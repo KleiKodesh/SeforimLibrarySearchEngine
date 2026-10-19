@@ -39,6 +39,20 @@ pub fn is_strippable_mark(c: char) -> bool {
         && c != '\u{05C6}'
 }
 
+/// Cantillation marks (טעמים): U+0591..U+05AF.
+#[inline(always)]
+pub fn is_taam(c: char) -> bool {
+    ('\u{0591}'..='\u{05AF}').contains(&c)
+}
+
+/// Vowel points (ניקוד): the strippable marks that are not te'amim —
+/// U+05B0..U+05BD, U+05BF, U+05C1/U+05C2 (shin/sin dots), U+05C4/U+05C5,
+/// U+05C7 (qamatz qatan).
+#[inline(always)]
+pub fn is_nikud(c: char) -> bool {
+    is_strippable_mark(c) && !is_taam(c)
+}
+
 /// Quote chars INSIDE a Hebrew word (rashi/gershayim/gematria) — transparent
 /// connectors, not separators. dquote U+0022, gershayim U+05F4, apostrophe U+0027,
 /// geresh U+05F3.

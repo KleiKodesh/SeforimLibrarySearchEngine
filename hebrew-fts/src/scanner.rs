@@ -52,7 +52,16 @@ pub struct WordSpan {
 ///   transition inside a letter run is a word boundary.
 /// - Geresh/gershayim and ASCII quotes inside a word are transparent (רש"י → רשי).
 #[allow(unused_assignments)] // the final flush!'s buffer reset is never read
-pub fn scan(text: &str, mut on_word: impl FnMut(&str, WordSpan)) {
+pub fn scan(text: &str, on_word: impl FnMut(&str, WordSpan)) {
+    scan_with(text, false, on_word)
+}
+
+/// Like [`scan`], but when `keep_marks` is true, nikud and te'amim inside a
+/// word are KEPT in the normalized token text (they never count toward the
+/// 2..=29 letter rule). Use for fields that index vocalized text; the walks
+/// can then optionally treat the marks as transparent.
+#[allow(unused_assignments)] // the final flush!'s buffer reset is never read
+pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, WordSpan)) {
     if text.is_empty() {
         return;
     }
@@ -165,8 +174,12 @@ pub fn scan(text: &str, mut on_word: impl FnMut(&str, WordSpan)) {
             continue;
         }
 
-        // ── NIKUD + CANTILLATION REMOVAL ─────────────────────
+        // ── NIKUD + CANTILLATION: strip or keep ──────────────
         if chars::is_strippable_mark(c) {
+            if keep_marks && buf_chars > 0 {
+                // Kept in the token text (never counted as a letter).
+                buf.push(c);
+            }
             i += 1;
             continue;
         }
@@ -252,9 +265,19 @@ pub struct TextToken {
 pub struct TextTokens {
     norm: String,
     tokens: Vec<TextToken>,
+    keep_marks: bool,
 }
 
 impl TextTokens {
+    /// A tokenizer that keeps nikud/te'amim in the normalized token text
+    /// (see [`scan_with`]).
+    pub fn keeping_marks() -> TextTokens {
+        TextTokens {
+            keep_marks: true,
+            ..TextTokens::default()
+        }
+    }
+
     /// Tokenizes `text`. The tokens AND every token's normalized view are
     /// reused on the next call — copy what you keep.
     pub fn tokenize(&mut self, text: &str) -> &[TextToken] {
@@ -262,7 +285,7 @@ impl TextTokens {
         self.tokens.clear();
         let norm = &mut self.norm;
         let tokens = &mut self.tokens;
-        scan(text, |word, span| {
+        scan_with(text, self.keep_marks, |word, span| {
             let norm_start = norm.len();
             norm.push_str(word);
             tokens.push(TextToken {
@@ -315,6 +338,17 @@ mod tests {
     fn nikud_stripped() {
         // בְּרֵאשִׁית → בראשית
         assert_eq!(words("בְּרֵאשִׁית בָּרָא"), ["בראשית", "ברא"]);
+    }
+
+    #[test]
+    fn marks_kept_when_requested() {
+        let mut out = Vec::new();
+        scan_with("בְּרֵאשִׁית בָּרָא", true, |w, _| out.push(w.to_string()));
+        assert_eq!(out, ["בְּרֵאשִׁית", "בָּרָא"]);
+        // letters-only length rule: בּ (1 letter + marks) is still dropped
+        let mut out2 = Vec::new();
+        scan_with("בְּ שם", true, |w, _| out2.push(w.to_string()));
+        assert_eq!(out2, ["שם"]);
     }
 
     #[test]

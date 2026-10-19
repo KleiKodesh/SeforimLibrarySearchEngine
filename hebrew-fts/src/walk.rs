@@ -60,6 +60,11 @@ pub struct WalkOptions {
     pub ignore_quotes: bool,
     /// שגיאות כתיב/OCR מצויות
     pub spelling_errors: bool,
+    /// Ignore nikud: בראשית matches בְּרֵאשִׁית (needs a marks-keeping field,
+    /// `hebrew_marked`). Off: vocalization must match exactly.
+    pub ignore_nikud: bool,
+    /// Ignore te'amim (cantillation), independently of nikud.
+    pub ignore_teamim: bool,
 }
 
 /// Prefix units for the closed grammatical prefix phase.
@@ -113,11 +118,16 @@ fn closed_suffixes(options: &WalkOptions) -> BTreeSet<String> {
 
 /// Builds the core word-variant set from the enabled generators.
 fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
-    let word: String = if options.ignore_quotes {
-        word.chars().filter(|&c| c != '"').collect()
-    } else {
-        word.to_string()
-    };
+    // Strip from the query word whatever the walk will treat as transparent:
+    // the self-loops then do the matching against the index.
+    let word: String = word
+        .chars()
+        .filter(|&c| {
+            !(options.ignore_quotes && c == '"')
+                && !(options.ignore_nikud && crate::chars::is_nikud(c))
+                && !(options.ignore_teamim && crate::chars::is_taam(c))
+        })
+        .collect();
     let mut set = BTreeSet::new();
     set.insert(word);
     if options.ktiv_male_haser {
@@ -134,9 +144,13 @@ fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
 
 // ── Composite automaton ──────────────────────────────────────────────────
 
-/// NFA configuration, packed: tag(3) | pending-lead-byte(1) | value(32).
+/// NFA configuration, packed: tag(3) | pending-kind(3) | value(32).
 /// Tags: 0 = closed-prefix trie node, 1 = any-prefix letter count,
 /// 2 = core trie node, 3 = closed-suffix trie node, 4 = any-suffix count.
+/// Pending kinds: 0 = none; 1 = saw a Hebrew letter lead byte (0xD7) in an
+/// any-letter phase; 2 = saw a possible mark lead 0xD6 (skipping a
+/// nikud/ta'am); 3 = saw a possible 0xD7-encoded nikud (shin/sin dots,
+/// qamatz qatan).
 type Config = u64;
 
 const TAG_PRE: u64 = 0;
@@ -145,17 +159,22 @@ const TAG_CORE: u64 = 2;
 const TAG_POST: u64 = 3;
 const TAG_POST_ANY: u64 = 4;
 
+const PEND_NONE: u64 = 0;
+const PEND_LETTER: u64 = 1;
+const PEND_MARK_D6: u64 = 2;
+const PEND_MARK_D7: u64 = 3;
+
 #[inline]
-fn pack(tag: u64, pending: bool, value: u32) -> Config {
-    (tag << 33) | ((pending as u64) << 32) | value as u64
+fn pack(tag: u64, pending: u64, value: u32) -> Config {
+    (tag << 35) | (pending << 32) | value as u64
 }
 #[inline]
 fn tag(c: Config) -> u64 {
-    c >> 33
+    c >> 35
 }
 #[inline]
-fn pending(c: Config) -> bool {
-    (c >> 32) & 1 == 1
+fn pending(c: Config) -> u64 {
+    (c >> 32) & 0b111
 }
 #[inline]
 fn value(c: Config) -> u32 {
@@ -169,9 +188,27 @@ fn is_ascii_letter(b: u8) -> bool {
 }
 /// Lead byte of a UTF-8 Hebrew letter (א..ת = 0xD7 0x90..0xAA).
 const HEBREW_LEAD: u8 = 0xD7;
+/// Lead byte of most Hebrew marks (U+0591..U+05BF = 0xD6 0x91..0xBF).
+const MARK_LEAD: u8 = 0xD6;
 #[inline]
 fn is_hebrew_tail_letter(b: u8) -> bool {
     (0x90..=0xAA).contains(&b)
+}
+/// Tail byte of a ta'am after 0xD6 (U+0591..U+05AF).
+#[inline]
+fn is_taam_tail(b: u8) -> bool {
+    (0x91..=0xAF).contains(&b)
+}
+/// Tail byte of a nikud mark after 0xD6 (U+05B0..U+05BF).
+#[inline]
+fn is_nikud_d6_tail(b: u8) -> bool {
+    (0xB0..=0xBF).contains(&b)
+}
+/// Tail byte of a 0xD7-encoded nikud: shin/sin dots (05C1/05C2), upper/lower
+/// dots (05C4/05C5), qamatz qatan (05C7).
+#[inline]
+fn is_nikud_d7_tail(b: u8) -> bool {
+    matches!(b, 0x81 | 0x82 | 0x84 | 0x85 | 0x87)
 }
 
 /// The composite walk automaton. State = sorted set of NFA configs; empty =
@@ -184,6 +221,8 @@ pub struct HebrewWalkAutomaton {
     suffixes: Option<SetAutomaton>,
     any_suffix_max: u32,
     transparent_quotes: bool,
+    ignore_nikud: bool,
+    ignore_teamim: bool,
 }
 
 impl HebrewWalkAutomaton {
@@ -191,7 +230,7 @@ impl HebrewWalkAutomaton {
     /// normalized the way the index normalizes (lowercase ASCII, nikud
     /// stripped, canonical '"').
     pub fn new(word: &str, options: &WalkOptions) -> HebrewWalkAutomaton {
-        let letters = word.chars().filter(|&c| c != '"').count();
+        let letters = word.chars().filter(|&c| crate::chars::is_letter(c)).count();
         let short = letters <= SHORT_WORD_MAX_LETTERS;
 
         let grammar_prefixes = options.grammar_prefixes || options.aramaic_prefixes;
@@ -231,6 +270,8 @@ impl HebrewWalkAutomaton {
             suffixes,
             any_suffix_max: any_post,
             transparent_quotes: options.ignore_quotes,
+            ignore_nikud: options.ignore_nikud,
+            ignore_teamim: options.ignore_teamim,
         }
     }
 
@@ -240,28 +281,27 @@ impl HebrewWalkAutomaton {
             return;
         }
         set.push(config);
+        if pending(config) != PEND_NONE {
+            return;
+        }
         match tag(config) {
             TAG_PRE => {
-                if !pending(config) {
-                    if let Some(prefixes) = &self.prefixes {
-                        if prefixes.node_is_match(value(config)) {
-                            self.close_into(pack(TAG_CORE, false, SetAutomaton::ROOT), set);
-                        }
+                if let Some(prefixes) = &self.prefixes {
+                    if prefixes.node_is_match(value(config)) {
+                        self.close_into(pack(TAG_CORE, PEND_NONE, SetAutomaton::ROOT), set);
                     }
                 }
             }
             TAG_PRE_ANY => {
-                if !pending(config) {
-                    self.close_into(pack(TAG_CORE, false, SetAutomaton::ROOT), set);
-                }
+                self.close_into(pack(TAG_CORE, PEND_NONE, SetAutomaton::ROOT), set);
             }
             TAG_CORE => {
-                if !pending(config) && self.core.node_is_match(value(config)) {
+                if self.core.node_is_match(value(config)) {
                     if self.suffixes.is_some() {
-                        self.close_into(pack(TAG_POST, false, SetAutomaton::ROOT), set);
+                        self.close_into(pack(TAG_POST, PEND_NONE, SetAutomaton::ROOT), set);
                     }
                     if self.any_suffix_max > 0 {
-                        self.close_into(pack(TAG_POST_ANY, false, 0), set);
+                        self.close_into(pack(TAG_POST_ANY, PEND_NONE, 0), set);
                     }
                 }
             }
@@ -272,12 +312,12 @@ impl HebrewWalkAutomaton {
     fn start_configs(&self) -> Vec<Config> {
         let mut set = Vec::new();
         if self.prefixes.is_some() {
-            self.close_into(pack(TAG_PRE, false, SetAutomaton::ROOT), &mut set);
+            self.close_into(pack(TAG_PRE, PEND_NONE, SetAutomaton::ROOT), &mut set);
         }
         if self.any_prefix_max > 0 {
-            self.close_into(pack(TAG_PRE_ANY, false, 0), &mut set);
+            self.close_into(pack(TAG_PRE_ANY, PEND_NONE, 0), &mut set);
         }
-        self.close_into(pack(TAG_CORE, false, SetAutomaton::ROOT), &mut set);
+        self.close_into(pack(TAG_CORE, PEND_NONE, SetAutomaton::ROOT), &mut set);
         set.sort_unstable();
         set
     }
@@ -285,11 +325,47 @@ impl HebrewWalkAutomaton {
     /// Successors of one config on `byte`, with closure, into `out`.
     fn step_config(&self, config: Config, byte: u8, out: &mut Vec<Config>) {
         let t = tag(config);
+        match pending(config) {
+            // Resolving a possible skipped mark: 0xD6 <tail>.
+            PEND_MARK_D6 => {
+                if (self.ignore_teamim && is_taam_tail(byte))
+                    || (self.ignore_nikud && is_nikud_d6_tail(byte))
+                {
+                    // Mark skipped; back to where we were.
+                    self.close_into(pack(t, PEND_NONE, value(config)), out);
+                }
+                return;
+            }
+            // Resolving a possible skipped 0xD7-encoded nikud.
+            PEND_MARK_D7 => {
+                if self.ignore_nikud && is_nikud_d7_tail(byte) {
+                    self.close_into(pack(t, PEND_NONE, value(config)), out);
+                }
+                return;
+            }
+            // Second byte of a Hebrew letter in an any-letter phase.
+            PEND_LETTER => {
+                if is_hebrew_tail_letter(byte) {
+                    self.close_into(pack(t, PEND_NONE, value(config) + 1), out);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // Mark transparency applies in every phase: a mark may begin here.
+        if byte == MARK_LEAD && (self.ignore_nikud || self.ignore_teamim) {
+            self.close_into(pack(t, PEND_MARK_D6, value(config)), out);
+        }
+        if byte == HEBREW_LEAD && self.ignore_nikud {
+            self.close_into(pack(t, PEND_MARK_D7, value(config)), out);
+        }
+
         match t {
             TAG_PRE => {
                 if let Some(prefixes) = &self.prefixes {
                     if let Some(next) = prefixes.step(value(config), byte) {
-                        self.close_into(pack(TAG_PRE, false, next), out);
+                        self.close_into(pack(TAG_PRE, PEND_NONE, next), out);
                     }
                 }
             }
@@ -302,22 +378,17 @@ impl HebrewWalkAutomaton {
                         self.any_suffix_max
                     },
                 );
-                if pending(config) {
-                    // Second byte of a Hebrew letter.
-                    if is_hebrew_tail_letter(byte) {
-                        self.close_into(pack(t, false, count + 1), out);
-                    }
-                } else if count < max {
+                if count < max {
                     if is_ascii_letter(byte) {
-                        self.close_into(pack(t, false, count + 1), out);
+                        self.close_into(pack(t, PEND_NONE, count + 1), out);
                     } else if byte == HEBREW_LEAD {
-                        self.close_into(pack(t, true, count), out);
+                        self.close_into(pack(t, PEND_LETTER, count), out);
                     }
                 }
             }
             TAG_CORE => {
                 if let Some(next) = self.core.step(value(config), byte) {
-                    self.close_into(pack(TAG_CORE, false, next), out);
+                    self.close_into(pack(TAG_CORE, PEND_NONE, next), out);
                 }
                 if self.transparent_quotes && byte == b'"' {
                     self.close_into(config, out);
@@ -326,7 +397,7 @@ impl HebrewWalkAutomaton {
             TAG_POST => {
                 if let Some(suffixes) = &self.suffixes {
                     if let Some(next) = suffixes.step(value(config), byte) {
-                        self.close_into(pack(TAG_POST, false, next), out);
+                        self.close_into(pack(TAG_POST, PEND_NONE, next), out);
                     }
                 }
             }
@@ -335,7 +406,7 @@ impl HebrewWalkAutomaton {
     }
 
     fn config_is_match(&self, config: Config) -> bool {
-        if pending(config) {
+        if pending(config) != PEND_NONE {
             return false;
         }
         match tag(config) {
@@ -349,6 +420,7 @@ impl HebrewWalkAutomaton {
             _ => false,
         }
     }
+
 }
 
 impl Automaton for HebrewWalkAutomaton {
@@ -617,6 +689,79 @@ mod tests {
         );
         assert!(matches(&a, "עבד")); // א↔ע
         assert!(matches(&a, "אבר")); // ד↔ר OCR
+    }
+
+    #[test]
+    fn ignore_nikud() {
+        let a = walk(
+            "בראשית",
+            WalkOptions {
+                ignore_nikud: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches(&a, "בראשית"));
+        assert!(matches(&a, "בְּרֵאשִׁית")); // vocalized indexed form
+        // off → exact only
+        let a2 = walk("בראשית", WalkOptions::default());
+        assert!(!matches(&a2, "בְּרֵאשִׁית"));
+        // a vocalized QUERY with the flag matches the bare indexed form
+        let a3 = walk(
+            "בְּרֵאשִׁית",
+            WalkOptions {
+                ignore_nikud: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches(&a3, "בראשית"));
+    }
+
+    #[test]
+    fn ignore_teamim_independent_of_nikud() {
+        // word with an etnahta (ta'am) only
+        let with_taam = "ברא\u{0591}שית";
+        let a = walk(
+            "בראשית",
+            WalkOptions {
+                ignore_teamim: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches(&a, with_taam));
+        // but nikud is NOT ignored by the teamim flag
+        assert!(!matches(&a, "בְּרֵאשִׁית"));
+        // and vice versa: nikud flag alone doesn't skip teamim
+        let a2 = walk(
+            "בראשית",
+            WalkOptions {
+                ignore_nikud: true,
+                ..Default::default()
+            },
+        );
+        assert!(!matches(&a2, with_taam));
+        // both flags: fully vocalized + cantillated matches
+        let a3 = walk(
+            "בראשית",
+            WalkOptions {
+                ignore_nikud: true,
+                ignore_teamim: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches(&a3, "בְּרֵ\u{0591}אשִׁית"));
+    }
+
+    #[test]
+    fn nikud_transparency_composes_with_prefixes() {
+        let a = walk(
+            "תורה",
+            WalkOptions {
+                grammar_prefixes: true,
+                ignore_nikud: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches(&a, "הַתּוֹרָה")); // vocalized prefix + word
     }
 
     #[test]

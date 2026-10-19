@@ -9,8 +9,14 @@
 use crate::scanner;
 use tantivy::tokenizer::{TextAnalyzer, Token, TokenStream, Tokenizer, TokenizerManager};
 
-/// Name under which [`register_hebrew_tokenizer`] registers the tokenizer.
+/// Name under which [`register_hebrew_tokenizer`] registers the
+/// mark-stripping tokenizer.
 pub const HEBREW_TOKENIZER_NAME: &str = "hebrew";
+
+/// Name of the mark-keeping variant (nikud/te'amim preserved in terms); use
+/// it for fields holding vocalized text. The walks can then opt in/out of
+/// ignoring the marks per search.
+pub const HEBREW_MARKED_TOKENIZER_NAME: &str = "hebrew_marked";
 
 /// Tokenizer matching FtsLib's `HtmlWordScanner` (see module docs).
 ///
@@ -18,7 +24,16 @@ pub const HEBREW_TOKENIZER_NAME: &str = "hebrew";
 /// offsets of the word's raw span in the source (including nikud and any
 /// inline tags the word runs across).
 #[derive(Clone, Default)]
-pub struct HebrewTokenizer;
+pub struct HebrewTokenizer {
+    keep_marks: bool,
+}
+
+impl HebrewTokenizer {
+    /// Variant that keeps nikud/te'amim in the indexed terms.
+    pub fn keeping_marks() -> HebrewTokenizer {
+        HebrewTokenizer { keep_marks: true }
+    }
+}
 
 /// Token stream over pre-scanned tokens.
 pub struct HebrewTokenStream {
@@ -32,7 +47,7 @@ impl Tokenizer for HebrewTokenizer {
     fn token_stream<'a>(&'a mut self, text: &'a str) -> HebrewTokenStream {
         let mut tokens = Vec::new();
         let mut position = 0;
-        scanner::scan(text, |word, span| {
+        scanner::scan_with(text, self.keep_marks, |word, span| {
             tokens.push(Token {
                 offset_from: span.byte_start,
                 offset_to: span.byte_end,
@@ -69,12 +84,17 @@ impl TokenStream for HebrewTokenStream {
     }
 }
 
-/// Registers [`HebrewTokenizer`] as `"hebrew"` on a tokenizer manager
-/// (typically `index.tokenizers()`).
+/// Registers [`HebrewTokenizer`] as `"hebrew"` (marks stripped) and
+/// `"hebrew_marked"` (marks kept) on a tokenizer manager (typically
+/// `index.tokenizers()`).
 pub fn register_hebrew_tokenizer(manager: &TokenizerManager) {
     manager.register(
         HEBREW_TOKENIZER_NAME,
         TextAnalyzer::from(HebrewTokenizer::default()),
+    );
+    manager.register(
+        HEBREW_MARKED_TOKENIZER_NAME,
+        TextAnalyzer::from(HebrewTokenizer::keeping_marks()),
     );
 }
 

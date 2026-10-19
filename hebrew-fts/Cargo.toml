@@ -6,6 +6,12 @@ rust-version = "1.88"
 description = "Hebrew FTS compatibility layer for tantivy — a faithful port of KitveiHakodesh's FtsLib (C#), so a tantivy index produces the same terms, matches, snippets and highlights as the SQLite-FTS5-based engine."
 license = "MIT"
 
+# Faster dev builds: skip debuginfo (biggest codegen+link cost); tantivy is
+# built once and cached, only hebrew-fts recompiles per edit.
+[profile.dev]
+debug = 0
+
 [dependencies]
 tantivy = { path = "../tantivy" }
+tantivy-fst = "0.5"
 unicode-general-category = "1.0"

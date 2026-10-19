@@ -13,9 +13,14 @@
 //! Still to port: query parser + expanders, snippet window locator, searcher.
 
 pub mod chars;
+pub mod grammar;
+pub mod grammar_query;
 mod html_tags;
 pub mod scanner;
+pub mod set_automaton;
 pub mod tokenizer;
 
+pub use grammar_query::HebrewGrammarQuery;
 pub use scanner::{scan, TextToken, TextTokens, WordSpan};
+pub use set_automaton::SetAutomaton;
 pub use tokenizer::{register_hebrew_tokenizer, HebrewTokenizer, HEBREW_TOKENIZER_NAME};

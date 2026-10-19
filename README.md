@@ -16,6 +16,11 @@ Tantivy-based Hebrew search engine producing FtsLib-compatible results
   a sink attached also returns the concrete words the FST expansion matched
   (fuzzy/regex/any automaton query). Zero cost when off; one memcpy per
   matched term when on. Per-doc scoring loop untouched.
+- **SpanQuery** (`src/query/span_query.rs`): word-distance search where every
+  slot is any term source (exact term, fuzzy, regex, any automaton incl. our
+  walks). Per-gap limits (`a –2– b –5– c`, counted as words between),
+  ordered or unordered, one word never fills two slots. Needs a field with
+  `WithFreqsAndPositions`.
 
 ### hebrew-fts crate
 - **Tokenizer** (`scanner.rs`, `tokenizer.rs`) — port of FtsLib
@@ -43,7 +48,8 @@ Tantivy-based Hebrew search engine producing FtsLib-compatible results
     field); both off = exact vocalization
 
 All walks work with MatchedTermsSink → search results + matched words in one
-pass, feeding the (upcoming) FtsLib-style snippet/highlight stage.
+pass, feeding the (upcoming) FtsLib-style snippet/highlight stage. Any walk
+becomes a span slot via `HebrewWalkQuery::span_slot()`.
 
 ## Next
 - Snippet window locator port (tightest window, context, marks).

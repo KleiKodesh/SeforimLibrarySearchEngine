@@ -24,8 +24,11 @@
 //! - שגיאות כתיב/OCR: single confusion-pair substitutions.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
-use tantivy::query::{AutomatonWeight, EnableScoring, MatchedTermsSink, Query, Weight};
+use tantivy::query::{
+    AutomatonWeight, EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight,
+};
 use tantivy::schema::Field;
 use tantivy_fst::Automaton;
 
@@ -478,16 +481,27 @@ impl HebrewWalkQuery {
     pub fn set_matched_terms_sink(&mut self, sink: MatchedTermsSink) {
         self.matched_terms_sink = Some(sink);
     }
-}
 
-impl Query for HebrewWalkQuery {
-    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+    fn automaton_weight(&self) -> AutomatonWeight<HebrewWalkAutomaton> {
         let automaton = HebrewWalkAutomaton::new(&self.word, &self.options);
         let mut weight = AutomatonWeight::new(self.field, automaton);
         if let Some(sink) = &self.matched_terms_sink {
             weight.set_matched_terms_sink(sink.clone());
         }
-        Ok(Box::new(weight))
+        weight
+    }
+
+    /// This walk as a slot of a [`SpanQuery`](tantivy::query::SpanQuery):
+    /// "any word this walk matches", with positions. The sink, if set, still
+    /// collects the matched forms.
+    pub fn span_slot(&self) -> Arc<dyn SpanTermSource> {
+        Arc::new(self.automaton_weight())
+    }
+}
+
+impl Query for HebrewWalkQuery {
+    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        Ok(Box::new(self.automaton_weight()))
     }
 }
 
@@ -762,6 +776,52 @@ mod tests {
             },
         );
         assert!(matches(&a, "הַתּוֹרָה")); // vocalized prefix + word
+    }
+
+    #[test]
+    fn walks_as_span_slots() -> tantivy::Result<()> {
+        use tantivy::collector::DocSetCollector;
+        use tantivy::query::SpanQuery;
+        use tantivy::schema::{IndexRecordOption, Schema, TextFieldIndexing, TextOptions};
+        use tantivy::{doc, Index, IndexWriter};
+
+        let mut schema_builder = Schema::builder();
+        let indexing = TextFieldIndexing::default()
+            .set_tokenizer(crate::HEBREW_TOKENIZER_NAME)
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+        let text =
+            schema_builder.add_text_field("text", TextOptions::default().set_indexing_options(indexing));
+        let index = Index::create_in_ram(schema_builder.build());
+        crate::register_hebrew_tokenizer(index.tokenizers());
+        let mut writer: IndexWriter = index.writer(15_000_000)?;
+        writer.add_document(doc!(text => "וְהַתּוֹרָה נִתְּנָה מִסִּינַי"))?; // 0: התורה, 0 between
+        writer.add_document(doc!(text => "בתורה כתוב שלא ניתנה"))?; // 1: 2 between
+        writer.add_document(doc!(text => "תורה אחת ואחת ושתיים ושלוש נתנה"))?; // 2: 4 between
+        writer.commit()?;
+        let searcher = index.reader()?.searcher();
+
+        let prefixes = WalkOptions {
+            grammar_prefixes: true,
+            ..Default::default()
+        };
+        let torah = HebrewWalkQuery::new(text, "תורה", prefixes);
+        let natna = HebrewWalkQuery::new(
+            text,
+            "נתנה",
+            WalkOptions {
+                ktiv_male_haser: true, // נתנה ↔ ניתנה
+                ..Default::default()
+            },
+        );
+        let q = SpanQuery::new(text, torah.span_slot()).then_within(2, natna.span_slot());
+        let mut docs: Vec<u32> = searcher
+            .search(&q, &DocSetCollector)?
+            .into_iter()
+            .map(|a| a.doc_id)
+            .collect();
+        docs.sort_unstable();
+        assert_eq!(docs, vec![0, 1]); // doc 2 has 4 words between
+        Ok(())
     }
 
     #[test]

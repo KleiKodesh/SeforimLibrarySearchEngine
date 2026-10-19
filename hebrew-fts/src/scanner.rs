@@ -200,8 +200,12 @@ pub fn scan(text: &str, mut on_word: impl FnMut(&str, WordSpan)) {
             visible += 1;
         } else if chars::is_intra_word_quote(c) && buf_chars > 0 {
             // Hebrew geresh/gershayim and ASCII quotes appearing inside a word
-            // (e.g. רשב"א, רש"י) are transparent connectors — skip without
-            // flushing so the word is indexed as a single token.
+            // (e.g. רשב"א, רש"י) are KEPT in the token, normalized to a
+            // canonical '"' (all four forms: " ' ׳ ״) — the index preserves
+            // them and the walks optionally treat them as transparent
+            // (ignore-gershayim option). They do not count toward the 2..29
+            // letter length rule (buf_chars counts letters only).
+            buf.push('"');
             visible += 1;
         } else {
             flush!(i);
@@ -314,9 +318,11 @@ mod tests {
     }
 
     #[test]
-    fn intra_word_quotes_transparent() {
-        assert_eq!(words("רש\"י אמר"), ["רשי", "אמר"]);
-        assert_eq!(words("רשב\u{05F4}א"), ["רשבא"]); // gershayim
+    fn intra_word_quotes_kept_canonical() {
+        // Quotes are kept in the token, normalized to '"'; they don't count
+        // toward the 2..29 letter rule.
+        assert_eq!(words("רש\"י אמר"), ["רש\"י", "אמר"]);
+        assert_eq!(words("רשב\u{05F4}א"), ["רשב\"א"]); // gershayim → '"'
         assert_eq!(words("ר' עקיבא"), ["עקיבא"]); // ר' is 1 letter → dropped
     }
 
@@ -410,7 +416,7 @@ mod tests {
         let mut tt = TextTokens::default();
         let toks: Vec<_> = tt.tokenize("רש\"י על־התורה").to_vec();
         assert_eq!(toks.len(), 3);
-        assert_eq!(tt.norm_of(&toks[0]), "רשי");
+        assert_eq!(tt.norm_of(&toks[0]), "רש\"י");
         assert_eq!(tt.norm_of(&toks[1]), "על");
         assert_eq!(tt.norm_of(&toks[2]), "התורה");
         let toks2: Vec<_> = tt.tokenize("שלום").to_vec();

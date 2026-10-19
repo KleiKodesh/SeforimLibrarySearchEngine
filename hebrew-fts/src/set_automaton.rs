@@ -25,6 +25,10 @@ pub struct SetAutomaton {
     nodes: Vec<TrieNode>,
     /// Flat, per-node-sorted edge list: (byte, target node index).
     edges: Vec<(u8, u32)>,
+    /// When true, the canonical quote byte `"` is transparent: from any
+    /// state it is skipped (self-loop), so indexed terms match with or
+    /// without geresh/gershayim (התעלם מגרשיים).
+    transparent_quotes: bool,
 }
 
 impl SetAutomaton {
@@ -68,11 +72,34 @@ impl SetAutomaton {
             });
             edges.extend_from_slice(&b.edges);
         }
-        SetAutomaton { nodes, edges }
+        SetAutomaton {
+            nodes,
+            edges,
+            transparent_quotes: false,
+        }
+    }
+
+    /// Makes the canonical quote byte `"` transparent (skipped from any
+    /// state): רמבם matches the indexed רמב"ם and vice versa. The index's
+    /// tokenizer normalizes all quote forms (" ' ׳ ״) to '"', so only this
+    /// one byte needs skipping. Candidate strings should be quote-stripped
+    /// when this is on.
+    pub fn with_transparent_quotes(mut self) -> SetAutomaton {
+        self.transparent_quotes = true;
+        self
+    }
+
+    /// Root node index (for composite walks).
+    pub(crate) const ROOT: u32 = 0;
+
+    /// Whether `node` completes one of the set's strings.
+    #[inline]
+    pub(crate) fn node_is_match(&self, node: u32) -> bool {
+        self.nodes[node as usize].is_match
     }
 
     #[inline]
-    fn step(&self, node: u32, byte: u8) -> Option<u32> {
+    pub(crate) fn step(&self, node: u32, byte: u8) -> Option<u32> {
         let n = self.nodes[node as usize];
         let edges =
             &self.edges[n.edges_start as usize..(n.edges_start + n.edges_len) as usize];
@@ -96,7 +123,15 @@ impl Automaton for SetAutomaton {
     }
 
     fn accept(&self, state: &Option<u32>, byte: u8) -> Option<u32> {
-        state.and_then(|node| self.step(node, byte))
+        state.and_then(|node| {
+            self.step(node, byte).or({
+                if self.transparent_quotes && byte == b'"' {
+                    Some(node)
+                } else {
+                    None
+                }
+            })
+        })
     }
 
     fn can_match(&self, state: &Option<u32>) -> bool {

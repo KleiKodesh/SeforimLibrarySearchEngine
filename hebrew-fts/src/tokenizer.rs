@@ -1,10 +1,10 @@
 //! Tantivy [`Tokenizer`] built on the FtsLib-compatible scanner.
 //!
-//! Registering this tokenizer on a text field makes tantivy index exactly the
-//! terms that KitveiHakodesh's FTS5 index holds: nikud stripped, ASCII
-//! lowercased, intra-word quotes dropped (רש"י → רשי), inline HTML tags
+//! Registering this tokenizer on a text field indexes: nikud stripped, ASCII
+//! lowercased, intra-word quotes kept and normalized to '"' (רש״י → רש"י; the
+//! walks can optionally treat them as transparent), inline HTML tags
 //! transparent, block tags / entities / maqaf as separators, words of 2..=29
-//! normalized letters only.
+//! letters only (quotes don't count).
 
 use crate::scanner;
 use tantivy::tokenizer::{TextAnalyzer, Token, TokenStream, Tokenizer, TokenizerManager};
@@ -96,7 +96,7 @@ mod tests {
     fn tokenizes_like_ftslib() {
         let toks = tokens("וַיֹּאמֶר רש\"י על־פני");
         let texts: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
-        assert_eq!(texts, ["ויאמר", "רשי", "על", "פני"]);
+        assert_eq!(texts, ["ויאמר", "רש\"י", "על", "פני"]);
         assert_eq!(toks[0].position, 0);
         assert_eq!(toks[3].position, 3);
     }

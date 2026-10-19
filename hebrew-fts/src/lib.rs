@@ -19,8 +19,11 @@ mod html_tags;
 pub mod scanner;
 pub mod set_automaton;
 pub mod tokenizer;
+pub mod variants;
+pub mod walk;
 
 pub use grammar_query::HebrewGrammarQuery;
 pub use scanner::{scan, TextToken, TextTokens, WordSpan};
 pub use set_automaton::SetAutomaton;
 pub use tokenizer::{register_hebrew_tokenizer, HebrewTokenizer, HEBREW_TOKENIZER_NAME};
+pub use walk::{HebrewWalkAutomaton, HebrewWalkQuery, WalkOptions};

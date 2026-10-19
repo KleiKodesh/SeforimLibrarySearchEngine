@@ -205,6 +205,58 @@ impl SnippetWindowLocator {
         let prepared = PreparedQueryGroups::from_literal_terms(query_terms);
         self.locate(raw_html, &prepared, false, 0)
     }
+
+    /// Locates over the matched line PLUS the given surrounding lines
+    /// (already fetched, in document order): the text is joined by
+    /// [`join_with_neighbour_lines`], then the normal single-pass locate
+    /// runs. The match is found in the matched line and the context expands
+    /// into the neighbour text. The returned offsets are into the JOINED
+    /// text; `joined` receives it so the caller can hold the same string.
+    ///
+    /// Used only for lines whose own window came out shorter than the
+    /// requested context (see [`SnippetDescriptor::window_word_count`]).
+    pub fn locate_over_neighbour_lines(
+        &mut self,
+        previous_content: &str,
+        content: &str,
+        next_content: &str,
+        prepared: &PreparedQueryGroups,
+        require_ordered: bool,
+        original_group_count: usize,
+        joined: &mut String,
+    ) -> SnippetDescriptor<'_> {
+        join_with_neighbour_lines(previous_content, content, next_content, joined);
+        self.locate(joined, prepared, require_ordered, original_group_count)
+    }
+
+    /// The per-side context this locator expands by.
+    pub fn context_words(&self) -> usize {
+        self.context_words
+    }
+}
+
+/// `previous + ' ' + content + ' ' + next`, an empty side dropped together
+/// with its space. The space keeps boundary words distinct (they must not
+/// fuse across a line break) and renders as a normal gap. The page re-joins
+/// line texts the same way, so a descriptor's offsets land on the same
+/// characters. Writes into `out` (cleared first).
+pub fn join_with_neighbour_lines(
+    previous_content: &str,
+    content: &str,
+    next_content: &str,
+    out: &mut String,
+) {
+    out.clear();
+    out.reserve(previous_content.len() + content.len() + next_content.len() + 2);
+    if !previous_content.is_empty() {
+        out.push_str(previous_content);
+        out.push(' ');
+    }
+    out.push_str(content);
+    if !next_content.is_empty() {
+        out.push(' ');
+        out.push_str(next_content);
+    }
 }
 
 // ── Window finding ────────────────────────────────────────────────────
@@ -524,6 +576,37 @@ mod tests {
         assert!(shown.starts_with("אב"));
         assert!(shown.ends_with("גד"));
         assert_eq!(d.window_word_count, 302);
+    }
+
+    #[test]
+    fn neighbour_join_rules() {
+        let mut s = String::new();
+        join_with_neighbour_lines("אא", "בב", "גג", &mut s);
+        assert_eq!(s, "אא בב גג");
+        join_with_neighbour_lines("", "בב", "גג", &mut s);
+        assert_eq!(s, "בב גג");
+        join_with_neighbour_lines("אא", "בב", "", &mut s);
+        assert_eq!(s, "אא בב");
+        join_with_neighbour_lines("", "בב", "", &mut s);
+        assert_eq!(s, "בב");
+    }
+
+    #[test]
+    fn short_window_widens_over_neighbours() {
+        let mut loc = SnippetWindowLocator::new(2);
+        let p = PreparedQueryGroups::from_groups(&[vec!["גג"]]);
+        // alone: the line has only the match → 1 word < 2 context
+        let d = loc.locate("גג", &p, false, 0);
+        assert_eq!(d.window_word_count, 1);
+        assert!(d.window_word_count < loc.context_words());
+        // with neighbours: context flows into them; offsets are into the joined text
+        let mut joined = String::new();
+        let d = loc.locate_over_neighbour_lines("אא בב", "גג", "דד הה", &p, false, 0, &mut joined);
+        assert_eq!(joined, "אא בב גג דד הה");
+        assert_eq!(d.window_word_count, 5);
+        assert_eq!(slice16(&joined, d.snap_start, d.snap_end), "אא בב גג דד הה");
+        let (start, len, _) = d.marks().next().unwrap();
+        assert_eq!(slice16(&joined, start, start + len), "גג");
     }
 
     #[test]

@@ -1,0 +1,11 @@
+[package]
+name = "hebrew-fts"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Hebrew FTS compatibility layer for tantivy — a faithful port of KitveiHakodesh's FtsLib (C#), so a tantivy index produces the same terms, matches, snippets and highlights as the SQLite-FTS5-based engine."
+license = "MIT"
+
+[dependencies]
+tantivy = { path = "../tantivy" }
+unicode-general-category = "1.0"

@@ -16,14 +16,18 @@ pub mod chars;
 pub mod grammar;
 pub mod grammar_query;
 mod html_tags;
+pub mod prepared;
 pub mod scanner;
 pub mod set_automaton;
+pub mod snippet;
 pub mod tokenizer;
 pub mod variants;
 pub mod walk;
 
 pub use grammar_query::HebrewGrammarQuery;
+pub use prepared::{PreparedQueryGroups, PreparedTerm};
 pub use scanner::{scan, scan_with, TextToken, TextTokens, WordSpan};
+pub use snippet::{SnippetDescriptor, SnippetWindowLocator, DEFAULT_CONTEXT_WORDS, MARK_STRIDE};
 pub use set_automaton::SetAutomaton;
 pub use tokenizer::{register_hebrew_tokenizer, HebrewTokenizer, HEBREW_TOKENIZER_NAME};
 pub use walk::{HebrewWalkAutomaton, HebrewWalkQuery, WalkOptions};

@@ -48,12 +48,19 @@ Tantivy-based Hebrew search engine producing FtsLib-compatible results
     field); both off = exact vocalization
 
 All walks work with MatchedTermsSink → search results + matched words in one
-pass, feeding the (upcoming) FtsLib-style snippet/highlight stage. Any walk
-becomes a span slot via `HebrewWalkQuery::span_slot()`.
+pass, feeding the snippet stage. Any walk becomes a span slot via
+`HebrewWalkQuery::span_slot()`.
+- **Snippet locator** (`prepared.rs`, `snippet.rs`) — step-for-step port of
+  FtsLib `PreparedQueryGroups` + `SnippetWindowLocator` + `SnippetDescriptor`:
+  one tokenize pass per line, tightest window covering all AND groups
+  (strict-< tie rule), ±8 tokens context, 4000-visible-char ceiling that never
+  cuts into the match, ellipsis flags, marks as (start, len, termOrdinal)
+  triples, WordDistance / ordered check. Offsets are UTF-16 units, as FtsLib's,
+  so the page renderer is unchanged. Term→group map built once per query from
+  the per-group sinks.
 
 ## Next
-- Snippet window locator port (tightest window, context, marks).
-- Searcher glue: line docs, catalog order, word-distance filter, batching.
+- Searcher glue: line docs, catalog order, neighbour-line widening, batching.
 - C ABI for C#/Dart.
 
 ## Dev

@@ -36,6 +36,10 @@ pub struct WordSpan {
     /// letter of this word. Used by the snippet window locator to measure
     /// window length without re-scanning.
     pub visible_start: usize,
+    /// Number of letters in the word (2..=29). Quotes and kept marks in the
+    /// normalized text are not counted. This is FtsLib's `NormLen`: the
+    /// word's visible width.
+    pub letters: usize,
 }
 
 /// Scans `text` and calls `on_word(normalized, span)` for each complete word
@@ -52,7 +56,7 @@ pub struct WordSpan {
 ///   transition inside a letter run is a word boundary.
 /// - Geresh/gershayim and ASCII quotes inside a word are transparent (רש"י → רשי).
 #[allow(unused_assignments)] // the final flush!'s buffer reset is never read
-pub fn scan(text: &str, on_word: impl FnMut(&str, WordSpan)) {
+pub fn scan(text: &str, on_word: impl FnMut(&str, WordSpan)) -> usize {
     scan_with(text, false, on_word)
 }
 
@@ -60,10 +64,13 @@ pub fn scan(text: &str, on_word: impl FnMut(&str, WordSpan)) {
 /// word are KEPT in the normalized token text (they never count toward the
 /// 2..=29 letter rule). Use for fields that index vocalized text; the walks
 /// can then optionally treat the marks as transparent.
+///
+/// Returns the text's length in UTF-16 code units (C#'s `string.Length`),
+/// known from the same pass.
 #[allow(unused_assignments)] // the final flush!'s buffer reset is never read
-pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, WordSpan)) {
+pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, WordSpan)) -> usize {
     if text.is_empty() {
-        return;
+        return 0;
     }
 
     // (byte offset, utf16 offset, char) for every char — lets the main loop use
@@ -104,6 +111,7 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
                     utf16_start: word_start_utf16,
                     utf16_end: utf16_at($i),
                     visible_start: word_start_visible,
+                    letters: buf_chars,
                 };
                 on_word(&buf, span);
             }
@@ -231,6 +239,7 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
     }
 
     flush!(len);
+    total_utf16
 }
 
 /// A single word token produced by [`TextTokens::tokenize`].
@@ -252,6 +261,9 @@ pub struct TextToken {
     /// Cumulative count of visible characters up to but not including the
     /// first letter of this token.
     pub visible_start: usize,
+    /// Letters in the word (FtsLib `NormLen`): its visible width, excluding
+    /// quotes and kept marks.
+    pub letters: usize,
     norm_start: usize,
     norm_len: usize,
 }
@@ -266,6 +278,7 @@ pub struct TextTokens {
     norm: String,
     tokens: Vec<TextToken>,
     keep_marks: bool,
+    raw_utf16_len: usize,
 }
 
 impl TextTokens {
@@ -285,7 +298,7 @@ impl TextTokens {
         self.tokens.clear();
         let norm = &mut self.norm;
         let tokens = &mut self.tokens;
-        scan_with(text, self.keep_marks, |word, span| {
+        self.raw_utf16_len = scan_with(text, self.keep_marks, |word, span| {
             let norm_start = norm.len();
             norm.push_str(word);
             tokens.push(TextToken {
@@ -294,6 +307,7 @@ impl TextTokens {
                 utf16_start: span.utf16_start,
                 utf16_end: span.utf16_end,
                 visible_start: span.visible_start,
+                letters: span.letters,
                 norm_start,
                 norm_len: word.len(),
             });
@@ -304,6 +318,12 @@ impl TextTokens {
     /// The tokens from the last [`tokenize`](Self::tokenize) call.
     pub fn tokens(&self) -> &[TextToken] {
         &self.tokens
+    }
+
+    /// Length in UTF-16 code units of the text last tokenized (C#'s
+    /// `rawHtml.Length`).
+    pub fn raw_utf16_len(&self) -> usize {
+        self.raw_utf16_len
     }
 
     /// Normalized form (nikud stripped, ASCII lowercased) of a token from the

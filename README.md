@@ -19,10 +19,11 @@ Tantivy-based Hebrew search engine producing FtsLib-compatible results
 
 ### hebrew-fts crate
 - **Tokenizer** (`scanner.rs`, `tokenizer.rs`) — port of FtsLib
-  HtmlWordScanner: HTML-aware, nikud stripped, inline tags transparent, block
+  HtmlWordScanner: HTML-aware, inline tags transparent, block
   tags/entities/maqaf split, words 2..29 letters, intra-word quotes kept as
-  canonical `"`. Tokens carry byte + UTF-16 + visible-char offsets (for the
-  snippet locator and the JS frontend).
+  canonical `"`. Two variants: `hebrew` (nikud/te'amim stripped) and
+  `hebrew_marked` (marks kept, for vocalized fields). Tokens carry byte +
+  UTF-16 + visible-char offsets (for the snippet locator and the JS frontend).
 - **SetAutomaton** (`set_automaton.rs`) — byte-trie automaton: FST walk visits
   only candidate strings; optional quote transparency.
 - **Grammar walk** (`grammar.rs`, `grammar_query.rs`) — FtsLib GrammarExpander
@@ -37,6 +38,9 @@ Tantivy-based Hebrew search engine producing FtsLib-compatible results
   - קידומות/סיומות מתקדם (any letters, 3/5 before, 5/7 after; both ≡ חלק ממילה)
   - התעלם מגרשיים (רמב"ם ↔ רמבם)
   - שגיאות כתיב/OCR (confusion pairs, tunable in `variants.rs`)
+  - ניקוד/טעמים: `ignore_nikud` / `ignore_teamim`, independent — whether
+    בראשית matches בְּרֵאשִׁית and/or cantillated forms (on a `hebrew_marked`
+    field); both off = exact vocalization
 
 All walks work with MatchedTermsSink → search results + matched words in one
 pass, feeding the (upcoming) FtsLib-style snippet/highlight stage.

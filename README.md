@@ -59,9 +59,27 @@ pass, feeding the snippet stage. Any walk becomes a span slot via
   so the page renderer is unchanged. Term→group map built once per query from
   the per-group sinks.
 
+### seforimdb-search crate (everything that knows the seforim DB)
+- `schema.rs` / `content.rs`: the three DB shapes (Zayit, Otzaria pre-6,
+  Otzaria 6+ with `line_content` + zstd dictionaries), content codec incl.
+  base64-frame recovery.
+- `tree_order.rs` + `catalog_title.rs` + `abbreviations.rs`: catalog tree
+  order (port of SeforimDbBookTreeOrder + title tokenizer + abbreviation map).
+- `corpus.rs`: catalog-order line feed, placed-line fetch, neighbour fetch.
+- `fingerprint.rs`: index provenance stamp (port of SeforimDbContentFingerprint).
+- `index.rs`: tantivy line index (line_id/position/book_id/line_index/toc as
+  fast fields, text with positions, nothing stored), resumable batched build
+  (`build`), `replace_lines` for updates. Paths are always passed in.
+- `searcher.rs`: `search()` → batches in catalog order (FtsLib batch plan
+  256×16 then doubling to 2048), per-group sinks → PreparedQueryGroups,
+  parallel snippet locate, word-distance filter, short windows widened over
+  same-book neighbours (radius 2, non-empty), term table, first-100 line
+  texts seeded. No DB watcher / coordinator: the app decides when to build.
+- `examples/smoke.rs`: build (capped) + search against a real seforim.db.
+
 ## Next
-- Searcher glue: line docs, catalog order, neighbour-line widening, batching.
 - C ABI for C#/Dart.
+- Query-string parsing into `SearchRequest` (Otzaria syntax).
 
 ## Dev
 - Build/test: `cargo test` in `hebrew-fts/` (rust-lld + debug=0 for fast cycles).

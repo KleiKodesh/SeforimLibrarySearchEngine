@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["hebrew-fts", "seforimdb-search"]
+# tantivy/ is a separate workspace (our fork); members depend on it by path.
+exclude = ["tantivy"]
+
+# Faster dev builds: skip debuginfo (biggest codegen+link cost); tantivy is
+# built once and cached, only our crates recompile per edit.
+[profile.dev]
+debug = 0

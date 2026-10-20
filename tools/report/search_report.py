@@ -88,6 +88,13 @@ def main(exe, index, queries, out, ftslib_db=None):
            "", "Stages: weight = query weight build (engine); walks + collect = FST walks / FM lookups + caps and postings to hits (engine); "
            "host = text fetch from seforim.db + snippet locate + neighbour widening; process = whole process incl. start-up and index open.",
            "Full logs: search-<n>.log next to this report."]
+    import json
+    (out / "search-report.json").write_text(json.dumps({
+        "engine": engine, "index": index, "index_bytes": size,
+        "rows": [dict(n=r[0], query=r[1], dist=r[2], exit=r[3], engine_hits=r[4], hits=r[5],
+                      weight_ms=r[6], walks_collect_ms=r[7], host_ms=r[8], first_ms=r[9],
+                      total_ms=r[10], process_ms=r[11]) for r in rows],
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
     report = out / "search-report.md"
     report.write_text("\n".join(md) + "\n", encoding="utf-8")
     print(f"report: {report}", flush=True)

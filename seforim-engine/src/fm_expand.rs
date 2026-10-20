@@ -53,21 +53,37 @@ fn term_of(dict: &TermDictionary, rowid: u32, buf: &mut Vec<u8>) -> Result<bool>
     Ok(dict.ord_to_term((rowid - 1) as u64, buf)?)
 }
 
-/// Keeps the best `cap` of `ranked` under the walk's order: lowest rank,
-/// then shortest (quote zero-width), then highest doc count, then bytes.
+/// Keeps the best `cap` slots of `ranked` under the walk's order: lowest
+/// rank, then shortest (quote zero-width), then highest doc count, then the
+/// quote-free bytes. As in the walk's cap, a term and its quoted variants
+/// (רשי, רש"י) are ONE slot (FtsLib's index stored only the quote-free
+/// term), ranked by their summed doc count; a kept slot keeps all of them.
 fn cap_like_the_walk(dict: &TermDictionary, mut ranked: Vec<(u32, Vec<u8>)>, cap: usize) -> Result<Vec<Vec<u8>>> {
-    if ranked.len() <= cap {
+    let mut forms: std::collections::HashMap<Vec<u8>, (u32, usize, u64, Vec<Vec<u8>>)> =
+        std::collections::HashMap::new();
+    for (rank, term) in &ranked {
+        let form = ZERO_WIDTH_BYTES.strip(term).into_owned();
+        let slot = forms
+            .entry(form)
+            .or_insert((u32::MAX, ZERO_WIDTH_BYTES.term_len(term), 0, Vec::new()));
+        slot.0 = slot.0.min(*rank);
+        slot.3.push(term.clone());
+    }
+    if forms.len() <= cap {
         ranked.sort_unstable_by(|a, b| a.1.cmp(&b.1));
         return Ok(ranked.into_iter().map(|(_, t)| t).collect());
     }
-    let mut keyed: Vec<(u32, usize, Reverse<u32>, Vec<u8>)> = Vec::with_capacity(ranked.len());
-    for (rank, term) in ranked {
-        let doc_freq = dict.get(&term)?.map(|i| i.doc_freq).unwrap_or(0);
-        keyed.push((rank, ZERO_WIDTH_BYTES.term_len(&term), Reverse(doc_freq), term));
+    let mut slots: Vec<(u32, usize, Reverse<u64>, Vec<u8>, Vec<Vec<u8>>)> = Vec::with_capacity(forms.len());
+    for (form, (rank, chars, _, terms)) in forms {
+        let mut doc_freq = 0u64;
+        for t in &terms {
+            doc_freq += u64::from(dict.get(t)?.map(|i| i.doc_freq).unwrap_or(0));
+        }
+        slots.push((rank, chars, Reverse(doc_freq), form, terms));
     }
-    keyed.sort_unstable();
-    keyed.truncate(cap);
-    let mut terms: Vec<Vec<u8>> = keyed.into_iter().map(|e| e.3).collect();
+    slots.sort_unstable_by(|a, b| (a.0, a.1, a.2, &a.3).cmp(&(b.0, b.1, b.2, &b.3)));
+    slots.truncate(cap);
+    let mut terms: Vec<Vec<u8>> = slots.into_iter().flat_map(|s| s.4).collect();
     terms.sort_unstable();
     Ok(terms)
 }

@@ -36,6 +36,9 @@ in one or two lines. Remove entries that turn out to be wrong.
   through `tail`/`head`/`grep` alone: that hides progress and swallows errors (a failed
   index build was lost this way). On failure, read the log's error first and report it.
   Give the user a progress line (stage, count, ETA) when asked or when a run is long.
+- **Time units in reports: ms below one second, minutes otherwise, never seconds**
+  (e.g. 830 ms, 7.1 min). Search comparisons come with charts: each stage and the
+  total, per query and per engine.
 - **Every build and search run is reported in full.** An index build reports total
   time, the time of each stage (indexing, merge, FM sidecar) and the index size
   (total and per file type): the C# `build` command prints all of it. Search runs go
@@ -170,6 +173,14 @@ seforim.db knowledge).
   segment kept other live docs. It looked like a 1-in-9 test flake because a fully
   deleted segment is dropped whole. Fixed; `deleted_docs_are_not_hits` reproduces it
   deterministically (one indexing thread). Any new doc loop must check the alive bitset.
+- **Port tables from FtsLib's CODE, never from its comments.** FtsLib writes Hebrew
+  tables as `\u` escapes with the letters in a comment; one comment was wrong (`ום`
+  for `\u05D5\u05DE` = `ומ`) and our port copied the comment, losing every ומ- form.
+  Check any ported table byte-for-byte against the escapes
+  (scratchpad `grammar_tables_check.py` did it for the grammar tables).
+- **Fix FtsLib when FtsLib is wrong** (user: "just fix the fts lib"), in the
+  KitveiHakodesh repo, committing only the touched file (that repo has other people's
+  uncommitted work), no AI attribution.
 - **A parity difference is analysed before it is fixed** (user's rule: is it our gap or
   a bug in FtsLib, or the reverse?). Example: `יצחק~1` differed because FtsLib's
   quote-free term יציק was 1 edit away while our DFA counted the quote in יצי"ק: our bug
@@ -209,6 +220,16 @@ seforim.db knowledge).
 - PowerShell 5.1 strips quotes from JSON arguments to native exes: pass via a file.
 
 ## Open decisions / next
+
+- **User's goal: every search feature Otzaria's current engine has that we lack gets
+  added** (from the feature matrix of otzaria_search_engine v5.0.0): regex `/…/`
+  queries, relevance (and generation) ordering, positive sameSection scope, exact
+  totals + per-book counts, cross-line phrases, streaming/cancellation, separate
+  negative options, vocalized matching without a keep-marks index. Semantic search:
+  ask the user first.
+- **REMIND THE USER: matching across lines (a phrase spanning a line break, Otzaria's
+  `continues_to_next_line`) still needs real work.** Whenever the user asks whether
+  everything is ready, say this explicitly. Today only snippet widening crosses lines.
 
 - Benchmark span query vs FtsLib-style post-filter for very broad expansions.
 - Profile the C# search path (1.0 s net10 / 1.5 s net48 vs 0.38 s pure Rust).

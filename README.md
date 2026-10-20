@@ -349,6 +349,24 @@ as an edit, while every other query kind treats the quote as transparent
 under ignore-gershayim. Fixed (fuzzy `ignore_quotes`); see the comparison
 report for the current numbers.
 
+The larger set (`tools/parity/queries-large.txt`, 58 queries: every query
+kind, quoted words, distances, OR groups, long phrases), first 20,000 hits
+per query, gave 48/58 identical on both index flavours. Every difference was
+analysed before fixing (whose bug is it?):
+- **FtsLib bug, fixed in FtsLib:** `HtmlWordScanner` computed a word's
+  visible start without its quotes, which shifted long snippets' context trim
+  (5 queries, 1-3 hits each). Fixed in KitveiHakodesh `e2a454ed`.
+- **Our bug, fixed:** under the 2,000-term cap a word and its quoted
+  variants (שב"ת, מל"ך) took separate slots, crowding rarer words out
+  (`*דוש*`). They now share one slot (tantivy `e1ca3da4`, FM path too).
+- **Our bug, fixed:** our `%` prefix table had `ום` (vav + final mem) where
+  FtsLib's bytes are `ומ`: the port copied FtsLib's comment, not its escape
+  (4 `%` queries). FtsLib's misleading comment fixed too (`2289253d`). Both
+  tables are now checked byte-for-byte against FtsLib's escapes.
+
+After the fixes those 10 queries are identical on both flavours; the full
+58-query rerun is in the comparison report.
+
 Full build (C# demo, .NET 10, 7,080,797 lines, measured 2026-10-20):
 
 | Stage | Time |

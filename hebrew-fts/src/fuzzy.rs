@@ -221,15 +221,16 @@ mod tests {
 
     #[test]
     fn cap_keeps_closest_then_shortest_quote_zero_width() {
-        // distance 0 beats distance 1; among distance 1, רש"י (3 letters +
-        // quote) is as short as רשי and shorter than רשיי
+        // רשי and רש"י are ONE slot (FtsLib's index held only the quote-free
+        // רשי), at the best member's distance 0; the second slot goes to the
+        // next closest, רשיי (distance 1, shorter than רשיים)
         let (index, field) = index_of(&["רשי", "רש\"י", "רשיי", "רשיים"]);
         let searcher = index.reader().unwrap().searcher();
         let mut q = HebrewFuzzyQuery::new(field, "רשי", 2);
         let sink = MatchedTermsSink::new();
         q.set_matched_terms_sink(sink.clone());
         q.set_max_expansions(2);
-        assert_eq!(searcher.search(&q, &Count).unwrap(), 2);
-        assert_eq!(sink.take_strings(), vec!["רש\"י", "רשי"]);
+        assert_eq!(searcher.search(&q, &Count).unwrap(), 3);
+        assert_eq!(sink.take_strings(), vec!["רש\"י", "רשי", "רשיי"]);
     }
 }

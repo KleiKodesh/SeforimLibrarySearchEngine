@@ -18,6 +18,7 @@ search options (Otzaria names):
   --nikud / --teamim  require typed marks (needs a --keep-marks index)
   --prefix-max N --suffix-max N --partial-max N --grammar-prefix-max N   (walk limits)
   --distance N        word gap (default 0)  --any-order
+  --spacing a,b,..    gap per consecutive word pair (customSpacing; needs positions)
   --fuzzy-distance N  (fuzzy mode, 1..2)   --any-word  (wordMatchMode anyWord)
   --book TEXT         only books whose title/category contains TEXT
   --limit N (100) --offset N (0)  --context N (8)
@@ -29,7 +30,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
   final m = <String, String?>{};
   const valued = {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
-    'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd',
+    'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd', 'spacing',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -179,6 +180,9 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     partOfWordMaxLetters: _int(o, 'partial-max'),
     grammarPrefixMaxLetters: _int(o, 'grammar-prefix-max'),
     marksIndex: info.keepMarks,
+    customSpacing: o['spacing'] == null
+        ? null
+        : {for (final (i, g) in o['spacing']!.split(',').indexed) i: int.parse(g.trim())},
   );
   final request = req.toRequest(contextWords: contextWords);
   req.warnings.toSet().forEach((w) => stderr.writeln('warning: $w'));

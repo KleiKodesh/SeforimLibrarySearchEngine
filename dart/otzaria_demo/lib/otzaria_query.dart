@@ -58,6 +58,7 @@ class OtzariaSearch {
     this.partOfWordMaxLetters,
     this.grammarPrefixMaxLetters,
     this.marksIndex = false,
+    this.customSpacing,
   })  :globalOptions = globalOptions ?? {},
         wordOptions = wordOptions ?? {},
         alternativeWords = alternativeWords ?? {};
@@ -86,6 +87,10 @@ class OtzariaSearch {
 
   /// The index was built with keepMarks (nikud/te'amim kept in terms).
   final bool marksIndex;
+
+  /// Otzaria's customSpacing: gap per consecutive word pair (index i = between
+  /// word i and i+1). Missing pairs use [distance]. Runs as a span query.
+  final Map<int, int>? customSpacing;
 
   /// Warnings about options the engine cannot honour.
   final List<String> warnings = [];
@@ -145,6 +150,15 @@ class OtzariaSearch {
     }
     if (anyWord && groups.length > 1) {
       return SearchRequest(groups: [QueryGroup.any(groups)], contextWords: contextWords);
+    }
+    final spacing = customSpacing;
+    if (spacing != null && spacing.isNotEmpty && groups.length > 1) {
+      return SearchRequest(
+        groups: groups,
+        gaps: [for (var i = 0; i < groups.length - 1; i++) spacing[i] ?? distance],
+        requireOrdered: !anyOrder,
+        contextWords: contextWords,
+      );
     }
     return SearchRequest(
       groups: groups,

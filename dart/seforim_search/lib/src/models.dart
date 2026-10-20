@@ -206,8 +206,14 @@ class AnyGroup extends QueryGroup {
 
 /// A search.
 class SearchRequest {
-  SearchRequest({List<QueryGroup>? groups, this.maxWordDistance, this.requireOrdered = false, this.contextWords = 8})
+  SearchRequest(
+      {List<QueryGroup>? groups, this.maxWordDistance, this.requireOrdered = false, this.contextWords = 8, this.gaps})
       : groups = groups ?? [];
+
+  /// Per-pair spacing (Otzaria's customSpacing): gaps[i] = max words between
+  /// group i and group i+1 (0 = adjacent). Needs an index with positions; one
+  /// entry per consecutive pair. Null = not used.
+  List<int>? gaps;
 
   /// AND across groups, OR within each group's expansion.
   final List<QueryGroup> groups;
@@ -226,6 +232,7 @@ class SearchRequest {
         'max_word_distance': maxWordDistance,
         'require_ordered': requireOrdered,
         'context_words': contextWords,
+        if (gaps != null) 'gaps': [for (final g in gaps!) g < 0 ? 0 : g],
       };
 }
 

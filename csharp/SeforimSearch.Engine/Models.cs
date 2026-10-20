@@ -252,6 +252,11 @@ namespace SeforimSearch.Engine
         /// <summary>Words of context per side of the match.</summary>
         public int ContextWords { get; set; } = 8;
 
+        /// <summary>Per-pair spacing (Otzaria's customSpacing): Gaps[i] = max words
+        /// between group i and group i+1 (0 = adjacent). Needs an index with
+        /// positions; one entry per consecutive pair. Null = not used.</summary>
+        public List<int>? Gaps { get; set; }
+
         internal string ToJson()
         {
             var sb = new StringBuilder();
@@ -265,6 +270,16 @@ namespace SeforimSearch.Engine
             sb.Append(MaxWordDistance.HasValue ? MaxWordDistance.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null");
             sb.Append(",\"require_ordered\":").Append(RequireOrdered ? "true" : "false");
             sb.Append(",\"context_words\":").Append(ContextWords.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (Gaps != null)
+            {
+                sb.Append(",\"gaps\":[");
+                for (int i = 0; i < Gaps.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append(Math.Max(0, Gaps[i]).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                }
+                sb.Append(']');
+            }
             sb.Append('}');
             return sb.ToString();
         }

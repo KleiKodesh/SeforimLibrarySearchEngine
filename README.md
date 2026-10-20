@@ -135,8 +135,15 @@ Measured on the real Otzaria DB (7.08M lines), first 200k lines:
   - It applies the word-distance and order filters and widens short windows
     over neighbouring lines.
   - It keeps the term table.
-- **Query groups:** word (with options), wildcard, fuzzy (distance ≤2), and OR
-  of alternatives.
+- **Query groups:** word (with options), wildcard, grammar (`%`), fuzzy
+  (distance ≤2), and OR of alternatives.
+- **Per-pair spacing** (Otzaria's customSpacing): `gaps` in the request (C#
+  `SearchRequest.Gaps`, Dart `SearchRequest.gaps`, demo `--spacing 2,5`).
+  - `gaps[i]` is the maximum number of words between query word i and i+1.
+  - Every group kind works as a slot; word order follows `RequireOrdered`.
+  - It runs as a span query, so it needs an index with positions; otherwise
+    the engine returns a clear error.
+  - Measured on the full index, בית המקדש adjacent: 15,218 lines in 29 ms.
 - **C ABI conventions:** objects are opaque handles; strings cross as UTF-8
   pointer + length; errors are `0/-1` status codes with a per-thread
   `se_last_error`; hot paths are binary (no JSON).
@@ -189,8 +196,6 @@ positions.
 ## Open
 - Otzaria gaps found by the Dart demo (see `dart/README.md`):
   - תרגום ארמי and ראשי תיבות have no walk.
-  - Per-word-pair spacing isn't exposed in the C ABI request; the engine has
-    SpanQuery.
   - The "most words" / "at least N" modes, exclusion words, and grouping are
     missing.
 - Leading-`*` speed: a trigram side index for `*x*` (`*יצח*` 1.1 s vs FtsLib

@@ -58,8 +58,18 @@ impl HebrewGrammarQuery {
     }
 }
 
-impl Query for HebrewGrammarQuery {
-    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+impl HebrewGrammarQuery {
+    /// This expansion as a span slot, capped over `searcher`'s whole index.
+    pub fn span_slot(
+        &self,
+        searcher: &tantivy::Searcher,
+    ) -> tantivy::Result<std::sync::Arc<dyn tantivy::query::SpanTermSource>> {
+        let mut weight = self.automaton_weight();
+        weight.apply_global_cap(searcher)?;
+        Ok(std::sync::Arc::new(weight))
+    }
+
+    fn automaton_weight(&self) -> AutomatonWeight<SetAutomaton> {
         let word: String = if self.ignore_quotes {
             self.word.chars().filter(|&c| c != '"').collect()
         } else {
@@ -75,6 +85,13 @@ impl Query for HebrewGrammarQuery {
             weight.set_matched_terms_sink(sink.clone());
         }
         weight.set_max_expansions(crate::walk::DEFAULT_MAX_EXPANDED_TERMS);
+        weight
+    }
+}
+
+impl Query for HebrewGrammarQuery {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        let mut weight = self.automaton_weight();
         if let Some(searcher) = enable_scoring.searcher() {
             weight.apply_global_cap(searcher)?;
         }

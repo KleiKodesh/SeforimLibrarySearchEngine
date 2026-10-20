@@ -92,7 +92,6 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 ### Gaps: what Otzaria does that the engine/demo can't (yet)
 
 - **Options with no walk:** תרגום ארמי and ראשי תיבות. The demo warns and ignores them.
-- **Custom spacing per word pair** (`customSpacing`). The engine's SpanQuery supports a separate limit per gap, but the C ABI request has only one `max_word_distance`.
 - **`wordMatchMode` mostWords / atLeast N.** The engine ANDs groups. Only "all" and "anyWord" can be expressed.
 - **Negative query** (words to exclude).
 - **Scope `sameSection`** (under the same heading), and **grouping** (`sameSection` cards, `identicalText` merging). Each hit has a `tocEntryId`, so the host could group by it, but the demo doesn't.

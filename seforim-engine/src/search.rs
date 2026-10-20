@@ -10,11 +10,15 @@ use hebrew_fts::{
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::columnar::Column;
-use tantivy::query::{BooleanQuery, MatchedTermsSink, Occur, Query};
+use std::sync::Arc;
+
+use tantivy::query::{
+    AutomatonWeight, BooleanQuery, MatchedTermsSink, Occur, Query, SpanQuery, SpanTermSource,
+};
 use tantivy::{DocId, Score, SegmentOrdinal, SegmentReader};
 
 use crate::index::LineIndex;
-use crate::Result;
+use crate::{Error, Result};
 
 /// One AND slot of a query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +116,10 @@ pub struct SearchRequest {
     pub require_ordered: bool,
     /// Words of context per side of the match.
     pub context_words: usize,
+    /// Per-pair spacing (Otzaria's customSpacing): `gaps[i]` = max words
+    /// between group i and group i+1 (0 = adjacent). Runs as a span query;
+    /// needs an index with positions. Order follows `require_ordered`.
+    pub gaps: Option<Vec<u32>>,
 }
 
 impl Default for SearchRequest {
@@ -121,6 +129,7 @@ impl Default for SearchRequest {
             max_word_distance: None,
             require_ordered: false,
             context_words: DEFAULT_CONTEXT_WORDS,
+            gaps: None,
         }
     }
 }
@@ -441,7 +450,123 @@ impl SegmentCollector for PlacedSegmentCollector {
     }
 }
 
+/// A span slot satisfied by any of several sources (FtsLib `a | b`).
+struct AnySource(Vec<Arc<dyn SpanTermSource>>);
+
+impl SpanTermSource for AnySource {
+    fn match_term_infos(&self, reader: &SegmentReader) -> tantivy::Result<Vec<tantivy::postings::TermInfo>> {
+        let mut all = Vec::new();
+        for source in &self.0 {
+            all.extend(source.match_term_infos(reader)?);
+        }
+        Ok(all)
+    }
+}
+
 impl LineIndex {
+    /// The span slot for one group, reporting into `sink`. None when the
+    /// group cannot search.
+    fn group_slot(
+        &self,
+        group: &GroupSpec,
+        sink: &MatchedTermsSink,
+        searcher: &tantivy::Searcher,
+    ) -> Result<Option<Arc<dyn SpanTermSource>>> {
+        let field = self.fields.text;
+        Ok(match group {
+            GroupSpec::Word { word, options } => {
+                if word.is_empty() {
+                    return Ok(None);
+                }
+                let mut q = HebrewWalkQuery::new(field, word.clone(), (*options).into());
+                q.set_matched_terms_sink(sink.clone());
+                Some(q.span_slot(searcher)?)
+            }
+            GroupSpec::Wildcard { pattern, ignore_quotes } => {
+                let q = if *ignore_quotes {
+                    HebrewWildcardQuery::new_ignoring_quotes(field, pattern)
+                } else {
+                    HebrewWildcardQuery::new(field, pattern)
+                };
+                let Ok(mut q) = q else { return Ok(None) };
+                q.set_matched_terms_sink(sink.clone());
+                Some(q.span_slot(searcher)?)
+            }
+            GroupSpec::Grammar { word, prefixes, suffixes, ignore_quotes } => {
+                if word.is_empty() {
+                    return Ok(None);
+                }
+                let mut q = hebrew_fts::HebrewGrammarQuery::new(field, word.clone(), *prefixes, *suffixes);
+                q.set_ignore_quotes(*ignore_quotes);
+                q.set_matched_terms_sink(sink.clone());
+                Some(q.span_slot(searcher)?)
+            }
+            GroupSpec::Fuzzy { word, distance } => {
+                if word.is_empty() {
+                    return Ok(None);
+                }
+                let term = tantivy::Term::from_field_text(field, word);
+                let fuzzy = tantivy::query::FuzzyTermQuery::new(term, (*distance).clamp(1, 2), true);
+                let mut weight = AutomatonWeight::new(field, fuzzy.automaton()?);
+                weight.set_matched_terms_sink(sink.clone());
+                weight.set_max_expansions(hebrew_fts::walk::DEFAULT_MAX_EXPANDED_TERMS);
+                weight.apply_global_cap(searcher)?;
+                Some(Arc::new(weight))
+            }
+            GroupSpec::Any { alternatives } => {
+                let mut sources = Vec::new();
+                for a in alternatives {
+                    if let Some(s) = self.group_slot(a, sink, searcher)? {
+                        sources.push(s);
+                    }
+                }
+                match sources.len() {
+                    0 => None,
+                    1 => sources.pop(),
+                    _ => Some(Arc::new(AnySource(sources))),
+                }
+            }
+        })
+    }
+
+    /// The span query for a request with per-pair `gaps`. Every group must be
+    /// searchable (a skipped group would shift the gaps); None when one is not.
+    fn span_query(
+        &self,
+        request: &SearchRequest,
+        gaps: &[u32],
+        searcher: &tantivy::Searcher,
+        sinks: &mut Vec<MatchedTermsSink>,
+    ) -> Result<Option<SpanQuery>> {
+        if !self.options.positions {
+            return Err(Error::Tantivy(tantivy::TantivyError::InvalidArgument(
+                "per-pair word spacing needs an index built with positions".into(),
+            )));
+        }
+        if gaps.len() + 1 != request.groups.len() {
+            return Err(Error::Tantivy(tantivy::TantivyError::InvalidArgument(format!(
+                "gaps must have one entry per consecutive pair: {} groups, {} gaps",
+                request.groups.len(),
+                gaps.len()
+            ))));
+        }
+        let mut span: Option<SpanQuery> = None;
+        for (i, group) in request.groups.iter().enumerate() {
+            let sink = MatchedTermsSink::new();
+            let Some(slot) = self.group_slot(group, &sink, searcher)? else {
+                return Ok(None);
+            };
+            sinks.push(sink);
+            span = Some(match span {
+                None => SpanQuery::new(self.fields.text, slot),
+                Some(s) => s.then_within(gaps[i - 1], slot),
+            });
+        }
+        let mut span = span.expect("at least one group");
+        span.set_ordered(request.require_ordered);
+        Ok(Some(span))
+    }
+
     /// The query for one slot, reporting into `sink`; None when the slot
     /// cannot search (skipped).
     fn group_query(&self, group: &GroupSpec, sink: &MatchedTermsSink) -> Option<Box<dyn Query>> {
@@ -528,29 +653,38 @@ impl LineIndex {
             joined: String::new(),
         };
 
-        // One query + one sink per searchable slot. Rejected wildcards skip
-        // their slot (it still counts in original_group_count).
-        let mut sinks = Vec::new();
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-        for group in &request.groups {
-            let sink = MatchedTermsSink::new();
-            if let Some(q) = self.group_query(group, &sink) {
-                clauses.push((Occur::Must, q));
-                sinks.push(sink);
-            }
-        }
-        if clauses.is_empty() {
-            return Ok(SearchResult {
-                hits: Vec::new(),
-                session,
-            });
-        }
-
         let reader = self.index.reader()?;
         let searcher = reader.searcher();
+        let mut sinks = Vec::new();
+
+        let query: Box<dyn Query> = if let Some(gaps) = &request.gaps {
+            // Per-pair spacing: a span query, one slot per group, each gap its own limit.
+            match self.span_query(request, gaps, &searcher, &mut sinks)? {
+                Some(q) => Box::new(q),
+                None => return Ok(SearchResult { hits: Vec::new(), session }),
+            }
+        } else {
+            // One query + one sink per searchable slot. Rejected wildcards skip
+            // their slot (it still counts in original_group_count).
+            let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            for group in &request.groups {
+                let sink = MatchedTermsSink::new();
+                if let Some(q) = self.group_query(group, &sink) {
+                    clauses.push((Occur::Must, q));
+                    sinks.push(sink);
+                }
+            }
+            if clauses.is_empty() {
+                return Ok(SearchResult {
+                    hits: Vec::new(),
+                    session,
+                });
+            }
+            Box::new(BooleanQuery::new(clauses))
+        };
+
         let timing = std::env::var_os("SEFORIM_ENGINE_TIMING").is_some();
         let t = std::time::Instant::now();
-        let query = BooleanQuery::new(clauses);
         let weight = query.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
         if timing {
             eprintln!("  [timing] weight (walks + caps): {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);

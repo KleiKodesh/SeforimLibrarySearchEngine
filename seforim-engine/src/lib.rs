@@ -136,6 +136,51 @@ mod tests {
     }
 
     #[test]
+    fn per_pair_gaps_run_as_span_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = build(
+            dir.path(),
+            IndexOptions::default(),
+            &[
+                line(1, 0, 1, 0, "משה קק תורה קק קק קק סיני"), // משה–1–תורה–3–סיני
+                line(2, 1, 1, 1, "משה קק קק קק תורה סיני"),    // משה–3–תורה–0–סיני
+            ],
+        );
+        let req = |gaps: Vec<u32>| SearchRequest {
+            groups: vec![word("משה", false), word("תורה", true), word("סיני", false)],
+            gaps: Some(gaps),
+            ..Default::default()
+        };
+        // a –2– b –5– c: only line 1 (line 2 fails the first gap)
+        let mut r = index.search(&req(vec![2, 5])).unwrap();
+        assert_eq!(r.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), vec![1]);
+        // sinks still feed snippets
+        assert!(r.session.locate("משה קק תורה קק קק קק סיני").is_some());
+        // a –3– b –0– c: only line 2
+        let r = index.search(&req(vec![3, 0])).unwrap();
+        assert_eq!(r.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), vec![2]);
+        // wrong gap count is an error
+        assert!(index.search(&req(vec![1])).is_err());
+
+        // an index without positions refuses per-pair spacing clearly
+        let dir2 = tempfile::tempdir().unwrap();
+        let flat = build(
+            dir2.path(),
+            IndexOptions { positions: false, keep_marks: false },
+            &[line(1, 0, 1, 0, "משה תורה")],
+        );
+        let err = flat
+            .search(&SearchRequest {
+                groups: vec![word("משה", false), word("תורה", false)],
+                gaps: Some(vec![0]),
+                ..Default::default()
+            })
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("positions"), "{err}");
+    }
+
+    #[test]
     fn distance_filter_without_positions() {
         // No positions stored: distance is validated from the text.
         let dir = tempfile::tempdir().unwrap();

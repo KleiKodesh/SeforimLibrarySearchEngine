@@ -50,12 +50,16 @@ impl HebrewGrammarQuery {
 }
 
 impl Query for HebrewGrammarQuery {
-    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
         let candidates = build_candidates(&self.word, self.expand_prefixes, self.expand_suffixes);
         let automaton = SetAutomaton::from_strings(&candidates);
         let mut weight = AutomatonWeight::new(self.field, automaton);
         if let Some(sink) = &self.matched_terms_sink {
             weight.set_matched_terms_sink(sink.clone());
+        }
+        weight.set_max_expansions(crate::walk::DEFAULT_MAX_EXPANDED_TERMS);
+        if let Some(searcher) = enable_scoring.searcher() {
+            weight.apply_global_cap(searcher)?;
         }
         Ok(Box::new(weight))
     }

@@ -23,6 +23,9 @@ pub mod snippet;
 pub mod tokenizer;
 pub mod variants;
 pub mod walk;
+pub mod wildcard;
+
+pub use wildcard::{HebrewWildcardQuery, WildcardPattern, WildcardRejected};
 
 pub use grammar_query::HebrewGrammarQuery;
 pub use prepared::{PreparedQueryGroups, PreparedTerm};

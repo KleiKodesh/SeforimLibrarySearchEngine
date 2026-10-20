@@ -456,6 +456,11 @@ impl Automaton for HebrewWalkAutomaton {
     }
 }
 
+/// FtsLib's cap on how many index terms one query word may expand to
+/// (`HebrewWildcardExpander.DefaultMaxExpandedTerms`,
+/// `FuzzyExpander.DefaultMaxExpandedTerms`).
+pub const DEFAULT_MAX_EXPANDED_TERMS: usize = 2000;
+
 /// Tantivy query running the Otzaria walk for one word.
 #[derive(Debug, Clone)]
 pub struct HebrewWalkQuery {
@@ -463,16 +468,20 @@ pub struct HebrewWalkQuery {
     word: String,
     options: WalkOptions,
     matched_terms_sink: Option<MatchedTermsSink>,
+    max_expansions: usize,
 }
 
 impl HebrewWalkQuery {
     /// `word`: normalized base word. `options`: the enabled walk options.
+    /// The expansion is capped at [`DEFAULT_MAX_EXPANDED_TERMS`] (shortest
+    /// forms first, then most frequent), as in FtsLib.
     pub fn new(field: Field, word: impl Into<String>, options: WalkOptions) -> HebrewWalkQuery {
         HebrewWalkQuery {
             field,
             word: word.into(),
             options,
             matched_terms_sink: None,
+            max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
         }
     }
 
@@ -482,26 +491,39 @@ impl HebrewWalkQuery {
         self.matched_terms_sink = Some(sink);
     }
 
+    /// Overrides the expansion cap (per segment).
+    pub fn set_max_expansions(&mut self, cap: usize) {
+        self.max_expansions = cap;
+    }
+
     fn automaton_weight(&self) -> AutomatonWeight<HebrewWalkAutomaton> {
         let automaton = HebrewWalkAutomaton::new(&self.word, &self.options);
         let mut weight = AutomatonWeight::new(self.field, automaton);
         if let Some(sink) = &self.matched_terms_sink {
             weight.set_matched_terms_sink(sink.clone());
         }
+        weight.set_max_expansions(self.max_expansions);
         weight
     }
 
     /// This walk as a slot of a [`SpanQuery`](tantivy::query::SpanQuery):
     /// "any word this walk matches", with positions. The sink, if set, still
-    /// collects the matched forms.
-    pub fn span_slot(&self) -> Arc<dyn SpanTermSource> {
-        Arc::new(self.automaton_weight())
+    /// collects the matched forms. The expansion cap is chosen over the whole
+    /// index of `searcher`.
+    pub fn span_slot(&self, searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
+        let mut weight = self.automaton_weight();
+        weight.apply_global_cap(searcher)?;
+        Ok(Arc::new(weight))
     }
 }
 
 impl Query for HebrewWalkQuery {
-    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        Ok(Box::new(self.automaton_weight()))
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        let mut weight = self.automaton_weight();
+        if let Some(searcher) = enable_scoring.searcher() {
+            weight.apply_global_cap(searcher)?;
+        }
+        Ok(Box::new(weight))
     }
 }
 
@@ -813,7 +835,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let q = SpanQuery::new(text, torah.span_slot()).then_within(2, natna.span_slot());
+        let q = SpanQuery::new(text, torah.span_slot(&searcher)?)
+            .then_within(2, natna.span_slot(&searcher)?);
         let mut docs: Vec<u32> = searcher
             .search(&q, &DocSetCollector)?
             .into_iter()

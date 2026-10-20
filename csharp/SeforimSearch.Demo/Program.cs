@@ -49,6 +49,7 @@ namespace SeforimSearch.Demo
             var options = new IndexOptions { Positions = !args.Contains("--no-positions") };
             var sw = Stopwatch.StartNew();
             long lastShown = 0;
+            var stages = new List<(string Name, TimeSpan Time)>();
             engine.Index.BuildLines((done, total) =>
             {
                 if (done - lastShown >= 100_000 || done == total)
@@ -56,9 +57,22 @@ namespace SeforimSearch.Demo
                     Console.Error.WriteLine($"  indexed {done:N0} / {total:N0}  ({sw.Elapsed.TotalSeconds:F1}s)");
                     lastShown = done;
                 }
-            }, indexOptions: options, maxLines: maxLines);
+            }, indexOptions: options, maxLines: maxLines, onStage: (name, t) =>
+            {
+                stages.Add((name, t));
+                Console.Error.WriteLine($"  stage: {name}: {t.TotalSeconds:F1}s");
+            });
             var state = engine.Index.ReadBuildState();
             Console.Error.WriteLine($"build: {state?.LinesDone:N0} lines, complete={state?.Complete} in {sw.Elapsed.TotalSeconds:F1}s");
+            string? dir = Option(args, "--index");
+            if (dir != null && Directory.Exists(dir))
+            {
+                var files = new DirectoryInfo(dir).GetFiles();
+                long total = files.Sum(f => f.Length);
+                Console.Error.WriteLine($"index size: {total / 1e6:F1} MB in {files.Length} files");
+                foreach (var g in files.GroupBy(f => f.Extension).OrderByDescending(g => g.Sum(f => f.Length)))
+                    Console.Error.WriteLine($"  {g.Key,-10} {g.Sum(f => f.Length) / 1e6,9:F1} MB");
+            }
             return 0;
         }
 

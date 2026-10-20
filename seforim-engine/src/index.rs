@@ -1,8 +1,12 @@
 //! The line index: one tantivy doc per line, fed by the host.
 //!
-//! The doc stores no text (the host has it). It holds the line's placement
-//! as fast fields and its catalog `position`: results come back in that
-//! order. Positions in the text postings are optional: without them the
+//! Bare-minimum rule: the engine works in tandem with seforim.db (SQLite),
+//! so a doc holds only the postings (with freqs/positions when the index is
+//! built with positions, for span/slop queries) plus the ids the engine
+//! itself needs: `line_id`, the catalog `position` (results come back in that
+//! order) and `book_id` (for filtered search by book). No text, nothing the
+//! host can read from SQLite by line id (line index, sections, references):
+//! grouping and placement are the host's job on the returned line ids. Positions in the text postings are optional: without them the
 //! index is smaller and word distance is validated by the snippet locator
 //! on the line text (FtsLib's way); with them, span queries also work.
 
@@ -45,9 +49,8 @@ pub struct LineFields {
     pub line_id: Field,
     /// Catalog position: results come back ordered by it.
     pub position: Field,
+    /// Book id: the one placement field kept, for filtered search by book.
     pub book_id: Field,
-    pub line_index: Field,
-    pub toc_entry_id: Field,
     /// The line text, Hebrew-tokenized.
     pub text: Field,
 }
@@ -59,8 +62,6 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
     let line_id = b.add_u64_field("line_id", INDEXED | FAST);
     let position = b.add_u64_field("position", FAST);
     let book_id = b.add_u64_field("book_id", FAST);
-    let line_index = b.add_u64_field("line_index", FAST);
-    let toc_entry_id = b.add_u64_field("toc_entry_id", FAST);
     let tokenizer = if options.keep_marks {
         hebrew_fts::tokenizer::HEBREW_MARKED_TOKENIZER_NAME
     } else {
@@ -81,8 +82,6 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
             line_id,
             position,
             book_id,
-            line_index,
-            toc_entry_id,
             text,
         },
     )
@@ -95,8 +94,6 @@ pub struct LineDoc {
     /// Rank in the library's catalog order.
     pub position: u64,
     pub book_id: u64,
-    pub line_index: u64,
-    pub toc_entry_id: u64,
     /// Raw line text (HTML allowed).
     pub text: String,
 }
@@ -246,8 +243,6 @@ impl LineWriter {
             f.line_id => line.line_id,
             f.position => line.position,
             f.book_id => line.book_id,
-            f.line_index => line.line_index,
-            f.toc_entry_id => line.toc_entry_id,
             f.text => line.text.as_str(),
         ))?;
         Ok(())
@@ -279,11 +274,32 @@ impl LineWriter {
 
     /// Merges all segments into one (for a shipped, read-mostly index) and
     /// waits for it.
+    ///
+    /// During a build tantivy's default merge policy keeps merging segments in
+    /// the background, so a segment list read earlier can be stale by the
+    /// time we merge ("segments that were merged could not be found"; a full
+    /// build failed this way). So: no new background merges from here on, read
+    /// the CURRENT committed segment ids from the index meta, and if a merge
+    /// that was already running still beats us, re-read and retry.
     pub fn merge_all(mut self) -> Result<()> {
-        let reader = self.writer.index().reader()?;
-        let ids = reader.searcher().segment_readers().iter().map(|s| s.segment_id()).collect::<Vec<_>>();
-        if ids.len() > 1 {
-            self.writer.merge(&ids).wait()?;
+        self.writer
+            .set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
+        let mut attempt = 0;
+        loop {
+            let ids = self.writer.index().searchable_segment_ids()?;
+            if ids.len() <= 1 {
+                break;
+            }
+            match self.writer.merge(&ids).wait() {
+                Ok(_) => break,
+                Err(e) if attempt < 20 => {
+                    // a background merge finished first: let it land, retry
+                    attempt += 1;
+                    let _ = e;
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         self.writer.wait_merging_threads()?;
         Ok(())

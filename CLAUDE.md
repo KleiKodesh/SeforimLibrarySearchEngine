@@ -21,6 +21,29 @@ in one or two lines. Remove entries that turn out to be wrong.
 
 ## The user's rules (stated explicitly, follow them)
 
+- **THE INDEX IS THE BARE MINIMUM (engine + seforim.db in tandem).** The engine is
+  always used together with the seforim.db SQLite DB, so the index stores only the
+  postings (+freqs/positions when built with positions, for span/slop) plus
+  `line_id`, `position` and `book_id` (book_id only because the engine must support
+  FILTERED SEARCH by book). No text, nothing the host can get from SQLite by line id.
+  Grouping, sections, line index, references, neighbours: the HOST does them with
+  SQLite on the returned line ids ("easy sqlite super speed"). Applies to C# and Dart
+  too, and to any similar future need.
+- **Long runs: progress + full log + error tracking, always.** Any build, index
+  build, parity dump or benchmark that takes more than a few seconds writes its FULL
+  output to a log file (`2>&1 | tee <scratchpad>/logs/<name>.log`), shows its progress
+  while it runs, and records the exit code (`${PIPESTATUS[0]}`). Never pipe a long run
+  through `tail`/`head`/`grep` alone: that hides progress and swallows errors (a failed
+  index build was lost this way). On failure, read the log's error first and report it.
+  Give the user a progress line (stage, count, ETA) when asked or when a run is long.
+- **Every build and search run is reported in full.** An index build reports total
+  time, the time of each stage (indexing, merge, FM sidecar) and the index size
+  (total and per file type): the C# `build` command prints all of it. Search runs go
+  through `tools/report/search_report.py`, which keeps every run's full log and writes
+  `search-report.md`: per query engine hits, weight ms, walks+collect ms (the walks run
+  inside scorer creation, not in the weight), host ms (text fetch
+  + locate + widening), first batch, total, and exit code. Quote these numbers to the
+  user; keep the logs and report in the scratchpad `logs/`.
 - **Parity with FtsLib is the goal.** Port FtsLib/Core logic step for step ("tit for
   tat"); no generalizing, no guessing. Before porting, quote the C# and list its exact
   steps; the user checks. Deviations must be named and justified.
@@ -141,6 +164,11 @@ seforim.db knowledge).
   separate terms and broke parity everywhere. Only quotes BETWEEN letters stay.
 - Index MUST be merged to one segment after a build: every walk repeats per segment
   (*יצח* 4.8 s on 37 segments → 1.1 s on 1), and the FM-index sidecar needs one segment.
+- Merge race: tantivy's default merge policy merges in the background during a build,
+  so a segment list read earlier goes stale and `merge` fails with "segments that were
+  merged could not be found in the SegmentManager" (two full builds died this way; the
+  first error was lost to a `| tail`). `merge_all` now sets `NoMergePolicy`, reads ids
+  from `index.searchable_segment_ids()`, and retries if an in-flight merge wins.
 - **Leading-`*` and fuzzy go through the FM-index sidecar** (`seforim-engine/src/fm_index.rs`,
   a port of FtsLib's `FmIndex.cs`; `fm_sidecar.rs` builds `<segment>.fmi` after the merge;
   `fm_expand.rs` = FtsLib's `IsFmWildcard` / `ExpandWildcardWithFm` / `ExpandFuzzy`).
@@ -163,14 +191,19 @@ seforim.db knowledge).
   tokenizer / walk / snippet change.
 - Bump `TantivySeforimIndex.IndexFormatVersion` whenever indexing output changes, or
   BuildLines keeps the stale index.
+- The section of a line is `line_toc.tocEntryId` (covers ~all lines); `line.tocEntryId`
+  is mostly NULL. Hosts read it from SQLite by line id (Dart `SeforimDb.sectionsOf`).
+- Storing placement (line index, toc/section) in the index, and doing sameSection
+  exclusion in the engine, was a mistake the user corrected: the index keeps only
+  line_id, position, book_id; sections/line index come from SQLite on the host.
 - PowerShell 5.1 strips quotes from JSON arguments to native exes: pass via a file.
 
 ## Open decisions / next
 
 - Benchmark span query vs FtsLib-style post-filter for very broad expansions.
 - Profile the C# search path (1.0 s net10 / 1.5 s net48 vs 0.38 s pure Rust).
-- Otzaria gaps still open: grouping (sameSection cards, identicalText merging),
-  relevance ordering.
+- Otzaria gaps still open: the positive query's sameSection scope, relevance
+  ordering.
   Otzaria's sources: `github.com/Otzaria/otzaria` (Dart) and
   `github.com/Otzaria/otzaria_search_engine` v5.0.0 (Rust `hebrew_query.rs`,
   `api/search_engine.rs`, `lexicons.rs`); clone them into the scratchpad to port.

@@ -212,24 +212,37 @@ class OtzariaSearch {
   /// Otzaria's apply_advanced_negative_query: the negative words as a query
   /// of their own, always "all words", with the positive distance and order.
   ExcludeSpec? _exclude() {
-    if (mode != SearchMode.advanced) return null;
-    final words = splitQueryWords(negativeQuery);
-    if (words.isEmpty) return null;
-    // the global options only (Otzaria keeps separate negative options; the
-    // CLI has none), without re-reporting the unsupported-option warnings
-    final o = {...globalOptions.entries.where((e) => e.value).map((e) => e.key)}
-      ..removeAll(OtzariaOption.unsupported);
-    final groups = [for (final w in words) _wordGroup(w, o)];
+    if (negativeScope == NegativeScope.sameSection) return null; // host-side, see sectionNegativeWords
+    final groups = _negativeGroups();
+    if (groups.isEmpty) return null;
     // proximityScope: wordDistance → distance/order; sameParagraph → the
-    // whole line, no limits; sameSection → whole sections.
+    // whole line, no limits.
     final limits = negativeScope == NegativeScope.wordDistance && groups.length > 1;
     return ExcludeSpec(
       groups: groups,
       maxWordDistance: limits ? distance : null,
       requireOrdered: limits && !anyOrder,
-      sameSection: negativeScope == NegativeScope.sameSection,
     );
   }
+
+  /// The negative words as engine groups (advanced mode only).
+  List<QueryGroup> _negativeGroups() {
+    if (mode != SearchMode.advanced) return const [];
+    final words = splitQueryWords(negativeQuery);
+    // the global options only (Otzaria keeps separate negative options; the
+    // CLI has none), without re-reporting the unsupported-option warnings
+    final o = {...globalOptions.entries.where((e) => e.value).map((e) => e.key)}
+      ..removeAll(OtzariaOption.unsupported);
+    return [for (final w in words) _wordGroup(w, o)];
+  }
+
+  /// Negative scope sameSection (Otzaria's scoped_words_query) is the HOST's
+  /// job, since the index holds no sections: run each of these words as its
+  /// own search (line ids), map them to sections with SQLite (`line_toc`),
+  /// intersect the per-word section sets ([blockedSections]) and drop the
+  /// positive hits in them. Empty unless the scope is sameSection.
+  List<QueryGroup> sectionNegativeWords() =>
+      negativeScope == NegativeScope.sameSection ? _negativeGroups() : const [];
 
   /// The engine request.
   SearchRequest toRequest({int contextWords = 8}) {
@@ -278,4 +291,16 @@ class OtzariaSearch {
       phraseAlternatives: phrases,
     );
   }
+}
+
+/// Otzaria's SameSection negative scope: a section is blocked when it holds
+/// EVERY negative word, each anywhere in it. [perWord] = the sections each
+/// word's lines fall in. No words = nothing blocked.
+Set<int> blockedSections(List<Set<int>> perWord) {
+  if (perWord.isEmpty) return {};
+  var blocked = perWord.first;
+  for (final s in perWord.skip(1)) {
+    blocked = blocked.intersection(s);
+  }
+  return blocked;
 }

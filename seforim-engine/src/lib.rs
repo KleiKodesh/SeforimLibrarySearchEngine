@@ -67,13 +67,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
 
-    fn line(id: u64, position: u64, book: u64, idx: u64, text: &str) -> LineDoc {
+    fn line(id: u64, position: u64, book: u64, text: &str) -> LineDoc {
         LineDoc {
             line_id: id,
             position,
             book_id: book,
-            line_index: idx,
-            toc_entry_id: 100 + idx,
             text: text.into(),
         }
     }
@@ -106,9 +104,9 @@ mod tests {
             dir.path(),
             IndexOptions::default(),
             &[
-                line(1, 2, 2, 0, "פירוש על התורה"),
-                line(4, 0, 1, 1, "והתורה ניתנה למשה"),
-                line(6, 1, 1, 3, "תורה צוה לנו משה"),
+                line(1, 2, 2, "פירוש על התורה"),
+                line(4, 0, 1, "והתורה ניתנה למשה"),
+                line(6, 1, 1, "תורה צוה לנו משה"),
             ],
         );
         assert_eq!(index.committed_payload().unwrap().as_deref(), Some("watermark=3"));
@@ -121,7 +119,7 @@ mod tests {
             .unwrap();
         let ids: Vec<u64> = result.hits.iter().map(|h| h.line_id).collect();
         assert_eq!(ids, vec![4, 6, 1]);
-        assert_eq!(result.hits[0].toc_entry_id, 101);
+        assert_eq!(result.hits[0].book_id, 1);
 
         let text = "והתורה ניתנה למשה";
         let s = result.session.locate(text).unwrap();
@@ -145,8 +143,8 @@ mod tests {
             dir.path(),
             IndexOptions::default(),
             &[
-                line(1, 0, 1, 0, "משה קק תורה קק קק קק סיני"), // משה–1–תורה–3–סיני
-                line(2, 1, 1, 1, "משה קק קק קק תורה סיני"),    // משה–3–תורה–0–סיני
+                line(1, 0, 1, "משה קק תורה קק קק קק סיני"), // משה–1–תורה–3–סיני
+                line(2, 1, 1, "משה קק קק קק תורה סיני"),    // משה–3–תורה–0–סיני
             ],
         );
         let req = |gaps: Vec<u32>| SearchRequest {
@@ -170,7 +168,7 @@ mod tests {
         let flat = build(
             dir2.path(),
             IndexOptions { positions: false, keep_marks: false },
-            &[line(1, 0, 1, 0, "משה תורה")],
+            &[line(1, 0, 1, "משה תורה")],
         );
         let err = flat
             .search(&SearchRequest {
@@ -194,8 +192,8 @@ mod tests {
                 keep_marks: false,
             },
             &[
-                line(1, 0, 1, 0, "משה קבל תורה מסיני"),
-                line(2, 1, 1, 1, "משה אמר דבר אחד ואחר כך תורה"),
+                line(1, 0, 1, "משה קבל תורה מסיני"),
+                line(2, 1, 1, "משה אמר דבר אחד ואחר כך תורה"),
             ],
         );
         let reopened = LineIndex::open(dir.path()).unwrap();
@@ -219,7 +217,7 @@ mod tests {
         let index = build(
             dir.path(),
             IndexOptions::default(),
-            &[line(1, 0, 1, 0, "שלום עליכם"), line(2, 1, 1, 1, "שלומכם רב")],
+            &[line(1, 0, 1, "שלום עליכם"), line(2, 1, 1, "שלומכם רב")],
         );
         let wildcard = |p: &str| GroupSpec::Wildcard {
             pattern: p.into(),
@@ -236,7 +234,7 @@ mod tests {
         // update line 2: delete + add new version
         let mut w = index.writer(50_000_000, 1).unwrap();
         w.delete(2);
-        w.add(&line(2, 1, 1, 1, "ברכה רבה")).unwrap();
+        w.add(&line(2, 1, 1, "ברכה רבה")).unwrap();
         w.commit(None).unwrap();
         let result = index
             .search(&SearchRequest {
@@ -310,10 +308,10 @@ mod tests {
             dir.path(),
             IndexOptions::default(),
             &[
-                line(1, 0, 1, 0, "משה קבל תורה בהר סיני"), // משה, תורה, סיני
-                line(2, 1, 1, 1, "תורה צוה לנו"),          // תורה
-                line(3, 2, 1, 2, "סיני ואז משה"),           // סיני, משה (reverse order)
-                line(4, 3, 1, 3, "דבר אחר"),
+                line(1, 0, 1, "משה קבל תורה בהר סיני"), // משה, תורה, סיני
+                line(2, 1, 1, "תורה צוה לנו"),          // תורה
+                line(3, 2, 1, "סיני ואז משה"),           // סיני, משה (reverse order)
+                line(4, 3, 1, "דבר אחר"),
             ],
         );
         let groups = || vec![word("משה", false), word("תורה", false), word("סיני", false)];
@@ -361,20 +359,15 @@ mod tests {
     #[test]
     fn exclude_negative_query() {
         let dir = tempfile::tempdir().unwrap();
-        // toc 100+idx: lines 1,2 share section 100 (idx 0), others their own;
-        // lines 6,7 have no section (toc 0)
-        let mut docs = vec![
-            line(1, 0, 1, 0, "משה קבל תורה מסיני"),
-            line(2, 1, 1, 0, "תורה ברכה גדולה"),
-            line(3, 2, 1, 1, "ברכה תורה"),
-            line(4, 3, 1, 2, "תורה בלי כלום"),
-            line(5, 4, 1, 3, "ברכה ואז הרבה מילים ואז תורה"),
-            line(6, 5, 1, 4, "ברכה תורה בלי כותרת"),
-            line(7, 6, 1, 5, "תורה סתם"),
+        let docs = vec![
+            line(1, 0, 1, "משה קבל תורה מסיני"),
+            line(2, 1, 1, "תורה ברכה גדולה"),
+            line(3, 2, 1, "ברכה תורה"),
+            line(4, 3, 1, "תורה בלי כלום"),
+            line(5, 4, 1, "ברכה ואז הרבה מילים ואז תורה"),
+            line(6, 5, 1, "ברכה תורה בלי כותרת"),
+            line(7, 6, 1, "תורה סתם"),
         ];
-        docs[1].toc_entry_id = 100;
-        docs[5].toc_entry_id = 0;
-        docs[6].toc_entry_id = 0;
         let index = build(dir.path(), IndexOptions::default(), &docs);
         let ids = |r: &SearchResult| r.hits.iter().map(|h| h.line_id).collect::<Vec<_>>();
         let req = |ex: ExcludeSpec| SearchRequest {
@@ -430,27 +423,6 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(ids(&r), vec![1, 2, 4, 5, 7]);
-        // same section: line 1 shares section 100 with line 2 (ברכה) → both go;
-        // a line without a section (toc 0) is never dropped, even with ברכה
-        let r = index
-            .search(&req(ExcludeSpec {
-                groups: vec![word("ברכה", false)],
-                same_section: true,
-                ..Default::default()
-            }))
-            .unwrap();
-        assert_eq!(ids(&r), vec![4, 6, 7]);
-        // same section, two words spread over two lines of section 100
-        // (מסיני in line 1, ברכה in line 2): the section goes; distance ignored
-        let r = index
-            .search(&req(ExcludeSpec {
-                groups: vec![word("ברכה", false), word("מסיני", false)],
-                max_word_distance: Some(0),
-                same_section: true,
-                ..Default::default()
-            }))
-            .unwrap();
-        assert_eq!(ids(&r), vec![3, 4, 5, 6, 7]);
         // an excluded word with no indexed form excludes nothing
         let r = index
             .search(&req(ExcludeSpec { groups: vec![word("זזזזז", false)], ..Default::default() }))
@@ -466,10 +438,10 @@ mod tests {
                 dir.path(),
                 IndexOptions { positions, keep_marks: false },
                 &[
-                    line(1, 0, 1, 0, "כתב רמב\"ם בהלכות"),
-                    line(2, 1, 1, 1, "אמר רבי משה בן מיימון כך"),
-                    line(3, 2, 1, 2, "רבי יוסי בן משה מיימון"), // words, not the phrase
-                    line(4, 3, 1, 3, "דבר אחר"),
+                    line(1, 0, 1, "כתב רמב\"ם בהלכות"),
+                    line(2, 1, 1, "אמר רבי משה בן מיימון כך"),
+                    line(3, 2, 1, "רבי יוסי בן משה מיימון"), // words, not the phrase
+                    line(4, 3, 1, "דבר אחר"),
                 ],
             );
             let phrase = |ws: &[&str]| ws.iter().map(|w| word(w, false)).collect::<Vec<_>>();
@@ -502,7 +474,7 @@ mod tests {
         }
         // main query that cannot match: the phrase alone still answers
         let dir = tempfile::tempdir().unwrap();
-        let index = build(dir.path(), IndexOptions::default(), &[line(1, 0, 1, 0, "רבי משה בן מיימון")]);
+        let index = build(dir.path(), IndexOptions::default(), &[line(1, 0, 1, "רבי משה בן מיימון")]);
         let mut r = index
             .search(&SearchRequest {
                 groups: vec![word("זזזזז", false)],
@@ -512,6 +484,50 @@ mod tests {
             .unwrap();
         assert_eq!(r.hits.len(), 1);
         assert!(r.session.locate("רבי משה בן מיימון").is_some());
+    }
+
+    #[test]
+    fn books_filter() {
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(
+                dir.path(),
+                IndexOptions { positions, keep_marks: false },
+                &[
+                    line(1, 0, 1, "תורה ברכה"),
+                    line(2, 1, 2, "תורה סתם"),
+                    line(3, 2, 3, "רבי משה בן מיימון"),
+                    line(4, 3, 2, "רבי משה בן מיימון"),
+                    line(5, 4, 3, "תורה ברכה"),
+                ],
+            );
+            let ids = |r: &SearchResult| r.hits.iter().map(|h| h.line_id).collect::<Vec<_>>();
+            let req = |books: Option<Vec<u64>>| SearchRequest {
+                groups: vec![word("תורה", false)],
+                books,
+                ..Default::default()
+            };
+            assert_eq!(ids(&index.search(&req(None)).unwrap()), vec![1, 2, 5]);
+            assert_eq!(ids(&index.search(&req(Some(vec![2, 3]))).unwrap()), vec![2, 5]);
+            assert!(index.search(&req(Some(vec![]))).unwrap().hits.is_empty());
+            // with exclusion
+            let r = index
+                .search(&SearchRequest {
+                    exclude: Some(ExcludeSpec { groups: vec![word("ברכה", false)], ..Default::default() }),
+                    ..req(Some(vec![1, 2]))
+                })
+                .unwrap();
+            assert_eq!(ids(&r), vec![2]);
+            // with phrase alternatives
+            let r = index
+                .search(&SearchRequest {
+                    phrase_alternatives: vec![vec![word("משה", false), word("בן", false)]],
+                    ..req(Some(vec![2]))
+                })
+                .unwrap();
+            assert_eq!(ids(&r), vec![2, 4]);
+            assert!(r.hits.iter().all(|h| h.book_id == 2));
+        }
     }
 
     /// The FM-index sidecar must give EXACTLY the walk's terms (and hits) for
@@ -526,7 +542,7 @@ mod tests {
         let mut lines: Vec<LineDoc> = Vec::new();
         let mut n = 0u64;
         let mut push = |text: String, lines: &mut Vec<LineDoc>| {
-            lines.push(line(n, n, 1, n, &text));
+            lines.push(line(n, n, 1, &text));
             n += 1;
         };
         for i in 0..letters.len() {
@@ -635,7 +651,7 @@ mod tests {
         // a second commit makes two segments: the sidecar steps aside, the
         // walk still answers; rebuilding after a merge brings it back
         let mut w = index.writer(60_000_000, 1).unwrap();
-        w.add(&line(n, n, 1, n, "אבאב")).unwrap();
+        w.add(&line(n, n, 1, "אבאב")).unwrap();
         w.commit(None).unwrap();
         assert!(!index.has_fm_sidecar());
         let r = index

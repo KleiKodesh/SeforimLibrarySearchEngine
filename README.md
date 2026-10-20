@@ -10,6 +10,22 @@ Runs on any native platform (Windows, macOS, Linux, Android, iOS) through one
 C library. From .NET it's a package that works on both .NET 10 and .NET
 Framework 4.8.
 
+## Rule: the index is the bare minimum (engine + seforim.db in tandem)
+
+The engine always works **together with the seforim.db SQLite database**, so
+the index stores only what the engine itself needs:
+
+- the postings (with freqs/positions only when the index is built with
+  positions, for span/slop queries)
+- `line_id`, the catalog `position`, and `book_id` (kept for **filtered
+  search by book**)
+
+Nothing else: no text, and no data the host can read from SQLite by line id.
+Grouping, sections, line index, references, neighbour lines and the like are
+done by the **host** with SQLite on the returned line ids (one indexed
+`IN (...)` query per batch). This applies to the C# and Dart hosts alike, and
+any similar future need follows the same rule.
+
 ## Purpose
 
 This project has two goals: to build a new and improved search engine for
@@ -202,9 +218,17 @@ are not printed), so upstream's query-parser tests stay as they are.
   Offsets are UTF-16 (.NET/JS string indices).
 
 ### seforim-engine / engine-ffi
-- **Index:** create or open; positions optional; add/delete/commit lines with a
-  host payload (resume watermark, provenance stamp) committed atomically with
-  the documents.
+- **Index:** create or open; positions optional; add/delete/commit lines
+  (`line_id`, `position`, `book_id`, text indexed but not stored; see the
+  bare-minimum rule above) with a host payload (resume watermark,
+  provenance stamp) committed atomically with the documents.
+- **Hits:** `PlacedHit` = position, line_id, book_id; the C ABI's
+  `se_search_copy_hits` writes 3 u64 per hit in that order.
+- **Filtered search by book:** `books` in the request (C# `Books`, Dart
+  `books`, demo `--book TEXT`): only lines whose `book_id` is in the set
+  come back (an empty set = no hits). Checked per doc on the `book_id` fast
+  column during collection, so it covers the main query, phrase
+  alternatives and exclusion alike.
 - **Search:** every matching line in catalog order, plus a snippet session.
   - The session locates snippets for a whole batch across all cores.
   - It applies the word-distance and order filters. Widening a short
@@ -247,16 +271,18 @@ are not printed), so upstream's query-parser tests stay as they are.
   not applied in that case.
 - **Exclusion** (Otzaria's negative query): `exclude` in the request (C#
   `SearchRequest.Exclude`, Dart `exclude`, demo `--exclude "words"
-  [--exclude-scope section]`): the words to drop, as a query of their own
+  [--exclude-scope distance|paragraph]`): the words to drop, as a query of their own
   with its own distance, order and spacing, every word required (Otzaria's
   `apply_advanced_negative_query`). One word, several words with no
   distance/order limit, or per-pair spacing are excluded in the query
   itself (MustNot); several words bound by distance/order are checked on
-  the line text at locate time, like the positive filters. With
-  `same_section` (Otzaria's `scoped_words_query`) the sections
-  (`toc_entry_id`) holding every excluded word, each anywhere in the
-  section, are dropped whole; distance and order do not apply there, and
-  lines without a section are never dropped, as in Otzaria.
+  the line text at locate time, like the positive filters. Section-scoped
+  exclusion (Otzaria's sameSection / `scoped_words_query`) is host-side,
+  since the index holds no sections: one search per negative word, its
+  line ids mapped to sections with SQLite (`line_toc`), the sets
+  intersected, and the positive hits in those sections dropped (a hit
+  without a section is never dropped). The Dart demo does this for
+  `--exclude-scope section`.
 - **Phrase alternatives** (for Otzaria's ראשי תיבות): `phrase_alternatives`
   in the request (C# `PhraseAlternatives`, Dart `phraseAlternatives`). Each
   is a phrase ORed with the main query: its words adjacent, in order and all
@@ -287,6 +313,18 @@ are not printed), so upstream's query-parser tests stay as they are.
   `LocateSnippetWindowOverNeighbourLines`, resumable `BuildLines`,
   `GetResumeState`).
 
+## Build and search reports
+
+- `SeforimSearch.Demo build` prints progress, then each stage's time
+  (indexing, merge into one segment, FM-index sidecar), the total, and the
+  index size in total and per file type.
+- `python -I tools/report/search_report.py <demo exe> <index> <queries> <out>`
+  runs every query with the engine's stage timing on and writes
+  `search-report.md`: per query the engine hits and the time of each stage
+  (query weight; FST walks / FM lookups + hit collection; host text fetch +
+  snippet locate + widening), time to the first batch, total, and exit code. Every run's full
+  log is kept next to the report.
+
 ## Parity with FtsLib (measured)
 
 `tools/parity/` runs KitveiHakodesh Core's own searcher on the installed FtsLib
@@ -300,8 +338,25 @@ On the full Otzaria DB (7,080,797 lines), first 2,000 hits per query: **16 of
 `|`, and distance 0/2/5. The one difference is `word~N`, where 2 hits differ
 because the fuzzy DFA counts an intra-word quote as an edit.
 
-Full build: 5 min plus a 70 s merge into one segment and 2.4 s for the
-FM-index sidecar. The index is 1.6 GB with positions.
+Full build (C# demo, .NET 10, 7,080,797 lines, measured 2026-10-20):
+
+| Stage | Time |
+|---|---|
+| indexing (read DB, tokenize, write segments, commits) | 282.1 s |
+| merge into one segment | 134.3 s |
+| FM-index sidecar | 5.1 s |
+| total | 423.0 s |
+
+Index size 1,598.2 MB with positions: postings `.idx` 737.5 MB, positions
+`.pos` 711.1 MB, FM sidecar 41.2 MB, term dictionary 40.0 MB, empty doc store
+28.5 MB, fast fields (line id, position, book id) 25.8 MB, field norms 14.2 MB.
+
+Search (same index, `search_report.py`, 17 parity queries): the engine's
+part (walks + collecting every hit) takes 29–330 ms per query, and the first
+batch of located results reaches the host in 0.4–0.9 s. The C# demo's
+`search` command then fetches and locates EVERY hit, so its totals (0.7 s for
+315 hits up to 50 s for 270k hits) measure the host's full-result loop, not
+what a page needs.
 
 ## Differences from FtsLib (known, deliberate)
 - **Fuzzy distance** is capped at 2 (tantivy's limit; FtsLib allowed 3).
@@ -324,7 +379,11 @@ FM-index sidecar. The index is 1.6 GB with positions.
 - Otzaria gaps found by the Dart demo (see `dart/README.md`):
   - ראשי תיבות and תרגום ארמי are done host-side in the Dart demo
     (Otzaria's dictionary assets → phrase / word alternatives).
-  - Grouping (sameSection cards, identicalText merging) is missing.
+  - Grouping (sameSection cards, identicalText merging) and sameSection
+    exclusion are done host-side in the Dart demo, with sections read from
+    SQLite (`line_toc`) by the hits' line ids.
+  - The positive query's sameSection scope (words spread over a section's
+    lines) is missing.
 - A full build compared side by side with FtsLib on the same queries.
 - Profiling: C# search is ~1.0 s (.NET 10) / ~1.5 s (net48), against 378 ms in
   the pure-Rust smoke test for the same query. That gap includes process start

@@ -61,7 +61,7 @@ namespace SeforimSearch.Engine.Native
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern int se_writer_add(WriterHandle writer, ulong lineId, ulong position, ulong bookId,
-                                               ulong lineIndex, ulong tocEntryId, byte* text, UIntPtr textLen);
+                                               byte* text, UIntPtr textLen);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern int se_writer_delete(WriterHandle writer, ulong lineId);

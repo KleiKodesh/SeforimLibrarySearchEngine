@@ -74,7 +74,7 @@ namespace FtsLib.Fts5
         public const int DefaultContextWords = 8;
 
         /// <summary>Bumped when the indexing pipeline changes; part of the provenance stamp.</summary>
-        public const string IndexFormatVersion = "tantivy2"; // 2: trailing quotes dropped from terms
+        public const string IndexFormatVersion = "tantivy4"; // 2: trailing quotes dropped from terms; 3: bare-minimum schema (no line_index/toc_entry_id)
 
         private readonly string _indexPath;
         private readonly Func<SeforimDbFtsCorpus> _openCorpus;
@@ -290,8 +290,9 @@ namespace FtsLib.Fts5
         /// <param name="indexOptions">Applies to a from-scratch build only.</param>
         public void BuildLines(Action<long, long>? onProgress = null, CancellationToken ct = default,
                                IndexOptions? indexOptions = null, int linesPerCommit = 20000,
-                               long heapBytes = 200_000_000, long maxLines = 0)
+                               long heapBytes = 200_000_000, long maxLines = 0, Action<string, TimeSpan>? onStage = null)
         {
+            _onStage = onStage;
             string fingerprint = SeforimSearch.Demo.SeforimDb.SeforimDbContentFingerprint.Compute(_seforimDbPath, IndexFormatVersion);
             var state = ReadBuildState();
             if (state != null && state.Fingerprint == fingerprint && state.Complete)
@@ -312,7 +313,8 @@ namespace FtsLib.Fts5
 
             try
             {
-                RunBuild(state!, resume, onProgress, ct, linesPerCommit, heapBytes, maxLines);
+                var indexing = System.Diagnostics.Stopwatch.StartNew();
+                RunBuild(state!, resume, onProgress, ct, linesPerCommit, heapBytes, maxLines, indexing);
             }
             catch (IndexNoLongerMatchesCorpusException)
             {
@@ -321,12 +323,22 @@ namespace FtsLib.Fts5
                 using (SeforimIndex.Create(_indexPath, indexOptions)) { }
                 using var c = _openCorpus();
                 var fresh = new BuildState { TotalLines = c.CountDocuments(), Fingerprint = fingerprint };
-                RunBuild(fresh, false, onProgress, ct, linesPerCommit, heapBytes, maxLines);
+                RunBuild(fresh, false, onProgress, ct, linesPerCommit, heapBytes, maxLines,
+                         System.Diagnostics.Stopwatch.StartNew());
             }
         }
 
+        /// <summary>Build stage reporter (stage name, duration); null = silent.</summary>
+        private Action<string, TimeSpan>? _onStage;
+
+        private void Stage(string name, System.Diagnostics.Stopwatch sw)
+        {
+            _onStage?.Invoke(name, sw.Elapsed);
+            sw.Restart();
+        }
+
         private void RunBuild(BuildState state, bool resume, Action<long, long>? onProgress, CancellationToken ct,
-                              int linesPerCommit, long heapBytes, long maxLines)
+                              int linesPerCommit, long heapBytes, long maxLines, System.Diagnostics.Stopwatch stage)
         {
             using var writer = Engine().OpenWriter(heapBytes);
             using var corpus = _openCorpus();
@@ -337,7 +349,7 @@ namespace FtsLib.Fts5
             bool verifyFirst = resume, sawFirst = false, capped = false;
             int sinceCommit = 0;
 
-            foreach (var (id, text) in corpus.ReadDocumentsInResultOrder(skip, ct))
+            foreach (var (id, text, bookId) in corpus.ReadDocumentsWithBookInResultOrder(skip, ct))
             {
                 if (verifyFirst)
                 {
@@ -349,7 +361,7 @@ namespace FtsLib.Fts5
                 }
                 if (maxLines > 0 && state.LinesDone >= maxLines) { capped = true; break; }
 
-                writer.Add(new LineDocument { LineId = id, Position = state.LinesDone, Text = text });
+                writer.Add(new LineDocument { LineId = id, Position = state.LinesDone, BookId = bookId, Text = text });
                 state.LinesDone++;
                 state.LastLineId = id;
                 if (++sinceCommit >= linesPerCommit)
@@ -365,6 +377,7 @@ namespace FtsLib.Fts5
             state.Complete = !capped;
             writer.Commit(state.Serialize());
             onProgress?.Invoke(state.LinesDone, state.TotalLines);
+            Stage("indexing (read DB + tokenize + write segments + commits)", stage);
 
             // One segment = one term dictionary per walk (FtsLib had one too). A
             // build commits every linesPerCommit lines, leaving dozens of segments,
@@ -373,7 +386,9 @@ namespace FtsLib.Fts5
             if (state.Complete)
             {
                 writer.MergeAndClose();
+                Stage("merge into one segment", stage);
                 Engine().BuildFmSidecar();
+                Stage("FM-index sidecar", stage);
             }
         }
 

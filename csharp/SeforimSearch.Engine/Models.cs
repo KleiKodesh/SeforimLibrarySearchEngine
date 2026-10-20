@@ -38,15 +38,16 @@ namespace SeforimSearch.Engine
         public string? Payload { get; internal set; }
     }
 
-    /// <summary>One line to index.</summary>
+    /// <summary>One line to index. Bare minimum: the index works in tandem with
+    /// seforim.db, so it keeps only the line id, catalog position and book id (for
+    /// filtered search); placement such as line index or section is read from SQLite
+    /// by line id.</summary>
     public struct LineDocument
     {
         public long LineId;
         /// <summary>Rank in the library's catalog order: results are returned in it.</summary>
         public long Position;
         public long BookId;
-        public long LineIndex;
-        public long TocEntryId;
         /// <summary>The raw line text (HTML allowed).</summary>
         public string Text;
     }
@@ -264,14 +265,18 @@ namespace SeforimSearch.Engine
         /// holding that many groups.</summary>
         public int? MinGroups { get; set; }
 
-        /// <summary>Otzaria's negative query: lines (or whole sections) carrying these
-        /// words are dropped. Null = none.</summary>
+        /// <summary>Otzaria's negative query: lines carrying these words are dropped.
+        /// Null = none.</summary>
         public ExcludeSpec? Exclude { get; set; }
 
         /// <summary>Whole-phrase alternatives ORed with <see cref="Groups"/> (Otzaria's
         /// acronym expansion: רמב"ם ↔ רבי משה בן מיימון). Each phrase's words are adjacent,
         /// in order and all required, whatever the main query's settings.</summary>
         public List<List<QueryGroup>> PhraseAlternatives { get; } = new List<List<QueryGroup>>();
+
+        /// <summary>Filtered search by book: only lines whose book id is in this list come
+        /// back (empty list = no hits). Null = every book.</summary>
+        public List<long>? Books { get; set; }
 
         internal string ToJson()
         {
@@ -314,6 +319,16 @@ namespace SeforimSearch.Engine
                 }
                 sb.Append(']');
             }
+            if (Books != null)
+            {
+                sb.Append(",\"books\":[");
+                for (int i = 0; i < Books.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append(Books[i].ToString(System.Globalization.CultureInfo.InvariantCulture));
+                }
+                sb.Append(']');
+            }
             if (Exclude != null)
             {
                 sb.Append(",\"exclude\":");
@@ -326,13 +341,12 @@ namespace SeforimSearch.Engine
 
     /// <summary>Otzaria's negative query: the words to exclude, run as a query of their
     /// own with its own distance, order and spacing, always with every word required.
-    /// A line matching it is dropped; with <see cref="SameSection"/> every line of a
-    /// section (tocEntryId) holding a match is dropped. Several words bound by
+    /// A line matching it is dropped. Several words bound by
     /// <see cref="MaxWordDistance"/> / <see cref="RequireOrdered"/> (without Gaps) are
     /// checked on the line text when a snippet is located, so such lines are still
-    /// among the hits and locate as null. With SameSection the sections holding every
-    /// excluded word (each anywhere in the section) are dropped whole; distance and
-    /// order do not apply there, and lines without a section are never dropped.</summary>
+    /// among the hits and locate as null. Section-scoped exclusion is the host's job:
+    /// search each negative word on its own, map the returned line ids to sections with
+    /// SQLite (line_toc), intersect, and drop the positive hits in those sections.</summary>
     public sealed class ExcludeSpec
     {
         /// <summary>AND across groups, OR within each group's expansion.</summary>
@@ -347,9 +361,6 @@ namespace SeforimSearch.Engine
         /// <summary>Per-pair spacing for the excluded words (needs positions).</summary>
         public List<int>? Gaps { get; set; }
 
-        /// <summary>Drop every line of a section that holds a match, not just the line.</summary>
-        public bool SameSection { get; set; }
-
         internal void WriteJson(StringBuilder sb)
         {
             sb.Append("{\"groups\":[");
@@ -361,7 +372,6 @@ namespace SeforimSearch.Engine
             sb.Append("],\"max_word_distance\":");
             sb.Append(MaxWordDistance.HasValue ? MaxWordDistance.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null");
             sb.Append(",\"require_ordered\":").Append(RequireOrdered ? "true" : "false");
-            sb.Append(",\"same_section\":").Append(SameSection ? "true" : "false");
             if (Gaps != null)
             {
                 sb.Append(",\"gaps\":[");
@@ -376,18 +386,17 @@ namespace SeforimSearch.Engine
         }
     }
 
-    /// <summary>A matching line, in catalog order.</summary>
+    /// <summary>A matching line, in catalog order: only the ids the index keeps. Any
+    /// other placement (line index, section) comes from SQLite by line id.</summary>
     public readonly struct PlacedHit
     {
-        public PlacedHit(long position, long lineId, long bookId, long lineIndex, long tocEntryId)
+        public PlacedHit(long position, long lineId, long bookId)
         {
-            Position = position; LineId = lineId; BookId = bookId; LineIndex = lineIndex; TocEntryId = tocEntryId;
+            Position = position; LineId = lineId; BookId = bookId;
         }
         public long Position { get; }
         public long LineId { get; }
         public long BookId { get; }
-        public long LineIndex { get; }
-        public long TocEntryId { get; }
     }
 
     /// <summary>

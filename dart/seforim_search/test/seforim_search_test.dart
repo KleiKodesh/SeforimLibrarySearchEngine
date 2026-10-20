@@ -27,9 +27,9 @@ void main() {
     tmp = Directory.systemTemp.createTempSync('se_dart_');
     index = SeforimIndex.create(tmp.path);
     final w = index.openWriter(heapBytes: 30000000, threads: 1);
-    w.add(const LineDocument(lineId: 7, position: 1, bookId: 1, lineIndex: 0, text: text));
-    w.add(const LineDocument(lineId: 8, position: 0, bookId: 2, lineIndex: 0, tocEntryId: 3, text: text2));
-    w.add(const LineDocument(lineId: 9, position: 2, bookId: 1, lineIndex: 1, text: 'temp'));
+    w.add(const LineDocument(lineId: 7, position: 1, bookId: 1, text: text));
+    w.add(const LineDocument(lineId: 8, position: 0, bookId: 2, text: text2));
+    w.add(const LineDocument(lineId: 9, position: 2, bookId: 1, text: 'temp'));
     w.commit('done=1');
     w.delete(9);
     w.commit('done=2');
@@ -72,8 +72,17 @@ void main() {
   test('catalog order and AND of groups', () {
     final s = index.search(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')]));
     expect(s.allHits().map((h) => h.lineId).toList(), [8]);
-    expect(s.hits(0, 1).single.tocEntryId, 3);
+    expect(s.hits(0, 1).single.bookId, 2);
     s.close();
+    final inBook1 = index.search(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')], books: [1]));
+    expect(inBook1.hitCount, 0);
+    inBook1.close();
+    final inBook2 = index.search(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')], books: [2, 5]));
+    expect(inBook2.allHits().map((h) => h.lineId).toList(), [8]);
+    inBook2.close();
+    final noBooks = index.search(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')], books: []));
+    expect(noBooks.hitCount, 0);
+    noBooks.close();
     final none = index.search(SearchRequest(groups: [
       const QueryGroup.word('בראשית'),
       const QueryGroup.word('למשה'),

@@ -239,8 +239,6 @@ pub unsafe extern "C" fn se_writer_add(
     line_id: u64,
     position: u64,
     book_id: u64,
-    line_index: u64,
-    toc_entry_id: u64,
     text: *const u8,
     text_len: usize,
 ) -> i32 {
@@ -250,8 +248,6 @@ pub unsafe extern "C" fn se_writer_add(
             line_id,
             position,
             book_id,
-            line_index,
-            toc_entry_id,
             text: str_arg(text, text_len)?.to_string(),
         };
         writer.add(&doc).map_err(err)?;
@@ -371,12 +367,13 @@ pub unsafe extern "C" fn se_search_hit_count(search: *const SearchResult) -> u64
     guard(0, || Ok(search.as_ref().ok_or("null search")?.hits.len() as u64))
 }
 
-/// Copies hits `[offset, offset+count)` into `out` as 5 u64 each:
-/// position, line_id, book_id, line_index, toc_entry_id. Returns how many
-/// hits were copied.
+/// Copies hits `[offset, offset+count)` into `out` as 3 u64 each:
+/// position, line_id, book_id (the only ids the index keeps; any other
+/// placement the host reads from SQLite by line id). Returns how many hits
+/// were copied.
 ///
 /// # Safety
-/// `out` must hold `count * 5` u64.
+/// `out` must hold `count * 3` u64.
 #[no_mangle]
 pub unsafe extern "C" fn se_search_copy_hits(
     search: *const SearchResult,
@@ -388,13 +385,11 @@ pub unsafe extern "C" fn se_search_copy_hits(
         let search = search.as_ref().ok_or("null search")?;
         let start = (offset as usize).min(search.hits.len());
         let end = start.saturating_add(count as usize).min(search.hits.len());
-        let out = std::slice::from_raw_parts_mut(out, (end - start) * 5);
+        let out = std::slice::from_raw_parts_mut(out, (end - start) * 3);
         for (i, h) in search.hits[start..end].iter().enumerate() {
-            out[i * 5] = h.position;
-            out[i * 5 + 1] = h.line_id;
-            out[i * 5 + 2] = h.book_id;
-            out[i * 5 + 3] = h.line_index;
-            out[i * 5 + 4] = h.toc_entry_id;
+            out[i * 3] = h.position;
+            out[i * 3 + 1] = h.line_id;
+            out[i * 3 + 2] = h.book_id;
         }
         Ok((end - start) as u64)
     })
@@ -528,7 +523,7 @@ mod tests {
             assert!(!index.is_null(), "{:?}", CStr::from_ptr(se_last_error()));
             let writer = se_writer_open(index, 30_000_000, 1);
             let text = "והתורה ניתנה למשה";
-            assert_eq!(se_writer_add(writer, 7, 0, 1, 0, 0, text.as_ptr(), text.len()), 0);
+            assert_eq!(se_writer_add(writer, 7, 0, 1, text.as_ptr(), text.len()), 0);
             let payload = "done=1";
             assert_eq!(se_writer_commit(writer, payload.as_ptr(), payload.len()), 0);
             se_writer_close(writer);
@@ -542,7 +537,7 @@ mod tests {
             let search = se_search(index, req.as_ptr(), req.len());
             assert!(!search.is_null(), "{:?}", CStr::from_ptr(se_last_error()));
             assert_eq!(se_search_hit_count(search), 1);
-            let mut hits = [0u64; 5];
+            let mut hits = [0u64; 3];
             assert_eq!(se_search_copy_hits(search, 0, 1, hits.as_mut_ptr()), 1);
             assert_eq!(hits[1], 7);
 

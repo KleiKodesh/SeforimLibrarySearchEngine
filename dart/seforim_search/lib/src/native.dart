@@ -53,8 +53,8 @@ final class SeforimNative {
         writerOpen = lib.lookupFunction<Pointer<Void> Function(Pointer<Void>, Size, Size),
             Pointer<Void> Function(Pointer<Void>, int, int)>('se_writer_open'),
         writerAdd = lib.lookupFunction<
-            Int32 Function(Pointer<Void>, Uint64, Uint64, Uint64, Uint64, Uint64, Pointer<Uint8>, Size),
-            int Function(Pointer<Void>, int, int, int, int, int, Pointer<Uint8>, int)>('se_writer_add'),
+            Int32 Function(Pointer<Void>, Uint64, Uint64, Uint64, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, int, int, int, Pointer<Uint8>, int)>('se_writer_add'),
         writerDelete = lib.lookupFunction<Int32 Function(Pointer<Void>, Uint64),
             int Function(Pointer<Void>, int)>('se_writer_delete'),
         writerCommit = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint8>, Size),
@@ -93,7 +93,7 @@ final class SeforimNative {
   final int Function(Pointer<Void>) indexBuildFmSidecar;
   final int Function(Pointer<Void>) indexHasFmSidecar;
   final Pointer<Void> Function(Pointer<Void>, int, int) writerOpen;
-  final int Function(Pointer<Void>, int, int, int, int, int, Pointer<Uint8>, int) writerAdd;
+  final int Function(Pointer<Void>, int, int, int, Pointer<Uint8>, int) writerAdd;
   final int Function(Pointer<Void>, int) writerDelete;
   final int Function(Pointer<Void>, Pointer<Uint8>, int) writerCommit;
   final int Function(Pointer<Void>) writerRollback;

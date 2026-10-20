@@ -33,14 +33,14 @@ class IndexInfo {
       );
 }
 
-/// One line to index.
+/// One line to index. Bare minimum: the index works in tandem with
+/// seforim.db, so it keeps only the line id, catalog position and book id
+/// (for filtered search); line index, sections etc. come from SQLite by id.
 class LineDocument {
   const LineDocument({
     required this.lineId,
     required this.position,
     required this.bookId,
-    required this.lineIndex,
-    this.tocEntryId = 0,
     required this.text,
   });
   final int lineId;
@@ -48,8 +48,6 @@ class LineDocument {
   /// Rank in the library's catalog order: results are returned in it.
   final int position;
   final int bookId;
-  final int lineIndex;
-  final int tocEntryId;
 
   /// The raw line text (HTML allowed).
   final String text;
@@ -214,17 +212,22 @@ class SearchRequest {
       this.gaps,
       this.minGroups,
       this.exclude,
-      List<List<QueryGroup>>? phraseAlternatives})
+      List<List<QueryGroup>>? phraseAlternatives,
+      this.books})
       : groups = groups ?? [],
         phraseAlternatives = phraseAlternatives ?? [];
+
+  /// Filtered search by book: only lines whose book id is in this list come
+  /// back (empty list = no hits). Null = every book.
+  List<int>? books;
 
   /// Whole-phrase alternatives ORed with [groups] (Otzaria's acronym
   /// expansion: רמב"ם ↔ רבי משה בן מיימון). Each phrase's words are adjacent,
   /// in order and all required, whatever the main query's settings.
   final List<List<QueryGroup>> phraseAlternatives;
 
-  /// Otzaria's negative query: lines (or whole sections) carrying these words
-  /// are dropped. Null = none.
+  /// Otzaria's negative query: lines carrying these words are dropped.
+  /// Null = none.
   ExcludeSpec? exclude;
 
   /// Partial matching (Otzaria's wordMatchMode): a line needs only this many
@@ -259,6 +262,7 @@ class SearchRequest {
         if (gaps != null) 'gaps': [for (final g in gaps!) g < 0 ? 0 : g],
         if (minGroups != null) 'min_groups': minGroups,
         if (exclude != null) 'exclude': exclude!.toJson(),
+        if (books != null) 'books': books,
         if (phraseAlternatives.isNotEmpty)
           'phrase_alternatives': [
             for (final p in phraseAlternatives) [for (final g in p) g.toJson()]
@@ -268,16 +272,15 @@ class SearchRequest {
 
 /// Otzaria's negative query: the words to exclude, run as a query of their own
 /// with its own distance, order and spacing, always with every word required.
-/// A line matching it is dropped; with [sameSection] every line of a section
-/// (tocEntryId) holding a match is dropped. Several words bound by
+/// A line matching it is dropped. Several words bound by
 /// [maxWordDistance] / [requireOrdered] (without [gaps]) are checked on the
 /// line text when a snippet is located, so such lines are still among the hits
-/// and locate as null. With [sameSection] the sections holding every excluded
-/// word (each anywhere in the section) are dropped whole; distance and order
-/// do not apply there, and lines without a section are never dropped.
+/// and locate as null. Section-scoped exclusion is the host's job: search
+/// each negative word on its own, map the returned line ids to sections with
+/// SQLite (`line_toc`), intersect, and drop the positive hits there.
 class ExcludeSpec {
   ExcludeSpec(
-      {List<QueryGroup>? groups, this.maxWordDistance, this.requireOrdered = false, this.gaps, this.sameSection = false})
+      {List<QueryGroup>? groups, this.maxWordDistance, this.requireOrdered = false, this.gaps})
       : groups = groups ?? [];
 
   /// AND across groups, OR within each group's expansion.
@@ -292,28 +295,23 @@ class ExcludeSpec {
   /// Per-pair spacing for the excluded words (needs positions).
   List<int>? gaps;
 
-  /// Drop every line of a section that holds a match, not just the line.
-  bool sameSection;
-
   Map<String, Object?> toJson() => {
         'groups': [for (final g in groups) g.toJson()],
         'max_word_distance': maxWordDistance,
         'require_ordered': requireOrdered,
-        'same_section': sameSection,
         if (gaps != null) 'gaps': [for (final g in gaps!) g < 0 ? 0 : g],
       };
 }
 
-/// A matching line, in catalog order.
+/// A matching line, in catalog order: only the ids the index keeps. Any
+/// other placement (line index, section) comes from SQLite by line id.
 class PlacedHit {
-  const PlacedHit(this.position, this.lineId, this.bookId, this.lineIndex, this.tocEntryId);
+  const PlacedHit(this.position, this.lineId, this.bookId);
   final int position;
   final int lineId;
   final int bookId;
-  final int lineIndex;
-  final int tocEntryId;
   @override
-  String toString() => 'PlacedHit(pos $position, line $lineId, book $bookId:$lineIndex)';
+  String toString() => 'PlacedHit(pos $position, line $lineId, book $bookId)';
 }
 
 /// One highlighted word inside a snippet: UTF-16 offsets (Dart string indices).

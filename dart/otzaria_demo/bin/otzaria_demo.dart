@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:otzaria_demo/otzaria_query.dart';
 import 'package:otzaria_demo/seforim_db.dart';
 import 'package:otzaria_demo/acronym_lexicon.dart';
+import 'package:otzaria_demo/grouping.dart';
 import 'package:otzaria_demo/translation_lexicon.dart';
 import 'package:seforim_search/seforim_search.dart';
 
@@ -28,6 +29,8 @@ search options (Otzaria names):
   --exclude "words"   negative query (same distance/order/options)
   --exclude-scope distance|paragraph|section   (negativeScope; default distance)
   --book TEXT         only books whose title/category contains TEXT
+  --group section|identical  (Otzaria's grouping; limit/offset then count groups)
+  --group-scan N      identical: hits read for signatures (default 20000)
   --limit N (100) --offset N (0)  --context N (8)
   word alternatives: write a,b in the query (Otzaria sets them per word in the UI)
   library paths: --native path (seforim_search_native), --zstd path (libzstd)
@@ -38,7 +41,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
   const valued = {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
     'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd', 'spacing', 'match',
-    'match-count', 'exclude', 'exclude-scope', 'dictionary', 'acronyms',
+    'match-count', 'exclude', 'exclude-scope', 'dictionary', 'acronyms', 'group', 'group-scan',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -101,8 +104,6 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
             lineId: line.id,
             position: position++,
             bookId: line.bookId,
-            lineIndex: line.lineIndex,
-            tocEntryId: line.tocEntryId,
             text: line.text));
         if (position % 100000 == 0) stdout.writeln('  $position lines, ${sw.elapsed.inSeconds}s');
       }
@@ -213,20 +214,70 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
         : {for (final (i, g) in o['spacing']!.split(',').indexed) i: int.parse(g.trim())},
   );
   final request = req.toRequest(contextWords: contextWords);
+  final bookFilter = o['book'] == null ? null : db.booksMatching(o['book']!);
+  // filtered search by book: done by the engine (book_id is in the index)
+  if (bookFilter != null) request.books = bookFilter.toList();
   req.warnings.toSet().forEach((w) => stderr.writeln('warning: $w'));
 
   final limit = _int(o, 'limit') ?? 100, offset = _int(o, 'offset') ?? 0;
-  final bookFilter = o['book'] == null ? null : db.booksMatching(o['book']!);
   final titles = db.bookTitles();
   final sw = Stopwatch()..start();
   final session = index.search(request);
   final searchMs = sw.elapsedMilliseconds;
 
+  // Negative scope sameSection, host-side (the index holds no sections):
+  // one search per negative word → line ids → sections via SQLite →
+  // intersect → drop positive hits in those sections. A hit without a
+  // section is never dropped.
+  final sectionWords = req.sectionNegativeWords();
+  var hits = session.allHits().toList();
+  if (sectionWords.isNotEmpty) {
+    final perWord = <Set<int>>[];
+    for (final w in sectionWords) {
+      final s = index.search(SearchRequest(groups: [w], books: request.books));
+      perWord.add(db.sectionsOf(s.allHits().map((h) => h.lineId)).values.toSet());
+      s.close();
+    }
+    final blocked = blockedSections(perWord);
+    if (blocked.isNotEmpty) {
+      final own = db.sectionsOf(hits.map((h) => h.lineId));
+      hits = [for (final h in hits) if (!blocked.contains(own[h.lineId])) h];
+    }
+  }
+
+  (String, Snippet) widen(PlacedHit h, String text, Snippet s) {
+    if (!s.isShort(contextWords)) return (text, s);
+    // Widen over up to 2 neighbouring lines per side (as the C# demo):
+    // previous + ' ' + line + ' ' + next, empty sides dropped (FtsLib's
+    // JoinWithNeighbourLines); the engine just locates the longer text. The
+    // demo shows the joined text's snippet as is; KitveiHakodesh's searcher
+    // (C# demo) keeps the matched line's score and distance.
+    // the engine returns line ids only: lineIndex comes from SQLite
+    final lineIndex = db.lineIndexesOf([h.lineId])[h.lineId];
+    if (lineIndex == null) return (text, s);
+    final around = db.linesAround(h.bookId, lineIndex - 2, lineIndex + 2);
+    String side(int a, int b) =>
+        [for (var d = a; d <= b; d++) around[lineIndex + d] ?? ''].where((t) => t.isNotEmpty).join(' ');
+    final joined = [side(-2, -1), text, side(1, 2)].where((t) => t.isNotEmpty).join(' ');
+    final wide = session.locate(joined);
+    return wide == null ? (text, s) : (joined, wide);
+  }
+
+  final grouping = switch (o['group']) {
+    'section' => Grouping.sameSection,
+    'identical' => Grouping.identicalText,
+    _ => null,
+  };
+  if (grouping != null) {
+    _grouped(db, session, hits, request, o, grouping, titles, limit, offset, sw, searchMs, widen);
+    index.close();
+    return;
+  }
+
   // Page through hits in catalog order, locate snippets per batch, keep the
   // ones that pass the filters, until offset+limit results exist.
   final results = <(PlacedHit, String, Snippet)>[];
   var passed = 0;
-  final hits = bookFilter == null ? session.allHits() : session.allHits().where((h) => bookFilter.contains(h.bookId));
   final it = hits.iterator;
   var more = true;
   while (more && results.length < limit) {
@@ -239,36 +290,18 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     final lineTexts = [for (final h in batch) texts[h.lineId] ?? ''];
     final snippets = session.locateBatch(lineTexts);
     for (var i = 0; i < batch.length && results.length < limit; i++) {
-      var s = snippets[i];
+      final s = snippets[i];
       if (s == null) continue;
       if (passed++ < offset) continue;
-      var text = lineTexts[i];
-      if (s.isShort(contextWords)) {
-        // Widen over up to 2 neighbouring lines per side (as the C# demo).
-        final h = batch[i];
-        final around = db.linesAround(h.bookId, h.lineIndex - 2, h.lineIndex + 2);
-        String side(int a, int b) =>
-            [for (var d = a; d <= b; d++) around[h.lineIndex + d] ?? ''].where((t) => t.isNotEmpty).join(' ');
-        final prev = side(-2, -1), next = side(1, 2);
-        // previous + ' ' + line + ' ' + next, empty sides dropped (FtsLib's
-        // JoinWithNeighbourLines); the engine just locates the longer text.
-        final joined = [prev, text, next].where((t) => t.isNotEmpty).join(' ');
-        // The demo shows the joined text's snippet as is; KitveiHakodesh's
-        // searcher (C# demo) keeps the matched line's score and distance.
-        final wide = session.locate(joined);
-        if (wide != null) {
-          s = wide;
-          text = joined;
-        }
-      }
-      results.add((batch[i], text, s));
+      final (text, shown) = widen(batch[i], lineTexts[i], s);
+      results.add((batch[i], text, shown));
     }
   }
   final refs = db.heRefs(results.map((r) => r.$1.lineId));
   final terms = session.takeNewTerms();
 
   stdout.writeln('Query groups: ${request.groups.length}, matching lines: ${session.hitCount}'
-      '${bookFilter != null ? ' (before book filter)' : ''}, search ${searchMs}ms, '
+      '${hits.length != session.hitCount ? ' (${hits.length} after section exclusion)' : ''}, search ${searchMs}ms, '
       'page ${sw.elapsedMilliseconds}ms');
   stdout.writeln('Matched words: ${terms.take(30).join(', ')}${terms.length > 30 ? ' …' : ''}');
   var n = offset;
@@ -278,4 +311,93 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   }
   session.close();
   index.close();
+}
+
+/// Otzaria's grouped results (see lib/grouping.dart). Groups are formed over
+/// the raw hits, as Otzaria's GroupCollector does. A card's representative is
+/// its first member, in catalog order, whose snippet passes the filters; a
+/// group with none is not shown. Counts are raw members (Otzaria's "found X
+/// results in range"); for identical text only the first --group-scan hits are
+/// read, so counts may be a lower bound (shown with +), as Otzaria's truncated.
+void _grouped(
+  SeforimDb db,
+  SearchSession session,
+  List<PlacedHit> all,
+  SearchRequest request,
+  Map<String, String?> o,
+  Grouping grouping,
+  Map<int, String> titles,
+  int limit,
+  int offset,
+  Stopwatch sw,
+  int searchMs,
+  (String, Snippet) Function(PlacedHit, String, Snippet) widen,
+) {
+  var scanned = all;
+  var truncated = false;
+  final texts = <int, String>{};
+  // The engine returns line ids only; sections come from the DB in one pass.
+  final sections = grouping == Grouping.sameSection ? db.sectionsOf(scanned.map((h) => h.lineId)) : const <int, int>{};
+  if (grouping == Grouping.identicalText) {
+    final cap = _int(o, 'group-scan') ?? 20000;
+    if (all.length > cap) {
+      scanned = all.sublist(0, cap);
+      truncated = true;
+    }
+    for (var i = 0; i < scanned.length; i += 2048) {
+      final end = i + 2048 > scanned.length ? scanned.length : i + 2048;
+      texts.addAll(db.lineTexts(scanned.sublist(i, end).map((h) => h.lineId)));
+    }
+  }
+  final groups = groupInOrder<PlacedHit>(
+    scanned,
+    (h) => groupKey(grouping, tocEntryId: sections[h.lineId] ?? 0, lineId: h.lineId, text: texts[h.lineId]),
+  );
+
+  final cards = <(HitGroup<PlacedHit>, PlacedHit, String, Snippet)>[];
+  var shown = 0;
+  for (final g in groups) {
+    if (cards.length >= limit) break;
+    // the representative: first member whose snippet passes
+    (PlacedHit, String, Snippet)? rep;
+    for (var i = 0; i < g.members.length && rep == null; i += 64) {
+      final part = g.members.sublist(i, i + 64 > g.members.length ? g.members.length : i + 64);
+      final have = part.every((h) => texts.containsKey(h.lineId));
+      final t = have ? texts : db.lineTexts(part.map((h) => h.lineId));
+      final lineTexts = [for (final h in part) t[h.lineId] ?? ''];
+      final snippets = session.locateBatch(lineTexts);
+      for (var j = 0; j < part.length; j++) {
+        final s = snippets[j];
+        if (s != null) {
+          final (text, sn) = widen(part[j], lineTexts[j], s);
+          rep = (part[j], text, sn);
+          break;
+        }
+      }
+    }
+    if (rep == null) continue;
+    if (shown++ < offset) continue;
+    cards.add((g, rep.$1, rep.$2, rep.$3));
+  }
+
+  final refs = db.heRefs([
+    for (final c in cards) ...[
+      c.$2.lineId,
+      ...c.$1.members.where((m) => m != c.$2).take(mergedSiblingsCap).map((m) => m.lineId)
+    ]
+  ]);
+  stdout.writeln('Query groups: ${request.groups.length}, matching lines: ${session.hitCount}, '
+      'groups: ${groups.length}${truncated ? '+' : ''} (${grouping.name}), search ${searchMs}ms, '
+      'page ${sw.elapsedMilliseconds}ms');
+  var n = offset;
+  for (final (g, h, text, s) in cards) {
+    final count = '${g.members.length}${truncated ? '+' : ''}';
+    stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId}) '
+        '[$count results]');
+    stdout.writeln('   ${_render(text, s)}');
+    for (final m in g.members.where((m) => m != h).take(mergedSiblingsCap)) {
+      stdout.writeln('     - ${titles[m.bookId] ?? m.bookId} | ${refs[m.lineId] ?? ''}  (line ${m.lineId})');
+    }
+  }
+  session.close();
 }

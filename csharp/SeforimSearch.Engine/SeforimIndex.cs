@@ -112,7 +112,7 @@ namespace SeforimSearch.Engine
             byte[] text = Interop.ToUtf8(line.Text);
             fixed (byte* t = text)
                 Interop.Check(NativeMethods.se_writer_add(_handle, (ulong)line.LineId, (ulong)line.Position,
-                    (ulong)line.BookId, (ulong)line.LineIndex, (ulong)line.TocEntryId, t, (UIntPtr)text.Length));
+                    (ulong)line.BookId, t, (UIntPtr)text.Length));
         }
 
         /// <summary>Queues deletion of a line. An update is Delete + Add.</summary>

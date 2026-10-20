@@ -119,7 +119,7 @@ final class IndexWriter implements Finalizable {
   void add(LineDocument line) {
     using((a) {
       final (t, tl) = utf8Native(line.text, a);
-      _n.checkStatus(_n.writerAdd(_h, line.lineId, line.position, line.bookId, line.lineIndex, line.tocEntryId, t, tl));
+      _n.checkStatus(_n.writerAdd(_h, line.lineId, line.position, line.bookId, t, tl));
     });
   }
 

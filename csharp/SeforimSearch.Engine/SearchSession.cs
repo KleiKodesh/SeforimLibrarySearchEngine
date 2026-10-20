@@ -33,15 +33,15 @@ namespace SeforimSearch.Engine
         {
             if (count <= 0 || offset >= HitCount) return Array.Empty<PlacedHit>();
             count = (int)Math.Min(count, HitCount - offset);
-            var raw = new ulong[count * 5];
+            var raw = new ulong[count * 3];
             ulong copied;
             fixed (ulong* r = raw)
                 copied = NativeMethods.se_search_copy_hits(_handle, (ulong)offset, (ulong)count, r);
             var hits = new PlacedHit[(int)copied];
             for (int i = 0; i < hits.Length; i++)
             {
-                int b = i * 5;
-                hits[i] = new PlacedHit((long)raw[b], (long)raw[b + 1], (long)raw[b + 2], (long)raw[b + 3], (long)raw[b + 4]);
+                int b = i * 3;
+                hits[i] = new PlacedHit((long)raw[b], (long)raw[b + 1], (long)raw[b + 2]);
             }
             return hits;
         }

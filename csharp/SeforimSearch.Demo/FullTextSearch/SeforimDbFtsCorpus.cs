@@ -110,6 +110,17 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// </summary>
         public IEnumerable<(int Id, string Text)> ReadDocumentsInResultOrder(long skip, CancellationToken ct = default)
         {
+            foreach (var d in ReadDocumentsWithBookInResultOrder(skip, ct))
+                yield return (d.Id, d.Text);
+        }
+
+        /// <summary><see cref="ReadDocumentsInResultOrder"/> plus each line's book id, which the
+        /// engine index keeps for filtered search by book (the only placement it stores; the
+        /// loop already reads book by book, so this costs no extra query). Not in Core: FtsLib
+        /// stored no book id.</summary>
+        public IEnumerable<(int Id, string Text, int BookId)> ReadDocumentsWithBookInResultOrder(long skip,
+                                                                                               CancellationToken ct = default)
+        {
             var treeOrder = SeforimDbBookTreeOrder.Load(_connection);
 
             var lineCounts = new Dictionary<int, long>();
@@ -143,7 +154,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 while (reader.Read())
                 {
                     ct.ThrowIfCancellationRequested();
-                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1));
+                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1), bookId);
                 }
             }
         }

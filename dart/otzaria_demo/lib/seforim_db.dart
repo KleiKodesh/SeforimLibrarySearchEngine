@@ -170,6 +170,45 @@ class SeforimDb {
     return {for (final r in rs) r.columnAt(0) as int: decode(r.columnAt(1))};
   }
 
+  /// Each line's lineIndex (its place in its book), from the DB: the engine
+  /// returns line ids only.
+  Map<int, int> lineIndexesOf(Iterable<int> ids) {
+    final out = <int, int>{};
+    final list = ids.toList();
+    for (var i = 0; i < list.length; i += 900) {
+      final chunk = list.sublist(i, i + 900 > list.length ? list.length : i + 900);
+      final rs = _db.select(
+          'SELECT id, lineIndex FROM line WHERE id IN (${List.filled(chunk.length, '?').join(',')})', chunk);
+      for (final r in rs) {
+        out[r.columnAt(0) as int] = r.columnAt(1) as int;
+      }
+    }
+    return out;
+  }
+
+  /// Each line's section (TOC entry) for grouping, straight from the DB: the
+  /// engine only returns line ids. `line_toc` is the authoritative map
+  /// (`line.tocEntryId` is NULL for most lines). Lines without one are absent.
+  Map<int, int> sectionsOf(Iterable<int> ids) {
+    final hasLineToc =
+        _db.select("SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_toc'").isNotEmpty;
+    final out = <int, int>{};
+    final list = ids.toList();
+    for (var i = 0; i < list.length; i += 900) {
+      final chunk = list.sublist(i, i + 900 > list.length ? list.length : i + 900);
+      final marks = List.filled(chunk.length, '?').join(',');
+      final rs = _db.select(
+          hasLineToc
+              ? 'SELECT lineId, tocEntryId FROM line_toc WHERE lineId IN ($marks)'
+              : 'SELECT id, tocEntryId FROM line WHERE tocEntryId IS NOT NULL AND id IN ($marks)',
+          chunk);
+      for (final r in rs) {
+        out[r.columnAt(0) as int] = r.columnAt(1) as int;
+      }
+    }
+    return out;
+  }
+
   /// heRef of line ids.
   Map<int, String> heRefs(Iterable<int> ids) {
     final list = ids.toList();

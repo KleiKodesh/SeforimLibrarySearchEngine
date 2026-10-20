@@ -36,12 +36,12 @@ final class SearchSession implements Finalizable {
   List<PlacedHit> hits(int offset, int count) {
     if (count <= 0 || offset >= hitCount) return const [];
     if (count > hitCount - offset) count = hitCount - offset;
-    final raw = calloc<Uint64>(count * 5);
+    final raw = calloc<Uint64>(count * 3);
     try {
       final copied = _n.searchCopyHits(_h, offset, count, raw);
-      final v = raw.asTypedList(copied * 5);
+      final v = raw.asTypedList(copied * 3);
       return [
-        for (var i = 0; i < copied; i++) PlacedHit(v[i * 5], v[i * 5 + 1], v[i * 5 + 2], v[i * 5 + 3], v[i * 5 + 4]),
+        for (var i = 0; i < copied; i++) PlacedHit(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]),
       ];
     } finally {
       calloc.free(raw);

@@ -143,6 +143,12 @@ pub struct SearchRequest {
     /// looser: the tightest window covering the words must be gap-free, so
     /// a repeated word can fill a gap (רבי משה בן רבי נחמן passes).
     pub phrase_alternatives: Vec<Vec<GroupSpec>>,
+    /// Filtered search by book: only lines whose `book_id` is in this set
+    /// come back (an empty set = no hits). None = every book. Checked per
+    /// doc against the `book_id` fast column during collection, so it
+    /// applies to the main query, the phrase alternatives and the negative
+    /// query alike.
+    pub books: Option<Vec<u64>>,
 }
 
 impl Default for SearchRequest {
@@ -156,6 +162,7 @@ impl Default for SearchRequest {
             min_groups: None,
             exclude: None,
             phrase_alternatives: Vec::new(),
+            books: None,
         }
     }
 }
@@ -163,21 +170,20 @@ impl Default for SearchRequest {
 /// Otzaria's negative query (`apply_advanced_negative_query`): the words to
 /// exclude, run as a query of their own with its own distance, order and
 /// spacing, always with every word required (a partial negative would veto
-/// any line carrying one of its words). A line matching it is dropped;
-/// with `same_section`, every line of a section (`toc_entry_id`) holding a
-/// match is dropped.
+/// any line carrying one of its words). A line matching it is dropped.
 ///
 /// How it is applied: one word, or several with no distance/order limit,
 /// or per-pair `gaps` (span query, needs positions) are excluded in the
 /// query itself. Several words bound by `max_word_distance` /
 /// `require_ordered` are checked on the line text when a snippet is
 /// located (the same way the positive filters work), so such lines are
-/// still in `hits` and come back as `None` from `locate`. With
-/// `same_section` (Otzaria's `scoped_words_query`) the words are matched
-/// at section resolution: the sections (`toc_entry_id`) holding word 1,
-/// intersected with those holding word 2, and so on, are dropped whole;
-/// distance, order and spacing do not apply there, and lines without a
-/// section (`toc_entry_id` 0) are never dropped, as in Otzaria.
+/// still in `hits` and come back as `None` from `locate`.
+///
+/// Section-scoped exclusion (Otzaria's SameSection scope) is the HOST's job,
+/// since the index holds no sections: run each negative word as its own
+/// search (it returns line ids), map those to sections with SQLite
+/// (`line_toc`), intersect the section sets, and drop the positive hits in
+/// the remaining sections.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExcludeSpec {
@@ -189,19 +195,16 @@ pub struct ExcludeSpec {
     pub require_ordered: bool,
     /// Per-pair spacing for the excluded words (needs positions).
     pub gaps: Option<Vec<u32>>,
-    /// Drop every line of a section that holds a match, not just the line.
-    pub same_section: bool,
 }
 
-/// One matching line, in catalog order. The host fetches its text and
-/// locates the snippet through the session.
+/// One matching line, in catalog order: only the ids the index keeps. The
+/// host fetches its text (and any placement: line index, section) from
+/// SQLite by `line_id` and locates the snippet through the session.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlacedHit {
     pub position: u64,
     pub line_id: u64,
     pub book_id: u64,
-    pub line_index: u64,
-    pub toc_entry_id: u64,
 }
 
 /// Snippet flag: "…" before the window.
@@ -457,10 +460,14 @@ pub struct SearchResult {
 
 // ── Collector: every matching doc with its placement, from fast fields ───
 
-struct PlacedCollector;
+struct PlacedCollector {
+    /// Book filter (see `SearchRequest::books`).
+    books: Option<Arc<std::collections::HashSet<u64>>>,
+}
 
 struct PlacedSegmentCollector {
-    columns: [Column<u64>; 5],
+    columns: [Column<u64>; 3],
+    books: Option<Arc<std::collections::HashSet<u64>>>,
     out: Vec<PlacedHit>,
 }
 
@@ -479,9 +486,8 @@ impl Collector for PlacedCollector {
                 ff.u64("position")?,
                 ff.u64("line_id")?,
                 ff.u64("book_id")?,
-                ff.u64("line_index")?,
-                ff.u64("toc_entry_id")?,
             ],
+            books: self.books.clone(),
             out: Vec::new(),
         })
     }
@@ -500,12 +506,14 @@ impl SegmentCollector for PlacedSegmentCollector {
 
     fn collect(&mut self, doc: DocId, _score: Score) {
         let get = |c: &Column<u64>| c.first(doc).unwrap_or(0);
+        let book_id = get(&self.columns[2]);
+        if self.books.as_ref().is_some_and(|b| !b.contains(&book_id)) {
+            return;
+        }
         self.out.push(PlacedHit {
             position: get(&self.columns[0]),
             line_id: get(&self.columns[1]),
-            book_id: get(&self.columns[2]),
-            line_index: get(&self.columns[3]),
-            toc_entry_id: get(&self.columns[4]),
+            book_id,
         });
     }
 
@@ -525,26 +533,6 @@ impl SpanTermSource for AnySource {
         }
         Ok(all)
     }
-}
-
-/// The sections (`toc_entry_id`, 0 = none, skipped) of every line `query`
-/// matches, read straight off the fast column.
-fn section_ids(query: &dyn Query, searcher: &tantivy::Searcher) -> Result<std::collections::HashSet<u64>> {
-    let weight = query.weight(tantivy::query::EnableScoring::disabled_from_searcher(searcher))?;
-    let mut sections = std::collections::HashSet::new();
-    for segment in searcher.segment_readers() {
-        let column: Column<u64> = segment.fast_fields().u64("toc_entry_id")?;
-        weight.for_each_no_score(segment, &mut |docs| {
-            for &doc in docs {
-                if let Some(toc) = column.first(doc) {
-                    if toc != 0 {
-                        sections.insert(toc);
-                    }
-                }
-            }
-        })?;
-    }
-    Ok(sections)
 }
 
 impl LineIndex {
@@ -914,25 +902,12 @@ impl LineIndex {
         };
 
         // The negative query (see ExcludeSpec): excluded in the query itself,
-        // or by section, or on the text at locate time.
+        // or on the text at locate time.
         let mut negative_sinks: Vec<MatchedTermsSink> = Vec::new();
-        let mut section_words: Vec<Box<dyn Query>> = Vec::new();
         let mut text_level_negative: Option<(usize, bool)> = None;
         let mut query = query;
         if let Some(ex) = &request.exclude {
-            if ex.same_section {
-                // Otzaria's scoped_words_query: one query per word; the
-                // sections are intersected below, proximity does not apply.
-                for group in &ex.groups {
-                    let sink = MatchedTermsSink::new();
-                    if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
-                        section_words.push(q);
-                    }
-                }
-            }
-            let negative: Option<Box<dyn Query>> = if ex.same_section {
-                None
-            } else if let Some(gaps) = &ex.gaps {
+            let negative: Option<Box<dyn Query>> = if let Some(gaps) = &ex.gaps {
                 let req = SearchRequest {
                     groups: ex.groups.clone(),
                     require_ordered: ex.require_ordered,
@@ -978,8 +953,11 @@ impl LineIndex {
         }
         let t = std::time::Instant::now();
         let mut hits = Vec::new();
+        let collector = PlacedCollector {
+            books: request.books.as_ref().map(|b| Arc::new(b.iter().copied().collect())),
+        };
         for (ord, segment) in searcher.segment_readers().iter().enumerate() {
-            let mut child = PlacedCollector.for_segment(ord as SegmentOrdinal, segment)?;
+            let mut child = collector.for_segment(ord as SegmentOrdinal, segment)?;
             weight.for_each_no_score(segment, &mut |docs| {
                 for &doc in docs {
                     child.collect(doc, 0.0);
@@ -989,24 +967,6 @@ impl LineIndex {
         }
         if timing {
             eprintln!("  [timing] collect {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);
-        }
-        if !section_words.is_empty() {
-            // Otzaria's SameSection scope: the sections holding every
-            // excluded word (each anywhere in the section) are blocked whole.
-            let mut blocked: Option<std::collections::HashSet<u64>> = None;
-            for word in &section_words {
-                let sections = section_ids(word.as_ref(), &searcher)?;
-                blocked = Some(match blocked {
-                    None => sections,
-                    Some(prior) => prior.intersection(&sections).copied().collect(),
-                });
-                if blocked.as_ref().is_some_and(|b| b.is_empty()) {
-                    break;
-                }
-            }
-            if let Some(blocked) = blocked {
-                hits.retain(|h| !blocked.contains(&h.toc_entry_id));
-            }
         }
         hits.sort_unstable_by_key(|h| h.position);
         if let Some((max_word_distance, require_ordered)) = text_level_negative {

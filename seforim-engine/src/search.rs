@@ -5,7 +5,7 @@
 
 use hebrew_fts::{
     ExactTermsQuery, HebrewFuzzyQuery, HebrewWalkQuery, HebrewWildcardQuery, PreparedQueryGroups,
-    SnippetWindowLocator, WalkOptions, DEFAULT_CONTEXT_WORDS, MARK_STRIDE,
+    SnippetWindowLocator, WalkOptions, DEFAULT_CONTEXT_WORDS,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{Collector, SegmentCollector};
@@ -132,6 +132,17 @@ pub struct SearchRequest {
     pub min_groups: Option<usize>,
     /// Otzaria's negative query: lines carrying these words are dropped.
     pub exclude: Option<ExcludeSpec>,
+    /// Whole-phrase alternatives ORed with `groups` (Otzaria's acronym
+    /// expansion, `acronym_alternatives`: רמב"ם ↔ רבי משה בן מיימון). Each
+    /// is a phrase: its words adjacent and in order, all required, whatever
+    /// `min_groups` / distance / order the main query uses. A line matching
+    /// the main query or any phrase is a hit; `locate` tries the main query
+    /// first, then each phrase. With positions a phrase runs as a span
+    /// query (strict). Without positions it runs as an AND checked on the
+    /// text with FtsLib's distance rule (ordered, distance 0), which is
+    /// looser: the tightest window covering the words must be gap-free, so
+    /// a repeated word can fill a gap (רבי משה בן רבי נחמן passes).
+    pub phrase_alternatives: Vec<Vec<GroupSpec>>,
 }
 
 impl Default for SearchRequest {
@@ -144,6 +155,7 @@ impl Default for SearchRequest {
             gaps: None,
             min_groups: None,
             exclude: None,
+            phrase_alternatives: Vec::new(),
         }
     }
 }
@@ -248,18 +260,55 @@ impl TermTable {
 /// The per-search state for snippet location: the prepared term→group map
 /// (built once from the groups' sinks), the filters, and the term table.
 pub struct SnippetSession {
-    prepared: Option<PreparedQueryGroups>,
+    /// The main query's matcher (None when it cannot match), then one per
+    /// phrase alternative. `locate` takes the first that passes.
+    matchers: Vec<Matcher>,
+    /// Main-query settings, used to build its matcher.
     original_group_count: usize,
     require_ordered: bool,
     max_word_distance: usize,
-    context_words: usize,
-    keep_marks: bool,
     /// Groups a window must cover (0 = all). See `SearchRequest::min_groups`.
     min_groups: usize,
+    context_words: usize,
+    keep_marks: bool,
     /// Text-level negative filter (see [`ExcludeSpec`]).
     negative: Option<NegativeFilter>,
     terms: TermTable,
     locator: SnippetWindowLocator,
+}
+
+/// One way a line can match: prepared terms plus the filters to apply.
+struct Matcher {
+    prepared: PreparedQueryGroups,
+    original_group_count: usize,
+    require_ordered: bool,
+    max_word_distance: usize,
+    min_groups: usize,
+}
+
+impl Matcher {
+    /// A passing snippet with marks holding THIS matcher's term ordinals.
+    fn locate(&self, locator: &mut SnippetWindowLocator, text: &str) -> Option<Snippet> {
+        locator.set_min_groups(self.min_groups);
+        let d = locator.locate(text, &self.prepared, self.require_ordered, self.original_group_count);
+        SnippetSession::raw(d, self.max_word_distance)
+    }
+}
+
+/// First matcher that passes, with its index.
+fn locate_with(
+    matchers: &[Matcher],
+    negative: Option<&NegativeFilter>,
+    locator: &mut SnippetWindowLocator,
+    text: &str,
+) -> Option<(usize, Snippet)> {
+    if negative.is_some_and(|n| n.excludes(locator, 0, text)) {
+        return None;
+    }
+    matchers
+        .iter()
+        .enumerate()
+        .find_map(|(i, m)| m.locate(locator, text).map(|s| (i, s)))
 }
 
 /// The excluded words checked on the line text: a line where they appear
@@ -287,16 +336,12 @@ impl SnippetSession {
     /// pass (not all groups present, wrong order, too far apart, or the
     /// excluded words present).
     pub fn locate(&mut self, text: &str) -> Option<Snippet> {
-        let prepared = self.prepared.as_ref()?;
-        if let Some(n) = &self.negative {
-            if n.excludes(&mut self.locator, self.min_groups, text) {
-                return None;
-            }
+        let (i, mut s) = locate_with(&self.matchers, self.negative.as_ref(), &mut self.locator, text)?;
+        let prepared = &self.matchers[i].prepared;
+        for m in s.marks.chunks_exact_mut(3) {
+            m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
         }
-        let d = self
-            .locator
-            .locate(text, prepared, self.require_ordered, self.original_group_count);
-        Self::finish(d, prepared, &mut self.terms, self.max_word_distance)
+        Some(s)
     }
 
     /// Locates a batch of matched lines across all cores (one locator per
@@ -304,32 +349,21 @@ impl SnippetSession {
     /// terms in document order. Same results as calling [`locate`](Self::locate)
     /// on each text in turn, term ids included.
     pub fn locate_many(&mut self, texts: &[&str]) -> Vec<Option<Snippet>> {
-        let Some(prepared) = self.prepared.as_ref() else {
+        if self.matchers.is_empty() {
             return vec![None; texts.len()];
-        };
-        let (require_ordered, original, max_distance, context, keep_marks, min_groups) = (
-            self.require_ordered,
-            self.original_group_count,
-            self.max_word_distance,
-            self.context_words,
-            self.keep_marks,
-            self.min_groups,
-        );
+        }
+        let (context, keep_marks) = (self.context_words, self.keep_marks);
+        let matchers = &self.matchers;
         let negative = self.negative.as_ref();
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
             .min(texts.len().max(1));
         // Snippets with marks still holding the query's term ORDINALS.
-        let mut located: Vec<Option<Snippet>> = Vec::with_capacity(texts.len());
+        let mut located: Vec<Option<(usize, Snippet)>> = Vec::with_capacity(texts.len());
         if threads <= 1 || texts.len() < 32 {
             for t in texts {
-                if negative.is_some_and(|n| n.excludes(&mut self.locator, min_groups, t)) {
-                    located.push(None);
-                    continue;
-                }
-                let d = self.locator.locate(t, prepared, require_ordered, original);
-                located.push(Self::raw(d, max_distance));
+                located.push(locate_with(matchers, negative, &mut self.locator, t));
             }
         } else {
             let chunk = texts.len().div_ceil(threads);
@@ -343,15 +377,8 @@ impl SnippetSession {
                             } else {
                                 SnippetWindowLocator::new(context)
                             };
-                            locator.set_min_groups(min_groups);
                             part.iter()
-                                .map(|t| {
-                                    if negative.is_some_and(|n| n.excludes(&mut locator, min_groups, t)) {
-                                        return None;
-                                    }
-                                    let d = locator.locate(t, prepared, require_ordered, original);
-                                    Self::raw(d, max_distance)
-                                })
+                                .map(|t| locate_with(matchers, negative, &mut locator, t))
                                 .collect::<Vec<_>>()
                         })
                     })
@@ -362,12 +389,18 @@ impl SnippetSession {
             });
         }
         // Ordinals → search-wide term ids, in document order (deterministic).
-        for s in located.iter_mut().flatten() {
-            for m in s.marks.chunks_exact_mut(3) {
-                m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
-            }
-        }
         located
+            .into_iter()
+            .map(|r| {
+                r.map(|(i, mut s)| {
+                    let prepared = &self.matchers[i].prepared;
+                    for m in s.marks.chunks_exact_mut(3) {
+                        m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
+                    }
+                    s
+                })
+            })
+            .collect()
     }
 
     /// A passing descriptor as a Snippet whose marks carry term ordinals.
@@ -382,35 +415,6 @@ impl SnippetSession {
             start: d.snap_start,
             end: d.snap_end,
             marks: d.mark_ranges.iter().map(|&v| v as u32).collect(),
-            flags: (if d.leading_ellipsis { SNIPPET_FLAG_LEADING_ELLIPSIS } else { 0 })
-                | (if d.trailing_ellipsis { SNIPPET_FLAG_TRAILING_ELLIPSIS } else { 0 }),
-        })
-    }
-
-    fn finish(
-        d: hebrew_fts::SnippetDescriptor<'_>,
-        prepared: &PreparedQueryGroups,
-        terms: &mut TermTable,
-        max_word_distance: usize,
-    ) -> Option<Snippet> {
-        if !d.is_match || d.word_distance > max_word_distance {
-            return None;
-        }
-        let triples = d.mark_ranges.len() / MARK_STRIDE;
-        let mut marks = Vec::with_capacity(triples * MARK_STRIDE);
-        for t in 0..triples {
-            let i = t * MARK_STRIDE;
-            marks.push(d.mark_ranges[i] as u32);
-            marks.push(d.mark_ranges[i + 1] as u32);
-            marks.push(terms.id_of(prepared.term_at(d.mark_ranges[i + 2])));
-        }
-        Some(Snippet {
-            score: d.score,
-            word_distance: d.word_distance,
-            window_word_count: d.window_word_count,
-            start: d.snap_start,
-            end: d.snap_end,
-            marks,
             flags: (if d.leading_ellipsis { SNIPPET_FLAG_LEADING_ELLIPSIS } else { 0 })
                 | (if d.trailing_ellipsis { SNIPPET_FLAG_TRAILING_ELLIPSIS } else { 0 }),
         })
@@ -440,7 +444,7 @@ impl SnippetSession {
 
     /// Every group's matched words, in query order (skipped slots absent).
     pub fn group_count(&self) -> usize {
-        self.prepared.as_ref().map(|p| p.group_count()).unwrap_or(0)
+        self.matchers.first().map(|m| m.prepared.group_count()).unwrap_or(0)
     }
 }
 
@@ -810,7 +814,7 @@ impl LineIndex {
             .map(|k| k.max(1));
         let partial = partial_min.is_some();
         let mut session = SnippetSession {
-            prepared: None,
+            matchers: Vec::new(),
             original_group_count: request.groups.len(),
             require_ordered: request.require_ordered && !partial,
             max_word_distance: if partial { usize::MAX } else { request.max_word_distance.unwrap_or(usize::MAX) },
@@ -828,12 +832,10 @@ impl LineIndex {
         let fm = fm.as_deref();
         let mut sinks = Vec::new();
 
-        let query: Box<dyn Query> = if let (Some(gaps), false) = (&request.gaps, partial) {
+        let main_query: Option<Box<dyn Query>> = if let (Some(gaps), false) = (&request.gaps, partial) {
             // Per-pair spacing: a span query, one slot per group, each gap its own limit.
-            match self.span_query(request, gaps, &searcher, fm, &mut sinks)? {
-                Some(q) => Box::new(q),
-                None => return Ok(SearchResult { hits: Vec::new(), session }),
-            }
+            self.span_query(request, gaps, &searcher, fm, &mut sinks)?
+                .map(|q| Box::new(q) as Box<dyn Query>)
         } else {
             // One query + one sink per searchable slot. Rejected wildcards skip
             // their slot (it still counts in original_group_count).
@@ -846,18 +848,68 @@ impl LineIndex {
                 }
             }
             if clauses.is_empty() {
-                return Ok(SearchResult {
-                    hits: Vec::new(),
-                    session,
-                });
+                None
+            } else {
+                Some(match partial_min {
+                    Some(min) if min < clauses.len() => {
+                        let should: Vec<(Occur, Box<dyn Query>)> =
+                            clauses.into_iter().map(|(_, q)| (Occur::Should, q)).collect();
+                        Box::new(BooleanQuery::with_minimum_required_clauses(should, min))
+                            as Box<dyn Query>
+                    }
+                    _ => Box::new(BooleanQuery::new(clauses)),
+                })
             }
-            match partial_min {
-                Some(min) if min < clauses.len() => {
-                    let should: Vec<(Occur, Box<dyn Query>)> =
-                        clauses.into_iter().map(|(_, q)| (Occur::Should, q)).collect();
-                    Box::new(BooleanQuery::with_minimum_required_clauses(should, min))
+        };
+
+        // Phrase alternatives (Otzaria's acronym expansions): each an
+        // adjacent, ordered, all-words phrase, ORed with the main query.
+        let mut alternatives: Vec<(Vec<MatchedTermsSink>, Box<dyn Query>)> = Vec::new();
+        for phrase in &request.phrase_alternatives {
+            if phrase.is_empty() {
+                continue;
+            }
+            let mut alt_sinks = Vec::new();
+            let q: Option<Box<dyn Query>> = if self.options.positions && phrase.len() > 1 {
+                let req = SearchRequest {
+                    groups: phrase.clone(),
+                    require_ordered: true,
+                    gaps: Some(vec![0; phrase.len() - 1]),
+                    ..Default::default()
+                };
+                self.span_query(&req, &vec![0; phrase.len() - 1], &searcher, fm, &mut alt_sinks)?
+                    .map(|q| Box::new(q) as Box<dyn Query>)
+            } else {
+                let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                let mut complete = true;
+                for group in phrase {
+                    let sink = MatchedTermsSink::new();
+                    match self.group_query(group, &sink, &searcher, fm)? {
+                        Some(q) => {
+                            clauses.push((Occur::Must, q));
+                            alt_sinks.push(sink);
+                        }
+                        None => complete = false,
+                    }
                 }
-                _ => Box::new(BooleanQuery::new(clauses)),
+                (complete && !clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>)
+            };
+            if let Some(q) = q {
+                alternatives.push((alt_sinks, q));
+            }
+        }
+        let query: Box<dyn Query> = match (main_query, alternatives.is_empty()) {
+            (None, true) => return Ok(SearchResult { hits: Vec::new(), session }),
+            (Some(q), true) => q,
+            (main, false) => {
+                let mut should: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                if let Some(q) = main {
+                    should.push((Occur::Should, q));
+                }
+                for (_, q) in &alternatives {
+                    should.push((Occur::Should, q.box_clone()));
+                }
+                Box::new(BooleanQuery::new(should))
             }
         };
 
@@ -969,24 +1021,44 @@ impl LineIndex {
             }
         }
 
+        // The main query's matcher, if it can match at all.
         let mut group_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
-        if let Some(min) = partial_min {
+        let main_ok = if group_terms.is_empty() {
+            false
+        } else if let Some(min) = partial_min {
             // a group that matched no indexed word simply cannot be one of
             // the `min`; the others still can
             group_terms.retain(|g| !g.is_empty());
-            if group_terms.len() < min {
-                return Ok(SearchResult { hits: Vec::new(), session });
-            }
             session.min_groups = min;
-            session.locator.set_min_groups(min);
-        } else if group_terms.iter().any(|g| g.is_empty()) {
-            // a group matched no indexed word: nothing can match
-            return Ok(SearchResult {
-                hits: Vec::new(),
-                session,
+            group_terms.len() >= min
+        } else {
+            // a group that matched no indexed word: the main query cannot match
+            group_terms.iter().all(|g| !g.is_empty())
+        };
+        if main_ok {
+            session.matchers.push(Matcher {
+                prepared: PreparedQueryGroups::from_groups(&group_terms),
+                original_group_count: session.original_group_count,
+                require_ordered: session.require_ordered,
+                max_word_distance: session.max_word_distance,
+                min_groups: session.min_groups,
             });
         }
-        session.prepared = Some(PreparedQueryGroups::from_groups(&group_terms));
+        for (alt_sinks, _) in &alternatives {
+            let terms: Vec<Vec<String>> = alt_sinks.iter().map(|s| s.take_strings()).collect();
+            if terms.iter().all(|g| !g.is_empty()) {
+                session.matchers.push(Matcher {
+                    original_group_count: terms.len(),
+                    prepared: PreparedQueryGroups::from_groups(&terms),
+                    require_ordered: true,
+                    max_word_distance: 0,
+                    min_groups: 0,
+                });
+            }
+        }
+        if session.matchers.is_empty() {
+            return Ok(SearchResult { hits: Vec::new(), session });
+        }
         Ok(SearchResult { hits, session })
     }
 }

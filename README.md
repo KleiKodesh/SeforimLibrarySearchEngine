@@ -257,6 +257,13 @@ are not printed), so upstream's query-parser tests stay as they are.
   (`toc_entry_id`) holding every excluded word, each anywhere in the
   section, are dropped whole; distance and order do not apply there, and
   lines without a section are never dropped, as in Otzaria.
+- **Phrase alternatives** (for Otzaria's ראשי תיבות): `phrase_alternatives`
+  in the request (C# `PhraseAlternatives`, Dart `phraseAlternatives`). Each
+  is a phrase ORed with the main query: its words adjacent, in order and all
+  required (a span query with positions; without positions an AND checked on
+  the text with FtsLib's distance rule, which lets a repeated word fill a
+  gap). `locate` tries the main query, then each phrase, and marks the words
+  of whichever matched. The acronym dictionary itself stays in the host.
 - **Per-pair spacing** (Otzaria's customSpacing): `gaps` in the request (C#
   `SearchRequest.Gaps`, Dart `SearchRequest.gaps`, demo `--spacing 2,5`).
   - `gaps[i]` is the maximum number of words between query word i and i+1.
@@ -315,9 +322,8 @@ FM-index sidecar. The index is 1.6 GB with positions.
 
 ## Open
 - Otzaria gaps found by the Dart demo (see `dart/README.md`):
-  - ראשי תיבות (acronym ↔ phrase alternatives) is not mapped yet. תרגום
-    ארמי is done host-side in the Dart demo (Otzaria's dictionary asset
-    → word alternatives).
+  - ראשי תיבות and תרגום ארמי are done host-side in the Dart demo
+    (Otzaria's dictionary assets → phrase / word alternatives).
   - Grouping (sameSection cards, identicalText merging) is missing.
 - A full build compared side by side with FtsLib on the same queries.
 - Profiling: C# search is ~1.0 s (.NET 10) / ~1.5 s (net48), against 378 ms in

@@ -1,5 +1,6 @@
 import 'package:seforim_search/seforim_search.dart';
 
+import 'acronym_lexicon.dart';
 import 'translation_lexicon.dart';
 
 /// Otzaria's search modes (`SearchMode`).
@@ -25,13 +26,13 @@ abstract final class OtzariaOption {
   static const aramaicSuffixes = 'סיומות ארמיות';
   static const ignoreGershayim = 'התעלם מגרשיים';
   static const aramaicTranslation = 'תרגום ארמי'; // host lexicon (TranslationLexicon)
-  static const acronyms = 'ראשי תיבות'; // not supported by the engine
+  static const acronyms = 'ראשי תיבות'; // host lexicon (AcronymLexicon)
   static const nikud = 'ניקוד';
   static const teamim = 'טעמים';
 
   /// Options exact mode allows (Otzaria `exactWordOptionKeys`).
   static const exactAllowed = {grammaticalPrefixes, grammaticalSuffixes, prefixes, suffixes, fullOrDefective};
-  static const unsupported = {acronyms};
+  static const unsupported = <String>{};
 }
 
 /// Otzaria's query sanitizer: ״/׳ → "/', maqaf and hyphen → space, collapse
@@ -72,6 +73,7 @@ class OtzariaSearch {
     this.negativeQuery = '',
     this.negativeScope = NegativeScope.wordDistance,
     this.translations,
+    this.acronymLexicon,
   })  :globalOptions = globalOptions ?? {},
         wordOptions = wordOptions ?? {},
         alternativeWords = alternativeWords ?? {};
@@ -128,6 +130,35 @@ class OtzariaSearch {
   /// Otzaria's Aramaic↔Hebrew dictionary for "תרגום ארמי"; null = not loaded
   /// (the option then warns and does nothing, as Otzaria without the asset).
   final TranslationLexicon? translations;
+
+  /// Otzaria's acronym dictionary for "ראשי תיבות"; null = not loaded.
+  final AcronymLexicon? acronymLexicon;
+
+  /// Otzaria acronym_alternatives: when any word has the option, the whole
+  /// query's phrase alternatives (advanced mode only).
+  List<List<QueryGroup>> _phraseAlternatives(List<String> words) {
+    if (mode != SearchMode.advanced) return const [];
+    // Otzaria: no acronym alternatives in vocalized (nikud/te'amim) search
+    if (globalOptions[OtzariaOption.nikud] == true || globalOptions[OtzariaOption.teamim] == true) return const [];
+    var enabled = false;
+    for (var i = 0; i < words.length; i++) {
+      if (_optionsFor(i).contains(OtzariaOption.acronyms)) enabled = true;
+    }
+    if (!enabled) return const [];
+    final lex = acronymLexicon;
+    if (lex == null) {
+      warnings.add('option "${OtzariaOption.acronyms}" needs --acronyms (Otzaria assets/Acronyms.json)');
+      return const [];
+    }
+    // A decoded phrase is literal: exact words, no options. A one-word
+    // alternative is a quote-free acronym (רמבן): Otzaria's index carries a
+    // quote-free twin token, ours keeps רמב"ן, so the quote is made
+    // transparent instead.
+    return [
+      for (final p in lex.alternativesFor(words))
+        [for (final w in p) p.length == 1 ? QueryGroup.word(w, const WalkOptions(ignoreQuotes: true)) : QueryGroup.word(w)]
+    ];
+  }
 
   /// Otzaria's negativeScope (its proximityScope).
   final NegativeScope negativeScope;
@@ -219,11 +250,13 @@ class OtzariaSearch {
       groups.add(alts.isEmpty ? main : QueryGroup.any([main, for (final a in alts) _wordGroup(a, o)]));
     }
     final exclude = _exclude();
+    final phrases = _phraseAlternatives(words);
     // Partial matching: at least minWords of the words; order, distance and
     // spacing do not apply (Otzaria: the match is at line resolution).
     final min = mode == SearchMode.advanced ? minWords(groups.length) : groups.length;
     if (min < groups.length) {
-      return SearchRequest(groups: groups, minGroups: min, contextWords: contextWords, exclude: exclude);
+      return SearchRequest(
+          groups: groups, minGroups: min, contextWords: contextWords, exclude: exclude, phraseAlternatives: phrases);
     }
     final spacing = customSpacing;
     if (spacing != null && spacing.isNotEmpty && groups.length > 1) {
@@ -233,6 +266,7 @@ class OtzariaSearch {
         requireOrdered: !anyOrder,
         contextWords: contextWords,
         exclude: exclude,
+        phraseAlternatives: phrases,
       );
     }
     return SearchRequest(
@@ -241,6 +275,7 @@ class OtzariaSearch {
       requireOrdered: !anyOrder && groups.length > 1,
       contextWords: contextWords,
       exclude: exclude,
+      phraseAlternatives: phrases,
     );
   }
 }

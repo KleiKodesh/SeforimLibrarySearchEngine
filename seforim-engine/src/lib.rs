@@ -458,6 +458,62 @@ mod tests {
         assert_eq!(r.hits.len(), 7);
     }
 
+    #[test]
+    fn phrase_alternatives_or_with_main_query() {
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(
+                dir.path(),
+                IndexOptions { positions, keep_marks: false },
+                &[
+                    line(1, 0, 1, 0, "כתב רמב\"ם בהלכות"),
+                    line(2, 1, 1, 1, "אמר רבי משה בן מיימון כך"),
+                    line(3, 2, 1, 2, "רבי יוסי בן משה מיימון"), // words, not the phrase
+                    line(4, 3, 1, 3, "דבר אחר"),
+                ],
+            );
+            let phrase = |ws: &[&str]| ws.iter().map(|w| word(w, false)).collect::<Vec<_>>();
+            let mut r = index
+                .search(&SearchRequest {
+                    groups: vec![GroupSpec::Word {
+                        word: "רמב\"ם".into(),
+                        options: WalkOptionsSpec::default(),
+                    }],
+                    phrase_alternatives: vec![phrase(&["רבי", "משה", "בן", "מיימון"])],
+                    ..Default::default()
+                })
+                .unwrap();
+            let ids: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();
+            if positions {
+                assert_eq!(ids, vec![1, 2], "span phrase");
+            } else {
+                // without positions line 3 is a candidate; the text check drops it
+                assert_eq!(ids, vec![1, 2, 3]);
+            }
+            assert!(r.session.locate("כתב רמב\"ם בהלכות").is_some());
+            let s = r.session.locate("אמר רבי משה בן מיימון כך").unwrap();
+            assert_eq!(s.marks.len(), 12);
+            let terms: Vec<String> =
+                s.marks.chunks(3).map(|m| r.session.all_terms()[m[2] as usize].clone()).collect();
+            assert_eq!(terms, vec!["רבי", "משה", "בן", "מיימון"]);
+            assert!(r.session.locate("רבי יוסי בן משה מיימון").is_none());
+            let many = r.session.locate_many(&["כתב רמב\"ם בהלכות", "רבי יוסי בן משה מיימון"]);
+            assert!(many[0].is_some() && many[1].is_none());
+        }
+        // main query that cannot match: the phrase alone still answers
+        let dir = tempfile::tempdir().unwrap();
+        let index = build(dir.path(), IndexOptions::default(), &[line(1, 0, 1, 0, "רבי משה בן מיימון")]);
+        let mut r = index
+            .search(&SearchRequest {
+                groups: vec![word("זזזזז", false)],
+                phrase_alternatives: vec![vec![word("משה", false), word("בן", false)]],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.hits.len(), 1);
+        assert!(r.session.locate("רבי משה בן מיימון").is_some());
+    }
+
     /// The FM-index sidecar must give EXACTLY the walk's terms (and hits) for
     /// every shape it serves, cap included. `test_only_disable_fm` exists for
     /// this comparison alone.

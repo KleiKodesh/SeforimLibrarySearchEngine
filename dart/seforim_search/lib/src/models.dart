@@ -213,8 +213,15 @@ class SearchRequest {
       this.contextWords = 8,
       this.gaps,
       this.minGroups,
-      this.exclude})
-      : groups = groups ?? [];
+      this.exclude,
+      List<List<QueryGroup>>? phraseAlternatives})
+      : groups = groups ?? [],
+        phraseAlternatives = phraseAlternatives ?? [];
+
+  /// Whole-phrase alternatives ORed with [groups] (Otzaria's acronym
+  /// expansion: רמב"ם ↔ רבי משה בן מיימון). Each phrase's words are adjacent,
+  /// in order and all required, whatever the main query's settings.
+  final List<List<QueryGroup>> phraseAlternatives;
 
   /// Otzaria's negative query: lines (or whole sections) carrying these words
   /// are dropped. Null = none.
@@ -252,6 +259,10 @@ class SearchRequest {
         if (gaps != null) 'gaps': [for (final g in gaps!) g < 0 ? 0 : g],
         if (minGroups != null) 'min_groups': minGroups,
         if (exclude != null) 'exclude': exclude!.toJson(),
+        if (phraseAlternatives.isNotEmpty)
+          'phrase_alternatives': [
+            for (final p in phraseAlternatives) [for (final g in p) g.toJson()]
+          ],
       };
 }
 

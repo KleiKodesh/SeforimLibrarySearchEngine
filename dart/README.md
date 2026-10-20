@@ -79,6 +79,7 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 | שגיאות כתיב | `spellingErrors` |
 | קידומות / סיומות ארמיות | `aramaicPrefixes` / `aramaicSuffixes` |
 | התעלם מגרשיים | `ignoreQuotes` |
+| ראשי תיבות | Host-side port of Otzaria's `AcronymLexicon` (`lib/acronym_lexicon.dart`) over `assets/Acronyms.json`, with its rule from `acronym_alternatives`: only when the whole query is one acronym (→ its multi-word expansions) or one known expansion (→ its acronyms). Sent as `SearchRequest.phraseAlternatives`. A decoded acronym gets ignore-gershayim (Otzaria's index has a quote-free twin token; ours keeps the quote). Demo: `--acronym --acronyms path`. Measured: רבי משה בן נחמן 557 → 16,781 lines. |
 | תרגום ארמי | Host-side port of Otzaria's `TranslationLexicon` (`lib/translation_lexicon.dart`) over the app's `assets/dictionary.json`: both directions, single-word glosses only, cap 16, appended to the word's alternatives (an `any` group), as Otzaria's `translation_alternatives`. Demo: `--translation --dictionary path`. |
 | ניקוד / טעמים (match the typed marks) | Needs an index built with `--keep-marks`. Without the option, the demo sets `ignoreNikud` / `ignoreTeamim` on such an index. |
 | `distance` (gap), default scope "in order" | `maxWordDistance`, `requireOrdered: true` |
@@ -93,7 +94,6 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 
 ### Gaps: what Otzaria does that the engine/demo can't (yet)
 
-- **ראשי תיבות** (acronym ↔ phrase alternatives) is not mapped yet. The demo warns and ignores it.
 - **Scope `sameSection`** (under the same heading), and **grouping** (`sameSection` cards, `identicalText` merging). Each hit has a `tocEntryId`, so the host could group by it, but the demo doesn't.
 - **Relevance ordering.** Results come in catalog order only.
 - **Regex queries** (`/…/`), the semantic and smart query modes, per-book counts (`countByBook`) and cancellation.

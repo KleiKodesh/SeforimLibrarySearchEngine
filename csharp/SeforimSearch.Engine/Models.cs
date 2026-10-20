@@ -268,6 +268,11 @@ namespace SeforimSearch.Engine
         /// words are dropped. Null = none.</summary>
         public ExcludeSpec? Exclude { get; set; }
 
+        /// <summary>Whole-phrase alternatives ORed with <see cref="Groups"/> (Otzaria's
+        /// acronym expansion: רמב"ם ↔ רבי משה בן מיימון). Each phrase's words are adjacent,
+        /// in order and all required, whatever the main query's settings.</summary>
+        public List<List<QueryGroup>> PhraseAlternatives { get; } = new List<List<QueryGroup>>();
+
         internal string ToJson()
         {
             var sb = new StringBuilder();
@@ -293,6 +298,22 @@ namespace SeforimSearch.Engine
             }
             if (MinGroups.HasValue)
                 sb.Append(",\"min_groups\":").Append(MinGroups.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (PhraseAlternatives.Count > 0)
+            {
+                sb.Append(",\"phrase_alternatives\":[");
+                for (int p = 0; p < PhraseAlternatives.Count; p++)
+                {
+                    if (p > 0) sb.Append(',');
+                    sb.Append('[');
+                    for (int i = 0; i < PhraseAlternatives[p].Count; i++)
+                    {
+                        if (i > 0) sb.Append(',');
+                        PhraseAlternatives[p][i].WriteJson(sb);
+                    }
+                    sb.Append(']');
+                }
+                sb.Append(']');
+            }
             if (Exclude != null)
             {
                 sb.Append(",\"exclude\":");

@@ -5,6 +5,10 @@ tantivy, returning **exactly** what KitveiHakodesh's FtsLib returns, plus Otzari
 search options. Read `README.md` for the architecture; this file is the working
 knowledge: rules the user set, how the parts fit, and lessons learned the hard way.
 
+**Purpose:** a new and improved search engine for Otzaria, and one engine that unifies
+the search of the KleiKodesh project (KitveiHakodesh, today on FtsLib) with Otzaria,
+so both apps share the same engine, index format and results.
+
 **The two main changes** (the reason this engine exists; keep them central):
 1. **Custom FST walks**: every search option is an automaton walked over the term
    dictionary, shortest first, capped inside the walk.

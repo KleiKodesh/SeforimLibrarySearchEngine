@@ -10,6 +10,17 @@ Runs on any native platform (Windows, macOS, Linux, Android, iOS) through one
 C library. From .NET it's a package that works on both .NET 10 and .NET
 Framework 4.8.
 
+## Purpose
+
+This project has two goals: to build a new and improved search engine for
+Otzaria, and to unify the search engine of the KleiKodesh project
+(KitveiHakodesh) with the Otzaria project, so one engine serves both apps.
+Today KitveiHakodesh searches with FtsLib (SQLite FTS5 + C#) and Otzaria has
+its own search. This engine is built to return exactly FtsLib's results, so
+KitveiHakodesh can switch to it, while adding Otzaria's search options as fast
+walks over the term dictionary, so Otzaria can switch to it too. The outcome
+is one engine, one index format and the same results for both apps.
+
 ## The main changes (what makes this engine different)
 
 1. **Custom FST walks.** Every search option (Hebrew/Aramaic prefixes and

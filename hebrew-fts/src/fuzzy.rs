@@ -134,7 +134,10 @@ impl HebrewFuzzyQuery {
     /// This query as a slot of a [`SpanQuery`](tantivy::query::SpanQuery):
     /// "any word within the distance", with positions. Same cap, rank and
     /// sink as the plain query.
-    pub fn span_slot(&self, _searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
+    pub fn span_slot(
+        &self,
+        _searcher: &tantivy::Searcher,
+    ) -> tantivy::Result<Arc<dyn SpanTermSource>> {
         Ok(Arc::new(self.automaton_weight()))
     }
 }

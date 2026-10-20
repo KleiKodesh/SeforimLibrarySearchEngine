@@ -209,11 +209,11 @@ are not printed), so upstream's query-parser tests stay as they are.
   - It keeps the term table.
 - **Query groups:** word (with options), wildcard, grammar (`%`), fuzzy
   (distance ≤2), and OR of alternatives.
-- **Fuzzy** is hebrew-fts's own `HebrewFuzzyQuery` (same Levenshtein DFA as
-  tantivy's, which cannot be built from outside tantivy): cap 2000 per
-  segment, closest edit distance first, then shortest with the quote zero
-  width, then most frequent. The plain query and the span slot are the same
-  weight.
+- **Fuzzy** is hebrew-fts's own `HebrewFuzzyQuery` (the Levenshtein DFA
+  tantivy uses, built here because tantivy's wrapper cannot be built from
+  outside): cap 2000 per segment, closest edit distance first, then shortest
+  with the quote zero width, then most frequent. The plain query and the
+  span slot are the same weight.
 - **Per-pair spacing** (Otzaria's customSpacing): `gaps` in the request (C#
   `SearchRequest.Gaps`, Dart `SearchRequest.gaps`, demo `--spacing 2,5`).
   - `gaps[i]` is the maximum number of words between query word i and i+1.

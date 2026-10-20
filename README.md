@@ -10,6 +10,21 @@ Runs on any native platform (Windows, macOS, Linux, Android, iOS) through one
 C library. From .NET it's a package that works on both .NET 10 and .NET
 Framework 4.8.
 
+## The main changes (what makes this engine different)
+
+1. **Custom FST walks.** Every search option (Hebrew/Aramaic prefixes and
+   suffixes, ktiv male/haser, part-of-word, wildcards, nikud/te'amim, spelling
+   errors, …) is an automaton walked directly over tantivy's term dictionary.
+   The walk visits only the spellings the options allow, shortest first, and
+   stops at the expansion cap. No candidate lists, no per-candidate lookups.
+2. **Matched FST terms come back with the search.** The words a walk actually
+   matched in the dictionary are returned together with the hits
+   (`MatchedTermsSink`), in the same pass. No separate query is needed to
+   learn which words matched; the snippet/highlight stage uses them directly.
+
+Everything else (tokenizer, snippets, catalog order) is a faithful port of
+FtsLib, so results match what KitveiHakodesh shows today.
+
 ## How it works
 
 1. **Index.** One document per line. The line text is tokenized exactly as
@@ -136,10 +151,30 @@ Measured on the real Otzaria DB (7.08M lines), first 200k lines:
   `LocateSnippetWindowOverNeighbourLines`, resumable `BuildLines`,
   `GetResumeState`).
 
+## Parity with FtsLib (measured)
+
+`tools/parity/` runs KitveiHakodesh Core's own searcher on the installed FtsLib
+index (`FtsLibDump`) and our demo (`SeforimSearch.Demo dump`) on the same DB
+and query list, then diffs every hit with `compare.py`. The diff covers hit
+order, word distance, snippet window, snippet lines, flags, and each mark's
+offsets and term.
+
+On the full Otzaria DB (7,080,797 lines), first 2,000 hits per query: **16 of
+17 queries identical.** That covers plain words, multi-word, `%`, `*`, `?`,
+`|`, and distance 0/2/5. The one difference is `word~N`, where 2 hits differ
+because the fuzzy DFA counts an intra-word quote as an edit.
+
+Full build: 5 min plus a 70 s merge into one segment. The index is 1.6 GB with
+positions.
+
 ## Differences from FtsLib (known, deliberate)
 - **Fuzzy distance** is capped at 2 (tantivy's limit; FtsLib allowed 3).
-- **Quotes:** a plain query word doesn't match a quoted word unless "ignore
-  gershayim" is on (רשי ↛ רש"י). FtsLib always matched.
+- **Quotes:** the index keeps intra-word quotes (רש"י) where FtsLib dropped
+  them. Matching ignores them through the "ignore gershayim" option, which the
+  FtsLib facade turns on by default, so results match FtsLib. A quote after
+  the last letter is punctuation and is never part of a term.
+- **`%word`** uses FtsLib's GrammarExpander tables (34 prefixes / 32
+  suffixes). The Otzaria prefix/suffix options are separate walk options.
 - **Ketiv/qere expansion** (`expandKetiv`) is replaced by the Otzaria walk
   options.
 - **Order and distance:** results are in catalog order, as FtsLib. Word

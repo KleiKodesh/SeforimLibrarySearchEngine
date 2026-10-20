@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Parity reference: runs KitveiHakodesh Core's OWN searcher (FtsLib engine) on an
+    existing FtsLib index and dumps every hit as one JSON line, in the same format
+    as SeforimSearch.Demo's `dump` command, for a side-by-side diff.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="C:\Users\Public\Documents\KleiKodeshProject\KitveiHakodesh\CSharpBackend\KitveiHakodesh.Core\KitveiHakodesh.Core.csproj" />
+  </ItemGroup>
+
+</Project>

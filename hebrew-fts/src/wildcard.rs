@@ -59,6 +59,9 @@ pub struct WildcardPattern {
     variants: Vec<Vec<Token>>,
     /// Total chars all `*`s together may match.
     budget: u32,
+    /// The canonical quote `"` is transparent everywhere (התעלם מגרשיים):
+    /// `*לום` then matches the indexed `שלו"ם`, as FtsLib's quote-free terms did.
+    ignore_quotes: bool,
 }
 
 fn anchor_length(pattern: &str) -> usize {
@@ -156,7 +159,20 @@ impl WildcardPattern {
         if variants.is_empty() {
             return Err(WildcardRejected::AnchorTooShort);
         }
-        Ok(WildcardPattern { variants, budget })
+        Ok(WildcardPattern {
+            variants,
+            budget,
+            ignore_quotes: false,
+        })
+    }
+
+    /// Parses `pattern` with the quote transparent: quotes in the pattern are
+    /// dropped and quotes in indexed terms are skipped.
+    pub fn parse_ignoring_quotes(pattern: &str) -> Result<WildcardPattern, WildcardRejected> {
+        let stripped: String = pattern.chars().filter(|&c| c != '"').collect();
+        let mut parsed = WildcardPattern::parse(&stripped)?;
+        parsed.ignore_quotes = true;
+        Ok(parsed)
     }
 }
 
@@ -239,6 +255,8 @@ impl WildcardAutomaton {
                     } else {
                         self.close_into(pack(v, t, off + 1, used, 0), out);
                     }
+                } else if byte == b'"' && self.pattern.ignore_quotes {
+                    self.close_into(config, out); // zero-width quote inside the literal
                 }
             }
             Token::Star => {
@@ -309,6 +327,16 @@ impl HebrewWildcardQuery {
         Ok(HebrewWildcardQuery {
             field,
             pattern: WildcardPattern::parse(pattern)?,
+            matched_terms_sink: None,
+            max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
+        })
+    }
+
+    /// As [`new`](Self::new), with the quote transparent (התעלם מגרשיים).
+    pub fn new_ignoring_quotes(field: Field, pattern: &str) -> Result<HebrewWildcardQuery, WildcardRejected> {
+        Ok(HebrewWildcardQuery {
+            field,
+            pattern: WildcardPattern::parse_ignoring_quotes(pattern)?,
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
         })
@@ -416,6 +444,27 @@ mod tests {
         // ? at position 0 and after * are dropped (no-ops)
         assert!(WildcardPattern::parse("?שלום").is_ok());
         assert!(WildcardPattern::parse("של*?ום").is_ok());
+    }
+
+    fn matches_ignoring_quotes(pattern: &str, term: &str) -> bool {
+        let a = WildcardAutomaton::new(WildcardPattern::parse_ignoring_quotes(pattern).unwrap());
+        let mut s = a.start();
+        for &b in term.as_bytes() {
+            if !a.can_match(&s) {
+                return false;
+            }
+            s = a.accept(&s, b);
+        }
+        a.is_match(&s)
+    }
+
+    #[test]
+    fn quote_transparent_inside_literals() {
+        assert!(!matches("*לום", "שלו\"ם")); // off: the quote breaks the literal
+        assert!(matches_ignoring_quotes("*לום", "שלו\"ם"));
+        assert!(matches_ignoring_quotes("*לום", "שלום"));
+        assert!(matches_ignoring_quotes("רמב\"*", "רמבם")); // quote in the pattern dropped
+        assert!(!matches_ignoring_quotes("*לום", "שלוםם"));
     }
 
     #[test]

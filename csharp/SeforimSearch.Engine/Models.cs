@@ -143,8 +143,32 @@ namespace SeforimSearch.Engine
         public static QueryGroup Word(string word, WalkOptions? options = null) => new WordGroup(word, options ?? new WalkOptions());
 
         /// <summary>A wildcard pattern (* and ?). A rejected pattern (anchor shorter
-        /// than 2, more than 4 '?') skips its slot.</summary>
-        public static QueryGroup Wildcard(string pattern) => new WildcardGroup(pattern);
+        /// than 2, more than 4 '?') skips its slot. <paramref name="ignoreQuotes"/>:
+        /// the quote is transparent (FtsLib's quote-free terms).</summary>
+        public static QueryGroup Wildcard(string pattern, bool ignoreQuotes = false) => new WildcardGroup(pattern, ignoreQuotes);
+
+        /// <summary>FtsLib's %word / word% / %word%: its GrammarExpander tables
+        /// (34 stacked prefixes, 32 suffixes).</summary>
+        public static QueryGroup Grammar(string word, bool prefixes, bool suffixes, bool ignoreQuotes = false)
+            => new GrammarGroup(word, prefixes, suffixes, ignoreQuotes);
+
+        private sealed class GrammarGroup : QueryGroup
+        {
+            private readonly string _word;
+            private readonly bool _prefixes, _suffixes, _ignoreQuotes;
+            public GrammarGroup(string word, bool prefixes, bool suffixes, bool ignoreQuotes)
+            {
+                _word = word; _prefixes = prefixes; _suffixes = suffixes; _ignoreQuotes = ignoreQuotes;
+            }
+            internal override void WriteJson(StringBuilder sb)
+            {
+                sb.Append("{\"kind\":\"grammar\",\"word\":");
+                Json.WriteString(sb, _word);
+                sb.Append(",\"prefixes\":").Append(_prefixes ? "true" : "false")
+                  .Append(",\"suffixes\":").Append(_suffixes ? "true" : "false")
+                  .Append(",\"ignore_quotes\":").Append(_ignoreQuotes ? "true" : "false").Append('}');
+            }
+        }
 
         /// <summary>A slot any of the alternatives satisfies (a | b).</summary>
         public static QueryGroup Any(params QueryGroup[] alternatives) => new AnyGroup(alternatives);
@@ -185,12 +209,13 @@ namespace SeforimSearch.Engine
         private sealed class WildcardGroup : QueryGroup
         {
             private readonly string _pattern;
-            public WildcardGroup(string pattern) { _pattern = pattern; }
+            private readonly bool _ignoreQuotes;
+            public WildcardGroup(string pattern, bool ignoreQuotes) { _pattern = pattern; _ignoreQuotes = ignoreQuotes; }
             internal override void WriteJson(StringBuilder sb)
             {
                 sb.Append("{\"kind\":\"wildcard\",\"pattern\":");
                 Json.WriteString(sb, _pattern);
-                sb.Append('}');
+                sb.Append(",\"ignore_quotes\":").Append(_ignoreQuotes ? "true" : "false").Append('}');
             }
         }
 

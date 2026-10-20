@@ -173,7 +173,10 @@ mod tests {
             IndexOptions::default(),
             &[line(1, 0, 1, 0, "שלום עליכם"), line(2, 1, 1, 1, "שלומכם רב")],
         );
-        let wildcard = |p: &str| GroupSpec::Wildcard { pattern: p.into() };
+        let wildcard = |p: &str| GroupSpec::Wildcard {
+            pattern: p.into(),
+            ignore_quotes: false,
+        };
         let result = index
             .search(&SearchRequest {
                 groups: vec![wildcard("שלו*")],

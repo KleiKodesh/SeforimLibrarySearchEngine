@@ -57,8 +57,9 @@ namespace FtsLib.Fts5
     /// while locating (FtsLib filtered them in Core; Core's checks stay harmless).</summary>
     public sealed class TantivySearchOptions
     {
-        /// <summary>Otzaria's per-word options (prefixes, suffixes, ktiv, nikud…).</summary>
-        public WalkOptions WordOptions { get; set; } = new WalkOptions();
+        /// <summary>Otzaria's per-word options (prefixes, suffixes, ktiv, nikud…).
+        /// IgnoreQuotes defaults ON here: FtsLib always matched רשי ↔ רש"י.</summary>
+        public WalkOptions WordOptions { get; set; } = new WalkOptions { IgnoreQuotes = true };
 
         /// <summary>מרחק בין מילים. Null = no limit.</summary>
         public int? MaxWordDistance { get; set; }
@@ -83,7 +84,7 @@ namespace FtsLib.Fts5
         public const int DefaultContextWords = 8;
 
         /// <summary>Bumped when the indexing pipeline changes; part of the provenance stamp.</summary>
-        public const string IndexFormatVersion = "tantivy1";
+        public const string IndexFormatVersion = "tantivy2"; // 2: trailing quotes dropped from terms
 
         private readonly string _indexPath;
         private readonly Func<SeforimDbFtsCorpus> _openCorpus;
@@ -274,7 +275,11 @@ namespace FtsLib.Fts5
         {
             string fingerprint = SeforimSearch.Demo.SeforimDb.SeforimDbContentFingerprint.Compute(_seforimDbPath, IndexFormatVersion);
             var state = ReadBuildState();
-            if (state != null && state.Fingerprint == fingerprint && state.Complete) return;
+            if (state != null && state.Fingerprint == fingerprint && state.Complete)
+            {
+                MergeSegments(heapBytes); // indexes built before merging existed
+                return;
+            }
 
             bool resume = state != null && state.Fingerprint == fingerprint && state.LinesDone > 0;
             if (!resume)
@@ -341,6 +346,20 @@ namespace FtsLib.Fts5
             state.Complete = !capped;
             writer.Commit(state.Serialize());
             onProgress?.Invoke(state.LinesDone, state.TotalLines);
+
+            // One segment = one term dictionary per walk (FtsLib had one too). A
+            // build commits every linesPerCommit lines, leaving dozens of segments,
+            // and every expansion walk repeats per segment (measured: *יצח* 4.8 s
+            // over 37 segments).
+            if (state.Complete) writer.MergeAndClose();
+        }
+
+        /// <summary>Merges the index into one segment if it has several (a no-op
+        /// otherwise). Call after updates when the index is mostly read.</summary>
+        public void MergeSegments(long heapBytes = 200_000_000)
+        {
+            using var writer = Engine().OpenWriter(heapBytes);
+            writer.MergeAndClose();
         }
 
         public void Dispose()

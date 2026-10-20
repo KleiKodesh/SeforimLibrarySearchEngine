@@ -21,9 +21,17 @@ pub struct HebrewGrammarQuery {
     expand_prefixes: bool,
     expand_suffixes: bool,
     matched_terms_sink: Option<MatchedTermsSink>,
+    ignore_quotes: bool,
 }
 
 impl HebrewGrammarQuery {
+    /// Makes the canonical quote transparent (התעלם מגרשיים): the word's own
+    /// quotes are dropped and indexed terms match with or without them, as
+    /// FtsLib's quote-free terms did.
+    pub fn set_ignore_quotes(&mut self, ignore: bool) {
+        self.ignore_quotes = ignore;
+    }
+
     /// `word` is the normalized base word (no `%` markers).
     /// `expand_prefixes` ⇔ leading `%`, `expand_suffixes` ⇔ trailing `%`.
     /// The bare word itself always matches too.
@@ -39,6 +47,7 @@ impl HebrewGrammarQuery {
             expand_prefixes,
             expand_suffixes,
             matched_terms_sink: None,
+            ignore_quotes: false,
         }
     }
 
@@ -51,8 +60,16 @@ impl HebrewGrammarQuery {
 
 impl Query for HebrewGrammarQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        let candidates = build_candidates(&self.word, self.expand_prefixes, self.expand_suffixes);
-        let automaton = SetAutomaton::from_strings(&candidates);
+        let word: String = if self.ignore_quotes {
+            self.word.chars().filter(|&c| c != '"').collect()
+        } else {
+            self.word.clone()
+        };
+        let candidates = build_candidates(&word, self.expand_prefixes, self.expand_suffixes);
+        let mut automaton = SetAutomaton::from_strings(&candidates);
+        if self.ignore_quotes {
+            automaton = automaton.with_transparent_quotes();
+        }
         let mut weight = AutomatonWeight::new(self.field, automaton);
         if let Some(sink) = &self.matched_terms_sink {
             weight.set_matched_terms_sink(sink.clone());

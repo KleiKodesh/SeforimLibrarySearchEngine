@@ -28,7 +28,21 @@ pub enum GroupSpec {
     },
     /// A wildcard pattern (`*`, `?`). A rejected pattern (anchor too short,
     /// too many `?`) skips the slot but still counts toward word distance.
-    Wildcard { pattern: String },
+    Wildcard {
+        pattern: String,
+        /// The quote is transparent (FtsLib's quote-free terms).
+        #[serde(default)]
+        ignore_quotes: bool,
+    },
+    /// FtsLib's `%word` / `word%` / `%word%`: its GrammarExpander tables
+    /// (34 stacked prefixes, 32 suffixes, sofit stem).
+    Grammar {
+        word: String,
+        prefixes: bool,
+        suffixes: bool,
+        #[serde(default)]
+        ignore_quotes: bool,
+    },
     /// Levenshtein neighbours of a word (FtsLib `word~N`), closest first,
     /// capped at 2000 terms. Distance is clamped to 2 (tantivy's DFA limit;
     /// FtsLib allowed 3).
@@ -440,8 +454,29 @@ impl LineIndex {
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
-            GroupSpec::Wildcard { pattern } => {
-                let mut q = HebrewWildcardQuery::new(self.fields.text, pattern).ok()?;
+            GroupSpec::Wildcard {
+                pattern,
+                ignore_quotes,
+            } => {
+                let mut q = if *ignore_quotes {
+                    HebrewWildcardQuery::new_ignoring_quotes(self.fields.text, pattern).ok()?
+                } else {
+                    HebrewWildcardQuery::new(self.fields.text, pattern).ok()?
+                };
+                q.set_matched_terms_sink(sink.clone());
+                Some(Box::new(q))
+            }
+            GroupSpec::Grammar {
+                word,
+                prefixes,
+                suffixes,
+                ignore_quotes,
+            } => {
+                if word.is_empty() {
+                    return None;
+                }
+                let mut q = hebrew_fts::HebrewGrammarQuery::new(self.fields.text, word.clone(), *prefixes, *suffixes);
+                q.set_ignore_quotes(*ignore_quotes);
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
@@ -513,7 +548,27 @@ impl LineIndex {
 
         let reader = self.index.reader()?;
         let searcher = reader.searcher();
-        let mut hits = searcher.search(&BooleanQuery::new(clauses), &PlacedCollector)?;
+        let timing = std::env::var_os("SEFORIM_ENGINE_TIMING").is_some();
+        let t = std::time::Instant::now();
+        let query = BooleanQuery::new(clauses);
+        let weight = query.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
+        if timing {
+            eprintln!("  [timing] weight (walks + caps): {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let t = std::time::Instant::now();
+        let mut hits = Vec::new();
+        for (ord, segment) in searcher.segment_readers().iter().enumerate() {
+            let mut child = PlacedCollector.for_segment(ord as SegmentOrdinal, segment)?;
+            weight.for_each_no_score(segment, &mut |docs| {
+                for &doc in docs {
+                    child.collect(doc, 0.0);
+                }
+            })?;
+            hits.extend(child.harvest());
+        }
+        if timing {
+            eprintln!("  [timing] collect {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);
+        }
         hits.sort_unstable_by_key(|h| h.position);
 
         let group_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();

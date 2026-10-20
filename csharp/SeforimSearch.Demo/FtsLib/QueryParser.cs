@@ -137,15 +137,17 @@ namespace FtsLib.Search
             if (isFuzzy && isWildcard) isFuzzy = false;
             if (isWildcard) grammarPrefix = grammarSuffix = false;
 
-            if (isWildcard) return QueryGroup.Wildcard(normalised);
+            bool ignoreQuotes = wordOptions?.IgnoreQuotes ?? false;
+            if (isWildcard) return QueryGroup.Wildcard(normalised, ignoreQuotes);
             if (isFuzzy) return QueryGroup.Fuzzy(normalised, fuzzyDist);
 
-            if (!grammarPrefix && !grammarSuffix && (letters < 2 || letters >= 30)) return null;
+            // '%' is FtsLib's GrammarExpander (its own prefix/suffix tables), not the
+            // Otzaria walk options.
+            if (grammarPrefix || grammarSuffix)
+                return QueryGroup.Grammar(normalised, grammarPrefix, grammarSuffix, ignoreQuotes);
 
-            var options = Clone(wordOptions);
-            if (grammarPrefix) options.GrammarPrefixes = true;
-            if (grammarSuffix) options.GrammarSuffixes = true;
-            return QueryGroup.Word(normalised, options);
+            if (letters < 2 || letters >= 30) return null;
+            return QueryGroup.Word(normalised, Clone(wordOptions));
         }
 
         /// <summary>Strips marks, lowercases ASCII, keeps '*' '?' and intra-word quotes

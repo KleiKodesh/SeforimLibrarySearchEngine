@@ -105,6 +105,20 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
     macro_rules! flush {
         ($i:expr) => {{
             if buf_chars > 1 && buf_chars < 30 {
+                // A quote is part of the word only BETWEEN letters (רש"י). One
+                // after the last letter is quotation punctuation (יצחק"): FtsLib
+                // drops it, so it must not become part of the term.
+                let last_letter_end = buf
+                    .char_indices()
+                    .filter(|&(_, c)| chars::is_letter(c))
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(0);
+                if buf[last_letter_end..].contains('"') {
+                    let tail: String = buf[last_letter_end..].chars().filter(|&c| c != '"').collect();
+                    buf.truncate(last_letter_end);
+                    buf.push_str(&tail);
+                }
                 let span = WordSpan {
                     byte_start: word_start_byte,
                     byte_end: byte_at($i),
@@ -378,6 +392,12 @@ mod tests {
         assert_eq!(words("רש\"י אמר"), ["רש\"י", "אמר"]);
         assert_eq!(words("רשב\u{05F4}א"), ["רשב\"א"]); // gershayim → '"'
         assert_eq!(words("ר' עקיבא"), ["עקיבא"]); // ר' is 1 letter → dropped
+        // a quote AFTER the last letter is punctuation, not part of the word
+        assert_eq!(words("\"יצחק\" אמר"), ["יצחק", "אמר"]);
+        assert_eq!(words("תורה'' שלמה"), ["תורה", "שלמה"]);
+        // its raw span still ends at the separator (FtsLib's rawEnd)
+        let s = spans("יצחק\" אמר");
+        assert_eq!(s[0].1.utf16_end, 5);
     }
 
     #[test]

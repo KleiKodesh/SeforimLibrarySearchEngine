@@ -5,6 +5,12 @@ tantivy, returning **exactly** what KitveiHakodesh's FtsLib returns, plus Otzari
 search options. Read `README.md` for the architecture; this file is the working
 knowledge: rules the user set, how the parts fit, and lessons learned the hard way.
 
+**The two main changes** (the reason this engine exists; keep them central):
+1. **Custom FST walks**: every search option is an automaton walked over the term
+   dictionary, shortest first, capped inside the walk.
+2. **Matched FST terms returned with the search** (`MatchedTermsSink`): the hits plus
+   the words the walks matched, in one pass, with no separate query.
+
 **Keep this file learning.** When a session teaches something non-obvious (a rule the
 user states, a trap hit, a decision made and why), add it to the right section below
 in one or two lines. Remove entries that turn out to be wrong.
@@ -109,6 +115,19 @@ non-empty lines).
 - XML comments in .csproj cannot contain `--`.
 - The cdylib must not share a crate name with a dependency (it is
   `seforim_search_native`).
+- A quote AFTER the last letter (יצחק") is punctuation: FtsLib drops it. Keeping it made
+  separate terms and broke parity everywhere. Only quotes BETWEEN letters stay.
+- Index MUST be merged to one segment after a build: every walk repeats per segment
+  (*יצח* 4.8 s on 37 segments → 1.1 s on 1). Leading-* walks are still the slow case
+  (FtsLib used an FM-index/trigram sidecar for them).
+- `%` is FtsLib's GrammarExpander (its own 34/32 tables), NOT the Otzaria walk options.
+- Parity is checked with `tools/parity` (FtsLibDump + `SeforimSearch.Demo dump` +
+  compare.py) against the installed FtsLib index at
+  `%LOCALAPPDATA%\KleiKodesh\KitveiHakodeshService\FtsIndex`. Rerun it after any
+  tokenizer / walk / snippet change.
+- Bump `TantivySeforimIndex.IndexFormatVersion` whenever indexing output changes, or
+  BuildLines keeps the stale index.
+- PowerShell 5.1 strips quotes from JSON arguments to native exes: pass via a file.
 
 ## Open decisions / next
 

@@ -1,88 +1,146 @@
 # SeforimDB Search Engine
 
-Tantivy-based Hebrew search engine producing FtsLib-compatible results
-(KitveiHakodesh) with Otzaria's search options.
+A Hebrew full-text search engine for the Otzaria / Zayit `seforim.db`, built on
+tantivy and made to return **exactly what KitveiHakodesh's FtsLib returns**:
+the same matches, catalog order, snippets and highlights. It adds Otzaria's
+search options (prefixes, suffixes, ktiv, nikud, …) as fast walks over the
+term dictionary.
+
+Runs on any native platform (Windows, macOS, Linux, Android, iOS) through one
+C library. From .NET it's a package that works on both .NET 10 and .NET
+Framework 4.8.
+
+## How it works
+
+1. **Index.** One document per line. The line text is tokenized exactly as
+   FtsLib's `HtmlWordScanner` does. The document also holds the line's catalog
+   position, which is the order results come back in. No text is stored: the
+   host app keeps the text in seforim.db.
+2. **Search.** Each query word becomes one *walk* over tantivy's term
+   dictionary (FST). The walk visits only spellings the word's options allow:
+   prefixes, suffixes, wildcards, ktiv variants and so on. The words of a query
+   are ANDed. Each walk reports the dictionary words it actually matched
+   (`MatchedTermsSink`), so the search returns its hits **plus** the expanded
+   words.
+3. **Snippets.** For each hit, the host passes in the line text and the
+   engine runs FtsLib's snippet locator, ported step for step:
+   - find the tightest window covering every query word
+   - add ±8 words of context and the ellipsis flags
+   - mark every matched word inside the window
+   - apply the word-distance and word-order filters
+   - widen short windows over neighbouring lines of the same book
+
+   The output is offsets only, not HTML, so the page renderer is unchanged.
 
 ## Layout
 
-- `tantivy/` — **fork** of tantivy 0.27.0 (KleiKodesh version). Commit to
-  `main`; upstream reachable via `origin/main`.
-- `hebrew-fts/` — the Hebrew layer: tokenizer, walks, wildcard, snippet locator.
-- `seforim-engine/` — the engine, **no database code**: line index fed by the
-  host (optional positions; host payload committed atomically), search in
-  catalog order, snippet session (filters, neighbour widening, term table).
-- `engine-ffi/` — C ABI → `seforim_search_native.dll/.so/.dylib`.
-- `csharp/SeforimSearch.Engine/` — .NET package (netstandard2.0: .NET 10 and
-  .NET Framework 4.8) over the native library.
-- `csharp/SeforimSearch.Demo/` — everything that reads seforim.db (copied from
-  KitveiHakodesh Core) plus a FtsLib-shaped facade (`TantivySeforimIndex` ≈
-  `Fts5SeforimIndex`, `SeforimDbFtsSearcher.SearchInBatches`, `FtsHit`,
-  `SnippetDescriptor`, `QueryParser`). Targets net10.0 and net48.
+| Folder | What | Depends on |
+|---|---|---|
+| `tantivy/` | Our modified copy of tantivy 0.27.0 (the "KleiKodesh version"). Plain commits on `main`; upstream is `origin`. | — |
+| `hebrew-fts/` | Hebrew layer: tokenizer, walks, wildcard, snippet locator. | tantivy |
+| `seforim-engine/` | The engine. **No database code**: the host feeds lines and texts. | hebrew-fts |
+| `engine-ffi/` | C ABI → `seforim_search_native.dll / .so / .dylib`. | seforim-engine |
+| `csharp/SeforimSearch.Engine/` | .NET API package (netstandard2.0 → .NET 10 and .NET Framework 4.8). | native lib |
+| `csharp/SeforimSearch.Demo/` | Everything that reads seforim.db, plus an FtsLib-shaped facade. net10.0 and net48. | Engine package, SQLite, zstd |
 
-Build: `cargo build --release -p engine-ffi`, then `dotnet build csharp/SeforimSearch.Demo -c Release`.
-Run: `SeforimSearch.Demo build [--max-lines N] [--no-positions]`,
-`SeforimSearch.Demo search [--prefixes] [--distance N] <query>`.
+## Build and run
 
-## Done
+```
+cargo build --release -p engine-ffi                  # native library
+dotnet build csharp/SeforimSearch.Demo -c Release    # both net10.0 and net48
 
-### tantivy fork patch
-- **MatchedTermsSink** (`src/query/automaton_weight.rs`): opt-in. A search with
-  a sink attached also returns the concrete words the FST expansion matched
-  (fuzzy/regex/any automaton query). Zero cost when off; one memcpy per
-  matched term when on. Per-doc scoring loop untouched.
-- **SpanQuery** (`src/query/span_query.rs`): word-distance search where every
-  slot is any term source (exact term, fuzzy, regex, any automaton incl. our
-  walks). Per-gap limits (`a –2– b –5– c`, counted as words between),
-  ordered or unordered, one word never fills two slots. Needs a field with
-  `WithFreqsAndPositions`.
+SeforimSearch.Demo build  [--db path] [--index dir] [--max-lines N] [--no-positions]
+SeforimSearch.Demo search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] <query>
+```
 
-### hebrew-fts crate
-- **Tokenizer** (`scanner.rs`, `tokenizer.rs`) — port of FtsLib
-  HtmlWordScanner: HTML-aware, inline tags transparent, block
-  tags/entities/maqaf split, words 2..29 letters, intra-word quotes kept as
-  canonical `"`. Two variants: `hebrew` (nikud/te'amim stripped) and
-  `hebrew_marked` (marks kept, for vocalized fields). Tokens carry byte +
-  UTF-16 + visible-char offsets (for the snippet locator and the JS frontend).
-- **SetAutomaton** (`set_automaton.rs`) — byte-trie automaton: FST walk visits
-  only candidate strings; optional quote transparency.
-- **Grammar walk** (`grammar.rs`, `grammar_query.rs`) — FtsLib GrammarExpander
-  port (%word / word% / %word%): 34 prefixes, 32 suffixes, sofit stem.
-- **Otzaria walk** (`walk.rs`, `variants.rs`) — `HebrewWalkQuery` +
-  `WalkOptions`, one composite automaton:
-  - קידומות דקדוקיות (combos ≤3 letters) + ארמיות (ד/דא/א)
-  - סיומות דקדוקיות (+ותיהם; rare יא/תא in full morphology)
-  - סיומות ארמיות: ה↔א, ם↔ן on word and suffix alternatives
-  - כתיב מלא/חסר (internal י/ו, ≤32 variants)
-  - חלק ממילה (≤3 any-letters/side; ≤2 for 4+-letter words)
-  - קידומות/סיומות מתקדם (any letters, 3/5 before, 5/7 after; both ≡ חלק ממילה)
-  - התעלם מגרשיים (רמב"ם ↔ רמבם)
-  - שגיאות כתיב/OCR (confusion pairs, tunable in `variants.rs`)
-  - ניקוד/טעמים: `ignore_nikud` / `ignore_teamim`, independent — whether
-    בראשית matches בְּרֵאשִׁית and/or cantillated forms (on a `hebrew_marked`
-    field); both off = exact vocalization
+Tests: `cargo test` at the root (hebrew-fts, seforim-engine, engine-ffi), and
+`cargo test --lib query::` in `tantivy/`.
 
-All walks work with MatchedTermsSink → search results + matched words in one
-pass, feeding the snippet stage. Any walk becomes a span slot via
-`HebrewWalkQuery::span_slot()`.
-- **Snippet locator** (`prepared.rs`, `snippet.rs`) — step-for-step port of
-  FtsLib `PreparedQueryGroups` + `SnippetWindowLocator` + `SnippetDescriptor`:
-  one tokenize pass per line, tightest window covering all AND groups
-  (strict-< tie rule), ±8 tokens context, 4000-visible-char ceiling that never
-  cuts into the match, ellipsis flags, marks as (start, len, termOrdinal)
-  triples, WordDistance / ordered check. Offsets are UTF-16 units, as FtsLib's,
-  so the page renderer is unchanged. Term→group map built once per query from
-  the per-group sinks.
+Measured on the real Otzaria DB (7.08M lines), first 200k lines:
+- Building takes ~12 s through the C# feed, so a full build is roughly 5–7 min.
+- Searching תורה with prefixes returns 2,002 hits with snippets, identical on
+  .NET 10 and .NET Framework 4.8.
 
-### Expansion caps
-Every walk (grammar, Otzaria options, wildcard, regex) is capped at 2000 terms
-INSIDE the walk: the term dictionary is walked shortest-first, level by level
-across all segments, and stops at the cap (ties: most frequent). Fuzzy keeps a
-distance-ranked cap.
+## What's in each part
 
-## Next
+### tantivy (our changes)
+- **MatchedTermsSink**, opt-in: a search also returns the words its FST
+  expansion matched. It costs nothing when off.
+- **Expansion cap inside the walk.** Every walk except fuzzy is capped at 2000
+  terms, and the cap is applied inside the walk itself:
+  - The term dictionary is walked shortest word first, level by level, across
+    all index segments together, and the walk stops at the cap (ties go to the
+    more frequent word).
+  - So `*word` always finds `word` first, then the shortest affixes, and the
+    long tail is never visited.
+  - Fuzzy is the exception: it walks fully and keeps the closest matches
+    (distance-ranked).
+  - Broad queries are capped rather than failing.
+- **SpanQuery**: word distance where each query word can be any walk, with a
+  separate limit per gap (`a –2– b –5– c`). Word order can be required or not.
+
+### hebrew-fts
+- **Tokenizer.** A port of FtsLib's `HtmlWordScanner`:
+  - HTML-aware: inline tags are transparent; block tags, entities and maqaf
+    split words.
+  - Only words of 2–29 letters are indexed.
+  - Intra-word quotes are kept as `"`.
+  - Two variants: `hebrew` strips nikud and te'amim, `hebrew_marked` keeps
+    them.
+- **Walks:**
+  - **Grammar** (`%word`, `word%`): 34 prefixes and 32 suffixes.
+  - **Otzaria options:** grammatical/Aramaic prefixes and suffixes, ktiv
+    male/haser, part-of-word, advanced prefixes/suffixes, ignore gershayim,
+    spelling/OCR errors, ignore nikud, ignore te'amim.
+  - **Wildcard** (`*`, `?`) with FtsLib's limits:
+    - at least 2 real letters, at most 4 `?`
+    - `*` may cover 3 characters before the anchor, 4 after it, or 7 in total
+      when both ends are wildcards
+- **Snippet locator.** A step-for-step port of FtsLib's
+  `PreparedQueryGroups`, `SnippetWindowLocator` and `SnippetDescriptor`.
+  Offsets are UTF-16 (.NET/JS string indices).
+
+### seforim-engine / engine-ffi
+- **Index:** create or open; positions optional; add/delete/commit lines with a
+  host payload (resume watermark, provenance stamp) committed atomically with
+  the documents.
+- **Search:** every matching line in catalog order, plus a snippet session.
+  - The session locates snippets for a whole batch across all cores.
+  - It applies the word-distance and order filters and widens short windows
+    over neighbouring lines.
+  - It keeps the term table.
+- **Query groups:** word (with options), wildcard, fuzzy (distance ≤2), and OR
+  of alternatives.
+- **C ABI conventions:** objects are opaque handles; strings cross as UTF-8
+  pointer + length; errors are `0/-1` status codes with a per-thread
+  `se_last_error`; hot paths are binary (no JSON).
+
+### C# demo (`csharp/SeforimSearch.Demo`)
+- **DB code**, copied from KitveiHakodesh Core with namespace renames only:
+  - schema probe (3 DB shapes), zstd codec, catalog tree order, content
+    fingerprint
+  - corpus reads, and `SeforimDbFtsSearcher` (batch plan, neighbour widening,
+    seeded line texts)
+- **FtsLib facade with the same names:** `FtsDocumentPlacement`,
+  `SearchResult`, `SnippetDescriptor`, `QueryParser` (`%` `~` `*` `?` `|`), and
+  `TantivySeforimIndex` (`Search`, `LocateSnippetWindow`,
+  `LocateSnippetWindowOverNeighbourLines`, resumable `BuildLines`,
+  `GetResumeState`).
+
+## Differences from FtsLib (known, deliberate)
+- **Fuzzy distance** is capped at 2 (tantivy's limit; FtsLib allowed 3).
+- **Quotes:** a plain query word doesn't match a quoted word unless "ignore
+  gershayim" is on (רשי ↛ רש"י). FtsLib always matched.
+- **Ketiv/qere expansion** (`expandKetiv`) is replaced by the Otzaria walk
+  options.
+- **Order and distance:** results are in catalog order, as FtsLib. Word
+  distance is checked from the line text, so an index without positions works.
+
+## Open
 - Dart binding over the same C ABI.
-- Side-by-side check against FtsLib on a full build.
-
-## Dev
-- Build/test: `cargo test` in `hebrew-fts/` (rust-lld + debug=0 for fast cycles).
-- FtsLib reference sources: KitveiHakodesh git HEAD (files deleted on disk).
+- A full build compared side by side with FtsLib on the same queries.
+- Profiling: C# search is ~1.0 s (.NET 10) / ~1.5 s (net48), against 378 ms in
+  the pure-Rust smoke test for the same query. That gap includes process start
+  and index open; not profiled yet.
+- Choosing span query vs post-filter for very broad expansions (needs a
+  benchmark).

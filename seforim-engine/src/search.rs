@@ -510,7 +510,6 @@ impl LineIndex {
                 let mut weight = AutomatonWeight::new(field, fuzzy.automaton()?);
                 weight.set_matched_terms_sink(sink.clone());
                 weight.set_max_expansions(hebrew_fts::walk::DEFAULT_MAX_EXPANDED_TERMS);
-                weight.apply_global_cap(searcher)?;
                 Some(Arc::new(weight))
             }
             GroupSpec::Any { alternatives } => {

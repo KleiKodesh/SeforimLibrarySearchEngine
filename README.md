@@ -85,9 +85,10 @@ Measured on the real Otzaria DB (7.08M lines), first 200k lines:
   expansion matched. It costs nothing when off.
 - **Expansion cap inside the walk.** Every walk except fuzzy is capped at 2000
   terms, and the cap is applied inside the walk itself:
-  - The term dictionary is walked shortest word first, level by level, across
-    all index segments together, and the walk stops at the cap (ties go to the
-    more frequent word).
+  - The cap applies per segment: each segment's term dictionary is walked
+    shortest word first, level by level, and the walk stops at the cap (ties
+    go to the more frequent word). The early stop also makes the walk itself
+    faster.
   - So `*word` always finds `word` first, then the shortest affixes, and the
     long tail is never visited.
   - Fuzzy is the exception: it walks fully and keeps the closest matches

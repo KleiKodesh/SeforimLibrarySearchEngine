@@ -13,7 +13,7 @@
 //!   (max Hebrew prefix stack); leading AND trailing → 3 + 4 = 7; otherwise
 //!   (trailing or internal) → 4 (max pronominal suffix).
 //! - The 2000-term cap (shortest first, then most frequent) is applied by
-//!   the AutomatonWeight over the whole index.
+//!   the AutomatonWeight per segment.
 //!
 //! Where FtsLib ran LIKE / range / FM-index scans and filtered afterwards,
 //! here one automaton walks the term dictionary and never leaves the budget.
@@ -312,7 +312,7 @@ impl Automaton for WildcardAutomaton {
 }
 
 /// Tantivy query for one wildcard pattern, capped at
-/// [`DEFAULT_MAX_EXPANDED_TERMS`] over the whole index (shortest first).
+/// [`DEFAULT_MAX_EXPANDED_TERMS`] per segment (shortest first).
 #[derive(Debug, Clone)]
 pub struct HebrewWildcardQuery {
     field: Field,
@@ -362,21 +362,15 @@ impl HebrewWildcardQuery {
         weight
     }
 
-    /// This pattern as a span slot, capped over `searcher`'s whole index.
-    pub fn span_slot(&self, searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
-        let mut weight = self.automaton_weight();
-        weight.apply_global_cap(searcher)?;
-        Ok(Arc::new(weight))
+    /// This pattern as a span slot, capped per segment.
+    pub fn span_slot(&self, _searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
+        Ok(Arc::new(self.automaton_weight()))
     }
 }
 
 impl Query for HebrewWildcardQuery {
-    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        let mut weight = self.automaton_weight();
-        if let Some(searcher) = enable_scoring.searcher() {
-            weight.apply_global_cap(searcher)?;
-        }
-        Ok(Box::new(weight))
+    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        Ok(Box::new(self.automaton_weight()))
     }
 }
 

@@ -59,14 +59,12 @@ impl HebrewGrammarQuery {
 }
 
 impl HebrewGrammarQuery {
-    /// This expansion as a span slot, capped over `searcher`'s whole index.
+    /// This expansion as a span slot, capped per segment.
     pub fn span_slot(
         &self,
-        searcher: &tantivy::Searcher,
+        _searcher: &tantivy::Searcher,
     ) -> tantivy::Result<std::sync::Arc<dyn tantivy::query::SpanTermSource>> {
-        let mut weight = self.automaton_weight();
-        weight.apply_global_cap(searcher)?;
-        Ok(std::sync::Arc::new(weight))
+        Ok(std::sync::Arc::new(self.automaton_weight()))
     }
 
     fn automaton_weight(&self) -> AutomatonWeight<SetAutomaton> {
@@ -90,12 +88,8 @@ impl HebrewGrammarQuery {
 }
 
 impl Query for HebrewGrammarQuery {
-    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        let mut weight = self.automaton_weight();
-        if let Some(searcher) = enable_scoring.searcher() {
-            weight.apply_global_cap(searcher)?;
-        }
-        Ok(Box::new(weight))
+    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        Ok(Box::new(self.automaton_weight()))
     }
 }
 

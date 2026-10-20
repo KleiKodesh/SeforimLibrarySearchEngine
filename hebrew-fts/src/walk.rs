@@ -529,22 +529,16 @@ impl HebrewWalkQuery {
 
     /// This walk as a slot of a [`SpanQuery`](tantivy::query::SpanQuery):
     /// "any word this walk matches", with positions. The sink, if set, still
-    /// collects the matched forms. The expansion cap is chosen over the whole
-    /// index of `searcher`.
-    pub fn span_slot(&self, searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
-        let mut weight = self.automaton_weight();
-        weight.apply_global_cap(searcher)?;
-        Ok(Arc::new(weight))
+    /// collects the matched forms. The expansion cap applies per
+    /// segment.
+    pub fn span_slot(&self, _searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
+        Ok(Arc::new(self.automaton_weight()))
     }
 }
 
 impl Query for HebrewWalkQuery {
-    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        let mut weight = self.automaton_weight();
-        if let Some(searcher) = enable_scoring.searcher() {
-            weight.apply_global_cap(searcher)?;
-        }
-        Ok(Box::new(weight))
+    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        Ok(Box::new(self.automaton_weight()))
     }
 }
 

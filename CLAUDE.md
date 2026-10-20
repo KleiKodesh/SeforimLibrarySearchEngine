@@ -34,7 +34,8 @@ in one or two lines. Remove entries that turn out to be wrong.
   nothing when unused.
 - **Expansion caps apply inside the walk**: walk shortest-first, stop at the cap, so the
   closest matches come first and the walk stays short. Applies to every wildcard /
-  regex / walk expansion. Cap 2000 (FtsLib's), chosen over the whole index.
+  regex / walk expansion. Cap 2000 (FtsLib's), applied PER SEGMENT (user's
+  decision; replaced the global cap).
 - **Options are the user's choice**: nikud / te'amim ignore, quotes ignore, index with
   or without positions — offer them, never force one behaviour.
 - **C# must build and run on .NET 10 AND .NET Framework 4.8.** Package =
@@ -103,8 +104,6 @@ non-empty lines).
   `$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`.
 - First tantivy build ~10 min; fork tests: `cargo test --lib query::` (~30 s after).
   Workspace uses rust-lld + `debug = 0` for speed. Run long builds in the background.
-- A per-segment cap is WRONG: segments differ, so the cap must be chosen globally
-  (`apply_global_cap`), then segments look the kept terms up directly.
 - tantivy's `IndexWriter` needs ≥15 MB heap PER THREAD; cap threads by budget.
 - zstd dictionary training needs enough sample data (tests pad samples).
 - `MatchedTermsSink` keys a FuzzyTermQuery's Debug output; query-parser tests assert

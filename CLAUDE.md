@@ -164,6 +164,16 @@ seforim.db knowledge).
   separate terms and broke parity everywhere. Only quotes BETWEEN letters stay.
 - Index MUST be merged to one segment after a build: every walk repeats per segment
   (*יצח* 4.8 s on 37 segments → 1.1 s on 1), and the FM-index sidecar needs one segment.
+- **Deleted docs were hits.** Search collected through `weight.for_each_no_score`, which
+  does NOT skip deleted docs (tantivy's collectors check `segment.alive_bitset()`
+  themselves). An updated line (delete + add) came back in its old version too when its
+  segment kept other live docs. It looked like a 1-in-9 test flake because a fully
+  deleted segment is dropped whole. Fixed; `deleted_docs_are_not_hits` reproduces it
+  deterministically (one indexing thread). Any new doc loop must check the alive bitset.
+- **A parity difference is analysed before it is fixed** (user's rule: is it our gap or
+  a bug in FtsLib, or the reverse?). Example: `יצחק~1` differed because FtsLib's
+  quote-free term יציק was 1 edit away while our DFA counted the quote in יצי"ק: our bug
+  (fuzzy ignored ignore-gershayim), fixed with fuzzy `ignore_quotes`.
 - Merge race: tantivy's default merge policy merges in the background during a build,
   so a segment list read earlier goes stale and `merge` fails with "segments that were
   merged could not be found in the SegmentManager" (two full builds died this way; the

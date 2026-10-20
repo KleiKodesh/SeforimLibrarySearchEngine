@@ -4,6 +4,11 @@ report with one row per query.
 
 Usage:
   python -I tools/report/search_report.py <demo exe> <index dir> <queries.txt> <out dir>
+  python -I tools/report/search_report.py <FtsLibDump exe> <ftslib index> <queries.txt> <out dir> --ftslib <seforim.db>
+
+With --ftslib the same queries run through KitveiHakodesh Core's own searcher on
+an FtsLib index (FtsLibDump search); FtsLib has no engine stage timing, so only
+first batch / total / process are filled for it.
 
 Stages per query (all in ms):
   weight     engine: build the query weight (SEFORIM_ENGINE_TIMING "weight");
@@ -28,7 +33,7 @@ import time
 from pathlib import Path
 
 
-def main(exe, index, queries, out):
+def main(exe, index, queries, out, ftslib_db=None):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, SEFORIM_ENGINE_TIMING="1")
@@ -37,7 +42,10 @@ def main(exe, index, queries, out):
              if l.strip() and not l.startswith("#")]
     for n, line in enumerate(lines):
         query, _, dist = line.partition("\t")
-        args = [exe, "search", "--index", index]
+        if ftslib_db:
+            args = [exe, "search", ftslib_db, index]
+        else:
+            args = [exe, "search", "--index", index]
         if dist.strip():
             args += ["--distance", dist.strip()]
         args += query.split()
@@ -68,8 +76,9 @@ def main(exe, index, queries, out):
 
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     size = sum(f2.stat().st_size for f2 in Path(index).iterdir() if f2.is_file())
+    engine = "FtsLib (KitveiHakodesh Core searcher)" if ftslib_db else "tantivy engine (SeforimSearch.Demo)"
     md = [f"# Search timing report ({stamp})", "",
-          f"Index: `{index}` ({size / 1e6:,.1f} MB). Demo: `{exe}`.", "",
+          f"Engine: {engine}. Index: `{index}` ({size / 1e6:,.1f} MB). Runner: `{exe}`.", "",
           "| # | query | dist | exit | engine hits | shown hits | weight ms | walks + collect ms | host ms | first batch ms | total ms | process ms |",
           "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for (n, q, d, code, raw, hits, w, c, h, first, total, wall) in rows:
@@ -86,4 +95,10 @@ def main(exe, index, queries, out):
 
 
 if __name__ == "__main__":
-    sys.exit(main(*sys.argv[1:5]))
+    a = sys.argv[1:]
+    db = None
+    if "--ftslib" in a:
+        i = a.index("--ftslib")
+        db = a[i + 1]
+        del a[i:i + 2]
+    sys.exit(main(*a[:4], ftslib_db=db))

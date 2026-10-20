@@ -139,7 +139,7 @@ namespace FtsLib.Search
 
             bool ignoreQuotes = wordOptions?.IgnoreQuotes ?? false;
             if (isWildcard) return QueryGroup.Wildcard(normalised, ignoreQuotes);
-            if (isFuzzy) return QueryGroup.Fuzzy(normalised, fuzzyDist);
+            if (isFuzzy) return QueryGroup.Fuzzy(normalised, fuzzyDist, ignoreQuotes);
 
             // '%' is FtsLib's GrammarExpander (its own prefix/suffix tables), not the
             // Otzaria walk options.

@@ -263,6 +263,7 @@ mod tests {
                 groups: vec![GroupSpec::Fuzzy {
                     word: "שלם".into(),
                     distance: 1,
+                    ignore_quotes: false,
                 }],
                 ..Default::default()
             })
@@ -530,6 +531,68 @@ mod tests {
         }
     }
 
+    /// An updated line (delete + add) must come back only in its new
+    /// version, also when its segment keeps other live docs. Search used to
+    /// collect through `for_each_no_score`, which does not skip deleted
+    /// docs: with both lines in one segment (one indexing thread) the old
+    /// version was found. It looked like a 1-in-9 flake because with two
+    /// threads the old line usually sat alone in a segment, which tantivy
+    /// drops whole once fully deleted.
+    #[test]
+    fn deleted_docs_are_not_hits() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        w.add(&line(1, 0, 1, "שלום עליכם")).unwrap();
+        w.add(&line(2, 1, 1, "שלומכם רב")).unwrap();
+        w.commit(None).unwrap();
+        w.delete(2);
+        w.add(&line(2, 1, 1, "ברכה רבה")).unwrap();
+        w.commit(None).unwrap();
+        let req = |p: &str| SearchRequest {
+            groups: vec![GroupSpec::Wildcard { pattern: p.into(), ignore_quotes: false }],
+            ..Default::default()
+        };
+        let ids = |r: SearchResult| r.hits.iter().map(|h| h.line_id).collect::<Vec<_>>();
+        assert_eq!(ids(index.search(&req("שלו*")).unwrap()), vec![1]);
+        assert_eq!(ids(index.search(&req("ברכ*")).unwrap()), vec![2]);
+        // a plain delete, no re-add
+        w.delete(1);
+        w.commit(None).unwrap();
+        assert!(index.search(&req("שלו*")).unwrap().hits.is_empty());
+    }
+
+    /// The parity diff that found the bug: FtsLib's quote-free index has
+    /// יציק, one edit from יצחק; ours keeps יצי"ק, which the DFA counted as two
+    /// edits. With the quote transparent it is one edit on both paths.
+    #[test]
+    fn fuzzy_quote_is_not_an_edit_when_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = build(
+            dir.path(),
+            IndexOptions::default(),
+            &[line(1, 0, 1, "ויציק יצי\"ק שמן"), line(2, 1, 1, "אבגד")],
+        );
+        let fuzzy = |ignore_quotes: bool| SearchRequest {
+            groups: vec![GroupSpec::Fuzzy { word: "יצחק".into(), distance: 1, ignore_quotes }],
+            ..Default::default()
+        };
+        for fm in [false, true] {
+            if fm {
+                let mut w = index.writer(50_000_000, 1).unwrap();
+                w.commit(None).unwrap();
+                w.merge_all().unwrap();
+                assert!(index.build_fm_sidecar().unwrap());
+            }
+            assert!(index.search(&fuzzy(false)).unwrap().hits.is_empty(), "fm={fm}: quote counts as an edit");
+            let mut r = index.search(&fuzzy(true)).unwrap();
+            assert_eq!(r.hits.len(), 1, "fm={fm}");
+            let s = r.session.locate("ויציק יצי\"ק שמן").unwrap();
+            let terms: Vec<String> = s.marks.chunks(3).map(|m| r.session.all_terms()[m[2] as usize].clone()).collect();
+            assert_eq!(terms, vec!["יצי\"ק"], "fm={fm}");
+        }
+    }
+
     /// The FM-index sidecar must give EXACTLY the walk's terms (and hits) for
     /// every shape it serves, cap included. `test_only_disable_fm` exists for
     /// this comparison alone.
@@ -582,6 +645,12 @@ mod tests {
         let fuzzy = |w: &str, d: u8| GroupSpec::Fuzzy {
             word: w.into(),
             distance: d,
+            ignore_quotes: false,
+        };
+        let fuzzy_q = |w: &str, d: u8| GroupSpec::Fuzzy {
+            word: w.into(),
+            distance: d,
+            ignore_quotes: true,
         };
         let groups: Vec<GroupSpec> = vec![
             wildcard("*אב", false),
@@ -604,6 +673,15 @@ mod tests {
             fuzzy("יצחק", 2),
             fuzzy("אב", 2),
             fuzzy("זזזז", 1),
+            // quote transparent: FM path (plain Levenshtein on quote-free
+            // forms) must equal the walk (DFA skipping the quote byte)
+            fuzzy_q("רשי", 1),
+            fuzzy_q("רמב\"ם", 1),
+            fuzzy_q("שלום", 2),
+            fuzzy_q("יצחק", 2),
+            // FtsLib's distance 3
+            fuzzy("שלום", 3),
+            fuzzy_q("יצחק", 3),
         ];
         for g in &groups {
             let run = |disable_fm: bool| {

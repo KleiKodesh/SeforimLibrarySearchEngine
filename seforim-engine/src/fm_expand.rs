@@ -122,9 +122,69 @@ pub fn expand_fuzzy(
     cap_like_the_walk(dict, kept, cap)
 }
 
+/// Plain Levenshtein distance over chars (insert, delete, substitute: FtsLib's
+/// `Levenshtein.Distance`), or None when it exceeds `max`.
+pub fn levenshtein_within(a: &[char], b: &[char], max: usize) -> Option<usize> {
+    if a.len().abs_diff(b.len()) > max {
+        return None;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        let mut row_min = cur[0];
+        for (j, &cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != cb);
+            cur[j + 1] = sub.min(prev[j + 1] + 1).min(cur[j] + 1);
+            row_min = row_min.min(cur[j + 1]);
+        }
+        if row_min > max {
+            return None;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    (prev[b.len()] <= max).then_some(prev[b.len()])
+}
+
+/// FtsLib `ExpandFuzzy` with the quote transparent: the sidecar's candidates
+/// (quote-free forms) are confirmed with the plain Levenshtein distance on
+/// the quote-free forms, exactly FtsLib's `Levenshtein.Distance` on its
+/// quote-free terms; distance up to 3 as FtsLib. Capped like the walk.
+pub fn expand_fuzzy_quote_free(
+    fm: &FmIndex,
+    dict: &TermDictionary,
+    word: &str,
+    max_distance: u8,
+    cap: usize,
+) -> Result<Vec<Vec<u8>>> {
+    let query: Vec<char> = text_form(word).chars().collect();
+    let mut buf = Vec::new();
+    let mut kept = Vec::new();
+    for (rowid, _) in fm.find_fuzzy(&text_form(word), max_distance as usize) {
+        if !term_of(dict, rowid, &mut buf)? {
+            continue;
+        }
+        let Ok(term) = std::str::from_utf8(&buf) else { continue };
+        let form: Vec<char> = text_form(term).chars().collect();
+        if let Some(d) = levenshtein_within(&form, &query, max_distance as usize) {
+            kept.push((d as u32, buf.clone()));
+        }
+    }
+    cap_like_the_walk(dict, kept, cap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn levenshtein_is_ftslibs() {
+        let c = |s: &str| s.chars().collect::<Vec<_>>();
+        assert_eq!(levenshtein_within(&c("יצחק"), &c("יציק"), 1), Some(1));
+        assert_eq!(levenshtein_within(&c("יצחק"), &c("קחצי"), 3), None); // no transposition
+        assert_eq!(levenshtein_within(&c("שלום"), &c("שלומות"), 3), Some(3));
+        assert_eq!(levenshtein_within(&c("אב"), &c("אבגדה"), 2), None);
+    }
 
     #[test]
     fn wildcard_shape_follows_ftslib() {

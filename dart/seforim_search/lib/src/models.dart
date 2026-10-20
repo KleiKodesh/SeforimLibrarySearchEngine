@@ -163,8 +163,10 @@ sealed class QueryGroup {
   /// A wildcard pattern (`*`, `?`). A rejected pattern skips its slot.
   const factory QueryGroup.wildcard(String pattern) = WildcardGroup;
 
-  /// Levenshtein neighbours of [word], distance 1..2, closest first.
-  const factory QueryGroup.fuzzy(String word, int distance) = FuzzyGroup;
+  /// Levenshtein neighbours of [word], distance 1..3 (3 needs the FM-index
+  /// sidecar; the walk path clamps to 2), closest first. With [ignoreQuotes]
+  /// distances are measured on the quote-free forms.
+  const factory QueryGroup.fuzzy(String word, int distance, {bool ignoreQuotes}) = FuzzyGroup;
 
   /// A slot any of the alternatives satisfies (a | b).
   const factory QueryGroup.any(List<QueryGroup> alternatives) = AnyGroup;
@@ -188,11 +190,13 @@ class WildcardGroup extends QueryGroup {
 }
 
 class FuzzyGroup extends QueryGroup {
-  const FuzzyGroup(this.word, this.distance);
+  const FuzzyGroup(this.word, this.distance, {this.ignoreQuotes = false});
   final String word;
   final int distance;
+  final bool ignoreQuotes;
   @override
-  Map<String, Object?> toJson() => {'kind': 'fuzzy', 'word': word, 'distance': distance.clamp(1, 2)};
+  Map<String, Object?> toJson() =>
+      {'kind': 'fuzzy', 'word': word, 'distance': distance.clamp(1, 3), 'ignore_quotes': ignoreQuotes};
 }
 
 class AnyGroup extends QueryGroup {

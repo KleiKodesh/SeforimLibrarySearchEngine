@@ -52,7 +52,14 @@ pub enum GroupSpec {
     /// Levenshtein neighbours of a word (FtsLib `word~N`), closest first,
     /// capped at 2000 terms. Distance is clamped to 2 (tantivy's DFA limit;
     /// FtsLib allowed 3).
-    Fuzzy { word: String, distance: u8 },
+    Fuzzy {
+        word: String,
+        distance: u8,
+        /// The quote is transparent (התעלם מגרשיים): distances on the
+        /// quote-free forms, as FtsLib's quote-free terms.
+        #[serde(default)]
+        ignore_quotes: bool,
+    },
     /// One slot satisfied by any of its alternatives (FtsLib `a | b`).
     /// Alternatives that cannot search (empty word, rejected wildcard) are
     /// dropped; if none remain, the slot is skipped.
@@ -579,11 +586,12 @@ impl LineIndex {
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
             }
-            GroupSpec::Fuzzy { word, distance } => {
+            GroupSpec::Fuzzy { word, distance, ignore_quotes } => {
                 if word.is_empty() {
                     return Ok(None);
                 }
                 let mut q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
+                q.set_ignore_quotes(*ignore_quotes);
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
             }
@@ -692,11 +700,12 @@ impl LineIndex {
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
-            GroupSpec::Fuzzy { word, distance } => {
+            GroupSpec::Fuzzy { word, distance, ignore_quotes } => {
                 if word.is_empty() {
                     return Ok(None);
                 }
                 let mut q = HebrewFuzzyQuery::new(self.fields.text, word.clone(), *distance);
+                q.set_ignore_quotes(*ignore_quotes);
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
@@ -761,20 +770,31 @@ impl LineIndex {
                 )?;
                 Ok(Some(terms))
             }
-            GroupSpec::Fuzzy { word, distance } => {
+            GroupSpec::Fuzzy { word, distance, ignore_quotes } => {
                 if word.is_empty() {
                     return Ok(None);
                 }
-                let q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
+                let mut q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
+                q.set_ignore_quotes(*ignore_quotes);
                 let inverted = dict()?;
-                let terms = fm_expand::expand_fuzzy(
-                    fm,
-                    inverted.terms(),
-                    &q.automaton(),
-                    q.word(),
-                    q.distance_limit(),
-                    q.max_expansions(),
-                )?;
+                let terms = if *ignore_quotes {
+                    fm_expand::expand_fuzzy_quote_free(
+                        fm,
+                        inverted.terms(),
+                        q.word(),
+                        q.distance_limit(),
+                        q.max_expansions(),
+                    )?
+                } else {
+                    fm_expand::expand_fuzzy(
+                        fm,
+                        inverted.terms(),
+                        &q.automaton(),
+                        q.word(),
+                        q.distance_limit(),
+                        q.max_expansions(),
+                    )?
+                };
                 Ok(Some(terms))
             }
             _ => Ok(None),
@@ -958,11 +978,24 @@ impl LineIndex {
         };
         for (ord, segment) in searcher.segment_readers().iter().enumerate() {
             let mut child = collector.for_segment(ord as SegmentOrdinal, segment)?;
-            weight.for_each_no_score(segment, &mut |docs| {
-                for &doc in docs {
-                    child.collect(doc, 0.0);
-                }
-            })?;
+            // `for_each_no_score` does NOT skip deleted docs (tantivy's own
+            // collectors check the alive bitset themselves). Without this an
+            // updated line (delete + add) came back in its OLD version too,
+            // whenever its segment kept other live docs.
+            match segment.alive_bitset() {
+                Some(alive) => weight.for_each_no_score(segment, &mut |docs| {
+                    for &doc in docs {
+                        if alive.is_alive(doc) {
+                            child.collect(doc, 0.0);
+                        }
+                    }
+                })?,
+                None => weight.for_each_no_score(segment, &mut |docs| {
+                    for &doc in docs {
+                        child.collect(doc, 0.0);
+                    }
+                })?,
+            }
             hits.extend(child.harvest());
         }
         if timing {

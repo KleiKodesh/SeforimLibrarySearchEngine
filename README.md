@@ -236,13 +236,21 @@ are not printed), so upstream's query-parser tests stay as they are.
     that text (no neighbour or DB logic in the engine).
   - It keeps the term table.
 - **Query groups:** word (with options), wildcard, grammar (`%`), fuzzy
-  (distance ≤2), and OR of alternatives.
+  (distance 1–3, FtsLib's range), and OR of alternatives.
 - **Fuzzy** is hebrew-fts's own `HebrewFuzzyQuery` (the Levenshtein DFA
   tantivy uses, built here because tantivy's wrapper cannot be built from
   outside): plain Levenshtein edits (a transposition is two, as FtsLib's
   `Levenshtein.Distance`), cap 2000 per segment, closest edit distance first,
   then shortest with the quote zero width, then most frequent. The plain
   query and the span slot are the same weight.
+  - **`ignore_quotes`** (on by default in the FtsLib facade, like every other
+    group kind): distances are measured on the quote-free forms, so the
+    indexed יצי"ק is one edit from יצחק, as FtsLib's quote-free term יציק is.
+    With the FM sidecar the candidates are confirmed with the plain
+    Levenshtein distance on the quote-free forms (FtsLib's
+    `Levenshtein.Distance`); without it the DFA skips the quote byte.
+  - **Distance 3** (FtsLib's maximum) runs through the FM sidecar; the walk
+    path builds a distance-3 DFA, which is slower to build.
 - **FM-index sidecar** (`<segment-id>.fmi`, a port of FtsLib's `FmIndex`):
   an FM-index over the term dictionary, built after the merge into one
   segment (`LineIndex::build_fm_sidecar`, C# `BuildFmSidecar` /
@@ -333,10 +341,13 @@ and query list, then diffs every hit with `compare.py`. The diff covers hit
 order, word distance, snippet window, snippet lines, flags, and each mark's
 offsets and term.
 
-On the full Otzaria DB (7,080,797 lines), first 2,000 hits per query: **16 of
-17 queries identical.** That covers plain words, multi-word, `%`, `*`, `?`,
-`|`, and distance 0/2/5. The one difference is `word~N`, where 2 hits differ
-because the fuzzy DFA counts an intra-word quote as an edit.
+On the full Otzaria DB (7,080,797 lines), first 2,000 hits per query: 16 of
+17 queries were identical. That covers plain words, multi-word, `%`, `*`, `?`,
+`|`, and distance 0/2/5. The one difference, `word~N`, was analysed: it was
+OUR bug, not FtsLib's. The fuzzy DFA counted the intra-word quote of יצי"ק
+as an edit, while every other query kind treats the quote as transparent
+under ignore-gershayim. Fixed (fuzzy `ignore_quotes`); see the comparison
+report for the current numbers.
 
 Full build (C# demo, .NET 10, 7,080,797 lines, measured 2026-10-20):
 
@@ -359,7 +370,6 @@ batch of located results reaches the host in 0.4–0.9 s. The C# demo's
 what a page needs.
 
 ## Differences from FtsLib (known, deliberate)
-- **Fuzzy distance** is capped at 2 (tantivy's limit; FtsLib allowed 3).
 - **Quotes:** the index keeps intra-word quotes (רש"י) where FtsLib dropped
   them. Matching ignores them through the "ignore gershayim" option, which the
   FtsLib facade turns on by default, so results match FtsLib. A quote after

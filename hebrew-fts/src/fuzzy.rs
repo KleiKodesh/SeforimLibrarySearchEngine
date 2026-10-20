@@ -22,14 +22,25 @@ use tantivy_fst::Automaton;
 
 use crate::walk::{DEFAULT_MAX_EXPANDED_TERMS, ZERO_WIDTH_BYTES};
 
-/// A Levenshtein DFA as a tantivy automaton.
-pub struct LevenshteinDfa(DFA);
+/// A Levenshtein DFA as a tantivy automaton. With `transparent_quotes` the
+/// canonical quote byte `"` is skipped (the state does not move), so an
+/// indexed רש"י is as far from the word as רשי: FtsLib's terms carried no
+/// quotes, and the ignore-gershayim option makes every other walk do the same.
+pub struct LevenshteinDfa {
+    dfa: DFA,
+    transparent_quotes: bool,
+}
 
 impl LevenshteinDfa {
     /// The edit distance of `term` from the query word (`AtLeast` for
-    /// non-matches).
+    /// non-matches), quotes skipped when they are transparent.
     pub fn distance(&self, term: &[u8]) -> Distance {
-        self.0.eval(term)
+        if self.transparent_quotes && term.contains(&b'"') {
+            let stripped: Vec<u8> = term.iter().copied().filter(|&b| b != b'"').collect();
+            self.dfa.eval(stripped)
+        } else {
+            self.dfa.eval(term)
+        }
     }
 }
 
@@ -37,11 +48,11 @@ impl Automaton for LevenshteinDfa {
     type State = u32;
 
     fn start(&self) -> Self::State {
-        self.0.initial_state()
+        self.dfa.initial_state()
     }
 
     fn is_match(&self, state: &Self::State) -> bool {
-        match self.0.distance(*state) {
+        match self.dfa.distance(*state) {
             Distance::Exact(_) => true,
             Distance::AtLeast(_) => false,
         }
@@ -52,7 +63,10 @@ impl Automaton for LevenshteinDfa {
     }
 
     fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
-        self.0.transition(*state, byte)
+        if self.transparent_quotes && byte == b'"' {
+            return *state;
+        }
+        self.dfa.transition(*state, byte)
     }
 }
 
@@ -66,19 +80,36 @@ pub struct HebrewFuzzyQuery {
     distance: u8,
     matched_terms_sink: Option<MatchedTermsSink>,
     max_expansions: usize,
+    ignore_quotes: bool,
 }
 
+/// FtsLib's `FuzzyExpander.MaxAllowedDistance`.
+pub const MAX_FUZZY_DISTANCE: u8 = 3;
+
 impl HebrewFuzzyQuery {
-    /// `distance`: 1 or 2 (clamped). The expansion is capped at
+    /// `distance`: 1..=[`MAX_FUZZY_DISTANCE`] (clamped, as FtsLib's
+    /// `ExpandFuzzy`). The expansion is capped at
     /// [`DEFAULT_MAX_EXPANDED_TERMS`] per segment, closest first.
     pub fn new(field: Field, word: impl Into<String>, distance: u8) -> HebrewFuzzyQuery {
         HebrewFuzzyQuery {
             field,
             word: word.into(),
-            distance: distance.clamp(1, 2),
+            distance: distance.clamp(1, MAX_FUZZY_DISTANCE),
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
+            ignore_quotes: false,
         }
+    }
+
+    /// Makes the quote transparent (התעלם מגרשיים): distances are measured
+    /// on the quote-free forms, as FtsLib's quote-free terms were.
+    pub fn set_ignore_quotes(&mut self, ignore: bool) {
+        self.ignore_quotes = ignore;
+    }
+
+    /// True when the quote is transparent.
+    pub fn ignore_quotes(&self) -> bool {
+        self.ignore_quotes
     }
 
     /// Collects the indexed forms this query matches into `sink` during the
@@ -110,11 +141,19 @@ impl HebrewFuzzyQuery {
     /// The Levenshtein DFA for this word (builder cached per distance, as
     /// in tantivy).
     pub fn automaton(&self) -> LevenshteinDfa {
-        static BUILDERS: [OnceLock<LevenshteinAutomatonBuilder>; 3] =
-            [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+        static BUILDERS: [OnceLock<LevenshteinAutomatonBuilder>; 4] =
+            [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
         let builder = BUILDERS[self.distance as usize]
             .get_or_init(|| LevenshteinAutomatonBuilder::new(self.distance, false));
-        LevenshteinDfa(builder.build_dfa(&self.word))
+        let word: String = if self.ignore_quotes {
+            self.word.chars().filter(|&c| c != '"').collect()
+        } else {
+            self.word.clone()
+        };
+        LevenshteinDfa {
+            dfa: builder.build_dfa(&word),
+            transparent_quotes: self.ignore_quotes,
+        }
     }
 
     fn automaton_weight(&self) -> AutomatonWeight<LevenshteinDfa> {

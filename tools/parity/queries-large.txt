@@ -1,0 +1,70 @@
+# Larger parity set: every FtsLib query kind, common and rare words, quoted
+# words, word distances and OR groups. One query per line; optional
+# TAB + max word distance. FtsLib syntax.
+# plain words: very common, common, rare
+אמר
+תורה
+ישראל
+שבת
+מצוה
+פסח
+ירושלים
+אלקים
+נבוכדנצר
+אחשורוש
+# quoted words (gershayim) and acronyms
+רש"י
+רמב"ם
+רמב"ן
+ז"ל
+ע"ש
+חז"ל
+תוס'
+# multi-word, any distance
+משה רבנו
+אברהם יצחק יעקב
+בית המקדש
+קריאת שמע
+תלמוד תורה
+עבודה זרה
+יום טוב
+ארץ ישראל
+# word distance
+משה אהרן	0
+משה אהרן	3
+שמע ישראל	0
+ויאמר משה	2
+אמר רבי	1
+רבי יוחנן	0
+רבי עקיבא	5
+# grammar (%)
+%שבת
+%ברכה
+ברכה%
+%מלך%
+%כהן
+דבר%
+# wildcards
+שלו*
+שבת*
+*לום
+*כהן
+*יצח*
+*דוש*
+שלו?ם
+מ?צוה
+ירושל?ים
+# fuzzy
+יצחק~1
+ירושלים~1
+אברהם~2
+שבת~1
+רש"י~1
+# OR groups
+רשי | רמבם
+שבת | יום טוב
+משה | אהרן כהן
+# long phrases
+תלמוד תורה כנגד כולם
+אלו דברים שאין להם שיעור
+שמע ישראל ה' אלקינו ה' אחד

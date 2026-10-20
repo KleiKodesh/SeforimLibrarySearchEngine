@@ -175,19 +175,28 @@ namespace SeforimSearch.Engine
         public static QueryGroup Any(params QueryGroup[] alternatives) => new AnyGroup(alternatives);
 
         /// <summary>Levenshtein neighbours of a word (word~N), closest first,
-        /// capped at 2000. Distance 1..2.</summary>
-        public static QueryGroup Fuzzy(string word, int distance) => new FuzzyGroup(word, distance);
+        /// capped at 2000. Distance 1..3 (FtsLib's MaxAllowedDistance; 3 needs the
+        /// FM-index sidecar, the walk path clamps to 2). With
+        /// <paramref name="ignoreQuotes"/> distances are measured on the quote-free
+        /// forms, as FtsLib's quote-free terms.</summary>
+        public static QueryGroup Fuzzy(string word, int distance, bool ignoreQuotes = false) =>
+            new FuzzyGroup(word, distance, ignoreQuotes);
 
         private sealed class FuzzyGroup : QueryGroup
         {
             private readonly string _word;
             private readonly int _distance;
-            public FuzzyGroup(string word, int distance) { _word = word; _distance = distance; }
+            private readonly bool _ignoreQuotes;
+            public FuzzyGroup(string word, int distance, bool ignoreQuotes)
+            {
+                _word = word; _distance = distance; _ignoreQuotes = ignoreQuotes;
+            }
             internal override void WriteJson(StringBuilder sb)
             {
                 sb.Append("{\"kind\":\"fuzzy\",\"word\":");
                 Json.WriteString(sb, _word);
-                sb.Append(",\"distance\":").Append(Math.Max(1, Math.Min(2, _distance)).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                sb.Append(",\"distance\":").Append(Math.Max(1, Math.Min(3, _distance)).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                sb.Append(",\"ignore_quotes\":").Append(_ignoreQuotes ? "true" : "false");
                 sb.Append('}');
             }
         }

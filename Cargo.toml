@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["hebrew-fts", "seforimdb-search"]
+members = ["hebrew-fts", "seforim-engine", "engine-ffi"]
 # tantivy/ is a separate workspace (our fork); members depend on it by path.
 exclude = ["tantivy"]
 

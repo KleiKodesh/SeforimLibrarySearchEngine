@@ -1,0 +1,15 @@
+[package]
+name = "seforim-engine"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "The search engine: a tantivy line index fed by the host, catalog-order search with per-group matched words, and FtsLib snippet location over host-supplied texts. No database code: the host owns the corpus."
+license = "MIT"
+
+[dependencies]
+tantivy = { path = "../tantivy" }
+hebrew-fts = { path = "../hebrew-fts" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

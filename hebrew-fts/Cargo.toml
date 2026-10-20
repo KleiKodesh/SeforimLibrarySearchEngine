@@ -11,3 +11,6 @@ tantivy = { path = "../tantivy" }
 tantivy-fst = "0.5"
 levenshtein_automata = "0.2.1"
 unicode-general-category = "1.0"
+# Fast non-cryptographic hasher for the per-token term lookup (already in the
+# lockfile through tantivy).
+rustc-hash = "2"

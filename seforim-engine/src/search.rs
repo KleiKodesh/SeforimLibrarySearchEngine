@@ -285,6 +285,8 @@ pub struct SnippetSession {
     negative: Option<NegativeFilter>,
     terms: TermTable,
     locator: SnippetWindowLocator,
+    /// One locator per `locate_many` worker, kept across batches.
+    pool: Vec<SnippetWindowLocator>,
 }
 
 /// One way a line can match: prepared terms plus the filters to apply.
@@ -297,10 +299,11 @@ struct Matcher {
 }
 
 impl Matcher {
-    /// A passing snippet with marks holding THIS matcher's term ordinals.
-    fn locate(&self, locator: &mut SnippetWindowLocator, text: &str) -> Option<Snippet> {
+    /// A passing snippet with marks holding THIS matcher's term ordinals,
+    /// over the text the locator last tokenized.
+    fn locate(&self, locator: &mut SnippetWindowLocator) -> Option<Snippet> {
         locator.set_min_groups(self.min_groups);
-        let d = locator.locate(text, &self.prepared, self.require_ordered, self.original_group_count);
+        let d = locator.locate_tokenized(&self.prepared, self.require_ordered, self.original_group_count);
         SnippetSession::raw(d, self.max_word_distance)
     }
 }
@@ -312,13 +315,19 @@ fn locate_with(
     locator: &mut SnippetWindowLocator,
     text: &str,
 ) -> Option<(usize, Snippet)> {
-    if negative.is_some_and(|n| n.excludes(locator, 0, text)) {
+    if text.is_empty() {
+        return None; // the locator never matches an empty text
+    }
+    // Scan the text once; the negative filter and every matcher reuse the
+    // tokens (they depend on the text only, not on the query).
+    locator.tokenize(text);
+    if negative.is_some_and(|n| n.excludes(locator, 0)) {
         return None;
     }
     matchers
         .iter()
         .enumerate()
-        .find_map(|(i, m)| m.locate(locator, text).map(|s| (i, s)))
+        .find_map(|(i, m)| m.locate(locator).map(|s| (i, s)))
 }
 
 /// The excluded words checked on the line text: a line where they appear
@@ -331,10 +340,11 @@ struct NegativeFilter {
 
 impl NegativeFilter {
     /// True when `text` carries the excluded words within the limits.
-    fn excludes(&self, locator: &mut SnippetWindowLocator, min_groups: usize, text: &str) -> bool {
+    /// Reads the text the locator last tokenized.
+    fn excludes(&self, locator: &mut SnippetWindowLocator, min_groups: usize) -> bool {
         // the negative always needs ALL its words, whatever the positive's mode
         locator.set_min_groups(0);
-        let d = locator.locate(text, &self.prepared, self.require_ordered, 0);
+        let d = locator.locate_tokenized(&self.prepared, self.require_ordered, 0);
         let hit = d.is_match && d.word_distance <= self.max_word_distance;
         locator.set_min_groups(min_groups);
         hit
@@ -362,7 +372,6 @@ impl SnippetSession {
         if self.matchers.is_empty() {
             return vec![None; texts.len()];
         }
-        let (context, keep_marks) = (self.context_words, self.keep_marks);
         let matchers = &self.matchers;
         let negative = self.negative.as_ref();
         let threads = std::thread::available_parallelism()
@@ -376,27 +385,68 @@ impl SnippetSession {
                 located.push(locate_with(matchers, negative, &mut self.locator, t));
             }
         } else {
-            let chunk = texts.len().div_ceil(threads);
+            // Work is split by BYTES, not by text count: locate cost is linear
+            // in the text length, and count-based chunks left one thread with
+            // the long lines. Contiguous chunks of ~1/8 of a thread's share are
+            // handed out through an atomic counter (dynamic balancing), and
+            // their results are reassembled by chunk index, so the output
+            // order — and with it the term-id numbering below — is exactly
+            // the sequential one.
+            let total: usize = texts.iter().map(|t| t.len()).sum();
+            let target = (total / (threads * 8)).max(1);
+            let mut bounds = vec![0usize];
+            let mut acc = 0usize;
+            for (i, t) in texts.iter().enumerate() {
+                acc += t.len();
+                if acc >= target && i + 1 < texts.len() {
+                    bounds.push(i + 1);
+                    acc = 0;
+                }
+            }
+            bounds.push(texts.len());
+            let chunks = bounds.len() - 1;
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            // Locators are kept across calls (one per worker): their scratch
+            // buffers are already grown, so a batch allocates nothing per line.
+            let (context, keep_marks) = (self.context_words, self.keep_marks);
+            while self.pool.len() < threads {
+                self.pool.push(if keep_marks {
+                    SnippetWindowLocator::keeping_marks(context)
+                } else {
+                    SnippetWindowLocator::new(context)
+                });
+            }
+            let mut parts: Vec<Option<Vec<Option<(usize, Snippet)>>>> = vec![None; chunks];
             std::thread::scope(|scope| {
-                let handles: Vec<_> = texts
-                    .chunks(chunk)
-                    .map(|part| {
+                let (bounds, next) = (&bounds, &next);
+                let handles: Vec<_> = self.pool[..threads]
+                    .iter_mut()
+                    .map(|locator| {
                         scope.spawn(move || {
-                            let mut locator = if keep_marks {
-                                SnippetWindowLocator::keeping_marks(context)
-                            } else {
-                                SnippetWindowLocator::new(context)
-                            };
-                            part.iter()
-                                .map(|t| locate_with(matchers, negative, &mut locator, t))
-                                .collect::<Vec<_>>()
+                            let mut done = Vec::new();
+                            loop {
+                                let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if c >= chunks {
+                                    break;
+                                }
+                                let part = &texts[bounds[c]..bounds[c + 1]];
+                                let res: Vec<_> =
+                                    part.iter().map(|t| locate_with(matchers, negative, locator, t)).collect();
+                                done.push((c, res));
+                            }
+                            done
                         })
                     })
                     .collect();
                 for h in handles {
-                    located.extend(h.join().expect("snippet thread panicked"));
+                    for (c, res) in h.join().expect("snippet thread panicked") {
+                        parts[c] = Some(res);
+                    }
                 }
             });
+            for p in parts {
+                located.extend(p.expect("every chunk is located"));
+            }
         }
         // Ordinals → search-wide term ids, in document order (deterministic).
         located
@@ -832,6 +882,7 @@ impl LineIndex {
             negative: None,
             terms: TermTable::default(),
             locator,
+            pool: Vec::new(),
         };
 
         let reader = self.index.reader()?;

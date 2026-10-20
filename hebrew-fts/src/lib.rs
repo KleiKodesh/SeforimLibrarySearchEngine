@@ -18,6 +18,7 @@ pub mod fuzzy;
 pub mod grammar;
 pub mod grammar_query;
 mod html_tags;
+mod scanner_reference;
 pub mod prepared;
 pub mod scanner;
 pub mod set_automaton;

@@ -291,6 +291,24 @@ mod tests {
         let one: Vec<_> = refs.iter().map(|t| b.session.locate(t)).collect();
         assert_eq!(many, one);
         assert_eq!(a.session.all_terms(), b.session.all_terms());
+        // byte-balanced chunks over very uneven lengths, non-matching lines,
+        // and a second batch reusing the pooled locators: still identical
+        let texts: Vec<String> = (0..997)
+            .map(|i| match i % 5 {
+                0 => format!("{}ברכה", "קק ".repeat(i * 7)),
+                1 => "אין כאן".to_string(),
+                2 => String::new(),
+                3 => format!("רבה ברכה {}", "<b>א</b>ב&nbsp;".repeat(i % 50)),
+                _ => "ברכה".repeat(i % 3 + 1),
+            })
+            .collect();
+        let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        for _ in 0..2 {
+            let many = a.session.locate_many(&refs);
+            let one: Vec<_> = refs.iter().map(|t| b.session.locate(t)).collect();
+            assert_eq!(many, one);
+        }
+        assert_eq!(a.session.all_terms(), b.session.all_terms());
 
         // a rejected wildcard skips its slot rather than failing the search
         let result = index

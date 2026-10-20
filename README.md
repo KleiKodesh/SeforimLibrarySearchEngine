@@ -333,6 +333,17 @@ are not printed), so upstream's query-parser tests stay as they are.
   snippet locate + widening), time to the first batch, total, and exit code. Every run's full
   log is kept next to the report.
 
+## Snippet-locate speed
+
+The host loop that reads every hit spends most of its engine time locating
+snippets. Measured single-thread on 2.2 KB HTML lines
+(`cargo run --release -p hebrew-fts --example locate_bench`): the scanner
+went from ~100 to ~380 MB/s and the full locate from ~70 to ~250 MB/s, with
+byte-identical output (the old scanner is kept as a test-only reference and
+compared on ~65 edge cases plus 20,000 random strings). `locate_many` splits
+work by bytes across reused per-thread locators. An 802,736-hit search read
+in full went from 54.8 s to 29.0 s (C# demo, no-positions index).
+
 ## Parity with FtsLib (measured)
 
 `tools/parity/` runs KitveiHakodesh Core's own searcher on the installed FtsLib

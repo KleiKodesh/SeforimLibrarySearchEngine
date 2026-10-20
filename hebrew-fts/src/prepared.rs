@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 
+use rustc_hash::FxHashMap;
+
 /// One query term: its ordinal (0..term_count, first-seen order over the
 /// groups) and the indices of every group that contains it.
 #[derive(Debug, Clone)]
@@ -23,7 +25,24 @@ pub struct PreparedTerm {
 /// Frozen term→group map for one query. Safe to share across threads.
 #[derive(Debug, Clone)]
 pub struct PreparedQueryGroups {
-    term_to_groups: HashMap<String, PreparedTerm>,
+    /// FxHash: the snippet locator probes this once per token of every
+    /// located line, so hashing speed matters; the map is built from query
+    /// terms only (no untrusted-key DoS concern). Lookup results are the same
+    /// as with any hasher.
+    term_to_groups: FxHashMap<String, PreparedTerm>,
+    /// Bit `min(len, 63)` set for every term's byte length: a token whose
+    /// length has no bit cannot be a term, so most tokens skip the hash.
+    len_mask: u64,
+    /// 256-bit sets of every term's second byte (its first Hebrew letter's
+    /// distinguishing byte) and last byte. Same idea: a cheap necessary
+    /// condition checked before hashing. Empty terms are kept out of these
+    /// filters (`has_empty` sends empty probes straight to the map).
+    second_byte: [u64; 4],
+    last_byte: [u64; 4],
+    has_empty: bool,
+    /// Each term's groups by ordinal (a copy of `term_to_groups`' values),
+    /// so a caller holding an ordinal reads them without hashing.
+    groups_by_ordinal: Vec<Vec<usize>>,
     terms: Vec<String>,
     group_count: usize,
 }
@@ -77,14 +96,34 @@ impl PreparedQueryGroups {
     }
 
     fn freeze(building: Vec<(String, Vec<usize>)>, group_count: usize) -> PreparedQueryGroups {
-        let mut term_to_groups = HashMap::with_capacity(building.len());
+        let mut term_to_groups = FxHashMap::default();
+        term_to_groups.reserve(building.len());
         let mut terms = Vec::with_capacity(building.len());
+        let mut len_mask = 0u64;
+        let mut second_byte = [0u64; 4];
+        let mut last_byte = [0u64; 4];
+        let mut has_empty = false;
+        let mut groups_by_ordinal = Vec::with_capacity(building.len());
         for (ordinal, (term, groups)) in building.into_iter().enumerate() {
+            len_mask |= 1u64 << term.len().min(63);
+            match Self::probe_bytes(&term) {
+                Some((a, z)) => {
+                    second_byte[a as usize >> 6] |= 1u64 << (a & 63);
+                    last_byte[z as usize >> 6] |= 1u64 << (z & 63);
+                }
+                None => has_empty = true,
+            }
             terms.push(term.clone());
+            groups_by_ordinal.push(groups.clone());
             term_to_groups.insert(term, PreparedTerm { ordinal, groups });
         }
         PreparedQueryGroups {
             term_to_groups,
+            len_mask,
+            second_byte,
+            last_byte,
+            has_empty,
+            groups_by_ordinal,
             terms,
             group_count,
         }
@@ -113,7 +152,34 @@ impl PreparedQueryGroups {
     /// The term's ordinal and groups, or None when it is not part of the
     /// query. Allocation-free: probes the map by `&str`.
     pub fn get(&self, term: &str) -> Option<&PreparedTerm> {
+        if self.len_mask & (1u64 << term.len().min(63)) == 0 {
+            return None; // no term has this byte length
+        }
+        match Self::probe_bytes(term) {
+            Some((a, z)) => {
+                let has = |set: &[u64; 4], x: u8| set[x as usize >> 6] & (1u64 << (x & 63)) != 0;
+                if !has(&self.second_byte, a) || !has(&self.last_byte, z) {
+                    return None; // no term has these bytes there
+                }
+            }
+            None if !self.has_empty => return None,
+            None => {}
+        }
         self.term_to_groups.get(term)
+    }
+
+    /// The bytes the pre-filters key on: the second byte (the first byte when
+    /// the string has one) and the last byte. None for the empty string.
+    #[inline(always)]
+    fn probe_bytes(s: &str) -> Option<(u8, u8)> {
+        let b = s.as_bytes();
+        let last = *b.last()?;
+        Some((b[1.min(b.len() - 1)], last))
+    }
+
+    /// The groups of the term with the given ordinal.
+    pub fn groups_at(&self, ordinal: usize) -> &[usize] {
+        &self.groups_by_ordinal[ordinal]
     }
 }
 

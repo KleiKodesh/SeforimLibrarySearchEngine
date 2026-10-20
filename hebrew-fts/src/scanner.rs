@@ -5,8 +5,8 @@
 //! word is reported with its raw source span (byte AND UTF-16 offsets into the
 //! original string) and its normalized form.
 //!
-//! The C# original indexes strings by UTF-16 code units; this port walks a
-//! precomputed `(byte, utf16, char)` table so the control flow mirrors the
+//! The C# original indexes strings by UTF-16 code units; this port walks the
+//! UTF-8 bytes carrying both byte and UTF-16 offsets, so the control flow mirrors the
 //! original index-based loop exactly, while emitting byte offsets (natural for
 //! Rust slicing / tantivy) alongside UTF-16 offsets (what the JS frontend and
 //! the C# descriptors use).
@@ -67,33 +67,36 @@ pub fn scan(text: &str, on_word: impl FnMut(&str, WordSpan)) -> usize {
 ///
 /// Returns the text's length in UTF-16 code units (C#'s `string.Length`),
 /// known from the same pass.
+///
+/// Implementation: the C# original is an index loop over UTF-16 units. This
+/// port walks the UTF-8 bytes directly, carrying the current char's byte AND
+/// UTF-16 offsets (`b`, `u`) — every place the C# reads `i` reads one of
+/// them. The control flow (branch order, flush points, entity skip, visible
+/// counting) is the C# loop's, step for step; the pre-optimisation version
+/// that materialised a `(byte, utf16, char)` table per line is kept in
+/// `scanner_reference.rs` and a property test asserts identical output.
 #[allow(unused_assignments)] // the final flush!'s buffer reset is never read
 pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, WordSpan)) -> usize {
-    if text.is_empty() {
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    if n == 0 {
         return 0;
     }
 
-    // (byte offset, utf16 offset, char) for every char — lets the main loop use
-    // plain indices and arbitrary forward jumps, exactly like the C# for-loop.
-    let mut char_table: Vec<(usize, usize, char)> = Vec::with_capacity(text.len());
-    let mut u16_pos = 0usize;
-    for (byte_pos, c) in text.char_indices() {
-        char_table.push((byte_pos, u16_pos, c));
-        u16_pos += c.len_utf16();
-    }
-    let total_bytes = text.len();
-    let total_utf16 = u16_pos;
-    let len = char_table.len();
-    let byte_at = |i: usize| if i < len { char_table[i].0 } else { total_bytes };
-    let utf16_at = |i: usize| if i < len { char_table[i].1 } else { total_utf16 };
-
     // Normalized word buffer — reused across words.
     let mut buf = String::with_capacity(64);
-    let mut buf_chars = 0usize; // chars in buf (letters are BMP: chars == UTF-16 units)
+    let mut buf_chars = 0usize; // letters in buf (letters are BMP: chars == UTF-16 units)
     let mut buf_first_latin = false; // is_latin_lower(buf[0])
+    // Byte length of `buf` up to and including its last letter, and whether a
+    // quote was pushed after that letter. Tracked while building so flush!
+    // need not re-scan the word for its last letter (same result: buf only
+    // ever holds letters, kept marks and '"').
+    let mut last_letter_end = 0usize;
+    let mut quote_in_tail = false;
 
-    // Tag name buffer.
-    let mut tag_name: Vec<char> = Vec::with_capacity(TAG_NAME_CAP);
+    // Tag name buffer (fixed array: the name is capped at TAG_NAME_CAP chars).
+    let mut tag_name = ['\0'; TAG_NAME_CAP];
+    let mut tag_len = 0usize;
     let mut in_tag = false;
     let mut tag_name_done = false; // first space seen — attribute chars must not join the name
 
@@ -102,28 +105,27 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
     let mut word_start_visible = 0usize;
     let mut visible = 0usize; // cumulative visible chars up to current position
 
+    // Current char position: byte offset and UTF-16 offset.
+    let mut b = 0usize;
+    let mut u = 0usize;
+
     macro_rules! flush {
-        ($i:expr) => {{
+        ($end_b:expr, $end_u:expr) => {{
             if buf_chars > 1 && buf_chars < 30 {
                 // A quote is part of the word only BETWEEN letters (רש"י). One
                 // after the last letter is quotation punctuation (יצחק"): FtsLib
-                // drops it, so it must not become part of the term.
-                let last_letter_end = buf
-                    .char_indices()
-                    .filter(|&(_, c)| chars::is_letter(c))
-                    .last()
-                    .map(|(i, c)| i + c.len_utf8())
-                    .unwrap_or(0);
-                if buf[last_letter_end..].contains('"') {
+                // drops it, so it must not become part of the term. The tail
+                // after the last letter holds only kept marks and quotes.
+                if quote_in_tail {
                     let tail: String = buf[last_letter_end..].chars().filter(|&c| c != '"').collect();
                     buf.truncate(last_letter_end);
                     buf.push_str(&tail);
                 }
                 let span = WordSpan {
                     byte_start: word_start_byte,
-                    byte_end: byte_at($i),
+                    byte_end: $end_b,
                     utf16_start: word_start_utf16,
-                    utf16_end: utf16_at($i),
+                    utf16_end: $end_u,
                     visible_start: word_start_visible,
                     letters: buf_chars,
                 };
@@ -131,32 +133,94 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
             }
             buf.clear();
             buf_chars = 0;
+            last_letter_end = 0;
+            quote_in_tail = false;
         }};
     }
 
-    let mut i = 0usize;
-    while i < len {
-        let c = char_table[i].2;
+    while b < n {
+        // ── FAST PATHS (outside tags) ───────────────────────
+        // The two commonest chars by far, handled before the general decode.
+        // Each does exactly what the general branches below do for that char
+        // (the branches are disjoint, so testing these first changes nothing).
+        if !in_tag {
+            let x = bytes[b];
+            // Hebrew letter alef..tav = U+05D0..U+05EA = D7 90..D7 AA.
+            if x == 0xD7 && (0x90..=0xAA).contains(&bytes[b + 1]) {
+                // = the WORD BUILDING branch for a non-Latin letter.
+                if buf_chars > 0 && buf_first_latin {
+                    flush!(b, u); // script boundary
+                }
+                if buf_chars == 0 {
+                    word_start_byte = b;
+                    word_start_utf16 = u;
+                    word_start_visible = visible;
+                    buf_first_latin = false;
+                }
+                buf.push_str(&text[b..b + 2]);
+                buf_chars += 1;
+                last_letter_end = buf.len();
+                quote_in_tail = false;
+                visible += 1;
+                b += 2;
+                u += 1;
+                continue;
+            }
+            // Nikud / te'amim U+0591..U+05BF = D6 91..D6 BF, minus the maqaf
+            // U+05BE (D6 BE) = the strip-or-keep branch. (The few strippable
+            // marks above U+05BF take the general path.)
+            if x == 0xD6 && bytes[b + 1] >= 0x91 && bytes[b + 1] != 0xBE {
+                if keep_marks && buf_chars > 0 {
+                    buf.push_str(&text[b..b + 2]);
+                }
+                b += 2;
+                u += 1;
+                continue;
+            }
+            // ASCII space = the final separator branch.
+            if x == b' ' {
+                flush!(b, u);
+                visible += 1;
+                b += 1;
+                u += 1;
+                continue;
+            }
+        }
+
+        let (c, clen) = decode_char(bytes, b);
+        // A 4-byte UTF-8 char is a surrogate pair in UTF-16; all others are one unit.
+        let ulen = if clen == 4 { 2 } else { 1 };
 
         // ── HTML TAGS ────────────────────────────────────────
         if in_tag {
             if c == '>' {
-                if html_tags::is_word_break_tag(&tag_name) {
-                    flush!(i);
+                if html_tags::is_word_break_tag(&tag_name[..tag_len]) {
+                    flush!(b, u);
                 }
                 in_tag = false;
-                tag_name.clear();
+                tag_len = 0;
             } else if !tag_name_done {
                 // Stop accumulating at the first space — everything after it is
                 // attributes, which must not corrupt the tag name the flush
                 // decision above depends on.
                 if c == ' ' || c == '\t' {
                     tag_name_done = true;
-                } else if tag_name.len() < TAG_NAME_CAP && c != '/' {
-                    tag_name.push(c);
+                } else if tag_len < TAG_NAME_CAP && c != '/' {
+                    tag_name[tag_len] = c;
+                    tag_len += 1;
                 }
+            } else {
+                // Attributes: nothing happens until '>'. Jump straight to it
+                // ('>' is ASCII, so it never occurs inside a multi-byte char),
+                // counting the skipped UTF-16 units.
+                let rest = &bytes[b..];
+                let skip = rest.iter().position(|&x| x == b'>').unwrap_or(rest.len());
+                u += utf16_len(&rest[..skip]);
+                b += skip;
+                continue;
             }
-            i += 1;
+            b += clen;
+            u += ulen;
             continue;
         }
 
@@ -169,9 +233,10 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
             // block tags and sup/sub break the word, everything else is
             // transparent.
             in_tag = true;
-            tag_name.clear();
+            tag_len = 0;
             tag_name_done = false;
-            i += 1;
+            b += 1;
+            u += 1;
             continue;
         }
 
@@ -181,18 +246,20 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
             // Flush at the '&' (the entity is the separator, so it is NOT part
             // of the word's raw span); the whole entity stays outside every
             // token span.
-            flush!(i);
-            html_tags::skip_entity(&char_table, len, &mut i);
+            flush!(b, u);
+            skip_entity(bytes, &mut b, &mut u);
             visible += 1; // the entity renders as one visible char
-            i += 1;
+            b += 1; // past the '&' (bare) or the ';' (well-formed)
+            u += 1;
             continue;
         }
 
         // ── MAQAF ─ word-joining hyphen acts as separator ────
         if c == '\u{05BE}' {
-            flush!(i);
+            flush!(b, u);
             visible += 1;
-            i += 1;
+            b += clen;
+            u += ulen;
             continue;
         }
 
@@ -202,12 +269,17 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
                 // Kept in the token text (never counted as a letter).
                 buf.push(c);
             }
-            i += 1;
+            b += clen;
+            u += ulen;
             continue;
         }
 
-        if c as u32 > 127 && get_general_category(c) == GeneralCategory::NonspacingMark {
-            i += 1;
+        // The Unicode category lookup is a table search; Hebrew and ASCII letters
+        // (the vast majority of chars) are never non-spacing marks, so skip it
+        // for them. Same result, ~1 lookup per non-letter char instead of per char.
+        if c as u32 > 127 && !chars::is_letter(c) && get_general_category(c) == GeneralCategory::NonspacingMark {
+            b += clen;
+            u += ulen;
             continue;
         }
 
@@ -220,18 +292,20 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
             // (bדה), a Hebrew prefix on a foreign word (הOU), or entity residue
             // (בשבת&amp) — from being indexed as one unsearchable token.
             if buf_chars > 0 && chars::is_latin_lower(c) != buf_first_latin {
-                flush!(i); // emits the completed run (if len 2..29), resets the buffer
+                flush!(b, u); // emits the completed run (if len 2..29), resets the buffer
             }
 
             if buf_chars == 0 {
-                word_start_byte = char_table[i].0;
-                word_start_utf16 = char_table[i].1;
+                word_start_byte = b;
+                word_start_utf16 = u;
                 word_start_visible = visible;
                 buf_first_latin = chars::is_latin_lower(c);
             }
 
             buf.push(c);
             buf_chars += 1;
+            last_letter_end = buf.len();
+            quote_in_tail = false;
             visible += 1;
         } else if chars::is_intra_word_quote(c) && buf_chars > 0 {
             // Hebrew geresh/gershayim and ASCII quotes appearing inside a word
@@ -241,19 +315,89 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
             // (ignore-gershayim option). They do not count toward the 2..29
             // letter length rule (buf_chars counts letters only).
             buf.push('"');
+            quote_in_tail = true;
             visible += 1;
         } else {
-            flush!(i);
+            flush!(b, u);
             // Non-letter separators (space, punctuation, etc.) count as
             // visible. The C# original counts UTF-16 units.
-            visible += c.len_utf16();
+            visible += ulen;
         }
 
-        i += 1;
+        b += clen;
+        u += ulen;
     }
 
-    flush!(len);
-    total_utf16
+    flush!(n, u);
+    u
+}
+
+/// Decodes the char starting at byte `b` of valid UTF-8, with its byte length.
+#[inline(always)]
+fn decode_char(bytes: &[u8], b: usize) -> (char, usize) {
+    let x = bytes[b];
+    if x < 0x80 {
+        return (x as char, 1);
+    }
+    let (cp, len) = if x < 0xE0 {
+        (((x as u32 & 0x1F) << 6) | (bytes[b + 1] as u32 & 0x3F), 2)
+    } else if x < 0xF0 {
+        (
+            ((x as u32 & 0x0F) << 12) | ((bytes[b + 1] as u32 & 0x3F) << 6) | (bytes[b + 2] as u32 & 0x3F),
+            3,
+        )
+    } else {
+        (
+            ((x as u32 & 0x07) << 18)
+                | ((bytes[b + 1] as u32 & 0x3F) << 12)
+                | ((bytes[b + 2] as u32 & 0x3F) << 6)
+                | (bytes[b + 3] as u32 & 0x3F),
+            4,
+        )
+    };
+    // SAFETY: `bytes` comes from a `&str` and `b` is always on a char
+    // boundary, so this is a valid scalar value.
+    (unsafe { char::from_u32_unchecked(cp) }, len)
+}
+
+/// UTF-16 length of a run of whole UTF-8 chars: one unit per char (count of
+/// non-continuation bytes) plus one more per 4-byte char (a surrogate pair).
+#[inline]
+fn utf16_len(bytes: &[u8]) -> usize {
+    bytes.iter().map(|&x| usize::from((x & 0xC0) != 0x80) + usize::from(x >= 0xF0)).sum()
+}
+
+/// FtsLib's entity skip on the byte walk. `(b, u)` is the `&`. A well-formed
+/// entity is `&`, then 1+ chars starting less than 10 UTF-16 units after the
+/// `&`'s successor, then `;` — the first char at offset ≥10 or the first `;`
+/// ends the probe, and the entity is accepted only if that char is a `;` and
+/// not the `&`'s direct successor. On success `(b, u)` moves to the `;` (the
+/// caller then steps past it); otherwise it stays on the `&`. Identical to the
+/// table form kept in `html_tags::skip_entity` for the reference scanner.
+#[inline]
+fn skip_entity(bytes: &[u8], b: &mut usize, u: &mut usize) {
+    let n = bytes.len();
+    let start_b = *b + 1;
+    if start_b >= n {
+        return;
+    }
+    let start_u = *u + 1;
+    let (mut eb, mut eu) = (start_b, start_u);
+    loop {
+        if eb >= n {
+            return; // ran off the end: malformed
+        }
+        let (c, clen) = decode_char(bytes, eb);
+        if eu - start_u >= 10 || c == ';' {
+            if c == ';' && eb > start_b {
+                *b = eb;
+                *u = eu;
+            }
+            return;
+        }
+        eb += clen;
+        eu += if clen == 4 { 2 } else { 1 };
+    }
 }
 
 /// A single word token produced by [`TextTokens::tokenize`].
@@ -505,5 +649,71 @@ mod tests {
         let s = spans(text);
         assert_eq!(s[0].0, "וראה");
         assert_eq!(&text[s[0].1.byte_start..s[0].1.byte_end], "ורא<b>ה</b>");
+    }
+
+    /// Everything the scanner reports, for comparing two implementations.
+    fn scan_all(f: fn(&str, bool, &mut dyn FnMut(&str, WordSpan)) -> usize, text: &str, keep: bool) -> (Vec<(String, WordSpan)>, usize) {
+        let mut out = Vec::new();
+        let n = f(text, keep, &mut |w, s| out.push((w.to_string(), s)));
+        (out, n)
+    }
+    fn new_impl(t: &str, k: bool, cb: &mut dyn FnMut(&str, WordSpan)) -> usize {
+        crate::scanner::scan_with(t, k, cb)
+    }
+    fn old_impl(t: &str, k: bool, cb: &mut dyn FnMut(&str, WordSpan)) -> usize {
+        crate::scanner_reference::scan_with(t, k, cb)
+    }
+
+    fn assert_same(text: &str) {
+        for keep in [false, true] {
+            assert_eq!(scan_all(new_impl, text, keep), scan_all(old_impl, text, keep), "keep_marks={keep} text={text:?}");
+        }
+    }
+
+    #[test]
+    fn matches_reference_on_edge_cases() {
+        let long_heb = "א".repeat(40);
+        let long_lat = "x".repeat(31);
+        let cases = [
+            "", "א", "אב", "&", "&;", "&a;", "אב&", "אב&;גד", "<", ">", "<b", "אב<b", "אב<div class=\"x\"",
+            "אב<sup>1</sup>גד", "אב<SUB>x</SUB>גד", "אב</p>גד", "אב<p/>גד", "אב<br />גד", "אב<!-- c -->גד",
+            "אב<span\tstyle='a>b'>גד", "אב<abcdefghijklmnopqrstuvwxyz>גד", "אב<divx>גד", "אב<דיב>גד",
+            "אב&nbsp;גד", "אב&#1234;גד", "אב&abcdefghij;גד", "אב&abcdefghi;גד", "אב&abcdefgh😀;גד",
+            "אב&abcdefgh😀x;גד", "אב&😀;גד", "&&&;;", "על־פני", "רש\"י", "רש\"\"", "יצחק\"", "יצחק\u{05B0}\"\u{05B0}",
+            "ר' עקיבא", "תורה'' שלמה", "רשב\u{05F4}א", "ג\u{05F3}", "\"אב\"", "בְּרֵאשִׁית בָּרָא", "בְּ שם",
+            "אב\u{0300}גד", "אב\u{05C0}גד", "אב\u{05C3}גד", "abcדה", "דהabc", "HeLLo WoRLD", "a\u{05B0}b",
+            "😀אב😀גד😀", "אב\u{10000}", &long_heb, &long_lat, "אב\u{1F600}&nbsp;\u{1F600}גד", "\u{200F}אב\u{200E}",
+            "אב<", "אב<b>", "אב\r\nגד\tהו", "ﬠאב", "אבּגד", "\u{05BE}\u{05BE}אב\u{05BE}",
+        ];
+        for c in cases {
+            assert_same(c);
+        }
+    }
+
+    #[test]
+    fn matches_reference_on_generated_strings() {
+        let pieces = [
+            "א", "ב", "ג", "ש", "ת", "ך", "ם", "a", "Z", "q", "\u{05B0}", "\u{05B4}", "\u{0591}", "\u{05AF}",
+            "\u{05BC}", "\u{05C1}", "\u{05C7}", "\u{05C0}", "\u{05C3}", "\u{05C6}", "\u{05BE}", "\"", "'", "\u{05F3}",
+            "\u{05F4}", " ", "  ", ",", ".", ":", "1", "<b>", "</b>", "<i>", "<span class=\"x\">", "</span>", "<br>",
+            "<br/>", "<p>", "</p>", "<div id='a'>", "<sup>", "</sup>", "<sub>", "</sub>", "<SUP>", "<small>", "<",
+            ">", "/", "&nbsp;", "&amp;", "&#160;", "&", ";", "&abcdefghijkl;", "&x", "😀", "\u{10FFFF}", "é",
+            "\u{0300}", "\u{200F}", "\t", "\n", "אבגדהוזחטיכלמנסעפצקרשת", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef",
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..20_000 {
+            let len = (next() % 40) as usize;
+            let mut s = String::new();
+            for _ in 0..len {
+                s.push_str(pieces[(next() % pieces.len() as u64) as usize]);
+            }
+            assert_same(&s);
+        }
     }
 }

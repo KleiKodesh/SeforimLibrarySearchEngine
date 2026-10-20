@@ -34,6 +34,9 @@ pub const DEFAULT_CONTEXT_WORDS: usize = 8;
 /// (e.g. a single paragraph with no word breaks).
 const SAFETY_CEILING: usize = 4000;
 
+/// [`SnippetWindowLocator`]'s per-token ordinal for a token that is no query term.
+const NO_TERM: u32 = u32::MAX;
+
 /// Ints per entry in [`SnippetDescriptor::mark_ranges`]: start, length, term
 /// ordinal.
 pub const MARK_STRIDE: usize = 3;
@@ -94,6 +97,11 @@ impl SnippetDescriptor<'_> {
 pub struct SnippetWindowLocator {
     context_words: usize,
     text_tokens: TextTokens,
+    /// Per token of the current text: its term ordinal in the prepared query,
+    /// or [`NO_TERM`]. Looked up ONCE per token; the window search, the order
+    /// check and the marks all read it instead of re-hashing the token
+    /// (FtsLib looks the same token up in each stage; same answers).
+    ordinals: Vec<u32>,
     group_count: Vec<usize>,
     mark_ranges: Vec<usize>,
     /// Groups a window must cover; 0 = all of them (FtsLib). See
@@ -124,6 +132,7 @@ impl SnippetWindowLocator {
         SnippetWindowLocator {
             context_words,
             text_tokens,
+            ordinals: Vec::new(),
             group_count: vec![0; 8],
             mark_ranges: Vec::with_capacity(24),
             min_groups: 0,
@@ -154,32 +163,62 @@ impl SnippetWindowLocator {
         if raw_html.is_empty() || prepared.is_empty() {
             return SnippetDescriptor::NO_MATCH;
         }
+        self.tokenize(raw_html);
+        self.locate_tokenized(prepared, require_ordered, original_group_count)
+    }
+
+    /// Tokenizes `raw_html` for [`locate_tokenized`](Self::locate_tokenized):
+    /// a caller locating several prepared queries over the same text (phrase
+    /// alternatives, a negative filter) scans it once. The tokens depend only
+    /// on the text, so the result equals calling [`locate`](Self::locate)
+    /// for each query.
+    pub fn tokenize(&mut self, raw_html: &str) {
+        self.text_tokens.tokenize(raw_html);
+    }
+
+    /// [`locate`](Self::locate) over the text last passed to
+    /// [`tokenize`](Self::tokenize).
+    pub fn locate_tokenized(
+        &mut self,
+        prepared: &PreparedQueryGroups,
+        require_ordered: bool,
+        original_group_count: usize,
+    ) -> SnippetDescriptor<'_> {
+        if prepared.is_empty() {
+            return SnippetDescriptor::NO_MATCH;
+        }
 
         let SnippetWindowLocator {
             context_words,
             text_tokens,
+            ordinals,
             group_count,
             mark_ranges,
             min_groups,
         } = self;
-        text_tokens.tokenize(raw_html);
         let tokens = text_tokens.tokens();
         if tokens.is_empty() {
             return SnippetDescriptor::NO_MATCH;
         }
         let raw_len = text_tokens.raw_utf16_len();
 
+        ordinals.clear();
+        ordinals.extend(tokens.iter().map(|t| {
+            prepared.get(text_tokens.norm_of(t)).map_or(NO_TERM, |p| p.ordinal as u32)
+        }));
+        let ordinals = &ordinals[..];
+
         let all_groups = prepared.group_count();
         let partial = *min_groups > 0 && *min_groups < all_groups;
         let required = if partial { *min_groups } else { all_groups };
-        let (i_left, i_right, score) = find_window(text_tokens, prepared, group_count, required);
+        let (i_left, i_right, score) = find_window(tokens, ordinals, prepared, group_count, required);
         if score == usize::MAX {
             return SnippetDescriptor::NO_MATCH;
         }
 
         let (snap_start, snap_end, s_idx, e_idx) =
             expand_window(tokens, raw_len, i_left, i_right, *context_words);
-        collect_mark_ranges(text_tokens, prepared, snap_start, snap_end, mark_ranges);
+        collect_mark_ranges(tokens, ordinals, snap_start, snap_end, mark_ranges);
 
         // Visible words actually inside the window: lets the host detect a
         // "short" snippet for free (it may then re-locate over a longer text).
@@ -198,7 +237,7 @@ impl SnippetWindowLocator {
         let word_dist = (i_right - i_left).saturating_sub(denominator - 1);
 
         let is_match = partial
-            || !(require_ordered && all_groups > 1 && !has_ordered_match(text_tokens, prepared));
+            || !(require_ordered && all_groups > 1 && !has_ordered_match(ordinals, prepared));
 
         SnippetDescriptor {
             is_match,
@@ -236,12 +275,12 @@ impl SnippetWindowLocator {
 /// `required`: distinct groups a window must cover (the group count, or
 /// fewer for partial matching).
 fn find_window(
-    text_tokens: &TextTokens,
+    tokens: &[TextToken],
+    ordinals: &[u32],
     prepared: &PreparedQueryGroups,
     group_count: &mut Vec<usize>,
     required: usize,
 ) -> (usize, usize, usize) {
-    let tokens = text_tokens.tokens();
     let all_groups = prepared.group_count();
     if group_count.len() < all_groups {
         group_count.resize(all_groups * 2, 0);
@@ -253,8 +292,8 @@ fn find_window(
     let mut l = 0usize;
 
     for r in 0..tokens.len() {
-        if let Some(r_term) = prepared.get(text_tokens.norm_of(&tokens[r])) {
-            for &rg in &r_term.groups {
+        if ordinals[r] != NO_TERM {
+            for &rg in prepared.groups_at(ordinals[r] as usize) {
                 group_count[rg] += 1;
                 if group_count[rg] == 1 {
                     covered += 1;
@@ -272,8 +311,8 @@ fn find_window(
                 best_i_left = l;
                 best_i_right = r;
             }
-            if let Some(l_term) = prepared.get(text_tokens.norm_of(&tokens[l])) {
-                for &lg in &l_term.groups {
+            if ordinals[l] != NO_TERM {
+                for &lg in prepared.groups_at(ordinals[l] as usize) {
                     group_count[lg] -= 1;
                     if group_count[lg] == 0 {
                         covered -= 1;
@@ -292,17 +331,13 @@ fn find_window(
 /// True when there exists a position where each query group is satisfied by
 /// a token appearing strictly after the token satisfying the previous group.
 /// Greedy forward scan.
-fn has_ordered_match(text_tokens: &TextTokens, prepared: &PreparedQueryGroups) -> bool {
-    let tokens = text_tokens.tokens();
+fn has_ordered_match(ordinals: &[u32], prepared: &PreparedQueryGroups) -> bool {
     let num_groups = prepared.group_count();
     if num_groups <= 1 {
         return true;
     }
-    let in_group = |tok: &TextToken, g: usize| {
-        prepared
-            .get(text_tokens.norm_of(tok))
-            .is_some_and(|t| t.groups.contains(&g))
-    };
+    let in_group = |ord: &u32, g: usize| *ord != NO_TERM && prepared.groups_at(*ord as usize).contains(&g);
+    let tokens = ordinals;
 
     // Try every starting token that belongs to group 0.
     for start in 0..tokens.len() {
@@ -403,27 +438,27 @@ fn expand_window(
 /// (rawStart, rawLength, termOrdinal) triple, document order, the length
 /// clipped to snap_end.
 fn collect_mark_ranges(
-    text_tokens: &TextTokens,
-    prepared: &PreparedQueryGroups,
+    tokens: &[TextToken],
+    ordinals: &[u32],
     snap_start: usize,
     snap_end: usize,
     mark_ranges: &mut Vec<usize>,
 ) {
     mark_ranges.clear();
-    for tok in text_tokens.tokens() {
+    for (tok, &ordinal) in tokens.iter().zip(ordinals) {
         if tok.utf16_end <= snap_start {
             continue;
         }
         if tok.utf16_start >= snap_end {
             break;
         }
-        let Some(term) = prepared.get(text_tokens.norm_of(tok)) else {
+        if ordinal == NO_TERM {
             continue;
-        };
+        }
         let tok_end = tok.utf16_end.min(snap_end);
         mark_ranges.push(tok.utf16_start);
         mark_ranges.push(tok_end - tok.utf16_start);
-        mark_ranges.push(term.ordinal);
+        mark_ranges.push(ordinal as usize);
     }
 }
 

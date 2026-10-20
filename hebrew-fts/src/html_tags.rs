@@ -84,6 +84,7 @@ pub(crate) fn is_word_break_tag(name: &[char]) -> bool {
 ///
 /// `chars` is the scanner's `(byte, utf16, char)` table; the ≤10 limit counts
 /// UTF-16 units, matching the C# original.
+#[cfg(test)] // only the reference scanner (scanner_reference.rs) uses the table form
 pub(crate) fn skip_entity(chars: &[(usize, usize, char)], len: usize, i: &mut usize) {
     let start = *i + 1;
     let mut end = start;

@@ -32,9 +32,18 @@ is one engine, one index format and the same results for both apps.
    matched in the dictionary are returned together with the hits
    (`MatchedTermsSink`), in the same pass. No separate query is needed to
    learn which words matched; the snippet/highlight stage uses them directly.
+3. **Snippets.** For each hit, the host passes in the line text and the
+   engine runs FtsLib's snippet locator, ported step for step:
+   - find the tightest window covering every query word
+   - add ±8 words of context and the ellipsis flags
+   - mark every matched word inside the window
+   - apply the word-distance and word-order filters
+   - widen short windows over neighbouring lines of the same book
 
-Everything else (tokenizer, snippets, catalog order) is a faithful port of
-FtsLib, so results match what KitveiHakodesh shows today.
+   The output is offsets only, not HTML, so the page renderer is unchanged.
+
+Everything else (tokenizer, catalog order) is a faithful port of FtsLib, so
+results match what KitveiHakodesh shows today.
 
 ## How it works
 
@@ -49,14 +58,8 @@ FtsLib, so results match what KitveiHakodesh shows today.
    (`MatchedTermsSink`), so the search returns its hits **plus** the expanded
    words.
 3. **Snippets.** For each hit, the host passes in the line text and the
-   engine runs FtsLib's snippet locator, ported step for step:
-   - find the tightest window covering every query word
-   - add ±8 words of context and the ellipsis flags
-   - mark every matched word inside the window
-   - apply the word-distance and word-order filters
-   - widen short windows over neighbouring lines of the same book
-
-   The output is offsets only, not HTML, so the page renderer is unchanged.
+   engine runs FtsLib's snippet locator (see main change 3 above), returning
+   offsets only.
 
 ## Layout
 

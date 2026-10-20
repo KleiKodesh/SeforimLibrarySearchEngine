@@ -18,8 +18,8 @@ pub mod search;
 pub use fm_index::FmIndex;
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
 pub use search::{
-    GroupSpec, PlacedHit, SearchRequest, SearchResult, Snippet, SnippetSession, WalkOptionsSpec,
-    SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,
+    ExcludeSpec, GroupSpec, PlacedHit, SearchRequest, SearchResult, Snippet, SnippetSession,
+    WalkOptionsSpec, SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,
 };
 
 /// Engine errors.
@@ -356,6 +356,106 @@ mod tests {
             .search(&SearchRequest { groups: groups(), min_groups: Some(7), ..Default::default() })
             .unwrap();
         assert_eq!(r.hits.len(), 1);
+    }
+
+    #[test]
+    fn exclude_negative_query() {
+        let dir = tempfile::tempdir().unwrap();
+        // toc 100+idx: lines 1,2 share section 100 (idx 0), others their own;
+        // lines 6,7 have no section (toc 0)
+        let mut docs = vec![
+            line(1, 0, 1, 0, "משה קבל תורה מסיני"),
+            line(2, 1, 1, 0, "תורה ברכה גדולה"),
+            line(3, 2, 1, 1, "ברכה תורה"),
+            line(4, 3, 1, 2, "תורה בלי כלום"),
+            line(5, 4, 1, 3, "ברכה ואז הרבה מילים ואז תורה"),
+            line(6, 5, 1, 4, "ברכה תורה בלי כותרת"),
+            line(7, 6, 1, 5, "תורה סתם"),
+        ];
+        docs[1].toc_entry_id = 100;
+        docs[5].toc_entry_id = 0;
+        docs[6].toc_entry_id = 0;
+        let index = build(dir.path(), IndexOptions::default(), &docs);
+        let ids = |r: &SearchResult| r.hits.iter().map(|h| h.line_id).collect::<Vec<_>>();
+        let req = |ex: ExcludeSpec| SearchRequest {
+            groups: vec![word("תורה", false)],
+            exclude: Some(ex),
+            ..Default::default()
+        };
+        // one excluded word: query-level
+        let r = index
+            .search(&req(ExcludeSpec { groups: vec![word("ברכה", false)], ..Default::default() }))
+            .unwrap();
+        assert_eq!(ids(&r), vec![1, 4, 7]);
+        // two words, no limit: query-level AND
+        let r = index
+            .search(&req(ExcludeSpec {
+                groups: vec![word("ברכה", false), word("ואז", false)],
+                ..Default::default()
+            }))
+            .unwrap();
+        assert_eq!(ids(&r), vec![1, 2, 3, 4, 6, 7]);
+        // two words bound by distance 0: checked on the text at locate time
+        let mut r = index
+            .search(&req(ExcludeSpec {
+                groups: vec![word("ברכה", false), word("תורה", false)],
+                max_word_distance: Some(0),
+                ..Default::default()
+            }))
+            .unwrap();
+        assert_eq!(ids(&r), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert!(r.session.locate("ברכה תורה").is_none()); // adjacent: excluded
+        assert!(r.session.locate("תורה ברכה גדולה").is_none()); // adjacent, any order
+        assert!(r.session.locate("ברכה ואז הרבה מילים ואז תורה").is_some()); // too far apart
+        let many = r.session.locate_many(&["ברכה תורה", "משה קבל תורה מסיני"]);
+        assert!(many[0].is_none() && many[1].is_some());
+        // ordered: ברכה then תורה only
+        let mut r = index
+            .search(&req(ExcludeSpec {
+                groups: vec![word("ברכה", false), word("תורה", false)],
+                max_word_distance: Some(0),
+                require_ordered: true,
+                ..Default::default()
+            }))
+            .unwrap();
+        assert!(r.session.locate("ברכה תורה").is_none());
+        assert!(r.session.locate("תורה ברכה גדולה").is_some());
+        // per-pair spacing: span query, query-level
+        let r = index
+            .search(&req(ExcludeSpec {
+                groups: vec![word("ברכה", false), word("תורה", false)],
+                gaps: Some(vec![0]),
+                require_ordered: true,
+                ..Default::default()
+            }))
+            .unwrap();
+        assert_eq!(ids(&r), vec![1, 2, 4, 5, 7]);
+        // same section: line 1 shares section 100 with line 2 (ברכה) → both go;
+        // a line without a section (toc 0) is never dropped, even with ברכה
+        let r = index
+            .search(&req(ExcludeSpec {
+                groups: vec![word("ברכה", false)],
+                same_section: true,
+                ..Default::default()
+            }))
+            .unwrap();
+        assert_eq!(ids(&r), vec![4, 6, 7]);
+        // same section, two words spread over two lines of section 100
+        // (מסיני in line 1, ברכה in line 2): the section goes; distance ignored
+        let r = index
+            .search(&req(ExcludeSpec {
+                groups: vec![word("ברכה", false), word("מסיני", false)],
+                max_word_distance: Some(0),
+                same_section: true,
+                ..Default::default()
+            }))
+            .unwrap();
+        assert_eq!(ids(&r), vec![3, 4, 5, 6, 7]);
+        // an excluded word with no indexed form excludes nothing
+        let r = index
+            .search(&req(ExcludeSpec { groups: vec![word("זזזזז", false)], ..Default::default() }))
+            .unwrap();
+        assert_eq!(r.hits.len(), 7);
     }
 
     /// The FM-index sidecar must give EXACTLY the walk's terms (and hits) for

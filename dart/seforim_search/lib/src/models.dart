@@ -212,8 +212,13 @@ class SearchRequest {
       this.requireOrdered = false,
       this.contextWords = 8,
       this.gaps,
-      this.minGroups})
+      this.minGroups,
+      this.exclude})
       : groups = groups ?? [];
+
+  /// Otzaria's negative query: lines (or whole sections) carrying these words
+  /// are dropped. Null = none.
+  ExcludeSpec? exclude;
 
   /// Partial matching (Otzaria's wordMatchMode): a line needs only this many
   /// of the groups (anyWord = 1, mostWords = n/2 + 1, atLeast = N; clamped to
@@ -246,6 +251,45 @@ class SearchRequest {
         'context_words': contextWords,
         if (gaps != null) 'gaps': [for (final g in gaps!) g < 0 ? 0 : g],
         if (minGroups != null) 'min_groups': minGroups,
+        if (exclude != null) 'exclude': exclude!.toJson(),
+      };
+}
+
+/// Otzaria's negative query: the words to exclude, run as a query of their own
+/// with its own distance, order and spacing, always with every word required.
+/// A line matching it is dropped; with [sameSection] every line of a section
+/// (tocEntryId) holding a match is dropped. Several words bound by
+/// [maxWordDistance] / [requireOrdered] (without [gaps]) are checked on the
+/// line text when a snippet is located, so such lines are still among the hits
+/// and locate as null. With [sameSection] the sections holding every excluded
+/// word (each anywhere in the section) are dropped whole; distance and order
+/// do not apply there, and lines without a section are never dropped.
+class ExcludeSpec {
+  ExcludeSpec(
+      {List<QueryGroup>? groups, this.maxWordDistance, this.requireOrdered = false, this.gaps, this.sameSection = false})
+      : groups = groups ?? [];
+
+  /// AND across groups, OR within each group's expansion.
+  final List<QueryGroup> groups;
+
+  /// Words allowed between the excluded words. Null = anywhere in the line.
+  int? maxWordDistance;
+
+  /// The excluded words must appear in this order.
+  bool requireOrdered;
+
+  /// Per-pair spacing for the excluded words (needs positions).
+  List<int>? gaps;
+
+  /// Drop every line of a section that holds a match, not just the line.
+  bool sameSection;
+
+  Map<String, Object?> toJson() => {
+        'groups': [for (final g in groups) g.toJson()],
+        'max_word_distance': maxWordDistance,
+        'require_ordered': requireOrdered,
+        'same_section': sameSection,
+        if (gaps != null) 'gaps': [for (final g in gaps!) g < 0 ? 0 : g],
       };
 }
 

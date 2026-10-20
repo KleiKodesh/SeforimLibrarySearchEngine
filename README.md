@@ -245,6 +245,18 @@ are not printed), so upstream's query-parser tests stay as they are.
   number of matching clauses, and the snippet is the tightest window
   holding that many groups. As in Otzaria, distance, order and spacing are
   not applied in that case.
+- **Exclusion** (Otzaria's negative query): `exclude` in the request (C#
+  `SearchRequest.Exclude`, Dart `exclude`, demo `--exclude "words"
+  [--exclude-scope section]`): the words to drop, as a query of their own
+  with its own distance, order and spacing, every word required (Otzaria's
+  `apply_advanced_negative_query`). One word, several words with no
+  distance/order limit, or per-pair spacing are excluded in the query
+  itself (MustNot); several words bound by distance/order are checked on
+  the line text at locate time, like the positive filters. With
+  `same_section` (Otzaria's `scoped_words_query`) the sections
+  (`toc_entry_id`) holding every excluded word, each anywhere in the
+  section, are dropped whole; distance and order do not apply there, and
+  lines without a section are never dropped, as in Otzaria.
 - **Per-pair spacing** (Otzaria's customSpacing): `gaps` in the request (C#
   `SearchRequest.Gaps`, Dart `SearchRequest.gaps`, demo `--spacing 2,5`).
   - `gaps[i]` is the maximum number of words between query word i and i+1.
@@ -304,7 +316,7 @@ FM-index sidecar. The index is 1.6 GB with positions.
 ## Open
 - Otzaria gaps found by the Dart demo (see `dart/README.md`):
   - תרגום ארמי and ראשי תיבות have no walk.
-  - Exclusion words and grouping are missing.
+  - Grouping (sameSection cards, identicalText merging) is missing.
 - A full build compared side by side with FtsLib on the same queries.
 - Profiling: C# search is ~1.0 s (.NET 10) / ~1.5 s (net48), against 378 ms in
   the pure-Rust smoke test for the same query. That gap includes process start

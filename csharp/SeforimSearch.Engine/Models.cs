@@ -264,6 +264,10 @@ namespace SeforimSearch.Engine
         /// holding that many groups.</summary>
         public int? MinGroups { get; set; }
 
+        /// <summary>Otzaria's negative query: lines (or whole sections) carrying these
+        /// words are dropped. Null = none.</summary>
+        public ExcludeSpec? Exclude { get; set; }
+
         internal string ToJson()
         {
             var sb = new StringBuilder();
@@ -289,8 +293,65 @@ namespace SeforimSearch.Engine
             }
             if (MinGroups.HasValue)
                 sb.Append(",\"min_groups\":").Append(MinGroups.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (Exclude != null)
+            {
+                sb.Append(",\"exclude\":");
+                Exclude.WriteJson(sb);
+            }
             sb.Append('}');
             return sb.ToString();
+        }
+    }
+
+    /// <summary>Otzaria's negative query: the words to exclude, run as a query of their
+    /// own with its own distance, order and spacing, always with every word required.
+    /// A line matching it is dropped; with <see cref="SameSection"/> every line of a
+    /// section (tocEntryId) holding a match is dropped. Several words bound by
+    /// <see cref="MaxWordDistance"/> / <see cref="RequireOrdered"/> (without Gaps) are
+    /// checked on the line text when a snippet is located, so such lines are still
+    /// among the hits and locate as null. With SameSection the sections holding every
+    /// excluded word (each anywhere in the section) are dropped whole; distance and
+    /// order do not apply there, and lines without a section are never dropped.</summary>
+    public sealed class ExcludeSpec
+    {
+        /// <summary>AND across groups, OR within each group's expansion.</summary>
+        public List<QueryGroup> Groups { get; } = new List<QueryGroup>();
+
+        /// <summary>Words allowed between the excluded words. Null = anywhere in the line.</summary>
+        public int? MaxWordDistance { get; set; }
+
+        /// <summary>The excluded words must appear in this order.</summary>
+        public bool RequireOrdered { get; set; }
+
+        /// <summary>Per-pair spacing for the excluded words (needs positions).</summary>
+        public List<int>? Gaps { get; set; }
+
+        /// <summary>Drop every line of a section that holds a match, not just the line.</summary>
+        public bool SameSection { get; set; }
+
+        internal void WriteJson(StringBuilder sb)
+        {
+            sb.Append("{\"groups\":[");
+            for (int i = 0; i < Groups.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                Groups[i].WriteJson(sb);
+            }
+            sb.Append("],\"max_word_distance\":");
+            sb.Append(MaxWordDistance.HasValue ? MaxWordDistance.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null");
+            sb.Append(",\"require_ordered\":").Append(RequireOrdered ? "true" : "false");
+            sb.Append(",\"same_section\":").Append(SameSection ? "true" : "false");
+            if (Gaps != null)
+            {
+                sb.Append(",\"gaps\":[");
+                for (int i = 0; i < Gaps.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append(Math.Max(0, Gaps[i]).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                }
+                sb.Append(']');
+            }
+            sb.Append('}');
         }
     }
 

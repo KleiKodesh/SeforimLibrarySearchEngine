@@ -130,6 +130,8 @@ pub struct SearchRequest {
     /// order and distance have no meaning); the snippet is the tightest
     /// window holding that many groups.
     pub min_groups: Option<usize>,
+    /// Otzaria's negative query: lines carrying these words are dropped.
+    pub exclude: Option<ExcludeSpec>,
 }
 
 impl Default for SearchRequest {
@@ -141,8 +143,42 @@ impl Default for SearchRequest {
             context_words: DEFAULT_CONTEXT_WORDS,
             gaps: None,
             min_groups: None,
+            exclude: None,
         }
     }
+}
+
+/// Otzaria's negative query (`apply_advanced_negative_query`): the words to
+/// exclude, run as a query of their own with its own distance, order and
+/// spacing, always with every word required (a partial negative would veto
+/// any line carrying one of its words). A line matching it is dropped;
+/// with `same_section`, every line of a section (`toc_entry_id`) holding a
+/// match is dropped.
+///
+/// How it is applied: one word, or several with no distance/order limit,
+/// or per-pair `gaps` (span query, needs positions) are excluded in the
+/// query itself. Several words bound by `max_word_distance` /
+/// `require_ordered` are checked on the line text when a snippet is
+/// located (the same way the positive filters work), so such lines are
+/// still in `hits` and come back as `None` from `locate`. With
+/// `same_section` (Otzaria's `scoped_words_query`) the words are matched
+/// at section resolution: the sections (`toc_entry_id`) holding word 1,
+/// intersected with those holding word 2, and so on, are dropped whole;
+/// distance, order and spacing do not apply there, and lines without a
+/// section (`toc_entry_id` 0) are never dropped, as in Otzaria.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExcludeSpec {
+    /// AND across groups, OR within a group's expansion (as `groups`).
+    pub groups: Vec<GroupSpec>,
+    /// Words allowed between the excluded words. None = anywhere in the line.
+    pub max_word_distance: Option<usize>,
+    /// The excluded words must appear in this order.
+    pub require_ordered: bool,
+    /// Per-pair spacing for the excluded words (needs positions).
+    pub gaps: Option<Vec<u32>>,
+    /// Drop every line of a section that holds a match, not just the line.
+    pub same_section: bool,
 }
 
 /// One matching line, in catalog order. The host fetches its text and
@@ -220,15 +256,43 @@ pub struct SnippetSession {
     keep_marks: bool,
     /// Groups a window must cover (0 = all). See `SearchRequest::min_groups`.
     min_groups: usize,
+    /// Text-level negative filter (see [`ExcludeSpec`]).
+    negative: Option<NegativeFilter>,
     terms: TermTable,
     locator: SnippetWindowLocator,
 }
 
+/// The excluded words checked on the line text: a line where they appear
+/// within the limits is dropped.
+struct NegativeFilter {
+    prepared: PreparedQueryGroups,
+    max_word_distance: usize,
+    require_ordered: bool,
+}
+
+impl NegativeFilter {
+    /// True when `text` carries the excluded words within the limits.
+    fn excludes(&self, locator: &mut SnippetWindowLocator, min_groups: usize, text: &str) -> bool {
+        // the negative always needs ALL its words, whatever the positive's mode
+        locator.set_min_groups(0);
+        let d = locator.locate(text, &self.prepared, self.require_ordered, 0);
+        let hit = d.is_match && d.word_distance <= self.max_word_distance;
+        locator.set_min_groups(min_groups);
+        hit
+    }
+}
+
 impl SnippetSession {
     /// Locates the snippet in one matched line. None when the line does not
-    /// pass (not all groups present, wrong order, or too far apart).
+    /// pass (not all groups present, wrong order, too far apart, or the
+    /// excluded words present).
     pub fn locate(&mut self, text: &str) -> Option<Snippet> {
         let prepared = self.prepared.as_ref()?;
+        if let Some(n) = &self.negative {
+            if n.excludes(&mut self.locator, self.min_groups, text) {
+                return None;
+            }
+        }
         let d = self
             .locator
             .locate(text, prepared, self.require_ordered, self.original_group_count);
@@ -251,6 +315,7 @@ impl SnippetSession {
             self.keep_marks,
             self.min_groups,
         );
+        let negative = self.negative.as_ref();
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
@@ -259,6 +324,10 @@ impl SnippetSession {
         let mut located: Vec<Option<Snippet>> = Vec::with_capacity(texts.len());
         if threads <= 1 || texts.len() < 32 {
             for t in texts {
+                if negative.is_some_and(|n| n.excludes(&mut self.locator, min_groups, t)) {
+                    located.push(None);
+                    continue;
+                }
                 let d = self.locator.locate(t, prepared, require_ordered, original);
                 located.push(Self::raw(d, max_distance));
             }
@@ -277,6 +346,9 @@ impl SnippetSession {
                             locator.set_min_groups(min_groups);
                             part.iter()
                                 .map(|t| {
+                                    if negative.is_some_and(|n| n.excludes(&mut locator, min_groups, t)) {
+                                        return None;
+                                    }
                                     let d = locator.locate(t, prepared, require_ordered, original);
                                     Self::raw(d, max_distance)
                                 })
@@ -449,6 +521,26 @@ impl SpanTermSource for AnySource {
         }
         Ok(all)
     }
+}
+
+/// The sections (`toc_entry_id`, 0 = none, skipped) of every line `query`
+/// matches, read straight off the fast column.
+fn section_ids(query: &dyn Query, searcher: &tantivy::Searcher) -> Result<std::collections::HashSet<u64>> {
+    let weight = query.weight(tantivy::query::EnableScoring::disabled_from_searcher(searcher))?;
+    let mut sections = std::collections::HashSet::new();
+    for segment in searcher.segment_readers() {
+        let column: Column<u64> = segment.fast_fields().u64("toc_entry_id")?;
+        weight.for_each_no_score(segment, &mut |docs| {
+            for &doc in docs {
+                if let Some(toc) = column.first(doc) {
+                    if toc != 0 {
+                        sections.insert(toc);
+                    }
+                }
+            }
+        })?;
+    }
+    Ok(sections)
 }
 
 impl LineIndex {
@@ -725,6 +817,7 @@ impl LineIndex {
             context_words: request.context_words,
             keep_marks,
             min_groups: 0,
+            negative: None,
             terms: TermTable::default(),
             locator,
         };
@@ -768,6 +861,63 @@ impl LineIndex {
             }
         };
 
+        // The negative query (see ExcludeSpec): excluded in the query itself,
+        // or by section, or on the text at locate time.
+        let mut negative_sinks: Vec<MatchedTermsSink> = Vec::new();
+        let mut section_words: Vec<Box<dyn Query>> = Vec::new();
+        let mut text_level_negative: Option<(usize, bool)> = None;
+        let mut query = query;
+        if let Some(ex) = &request.exclude {
+            if ex.same_section {
+                // Otzaria's scoped_words_query: one query per word; the
+                // sections are intersected below, proximity does not apply.
+                for group in &ex.groups {
+                    let sink = MatchedTermsSink::new();
+                    if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                        section_words.push(q);
+                    }
+                }
+            }
+            let negative: Option<Box<dyn Query>> = if ex.same_section {
+                None
+            } else if let Some(gaps) = &ex.gaps {
+                let req = SearchRequest {
+                    groups: ex.groups.clone(),
+                    require_ordered: ex.require_ordered,
+                    gaps: Some(gaps.clone()),
+                    ..Default::default()
+                };
+                self.span_query(&req, gaps, &searcher, fm, &mut negative_sinks)?
+                    .map(|q| Box::new(q) as Box<dyn Query>)
+            } else {
+                let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                for group in &ex.groups {
+                    let sink = MatchedTermsSink::new();
+                    if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                        clauses.push((Occur::Must, q));
+                        negative_sinks.push(sink);
+                    }
+                }
+                (!clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>)
+            };
+            if let Some(negative) = negative {
+                let bound = ex.max_word_distance.is_some() || ex.require_ordered;
+                let needs_text = ex.gaps.is_none() && negative_sinks.len() > 1 && bound;
+                if needs_text {
+                    // Build the scorers once so the walks report the excluded
+                    // forms; the docs themselves are not needed.
+                    let w = negative.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
+                    for segment in searcher.segment_readers() {
+                        let _ = w.scorer(segment, 1.0)?;
+                    }
+                    text_level_negative =
+                        Some((ex.max_word_distance.unwrap_or(usize::MAX), ex.require_ordered));
+                } else {
+                    query = Box::new(BooleanQuery::new(vec![(Occur::Must, query), (Occur::MustNot, negative)]));
+                }
+            }
+        }
+
         let timing = std::env::var_os("SEFORIM_ENGINE_TIMING").is_some();
         let t = std::time::Instant::now();
         let weight = query.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
@@ -788,7 +938,36 @@ impl LineIndex {
         if timing {
             eprintln!("  [timing] collect {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);
         }
+        if !section_words.is_empty() {
+            // Otzaria's SameSection scope: the sections holding every
+            // excluded word (each anywhere in the section) are blocked whole.
+            let mut blocked: Option<std::collections::HashSet<u64>> = None;
+            for word in &section_words {
+                let sections = section_ids(word.as_ref(), &searcher)?;
+                blocked = Some(match blocked {
+                    None => sections,
+                    Some(prior) => prior.intersection(&sections).copied().collect(),
+                });
+                if blocked.as_ref().is_some_and(|b| b.is_empty()) {
+                    break;
+                }
+            }
+            if let Some(blocked) = blocked {
+                hits.retain(|h| !blocked.contains(&h.toc_entry_id));
+            }
+        }
         hits.sort_unstable_by_key(|h| h.position);
+        if let Some((max_word_distance, require_ordered)) = text_level_negative {
+            let negative_terms: Vec<Vec<String>> = negative_sinks.iter().map(|s| s.take_strings()).collect();
+            // a word with no indexed form can never be present: no exclusion
+            if negative_terms.iter().all(|g| !g.is_empty()) {
+                session.negative = Some(NegativeFilter {
+                    prepared: PreparedQueryGroups::from_groups(&negative_terms),
+                    max_word_distance,
+                    require_ordered,
+                });
+            }
+        }
 
         let mut group_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
         if let Some(min) = partial_min {

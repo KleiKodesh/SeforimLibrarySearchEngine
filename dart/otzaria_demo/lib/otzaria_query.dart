@@ -6,6 +6,10 @@ enum SearchMode { exact, advanced, fuzzy }
 /// Otzaria's `WordMatchMode`: how many of the query words a result needs.
 enum WordMatchMode { all, anyWord, mostWords, atLeast }
 
+/// Otzaria's `SearchScope` for the negative query: within the distance, the
+/// whole line (paragraph), or the whole section.
+enum NegativeScope { wordDistance, sameParagraph, sameSection }
+
 /// Otzaria's per-word option keys (literal Hebrew strings in Otzaria).
 abstract final class OtzariaOption {
   static const grammaticalPrefixes = 'קידומות דקדוקיות';
@@ -63,6 +67,8 @@ class OtzariaSearch {
     this.grammarPrefixMaxLetters,
     this.marksIndex = false,
     this.customSpacing,
+    this.negativeQuery = '',
+    this.negativeScope = NegativeScope.wordDistance,
   })  :globalOptions = globalOptions ?? {},
         wordOptions = wordOptions ?? {},
         alternativeWords = alternativeWords ?? {};
@@ -110,6 +116,15 @@ class OtzariaSearch {
   /// word i and i+1). Missing pairs use [distance]. Runs as a span query.
   final Map<int, int>? customSpacing;
 
+  /// Otzaria's negativeQuery: words that must not appear. It runs with the
+  /// same distance / order as the positive query (Otzaria passes
+  /// `negativeDistance: state.distance`, `negativeScope: proximityScope`) and,
+  /// in this demo, the same global options. Empty = none.
+  final String negativeQuery;
+
+  /// Otzaria's negativeScope (its proximityScope).
+  final NegativeScope negativeScope;
+
   /// Warnings about options the engine cannot honour.
   final List<String> warnings = [];
 
@@ -156,6 +171,28 @@ class OtzariaSearch {
     );
   }
 
+  /// Otzaria's apply_advanced_negative_query: the negative words as a query
+  /// of their own, always "all words", with the positive distance and order.
+  ExcludeSpec? _exclude() {
+    if (mode != SearchMode.advanced) return null;
+    final words = splitQueryWords(negativeQuery);
+    if (words.isEmpty) return null;
+    // the global options only (Otzaria keeps separate negative options; the
+    // CLI has none), without re-reporting the unsupported-option warnings
+    final o = {...globalOptions.entries.where((e) => e.value).map((e) => e.key)}
+      ..removeAll(OtzariaOption.unsupported);
+    final groups = [for (final w in words) _wordGroup(w, o)];
+    // proximityScope: wordDistance → distance/order; sameParagraph → the
+    // whole line, no limits; sameSection → whole sections.
+    final limits = negativeScope == NegativeScope.wordDistance && groups.length > 1;
+    return ExcludeSpec(
+      groups: groups,
+      maxWordDistance: limits ? distance : null,
+      requireOrdered: limits && !anyOrder,
+      sameSection: negativeScope == NegativeScope.sameSection,
+    );
+  }
+
   /// The engine request.
   SearchRequest toRequest({int contextWords = 8}) {
     final words = splitQueryWords(query);
@@ -166,11 +203,12 @@ class OtzariaSearch {
       final main = _wordGroup(words[i], o);
       groups.add(alts.isEmpty ? main : QueryGroup.any([main, for (final a in alts) _wordGroup(a, o)]));
     }
+    final exclude = _exclude();
     // Partial matching: at least minWords of the words; order, distance and
     // spacing do not apply (Otzaria: the match is at line resolution).
     final min = mode == SearchMode.advanced ? minWords(groups.length) : groups.length;
     if (min < groups.length) {
-      return SearchRequest(groups: groups, minGroups: min, contextWords: contextWords);
+      return SearchRequest(groups: groups, minGroups: min, contextWords: contextWords, exclude: exclude);
     }
     final spacing = customSpacing;
     if (spacing != null && spacing.isNotEmpty && groups.length > 1) {
@@ -179,6 +217,7 @@ class OtzariaSearch {
         gaps: [for (var i = 0; i < groups.length - 1; i++) spacing[i] ?? distance],
         requireOrdered: !anyOrder,
         contextWords: contextWords,
+        exclude: exclude,
       );
     }
     return SearchRequest(
@@ -186,6 +225,7 @@ class OtzariaSearch {
       maxWordDistance: groups.length > 1 ? distance : null,
       requireOrdered: !anyOrder && groups.length > 1,
       contextWords: contextWords,
+      exclude: exclude,
     );
   }
 }

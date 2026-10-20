@@ -70,6 +70,7 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 | `SearchMode.exact` | Only the 5 exact-mode options are kept: grammatical prefixes/suffixes, prefixes, suffixes, ktiv. |
 | `SearchMode.advanced` | All options, plus alternatives. |
 | `SearchMode.fuzzy` | `QueryGroup.fuzzy(word, 1..2)`. |
+| `negativeQuery` / `negativeScope` | `SearchRequest.exclude` (`ExcludeSpec`): the negative words as their own all-words query with the positive distance and order (as Otzaria passes `negativeDistance: distance`, `negativeScope: proximityScope`); scope paragraph = whole line without limits, scope section = whole sections (words intersected per section, as Otzaria's `scoped_words_query`). Demo: `--exclude "words" [--exclude-scope distance|paragraph|section]`, global options only. |
 | `wordMatchMode` / `wordMatchCount` | `SearchRequest.minGroups` = Otzaria's `min_words` (anyWord 1, mostWords n/2+1, atLeast N); distance, order and spacing are then not applied, as in Otzaria. Advanced mode only. |
 | קידומות דקדוקיות / סיומות דקדוקיות | `grammarPrefixes` / `grammarSuffixes`. As in Otzaria, they are skipped for words under 3 letters unless the word is an acronym (has `"`). |
 | קידומות / סיומות | `advancedPrefixes` / `advancedSuffixes`, plus `prefixMaxLetters` / `suffixMaxLetters`. |
@@ -92,7 +93,6 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 ### Gaps: what Otzaria does that the engine/demo can't (yet)
 
 - **Options with no walk:** תרגום ארמי and ראשי תיבות. The demo warns and ignores them.
-- **Negative query** (words to exclude).
 - **Scope `sameSection`** (under the same heading), and **grouping** (`sameSection` cards, `identicalText` merging). Each hit has a `tocEntryId`, so the host could group by it, but the demo doesn't.
 - **Relevance ordering.** Results come in catalog order only.
 - **Regex queries** (`/…/`), the semantic and smart query modes, per-book counts (`countByBook`) and cancellation.

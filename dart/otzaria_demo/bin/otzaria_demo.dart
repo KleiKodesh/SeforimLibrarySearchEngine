@@ -21,6 +21,8 @@ search options (Otzaria names):
   --spacing a,b,..    gap per consecutive word pair (customSpacing; needs positions)
   --fuzzy-distance N  (fuzzy mode, 1..2)
   --match all|any|most|atleast  (wordMatchMode; default all)   --match-count N  (for atleast)
+  --exclude "words"   negative query (same distance/order/options)
+  --exclude-scope distance|paragraph|section   (negativeScope; default distance)
   --book TEXT         only books whose title/category contains TEXT
   --limit N (100) --offset N (0)  --context N (8)
   word alternatives: write a,b in the query (Otzaria sets them per word in the UI)
@@ -32,7 +34,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
   const valued = {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
     'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd', 'spacing', 'match',
-    'match-count',
+    'match-count', 'exclude', 'exclude-scope',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -186,6 +188,12 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
       _ => WordMatchMode.all,
     },
     wordMatchCount: _int(o, 'match-count') ?? 1,
+    negativeQuery: o['exclude'] ?? '',
+    negativeScope: switch (o['exclude-scope'] ?? 'distance') {
+      'paragraph' => NegativeScope.sameParagraph,
+      'section' => NegativeScope.sameSection,
+      _ => NegativeScope.wordDistance,
+    },
     fuzzyDistance: _int(o, 'fuzzy-distance') ?? 1,
     prefixMaxLetters: _int(o, 'prefix-max'),
     suffixMaxLetters: _int(o, 'suffix-max'),

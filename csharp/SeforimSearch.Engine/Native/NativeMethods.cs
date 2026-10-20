@@ -92,11 +92,6 @@ namespace SeforimSearch.Engine.Native
         public static extern SeBuffer se_search_locate_batch(SearchHandle search, IntPtr* texts, UIntPtr* lens, UIntPtr count);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern SeBuffer se_search_locate_with_neighbours(SearchHandle search,
-            byte* previous, UIntPtr previousLen, byte* text, UIntPtr textLen, byte* next, UIntPtr nextLen,
-            uint matchedScore, uint matchedWordDistance);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr se_search_take_new_terms(SearchHandle search);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

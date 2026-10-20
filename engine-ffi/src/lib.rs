@@ -489,58 +489,6 @@ pub unsafe extern "C" fn se_search_locate_batch(
     })
 }
 
-/// Re-locates a short line's snippet over `previous + ' ' + text + ' ' +
-/// next` (empty sides dropped). `matched_score` / `matched_word_distance`
-/// are the line's own (kept on the result). Output as one entry of
-/// `se_search_locate_batch`; offsets into the joined text.
-///
-/// # Safety
-/// Strings valid for their lengths.
-#[no_mangle]
-pub unsafe extern "C" fn se_search_locate_with_neighbours(
-    search: *mut SearchResult,
-    previous: *const u8,
-    previous_len: usize,
-    text: *const u8,
-    text_len: usize,
-    next: *const u8,
-    next_len: usize,
-    matched_score: u32,
-    matched_word_distance: u32,
-) -> SeBuffer {
-    let empty = SeBuffer {
-        data: ptr::null_mut(),
-        len: 0,
-        cap: 0,
-    };
-    guard(empty, || {
-        let search = search.as_mut().ok_or("null search")?;
-        let matched = Snippet {
-            score: matched_score as usize,
-            word_distance: matched_word_distance as usize,
-            window_word_count: 0,
-            start: 0,
-            end: 0,
-            marks: Vec::new(),
-            flags: 0,
-        };
-        let mut out = Vec::new();
-        match search.session.locate_with_neighbours(
-            str_arg(previous, previous_len)?,
-            str_arg(text, text_len)?,
-            str_arg(next, next_len)?,
-            &matched,
-        ) {
-            Some(s) => {
-                out.push(1);
-                write_snippet(&s, &mut out);
-            }
-            None => out.push(0),
-        }
-        Ok(SeBuffer::from_vec(out))
-    })
-}
-
 /// Terms added to the search's term table since the previous call, as a
 /// JSON array of strings in id order (ids continue from the previous call).
 ///

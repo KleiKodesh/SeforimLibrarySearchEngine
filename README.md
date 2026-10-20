@@ -38,7 +38,10 @@ is one engine, one index format and the same results for both apps.
    - add ±8 words of context and the ellipsis flags
    - mark every matched word inside the window
    - apply the word-distance and word-order filters
-   - widen short windows over neighbouring lines of the same book
+   - report the window's word count, so the host can tell a short window
+     and locate again over the line joined with its neighbours (what
+     counts as a neighbour is seforim.db knowledge, so that stays in the
+     host: FtsLib's `SnippetDescriptorPipeline`, ported in the C# demo)
 
    The output is offsets only, not HTML, so the page renderer is unchanged.
 
@@ -204,8 +207,9 @@ are not printed), so upstream's query-parser tests stay as they are.
   the documents.
 - **Search:** every matching line in catalog order, plus a snippet session.
   - The session locates snippets for a whole batch across all cores.
-  - It applies the word-distance and order filters and widens short windows
-    over neighbouring lines.
+  - It applies the word-distance and order filters. Widening a short
+    window is the host's job: join the line with its neighbours and locate
+    that text (no neighbour or DB logic in the engine).
   - It keeps the term table.
 - **Query groups:** word (with options), wildcard, grammar (`%`), fuzzy
   (distance ≤2), and OR of alternatives.
@@ -234,6 +238,13 @@ are not printed), so upstream's query-parser tests stay as they are.
     keeps using the walk.
   - Measured on the full index (1,755,598 terms): built in 2.4 s, 41 MB;
     `*יצח*` 41 ms against 1.1 s as a walk (FtsLib: 0.26 s).
+- **Partial matching** (Otzaria's wordMatchMode): `min_groups` in the
+  request (C# `MinGroups`, Dart `minGroups`, demo `--match any|most|atleast`).
+  A line needs only that many of the groups (anyWord 1, mostWords n/2+1,
+  atLeast N, clamped to 1..n); it runs as a BooleanQuery with a minimum
+  number of matching clauses, and the snippet is the tightest window
+  holding that many groups. As in Otzaria, distance, order and spacing are
+  not applied in that case.
 - **Per-pair spacing** (Otzaria's customSpacing): `gaps` in the request (C#
   `SearchRequest.Gaps`, Dart `SearchRequest.gaps`, demo `--spacing 2,5`).
   - `gaps[i]` is the maximum number of words between query word i and i+1.
@@ -293,8 +304,7 @@ FM-index sidecar. The index is 1.6 GB with positions.
 ## Open
 - Otzaria gaps found by the Dart demo (see `dart/README.md`):
   - תרגום ארמי and ראשי תיבות have no walk.
-  - The "most words" / "at least N" modes, exclusion words, and grouping are
-    missing.
+  - Exclusion words and grouping are missing.
 - A full build compared side by side with FtsLib on the same queries.
 - Profiling: C# search is ~1.0 s (.NET 10) / ~1.5 s (net48), against 378 ms in
   the pure-Rust smoke test for the same query. That gap includes process start

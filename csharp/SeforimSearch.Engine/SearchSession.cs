@@ -100,27 +100,6 @@ namespace SeforimSearch.Engine
         /// <summary>Locates one matched line's snippet (see <see cref="LocateBatch"/>).</summary>
         public Snippet? Locate(string text) => LocateBatch(new[] { text })[0];
 
-        /// <summary>
-        /// Re-locates a SHORT window over <c>previous + ' ' + text + ' ' + next</c>
-        /// (empty sides dropped). Offsets are into that joined text. Score and word
-        /// distance are kept from <paramref name="matchedLine"/>. Null if the
-        /// re-locate fails (keep the original snippet then).
-        /// </summary>
-        public Snippet? LocateWithNeighbours(string previous, string text, string next, Snippet matchedLine)
-        {
-            byte[] p = Interop.ToUtf8(previous), t = Interop.ToUtf8(text), n = Interop.ToUtf8(next);
-            uint[] data;
-            fixed (byte* pp = p.Length == 0 ? new byte[1] : p)
-            fixed (byte* tp = t.Length == 0 ? new byte[1] : t)
-            fixed (byte* np = n.Length == 0 ? new byte[1] : n)
-                data = Interop.TakeBuffer(NativeMethods.se_search_locate_with_neighbours(_handle,
-                    pp, (UIntPtr)p.Length, tp, (UIntPtr)t.Length, np, (UIntPtr)n.Length,
-                    (uint)matchedLine.Score, (uint)matchedLine.WordDistance));
-            if (data.Length == 0 || data[0] == 0) return null;
-            int at = 1;
-            return Snippet.Read(data, ref at);
-        }
-
         /// <summary>Terms added to the term table since the previous call, in id
         /// order (ids continue from the previous call). A mark's termId indexes
         /// the concatenation of every call's result.</summary>

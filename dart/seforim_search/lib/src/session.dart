@@ -84,21 +84,6 @@ final class SearchSession implements Finalizable {
   /// One line's snippet.
   Snippet? locate(String text) => locateBatch([text])[0];
 
-  /// Re-locates a SHORT window over `previous + ' ' + text + ' ' + next`
-  /// (empty sides dropped). Offsets index that joined text. Null if it fails
-  /// (keep the original snippet then).
-  Snippet? locateWithNeighbours(String previous, String text, String next, Snippet matchedLine) {
-    final data = using((a) {
-      final (p, pl) = utf8Native(previous, a);
-      final (t, tl) = utf8Native(text, a);
-      final (x, xl) = utf8Native(next, a);
-      return _n.takeBuffer(
-          _n.locateWithNeighbours(_h, p, pl, t, tl, x, xl, matchedLine.score, matchedLine.wordDistance));
-    });
-    if (data.isEmpty || data[0] == 0) return null;
-    return Snippet.read(data, 1).$1;
-  }
-
   /// Terms added to the term table since the previous call, in id order.
   /// A mark's termId indexes the concatenation of every call's result.
   List<String> takeNewTerms() =>

@@ -34,10 +34,7 @@ pub use fuzzy::HebrewFuzzyQuery;
 pub use grammar_query::HebrewGrammarQuery;
 pub use prepared::{PreparedQueryGroups, PreparedTerm};
 pub use scanner::{scan, scan_with, TextToken, TextTokens, WordSpan};
-pub use snippet::{
-    join_with_neighbour_lines, SnippetDescriptor, SnippetWindowLocator, DEFAULT_CONTEXT_WORDS,
-    MARK_STRIDE,
-};
+pub use snippet::{SnippetDescriptor, SnippetWindowLocator, DEFAULT_CONTEXT_WORDS, MARK_STRIDE};
 pub use set_automaton::SetAutomaton;
 pub use tokenizer::{register_hebrew_tokenizer, HebrewTokenizer, HEBREW_TOKENIZER_NAME};
 pub use walk::{HebrewWalkAutomaton, HebrewWalkQuery, WalkOptions};

@@ -3,6 +3,9 @@ import 'package:seforim_search/seforim_search.dart';
 /// Otzaria's search modes (`SearchMode`).
 enum SearchMode { exact, advanced, fuzzy }
 
+/// Otzaria's `WordMatchMode`: how many of the query words a result needs.
+enum WordMatchMode { all, anyWord, mostWords, atLeast }
+
 /// Otzaria's per-word option keys (literal Hebrew strings in Otzaria).
 abstract final class OtzariaOption {
   static const grammaticalPrefixes = 'קידומות דקדוקיות';
@@ -52,7 +55,8 @@ class OtzariaSearch {
     this.distance = 0,
     this.anyOrder = false,
     this.fuzzyDistance = 1,
-    this.anyWord = false,
+    this.wordMatchMode = WordMatchMode.all,
+    this.wordMatchCount = 1,
     this.prefixMaxLetters,
     this.suffixMaxLetters,
     this.partOfWordMaxLetters,
@@ -80,8 +84,22 @@ class OtzariaSearch {
   /// Fuzzy mode edit distance (Otzaria kMaxFuzzyDistance = 2).
   final int fuzzyDistance;
 
-  /// wordMatchMode = anyWord: one OR slot of all words.
-  final bool anyWord;
+  /// Otzaria's wordMatchMode / wordMatchCount (count is for atLeast). Only
+  /// the advanced mode honours it (exact and fuzzy run "all").
+  final WordMatchMode wordMatchMode;
+  final int wordMatchCount;
+
+  /// Otzaria `WordMatch::min_words`: all = n, anyWord = 1, mostWords =
+  /// n/2 + 1, atLeast = count (at least 1); never more than n.
+  int minWords(int n) {
+    final min = switch (wordMatchMode) {
+      WordMatchMode.all => n,
+      WordMatchMode.anyWord => 1,
+      WordMatchMode.mostWords => n ~/ 2 + 1,
+      WordMatchMode.atLeast => wordMatchCount < 1 ? 1 : wordMatchCount,
+    };
+    return min < n ? min : n;
+  }
 
   final int? prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters, grammarPrefixMaxLetters;
 
@@ -148,8 +166,11 @@ class OtzariaSearch {
       final main = _wordGroup(words[i], o);
       groups.add(alts.isEmpty ? main : QueryGroup.any([main, for (final a in alts) _wordGroup(a, o)]));
     }
-    if (anyWord && groups.length > 1) {
-      return SearchRequest(groups: [QueryGroup.any(groups)], contextWords: contextWords);
+    // Partial matching: at least minWords of the words; order, distance and
+    // spacing do not apply (Otzaria: the match is at line resolution).
+    final min = mode == SearchMode.advanced ? minWords(groups.length) : groups.length;
+    if (min < groups.length) {
+      return SearchRequest(groups: groups, minGroups: min, contextWords: contextWords);
     }
     final spacing = customSpacing;
     if (spacing != null && spacing.isNotEmpty && groups.length > 1) {

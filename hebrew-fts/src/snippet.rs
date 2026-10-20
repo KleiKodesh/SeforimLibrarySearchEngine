@@ -39,8 +39,7 @@ const SAFETY_CEILING: usize = 4000;
 pub const MARK_STRIDE: usize = 3;
 
 /// WHERE a snippet is in its source text. Offsets are UTF-16 units into the
-/// string the locator was given (a matched line, or that line joined with its
-/// neighbours by single spaces).
+/// string the locator was given.
 #[derive(Debug, Clone, Copy)]
 pub struct SnippetDescriptor<'a> {
     /// True when every query group was found in the source (and, if ordered
@@ -97,6 +96,9 @@ pub struct SnippetWindowLocator {
     text_tokens: TextTokens,
     group_count: Vec<usize>,
     mark_ranges: Vec<usize>,
+    /// Groups a window must cover; 0 = all of them (FtsLib). See
+    /// [`set_min_groups`](Self::set_min_groups).
+    min_groups: usize,
 }
 
 impl Default for SnippetWindowLocator {
@@ -124,7 +126,18 @@ impl SnippetWindowLocator {
             text_tokens,
             group_count: vec![0; 8],
             mark_ranges: Vec::with_capacity(24),
+            min_groups: 0,
         }
+    }
+
+    /// Partial matching (Otzaria's wordMatchMode anyWord / mostWords /
+    /// atLeast): a window needs only `min_groups` distinct query groups, the
+    /// tightest such window wins, and the order check is skipped (Otzaria:
+    /// with words allowed to be missing, order and distance have no
+    /// meaning). 0, or a value of at least the group count, restores FtsLib's
+    /// all-groups rule.
+    pub fn set_min_groups(&mut self, min_groups: usize) {
+        self.min_groups = min_groups;
     }
 
     /// The core locate. `prepared` is the query's immutable term→group map.
@@ -147,6 +160,7 @@ impl SnippetWindowLocator {
             text_tokens,
             group_count,
             mark_ranges,
+            min_groups,
         } = self;
         text_tokens.tokenize(raw_html);
         let tokens = text_tokens.tokens();
@@ -155,7 +169,10 @@ impl SnippetWindowLocator {
         }
         let raw_len = text_tokens.raw_utf16_len();
 
-        let (i_left, i_right, score) = find_window(text_tokens, prepared, group_count);
+        let all_groups = prepared.group_count();
+        let partial = *min_groups > 0 && *min_groups < all_groups;
+        let required = if partial { *min_groups } else { all_groups };
+        let (i_left, i_right, score) = find_window(text_tokens, prepared, group_count, required);
         if score == usize::MAX {
             return SnippetDescriptor::NO_MATCH;
         }
@@ -164,23 +181,24 @@ impl SnippetWindowLocator {
             expand_window(tokens, raw_len, i_left, i_right, *context_words);
         collect_mark_ranges(text_tokens, prepared, snap_start, snap_end, mark_ranges);
 
-        // Visible words actually inside the window: lets the caller detect a
-        // "short" snippet for free and widen it over neighbouring lines.
+        // Visible words actually inside the window: lets the host detect a
+        // "short" snippet for free (it may then re-locate over a longer text).
         let window_words = e_idx - s_idx + 1;
 
         // WordDistance = extra words between matched slots (0 = all
         // consecutive). original_group_count overrides so skipped wildcards
         // still count as a slot.
-        let denominator = if original_group_count > 0 {
+        let denominator = if partial {
+            required
+        } else if original_group_count > 0 {
             original_group_count
         } else {
-            prepared.group_count()
+            all_groups
         };
         let word_dist = (i_right - i_left).saturating_sub(denominator - 1);
 
-        let is_match = !(require_ordered
-            && prepared.group_count() > 1
-            && !has_ordered_match(text_tokens, prepared));
+        let is_match = partial
+            || !(require_ordered && all_groups > 1 && !has_ordered_match(text_tokens, prepared));
 
         SnippetDescriptor {
             is_match,
@@ -206,73 +224,29 @@ impl SnippetWindowLocator {
         self.locate(raw_html, &prepared, false, 0)
     }
 
-    /// Locates over the matched line PLUS the given surrounding lines
-    /// (already fetched, in document order): the text is joined by
-    /// [`join_with_neighbour_lines`], then the normal single-pass locate
-    /// runs. The match is found in the matched line and the context expands
-    /// into the neighbour text. The returned offsets are into the JOINED
-    /// text; `joined` receives it so the caller can hold the same string.
-    ///
-    /// Used only for lines whose own window came out shorter than the
-    /// requested context (see [`SnippetDescriptor::window_word_count`]).
-    pub fn locate_over_neighbour_lines(
-        &mut self,
-        previous_content: &str,
-        content: &str,
-        next_content: &str,
-        prepared: &PreparedQueryGroups,
-        require_ordered: bool,
-        original_group_count: usize,
-        joined: &mut String,
-    ) -> SnippetDescriptor<'_> {
-        join_with_neighbour_lines(previous_content, content, next_content, joined);
-        self.locate(joined, prepared, require_ordered, original_group_count)
-    }
-
     /// The per-side context this locator expands by.
     pub fn context_words(&self) -> usize {
         self.context_words
     }
 }
 
-/// `previous + ' ' + content + ' ' + next`, an empty side dropped together
-/// with its space. The space keeps boundary words distinct (they must not
-/// fuse across a line break) and renders as a normal gap. The page re-joins
-/// line texts the same way, so a descriptor's offsets land on the same
-/// characters. Writes into `out` (cleared first).
-pub fn join_with_neighbour_lines(
-    previous_content: &str,
-    content: &str,
-    next_content: &str,
-    out: &mut String,
-) {
-    out.clear();
-    out.reserve(previous_content.len() + content.len() + next_content.len() + 2);
-    if !previous_content.is_empty() {
-        out.push_str(previous_content);
-        out.push(' ');
-    }
-    out.push_str(content);
-    if !next_content.is_empty() {
-        out.push(' ');
-        out.push_str(next_content);
-    }
-}
-
 // ── Window finding ────────────────────────────────────────────────────
 // Returns (i_left, i_right, score): token indices, not raw positions.
 
+/// `required`: distinct groups a window must cover (the group count, or
+/// fewer for partial matching).
 fn find_window(
     text_tokens: &TextTokens,
     prepared: &PreparedQueryGroups,
     group_count: &mut Vec<usize>,
+    required: usize,
 ) -> (usize, usize, usize) {
     let tokens = text_tokens.tokens();
-    let required = prepared.group_count();
-    if group_count.len() < required {
-        group_count.resize(required * 2, 0);
+    let all_groups = prepared.group_count();
+    if group_count.len() < all_groups {
+        group_count.resize(all_groups * 2, 0);
     }
-    group_count[..required].fill(0);
+    group_count[..all_groups].fill(0);
 
     let mut covered = 0usize;
     let (mut best_i_left, mut best_i_right, mut best_score) = (usize::MAX, usize::MAX, usize::MAX);
@@ -288,7 +262,9 @@ fn find_window(
             }
         }
 
-        while covered == required {
+        // `>=`: with partial matching one token may belong to several groups
+        // and push `covered` past `required` in one step.
+        while covered >= required {
             // Score in raw chars (used only for picking the tightest window).
             let span = tokens[r].utf16_end - tokens[l].utf16_start;
             if span < best_score {
@@ -579,34 +555,26 @@ mod tests {
     }
 
     #[test]
-    fn neighbour_join_rules() {
-        let mut s = String::new();
-        join_with_neighbour_lines("אא", "בב", "גג", &mut s);
-        assert_eq!(s, "אא בב גג");
-        join_with_neighbour_lines("", "בב", "גג", &mut s);
-        assert_eq!(s, "בב גג");
-        join_with_neighbour_lines("אא", "בב", "", &mut s);
-        assert_eq!(s, "אא בב");
-        join_with_neighbour_lines("", "בב", "", &mut s);
-        assert_eq!(s, "בב");
-    }
-
-    #[test]
-    fn short_window_widens_over_neighbours() {
-        let mut loc = SnippetWindowLocator::new(2);
-        let p = PreparedQueryGroups::from_groups(&[vec!["גג"]]);
-        // alone: the line has only the match → 1 word < 2 context
-        let d = loc.locate("גג", &p, false, 0);
-        assert_eq!(d.window_word_count, 1);
-        assert!(d.window_word_count < loc.context_words());
-        // with neighbours: context flows into them; offsets are into the joined text
-        let mut joined = String::new();
-        let d = loc.locate_over_neighbour_lines("אא בב", "גג", "דד הה", &p, false, 0, &mut joined);
-        assert_eq!(joined, "אא בב גג דד הה");
-        assert_eq!(d.window_word_count, 5);
-        assert_eq!(slice16(&joined, d.snap_start, d.snap_end), "אא בב גג דד הה");
-        let (start, len, _) = d.marks().next().unwrap();
-        assert_eq!(slice16(&joined, start, start + len), "גג");
+    fn partial_matching_min_groups() {
+        let mut loc = SnippetWindowLocator::new(0);
+        // one token in two groups: covered jumps 0 -> 2 with min_groups 1
+        let p = PreparedQueryGroups::from_groups(&[vec!["תורה"], vec!["תורה", "משה"], vec!["סיני"]]);
+        loc.set_min_groups(1);
+        let d = loc.locate("אב תורה גד", &p, true, 0);
+        assert!(d.is_match);
+        assert_eq!(d.word_distance, 0);
+        // min 2 of 3: the tightest window holding two groups; order ignored
+        loc.set_min_groups(2);
+        let d = loc.locate("סיני אב משה גד תורה", &p, true, 0);
+        assert!(d.is_match);
+        assert_eq!(d.word_distance, 0); // תורה alone is groups 0+1: a one-token window
+        let d = loc.locate("סיני אב משה גד", &p, true, 0);
+        assert!(d.is_match);
+        assert_eq!(d.word_distance, 1); // "סיני אב משה": groups 2 and 1
+        // all groups (0): FtsLib's rule, order enforced
+        loc.set_min_groups(0);
+        let d = loc.locate("סיני אב משה גד תורה", &p, true, 0);
+        assert!(!d.is_match);
     }
 
     #[test]

@@ -52,7 +52,6 @@ final s = index.search(SearchRequest(
   maxWordDistance: 5, requireOrdered: false, contextWords: 8));
 s.hitCount; s.hits(offset, count); s.allHits();          // PlacedHit, catalog order
 s.locateBatch(texts); s.locate(text);                    // Snippet? (null = filtered out)
-s.locateWithNeighbours(prev, text, next, snippet);       // widen a short window
 s.takeNewTerms();                                        // term table, indexed by SnippetMark.termId
 s.close(); index.close();
 ```
@@ -71,6 +70,7 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 | `SearchMode.exact` | Only the 5 exact-mode options are kept: grammatical prefixes/suffixes, prefixes, suffixes, ktiv. |
 | `SearchMode.advanced` | All options, plus alternatives. |
 | `SearchMode.fuzzy` | `QueryGroup.fuzzy(word, 1..2)`. |
+| `wordMatchMode` / `wordMatchCount` | `SearchRequest.minGroups` = Otzaria's `min_words` (anyWord 1, mostWords n/2+1, atLeast N); distance, order and spacing are then not applied, as in Otzaria. Advanced mode only. |
 | קידומות דקדוקיות / סיומות דקדוקיות | `grammarPrefixes` / `grammarSuffixes`. As in Otzaria, they are skipped for words under 3 letters unless the word is an acronym (has `"`). |
 | קידומות / סיומות | `advancedPrefixes` / `advancedSuffixes`, plus `prefixMaxLetters` / `suffixMaxLetters`. |
 | כתיב מלא/חסר | `ktivMaleHaser` |
@@ -82,18 +82,16 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 | `distance` (gap), default scope "in order" | `maxWordDistance`, `requireOrdered: true` |
 | `anyOrder` | `requireOrdered: false` |
 | `alternativeWords[i]` | `QueryGroup.any([...])`. In the CLI, write `a,b`. |
-| `wordMatchMode.anyWord` | One `any` group holding every word. |
 | scope `sameParagraph` | Leave out `--distance` limits. A line is the paragraph unit. |
 | `order: catalogue` | This is the only order. Positions come from the catalog-tree walk at build time. |
 | book/category facets | `--book TEXT` filters hits by book IDs, matching the book title or an ancestor category title (`category_closure`). |
 | `limit` / `offset` | Counted over results that pass the snippet filters, as Otzaria's pages are. |
 | query sanitizing | Same rules: ״→", ׳→', maqaf and `-` → space, an edge `"` is dropped, `''`→". |
-| result `title` / `reference` / snippet | Book title, `line.heRef`, and the snippet with `⟦marks⟧`. Short windows are widened over ±2 neighbour lines (`continuesToNextLine`-like). |
+| result `title` / `reference` / snippet | Book title, `line.heRef`, and the snippet with `⟦marks⟧`. Short windows (`isShort`) are located again over the line joined with ±2 neighbour lines, by the demo (seforim.db knowledge stays out of the engine). |
 
 ### Gaps: what Otzaria does that the engine/demo can't (yet)
 
 - **Options with no walk:** תרגום ארמי and ראשי תיבות. The demo warns and ignores them.
-- **`wordMatchMode` mostWords / atLeast N.** The engine ANDs groups. Only "all" and "anyWord" can be expressed.
 - **Negative query** (words to exclude).
 - **Scope `sameSection`** (under the same heading), and **grouping** (`sameSection` cards, `identicalText` merging). Each hit has a `tocEntryId`, so the host could group by it, but the demo doesn't.
 - **Relevance ordering.** Results come in catalog order only.

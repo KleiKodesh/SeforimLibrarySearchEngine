@@ -72,11 +72,6 @@ final class SeforimNative {
         locateBatch = lib.lookupFunction<
             SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Size),
             SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int)>('se_search_locate_batch'),
-        locateWithNeighbours = lib.lookupFunction<
-            SeBuffer Function(Pointer<Void>, Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Uint8>, Size, Uint32,
-                Uint32),
-            SeBuffer Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, int,
-                int)>('se_search_locate_with_neighbours'),
         takeNewTerms = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_search_take_new_terms'),
         indexCloseFinalizer = NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_index_close').cast()),
@@ -107,8 +102,6 @@ final class SeforimNative {
   final int Function(Pointer<Void>) searchHitCount;
   final int Function(Pointer<Void>, int, int, Pointer<Uint64>) searchCopyHits;
   final SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) locateBatch;
-  final SeBuffer Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, int, int)
-      locateWithNeighbours;
   final Pointer<Utf8> Function(Pointer<Void>) takeNewTerms;
   final NativeFinalizer indexCloseFinalizer;
   final NativeFinalizer writerCloseFinalizer;

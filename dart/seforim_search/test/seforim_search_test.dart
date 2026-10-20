@@ -92,14 +92,15 @@ void main() {
     s.close();
   });
 
-  test('any + fuzzy + neighbours', () {
+  test('any + fuzzy + a host-joined longer text', () {
     final s = index.search(SearchRequest(groups: [
       const QueryGroup.any([QueryGroup.word('משה'), QueryGroup.fuzzy('למשא', 1)]),
     ]));
     expect(s.hitCount, 1);
     final own = s.locate(text)!;
-    final wide = s.locateWithNeighbours('לפני', text, 'אחרי', own);
+    final wide = s.locate('לפני $text אחרי');
     expect(wide, isNotNull);
+    expect(wide!.windowWordCount, greaterThan(own.windowWordCount));
     s.close();
   });
 

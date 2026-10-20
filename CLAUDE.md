@@ -29,7 +29,9 @@ in one or two lines. Remove entries that turn out to be wrong.
   Check on-disk vs git HEAD (`git status`) first; files were once deleted on disk.
 - **No database code in Rust / tantivy.** Anything that needs SQLite or knows the
   seforim.db schema lives in the C# demo (`csharp/SeforimSearch.Demo`). The engine is
-  fed lines and texts by the host.
+  fed lines and texts by the host. This includes widening short snippets over
+  neighbour lines: "it has to do with the seforim db", so no join/re-locate helper in
+  Rust; the host joins the texts and calls the plain locate (user's rule).
 - **tantivy/ is our modified copy** ("KleiKodesh version", the user dislikes "fork"
   meaning anything online). Commit straight to its `main`, no branches. It is a git submodule
   (origin = KleiKodesh/tantivy); after tantivy commits, push it, then `git add tantivy` here.
@@ -89,9 +91,11 @@ Search flow: the query string goes through `QueryParser` (FtsLib rules) and beco
 groups (AND across, OR inside). Each group is a walk with a sink, and the
 BooleanQuery returns every hit's line id + catalog position. The host fetches texts
 in FtsLib's batch plan (256×16, then doubling to 2048). The engine then locates
-each batch in one multi-core call, applies the distance and order filters, and
-widens short windows over the host-supplied same-book neighbours (radius 2,
-non-empty lines).
+each batch in one multi-core call and applies the distance and order filters. A
+short window is the HOST's business: it joins the line with its same-book
+neighbours (radius 2, non-empty lines; FtsLib's `SnippetDescriptorPipeline`, in the
+C# demo) and locates that text. Rust holds no neighbour logic (user's rule: it is
+seforim.db knowledge).
 
 ## Key facts about the data and FtsLib
 
@@ -165,5 +169,9 @@ non-empty lines).
 
 - Benchmark span query vs FtsLib-style post-filter for very broad expansions.
 - Profile the C# search path (1.0 s net10 / 1.5 s net48 vs 0.38 s pure Rust).
-- Dart binding over the same C ABI.
-- Full build + side-by-side comparison against FtsLib on real queries.
+- Otzaria gaps still open: negative (exclusion) query, acronym (ראשי תיבות) phrase
+  alternatives, Aramaic translation lexicon (host-side `dictionary.json`), grouping.
+  Otzaria's sources: `github.com/Otzaria/otzaria` (Dart) and
+  `github.com/Otzaria/otzaria_search_engine` v5.0.0 (Rust `hebrew_query.rs`,
+  `api/search_engine.rs`, `lexicons.rs`); clone them into the scratchpad to port.
+- Done: Dart binding; full-DB side-by-side parity (16/17); FM sidecar; wordMatchMode.

@@ -40,16 +40,6 @@ namespace FtsLib.Fts5
             }
         }
 
-        public Snippet? LocateWithNeighbours(string previous, string text, string next, Snippet matched)
-        {
-            lock (_lock)
-            {
-                var located = _session.LocateWithNeighbours(previous, text, next, matched);
-                _terms.AddRange(_session.TakeNewTerms());
-                return located;
-            }
-        }
-
         public void Dispose() => _session.Dispose();
     }
 
@@ -201,16 +191,45 @@ namespace FtsLib.Fts5
             return snippet == null ? SnippetDescriptor.NoMatch : new SnippetDescriptor(snippet, result.Session.TermAt);
         }
 
-        /// <summary>Re-locates a short window over the line joined with its neighbours
-        /// (previous + ' ' + line + ' ' + next). Offsets are into that joined text.</summary>
+        /// <summary>FtsLib's <c>SnippetDescriptorPipeline.LocateOverNeighbourLines</c>:
+        /// locates over the matched line PLUS the given surrounding lines (already
+        /// fetched, in document order). The text is joined by
+        /// <see cref="JoinWithNeighbourLines"/>, then the normal locate runs; the match is
+        /// found in the matched line and the context expands into the neighbour text.
+        /// Offsets are into that JOINED text. Used only for lines whose own window came
+        /// out shorter than the requested context. Deviation: <paramref name="requireOrdered"/>
+        /// and <paramref name="contextWords"/> are kept for FtsLib's signature but the native
+        /// session locates with the values the search was made with, and applies the
+        /// search's MaxWordDistance filter (FtsLib's pipeline did not filter here); the Core
+        /// caller passes the same values, and the joined text's tightest window can never be
+        /// wider than the line's own, so the result is the same.</summary>
         public SnippetDescriptor LocateSnippetWindowOverNeighbourLines(SearchResult result, string previousContent,
                                                                        string nextContent, bool requireOrdered = false,
                                                                        int contextWords = DefaultContextWords)
         {
-            if (result?.LocatedSnippet == null) return SnippetDescriptor.NoMatch;
-            var extended = result.Session.LocateWithNeighbours(previousContent ?? "", result.Content,
-                                                               nextContent ?? "", result.LocatedSnippet);
-            return extended == null ? SnippetDescriptor.NoMatch : new SnippetDescriptor(extended, result.Session.TermAt);
+            if (result == null || string.IsNullOrEmpty(result.Content)) return SnippetDescriptor.NoMatch;
+            string joined = JoinWithNeighbourLines(previousContent, result.Content, nextContent);
+            var snippet = result.Session.LocateBatch(new[] { joined })[0];
+            return snippet == null ? SnippetDescriptor.NoMatch : new SnippetDescriptor(snippet, result.Session.TermAt);
+        }
+
+        /// <summary>FtsLib's <c>SnippetDescriptorPipeline.JoinWithNeighbourLines</c>:
+        /// previous + ' ' + content + ' ' + next, an empty side dropped together with its
+        /// space. The space keeps boundary words distinct (they must not fuse across a
+        /// line break) and renders as a normal gap. The page re-joins line texts the same
+        /// way, so a descriptor's offsets land on the same characters.</summary>
+        internal static string JoinWithNeighbourLines(string? previousContent, string content, string? nextContent)
+        {
+            bool hasPrevious = !string.IsNullOrEmpty(previousContent);
+            bool hasNext = !string.IsNullOrEmpty(nextContent);
+            if (!hasPrevious && !hasNext) return content;
+
+            var joined = new System.Text.StringBuilder(
+                (previousContent?.Length ?? 0) + content.Length + (nextContent?.Length ?? 0) + 2);
+            if (hasPrevious) joined.Append(previousContent).Append(' ');
+            joined.Append(content);
+            if (hasNext) joined.Append(' ').Append(nextContent);
+            return joined.ToString();
         }
 
         // ── Build ─────────────────────────────────────────────────────

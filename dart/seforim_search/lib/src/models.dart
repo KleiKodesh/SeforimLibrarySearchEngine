@@ -207,8 +207,20 @@ class AnyGroup extends QueryGroup {
 /// A search.
 class SearchRequest {
   SearchRequest(
-      {List<QueryGroup>? groups, this.maxWordDistance, this.requireOrdered = false, this.contextWords = 8, this.gaps})
+      {List<QueryGroup>? groups,
+      this.maxWordDistance,
+      this.requireOrdered = false,
+      this.contextWords = 8,
+      this.gaps,
+      this.minGroups})
       : groups = groups ?? [];
+
+  /// Partial matching (Otzaria's wordMatchMode): a line needs only this many
+  /// of the groups (anyWord = 1, mostWords = n/2 + 1, atLeast = N; clamped to
+  /// 1..n). Null = all groups. Below the group count, [maxWordDistance],
+  /// [requireOrdered] and [gaps] are not applied; the snippet is the tightest
+  /// window holding that many groups.
+  int? minGroups;
 
   /// Per-pair spacing (Otzaria's customSpacing): gaps[i] = max words between
   /// group i and group i+1 (0 = adjacent). Needs an index with positions; one
@@ -233,6 +245,7 @@ class SearchRequest {
         'require_ordered': requireOrdered,
         'context_words': contextWords,
         if (gaps != null) 'gaps': [for (final g in gaps!) g < 0 ? 0 : g],
+        if (minGroups != null) 'min_groups': minGroups,
       };
 }
 
@@ -290,7 +303,8 @@ class Snippet {
   bool get leadingEllipsis => flags & flagLeadingEllipsis != 0;
   bool get trailingEllipsis => flags & flagTrailingEllipsis != 0;
 
-  /// Fewer words than the per-side context: widen over neighbour lines.
+  /// Fewer words than the per-side context ("short"): the host may locate
+  /// again over a longer text, e.g. the line joined with its neighbours.
   bool isShort(int contextWords) => windowWordCount < contextWords;
 
   static const int _maxInt32 = 0x7fffffff;

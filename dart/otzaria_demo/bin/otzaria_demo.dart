@@ -19,7 +19,8 @@ search options (Otzaria names):
   --prefix-max N --suffix-max N --partial-max N --grammar-prefix-max N   (walk limits)
   --distance N        word gap (default 0)  --any-order
   --spacing a,b,..    gap per consecutive word pair (customSpacing; needs positions)
-  --fuzzy-distance N  (fuzzy mode, 1..2)   --any-word  (wordMatchMode anyWord)
+  --fuzzy-distance N  (fuzzy mode, 1..2)
+  --match all|any|most|atleast  (wordMatchMode; default all)   --match-count N  (for atleast)
   --book TEXT         only books whose title/category contains TEXT
   --limit N (100) --offset N (0)  --context N (8)
   word alternatives: write a,b in the query (Otzaria sets them per word in the UI)
@@ -30,7 +31,8 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
   final m = <String, String?>{};
   const valued = {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
-    'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd', 'spacing',
+    'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd', 'spacing', 'match',
+    'match-count',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -177,7 +179,13 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     alternativeWords: alts,
     distance: _int(o, 'distance') ?? 0,
     anyOrder: o.containsKey('any-order'),
-    anyWord: o.containsKey('any-word'),
+    wordMatchMode: switch (o['match'] ?? 'all') {
+      'any' => WordMatchMode.anyWord,
+      'most' => WordMatchMode.mostWords,
+      'atleast' => WordMatchMode.atLeast,
+      _ => WordMatchMode.all,
+    },
+    wordMatchCount: _int(o, 'match-count') ?? 1,
     fuzzyDistance: _int(o, 'fuzzy-distance') ?? 1,
     prefixMaxLetters: _int(o, 'prefix-max'),
     suffixMaxLetters: _int(o, 'suffix-max'),
@@ -226,10 +234,15 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
         String side(int a, int b) =>
             [for (var d = a; d <= b; d++) around[h.lineIndex + d] ?? ''].where((t) => t.isNotEmpty).join(' ');
         final prev = side(-2, -1), next = side(1, 2);
-        final wide = session.locateWithNeighbours(prev, text, next, s);
+        // previous + ' ' + line + ' ' + next, empty sides dropped (FtsLib's
+        // JoinWithNeighbourLines); the engine just locates the longer text.
+        final joined = [prev, text, next].where((t) => t.isNotEmpty).join(' ');
+        // The demo shows the joined text's snippet as is; KitveiHakodesh's
+        // searcher (C# demo) keeps the matched line's score and distance.
+        final wide = session.locate(joined);
         if (wide != null) {
           s = wide;
-          text = [prev, text, next].where((t) => t.isNotEmpty).join(' ');
+          text = joined;
         }
       }
       results.add((batch[i], text, s));

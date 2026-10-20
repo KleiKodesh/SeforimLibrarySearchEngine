@@ -257,6 +257,13 @@ namespace SeforimSearch.Engine
         /// positions; one entry per consecutive pair. Null = not used.</summary>
         public List<int>? Gaps { get; set; }
 
+        /// <summary>Partial matching (Otzaria's wordMatchMode): a line needs only this
+        /// many of the groups (anyWord = 1, mostWords = n/2 + 1, atLeast = N; clamped
+        /// to 1..n). Null = all groups. Below the group count, MaxWordDistance,
+        /// RequireOrdered and Gaps are not applied; the snippet is the tightest window
+        /// holding that many groups.</summary>
+        public int? MinGroups { get; set; }
+
         internal string ToJson()
         {
             var sb = new StringBuilder();
@@ -280,6 +287,8 @@ namespace SeforimSearch.Engine
                 }
                 sb.Append(']');
             }
+            if (MinGroups.HasValue)
+                sb.Append(",\"min_groups\":").Append(MinGroups.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
             sb.Append('}');
             return sb.ToString();
         }
@@ -325,7 +334,8 @@ namespace SeforimSearch.Engine
         public bool LeadingEllipsis => (Flags & FlagLeadingEllipsis) != 0;
         public bool TrailingEllipsis => (Flags & FlagTrailingEllipsis) != 0;
 
-        /// <summary>Fewer words than the per-side context: widen over neighbour lines.</summary>
+        /// <summary>Fewer words than the per-side context ("short"): the host may
+        /// locate again over a longer text, e.g. the line joined with its neighbours.</summary>
         public bool IsShort(int contextWords) => WindowWordCount < contextWords;
 
         /// <summary>Reads one record of the native flat format: header + marks.</summary>

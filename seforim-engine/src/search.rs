@@ -122,6 +122,14 @@ pub struct SearchRequest {
     /// between group i and group i+1 (0 = adjacent). Runs as a span query;
     /// needs an index with positions. Order follows `require_ordered`.
     pub gaps: Option<Vec<u32>>,
+    /// Partial matching (Otzaria's wordMatchMode): a line needs only this
+    /// many of the searchable groups (anyWord = 1, mostWords = n/2 + 1,
+    /// atLeast = N; clamped to 1..n). None = all groups (FtsLib). When it
+    /// is below the group count, `max_word_distance`, `require_ordered` and
+    /// `gaps` are not applied (Otzaria: with words allowed to be missing,
+    /// order and distance have no meaning); the snippet is the tightest
+    /// window holding that many groups.
+    pub min_groups: Option<usize>,
 }
 
 impl Default for SearchRequest {
@@ -132,6 +140,7 @@ impl Default for SearchRequest {
             require_ordered: false,
             context_words: DEFAULT_CONTEXT_WORDS,
             gaps: None,
+            min_groups: None,
         }
     }
 }
@@ -162,7 +171,9 @@ pub struct Snippet {
     /// Words between the matched slots in the tightest window.
     pub word_distance: usize,
     /// Words the window spans after context expansion; fewer than the
-    /// context means "short": widen over neighbour lines.
+    /// context means "short". What to do then is the host's business (the
+    /// KitveiHakodesh host joins the line with its neighbours and locates
+    /// again); the engine only locates the text it is given.
     pub window_word_count: usize,
     pub start: usize,
     pub end: usize,
@@ -207,9 +218,10 @@ pub struct SnippetSession {
     max_word_distance: usize,
     context_words: usize,
     keep_marks: bool,
+    /// Groups a window must cover (0 = all). See `SearchRequest::min_groups`.
+    min_groups: usize,
     terms: TermTable,
     locator: SnippetWindowLocator,
-    joined: String,
 }
 
 impl SnippetSession {
@@ -231,12 +243,13 @@ impl SnippetSession {
         let Some(prepared) = self.prepared.as_ref() else {
             return vec![None; texts.len()];
         };
-        let (require_ordered, original, max_distance, context, keep_marks) = (
+        let (require_ordered, original, max_distance, context, keep_marks, min_groups) = (
             self.require_ordered,
             self.original_group_count,
             self.max_word_distance,
             self.context_words,
             self.keep_marks,
+            self.min_groups,
         );
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -261,6 +274,7 @@ impl SnippetSession {
                             } else {
                                 SnippetWindowLocator::new(context)
                             };
+                            locator.set_min_groups(min_groups);
                             part.iter()
                                 .map(|t| {
                                     let d = locator.locate(t, prepared, require_ordered, original);
@@ -299,34 +313,6 @@ impl SnippetSession {
             flags: (if d.leading_ellipsis { SNIPPET_FLAG_LEADING_ELLIPSIS } else { 0 })
                 | (if d.trailing_ellipsis { SNIPPET_FLAG_TRAILING_ELLIPSIS } else { 0 }),
         })
-    }
-
-    /// Re-locates a short line's snippet over the line joined with its
-    /// neighbours: `previous + ' ' + text + ' ' + next`, empty sides dropped.
-    /// Offsets are into that joined text. Score and word distance stay those
-    /// of `matched_line_snippet` (relevance is the matched line's; the
-    /// neighbours are presentation). None if the re-locate fails.
-    pub fn locate_with_neighbours(
-        &mut self,
-        previous: &str,
-        text: &str,
-        next: &str,
-        matched_line_snippet: &Snippet,
-    ) -> Option<Snippet> {
-        let prepared = self.prepared.as_ref()?;
-        let d = self.locator.locate_over_neighbour_lines(
-            previous,
-            text,
-            next,
-            prepared,
-            self.require_ordered,
-            self.original_group_count,
-            &mut self.joined,
-        );
-        let mut s = Self::finish(d, prepared, &mut self.terms, usize::MAX)?;
-        s.score = matched_line_snippet.score;
-        s.word_distance = matched_line_snippet.word_distance;
-        Some(s)
     }
 
     fn finish(
@@ -722,16 +708,25 @@ impl LineIndex {
         } else {
             SnippetWindowLocator::new(request.context_words)
         };
+        // Partial matching: at least `min` of the searchable groups. Clamped
+        // to 1..n like Otzaria's WordMatch::min_words; n or more = all. (n
+        // counts the request's groups; Otzaria counts distinct materialized
+        // words, which differs only for duplicate words or rejected wildcards.)
+        let partial_min = request
+            .min_groups
+            .filter(|&k| k < request.groups.len())
+            .map(|k| k.max(1));
+        let partial = partial_min.is_some();
         let mut session = SnippetSession {
             prepared: None,
             original_group_count: request.groups.len(),
-            require_ordered: request.require_ordered,
-            max_word_distance: request.max_word_distance.unwrap_or(usize::MAX),
+            require_ordered: request.require_ordered && !partial,
+            max_word_distance: if partial { usize::MAX } else { request.max_word_distance.unwrap_or(usize::MAX) },
             context_words: request.context_words,
             keep_marks,
+            min_groups: 0,
             terms: TermTable::default(),
             locator,
-            joined: String::new(),
         };
 
         let reader = self.index.reader()?;
@@ -740,7 +735,7 @@ impl LineIndex {
         let fm = fm.as_deref();
         let mut sinks = Vec::new();
 
-        let query: Box<dyn Query> = if let Some(gaps) = &request.gaps {
+        let query: Box<dyn Query> = if let (Some(gaps), false) = (&request.gaps, partial) {
             // Per-pair spacing: a span query, one slot per group, each gap its own limit.
             match self.span_query(request, gaps, &searcher, fm, &mut sinks)? {
                 Some(q) => Box::new(q),
@@ -763,7 +758,14 @@ impl LineIndex {
                     session,
                 });
             }
-            Box::new(BooleanQuery::new(clauses))
+            match partial_min {
+                Some(min) if min < clauses.len() => {
+                    let should: Vec<(Occur, Box<dyn Query>)> =
+                        clauses.into_iter().map(|(_, q)| (Occur::Should, q)).collect();
+                    Box::new(BooleanQuery::with_minimum_required_clauses(should, min))
+                }
+                _ => Box::new(BooleanQuery::new(clauses)),
+            }
         };
 
         let timing = std::env::var_os("SEFORIM_ENGINE_TIMING").is_some();
@@ -788,8 +790,17 @@ impl LineIndex {
         }
         hits.sort_unstable_by_key(|h| h.position);
 
-        let group_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
-        if group_terms.iter().any(|g| g.is_empty()) {
+        let mut group_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
+        if let Some(min) = partial_min {
+            // a group that matched no indexed word simply cannot be one of
+            // the `min`; the others still can
+            group_terms.retain(|g| !g.is_empty());
+            if group_terms.len() < min {
+                return Ok(SearchResult { hits: Vec::new(), session });
+            }
+            session.min_groups = min;
+            session.locator.set_min_groups(min);
+        } else if group_terms.iter().any(|g| g.is_empty()) {
             // a group matched no indexed word: nothing can match
             return Ok(SearchResult {
                 hits: Vec::new(),

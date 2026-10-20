@@ -7,8 +7,7 @@
 //!   ([`IndexOptions`]).
 //! - [`LineIndex::search`]: every matching line in catalog order, plus a
 //!   [`SnippetSession`] that locates FtsLib snippets in the texts the host
-//!   fetches, applying the word-distance / order filters, and widens short
-//!   windows over neighbour lines the host supplies.
+//!   fetches, applying the word-distance / order filters.
 
 pub mod fm_expand;
 pub mod fm_index;
@@ -133,12 +132,8 @@ mod tests {
         assert_eq!(result.session.all_terms()[term], "והתורה");
         assert!(s.is_short(result.session.context_words()));
 
-        // widening over host-supplied neighbours keeps score/distance
-        let w = result
-            .session
-            .locate_with_neighbours("בראשית ברא", text, "תורה צוה", &s)
-            .unwrap();
-        assert_eq!(w.score, s.score);
+        // a host that widens a short snippet simply locates a longer text
+        let w = result.session.locate("בראשית ברא והתורה ניתנה למשה תורה צוה").unwrap();
         assert!(w.window_word_count > s.window_word_count);
         assert!(!result.session.take_new_terms().is_empty());
     }
@@ -306,6 +301,61 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result.hits.len(), 1);
+    }
+
+    #[test]
+    fn min_groups_partial_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = build(
+            dir.path(),
+            IndexOptions::default(),
+            &[
+                line(1, 0, 1, 0, "משה קבל תורה בהר סיני"), // משה, תורה, סיני
+                line(2, 1, 1, 1, "תורה צוה לנו"),          // תורה
+                line(3, 2, 1, 2, "סיני ואז משה"),           // סיני, משה (reverse order)
+                line(4, 3, 1, 3, "דבר אחר"),
+            ],
+        );
+        let groups = || vec![word("משה", false), word("תורה", false), word("סיני", false)];
+        // all (None): only line 1
+        let r = index.search(&SearchRequest { groups: groups(), ..Default::default() }).unwrap();
+        assert_eq!(r.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), vec![1]);
+        // mostWords = 3/2 + 1 = 2: lines 1 and 3; order/distance ignored
+        let mut r = index
+            .search(&SearchRequest {
+                groups: groups(),
+                min_groups: Some(2),
+                require_ordered: true,
+                max_word_distance: Some(0),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), vec![1, 3]);
+        let s = r.session.locate("סיני ואז משה").unwrap();
+        assert_eq!(s.marks.len(), 6);
+        assert_eq!(s.word_distance, 1);
+        // tightest 2-group window in line 1: "משה קבל תורה" (strict-< tie: earliest)
+        let s1 = r.session.locate("משה קבל תורה בהר סיני").unwrap();
+        assert_eq!(s1.word_distance, 1);
+        // marks cover every query term inside the context-expanded window
+        assert_eq!(s1.marks.len(), 9);
+        // anyWord = 1: lines 1, 2, 3
+        let r = index
+            .search(&SearchRequest { groups: groups(), min_groups: Some(1), ..Default::default() })
+            .unwrap();
+        assert_eq!(r.hits.len(), 3);
+        // a group with no indexed term does not sink the others
+        let mut g = groups();
+        g.push(word("זזזזז", false));
+        let r = index
+            .search(&SearchRequest { groups: g, min_groups: Some(3), ..Default::default() })
+            .unwrap();
+        assert_eq!(r.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), vec![1]);
+        // min >= n means all
+        let r = index
+            .search(&SearchRequest { groups: groups(), min_groups: Some(7), ..Default::default() })
+            .unwrap();
+        assert_eq!(r.hits.len(), 1);
     }
 
     /// The FM-index sidecar must give EXACTLY the walk's terms (and hits) for

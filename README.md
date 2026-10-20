@@ -92,6 +92,15 @@ Measured on the real Otzaria DB (7.08M lines), first 200k lines:
   - **Otzaria options:** grammatical/Aramaic prefixes and suffixes, ktiv
     male/haser, part-of-word, advanced prefixes/suffixes, ignore gershayim,
     spelling/OCR errors, ignore nikud, ignore te'amim.
+  - **Length limits are set by the caller** (Otzaria), as plain ints; unset
+    means the default:
+
+    | Option | Default |
+    |---|---|
+    | `PrefixMaxLetters` | 3 (5 for a word of ≤3 letters) |
+    | `SuffixMaxLetters` | 5 (7 for a short word) |
+    | `PartOfWordMaxLetters` | 3 per side (2 for 4+-letter words) |
+    | `GrammarPrefixMaxLetters` | 3 |
   - **Wildcard** (`*`, `?`) with FtsLib's limits:
     - at least 2 real letters, at most 4 `?`
     - `*` may cover 3 characters before the anchor, 4 after it, or 7 in total

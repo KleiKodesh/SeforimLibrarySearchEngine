@@ -68,6 +68,19 @@ pub struct WalkOptions {
     pub ignore_nikud: bool,
     /// Ignore te'amim (cantillation), independently of nikud.
     pub ignore_teamim: bool,
+
+    // ── Limits, set by the caller (Otzaria). None = the defaults below. ──
+    /// קידומות (מתקדם): max letters before the word. Default 3, or 5 for a
+    /// word of ≤3 letters.
+    pub prefix_max_letters: Option<u32>,
+    /// סיומות (מתקדם): max letters after the word. Default 5, or 7 for a
+    /// word of ≤3 letters.
+    pub suffix_max_letters: Option<u32>,
+    /// חלק ממילה: max letters on each side. Default 3, or 2 for a word of
+    /// ≥4 letters.
+    pub part_of_word_max_letters: Option<u32>,
+    /// קידומות דקדוקיות: max total letters of a stacked prefix. Default 3.
+    pub grammar_prefix_max_letters: Option<u32>,
 }
 
 /// Prefix units for the closed grammatical prefix phase.
@@ -79,28 +92,28 @@ const RARE_SUFFIXES: [&str; 2] = ["יא", "תא"];
 /// Suffix from the Otzaria spec missing from the FtsLib table.
 const EXTRA_SUFFIXES: [&str; 1] = ["ותיהם"];
 
-/// All closed-list prefixes: sequences of distinct units, total ≤3 letters.
-fn closed_prefixes(aramaic: bool) -> BTreeSet<String> {
+/// All closed-list prefixes: sequences of distinct units, total ≤ `max_letters`.
+fn closed_prefixes(aramaic: bool, max_letters: usize) -> BTreeSet<String> {
     let mut units: Vec<&str> = PREFIX_UNITS.to_vec();
     if aramaic {
         units.extend(ARAMAIC_PREFIX_UNITS);
     }
     let mut out = BTreeSet::new();
-    // depth ≤ 3 units is more than enough since total length is capped at 3.
-    fn recurse(units: &[&str], current: String, used: u32, out: &mut BTreeSet<String>) {
+    // Each unit is used at most once, so depth is bounded by the unit count.
+    fn recurse(units: &[&str], current: String, used: u32, max: usize, out: &mut BTreeSet<String>) {
         for (i, unit) in units.iter().enumerate() {
             if used & (1 << i) != 0 {
                 continue;
             }
             let combined = format!("{current}{unit}");
-            if combined.chars().count() > 3 {
+            if combined.chars().count() > max {
                 continue;
             }
             out.insert(combined.clone());
-            recurse(units, combined, used | (1 << i), out);
+            recurse(units, combined, used | (1 << i), max, out);
         }
     }
-    recurse(&units, String::new(), 0, &mut out);
+    recurse(&units, String::new(), 0, max_letters, &mut out);
     out
 }
 
@@ -239,23 +252,31 @@ impl HebrewWalkAutomaton {
         let grammar_prefixes = options.grammar_prefixes || options.aramaic_prefixes;
 
         // Advanced any-letter sides; both together ≡ part-of-word per spec.
-        let part_of_word_max = if letters >= 4 { 2 } else { 3 };
+        // Every limit is the caller's when set; the defaults are Otzaria's.
+        let part_of_word_max = options
+            .part_of_word_max_letters
+            .unwrap_or(if letters >= 4 { 2 } else { 3 });
         let (mut any_pre, mut any_post) = (0u32, 0u32);
         if options.part_of_word || (options.advanced_prefixes && options.advanced_suffixes) {
             any_pre = part_of_word_max;
             any_post = part_of_word_max;
         } else {
             if options.advanced_prefixes {
-                any_pre = if short { 5 } else { 3 };
+                any_pre = options
+                    .prefix_max_letters
+                    .unwrap_or(if short { 5 } else { 3 });
             }
             if options.advanced_suffixes {
-                any_post = if short { 7 } else { 5 };
+                any_post = options
+                    .suffix_max_letters
+                    .unwrap_or(if short { 7 } else { 5 });
             }
         }
+        let grammar_prefix_max = options.grammar_prefix_max_letters.unwrap_or(3) as usize;
 
         let prefixes = if any_pre == 0 && grammar_prefixes {
             Some(SetAutomaton::from_strings(
-                &closed_prefixes(options.aramaic_prefixes),
+                &closed_prefixes(options.aramaic_prefixes, grammar_prefix_max),
             ))
         } else {
             None
@@ -659,6 +680,54 @@ mod tests {
         );
         assert!(matches(&a4, "בתורות"));
         assert!(!matches(&a4, "אבגתורות")); // 3 before > 2
+    }
+
+    #[test]
+    fn caller_set_limits_override_defaults() {
+        // advanced prefixes: default 3 for a 4-letter word; caller sets 1
+        let a = walk(
+            "תורה",
+            WalkOptions {
+                advanced_prefixes: true,
+                prefix_max_letters: Some(1),
+                ..Default::default()
+            },
+        );
+        assert!(matches(&a, "קתורה"));
+        assert!(!matches(&a, "קקתורה"));
+        // advanced suffixes: caller sets 2
+        let a = walk(
+            "תורה",
+            WalkOptions {
+                advanced_suffixes: true,
+                suffix_max_letters: Some(2),
+                ..Default::default()
+            },
+        );
+        assert!(matches(&a, "תורהקק"));
+        assert!(!matches(&a, "תורהקקק"));
+        // part of word: caller sets 1 per side
+        let a = walk(
+            "ספר",
+            WalkOptions {
+                part_of_word: true,
+                part_of_word_max_letters: Some(1),
+                ..Default::default()
+            },
+        );
+        assert!(matches(&a, "מספרי"));
+        assert!(!matches(&a, "מספרים"));
+        // grammatical prefixes: caller sets 1 letter → no stacking
+        let a = walk(
+            "תורה",
+            WalkOptions {
+                grammar_prefixes: true,
+                grammar_prefix_max_letters: Some(1),
+                ..Default::default()
+            },
+        );
+        assert!(matches(&a, "התורה"));
+        assert!(!matches(&a, "והתורה"));
     }
 
     #[test]

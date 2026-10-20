@@ -79,6 +79,22 @@ namespace SeforimSearch.Engine
         /// <summary>Ignore te'amim (needs a KeepMarks index to matter).</summary>
         public bool IgnoreTeamim { get; set; }
 
+        /// <summary>קידומות (מתקדם): max letters before the word. Null = default
+        /// (3, or 5 for a word of ≤3 letters).</summary>
+        public int? PrefixMaxLetters { get; set; }
+
+        /// <summary>סיומות (מתקדם): max letters after the word. Null = default
+        /// (5, or 7 for a word of ≤3 letters).</summary>
+        public int? SuffixMaxLetters { get; set; }
+
+        /// <summary>חלק ממילה: max letters on each side. Null = default
+        /// (3, or 2 for a word of ≥4 letters).</summary>
+        public int? PartOfWordMaxLetters { get; set; }
+
+        /// <summary>קידומות דקדוקיות: max total letters of a stacked prefix.
+        /// Null = default (3).</summary>
+        public int? GrammarPrefixMaxLetters { get; set; }
+
         internal void WriteJson(StringBuilder sb)
         {
             sb.Append('{');
@@ -90,6 +106,18 @@ namespace SeforimSearch.Engine
                 first = false;
                 sb.Append('"').Append(name).Append("\":true");
             }
+            void Limit(string name, int? value)
+            {
+                if (!value.HasValue) return;
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append('"').Append(name).Append("\":")
+                  .Append(Math.Max(0, value.Value).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+            Limit("prefix_max_letters", PrefixMaxLetters);
+            Limit("suffix_max_letters", SuffixMaxLetters);
+            Limit("part_of_word_max_letters", PartOfWordMaxLetters);
+            Limit("grammar_prefix_max_letters", GrammarPrefixMaxLetters);
             Flag("grammar_prefixes", GrammarPrefixes);
             Flag("grammar_suffixes", GrammarSuffixes);
             Flag("aramaic_prefixes", AramaicPrefixes);

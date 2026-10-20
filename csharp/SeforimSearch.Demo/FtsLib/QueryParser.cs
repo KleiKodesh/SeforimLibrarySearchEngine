@@ -182,6 +182,10 @@ namespace FtsLib.Search
                 SpellingErrors = o.SpellingErrors,
                 IgnoreNikud = o.IgnoreNikud,
                 IgnoreTeamim = o.IgnoreTeamim,
+                PrefixMaxLetters = o.PrefixMaxLetters,
+                SuffixMaxLetters = o.SuffixMaxLetters,
+                PartOfWordMaxLetters = o.PartOfWordMaxLetters,
+                GrammarPrefixMaxLetters = o.GrammarPrefixMaxLetters,
             };
         }
     }

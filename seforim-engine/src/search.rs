@@ -55,6 +55,11 @@ pub struct WalkOptionsSpec {
     pub spelling_errors: bool,
     pub ignore_nikud: bool,
     pub ignore_teamim: bool,
+    /// Caller-set limits (Otzaria). Absent = the walk's defaults.
+    pub prefix_max_letters: Option<u32>,
+    pub suffix_max_letters: Option<u32>,
+    pub part_of_word_max_letters: Option<u32>,
+    pub grammar_prefix_max_letters: Option<u32>,
 }
 
 impl From<WalkOptionsSpec> for WalkOptions {
@@ -72,6 +77,10 @@ impl From<WalkOptionsSpec> for WalkOptions {
             spelling_errors: s.spelling_errors,
             ignore_nikud: s.ignore_nikud,
             ignore_teamim: s.ignore_teamim,
+            prefix_max_letters: s.prefix_max_letters,
+            suffix_max_letters: s.suffix_max_letters,
+            part_of_word_max_letters: s.part_of_word_max_letters,
+            grammar_prefix_max_letters: s.grammar_prefix_max_letters,
         }
     }
 }

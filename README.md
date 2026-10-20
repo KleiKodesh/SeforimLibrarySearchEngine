@@ -80,22 +80,69 @@ Measured on the real Otzaria DB (7.08M lines), first 200k lines:
 
 ## What's in each part
 
-### tantivy (our changes)
-- **MatchedTermsSink**, opt-in: a search also returns the words its FST
-  expansion matched. It costs nothing when off.
-- **Expansion cap inside the walk.** Every walk except fuzzy is capped at 2000
-  terms, and the cap is applied inside the walk itself:
-  - The cap applies per segment: each segment's term dictionary is walked
-    shortest word first, level by level, and the walk stops at the cap (ties
-    go to the more frequent word). The early stop also makes the walk itself
-    faster.
-  - So `*word` always finds `word` first, then the shortest affixes, and the
-    long tail is never visited.
-  - Fuzzy is the exception: it walks fully and keeps the closest matches
-    (distance-ranked).
-  - Broad queries are capped rather than failing.
-- **SpanQuery**: word distance where each query word can be any walk, with a
-  separate limit per gap (`a –2– b –5– c`). Word order can be required or not.
+### tantivy: the changes made to tantivy itself, and why
+
+Our tantivy copy is upstream 0.27.0 (commit `67889269`) plus the changes below,
+all in `src/query/` and `src/termdict/`. Every change is opt-in: a query that
+doesn't use it runs upstream's exact code path, at no cost.
+
+1. **MatchedTermsSink: return the matched words with the search.**
+   (`query/automaton_weight.rs`, plus `fuzzy_query.rs` and `regex_query.rs`
+   to attach a sink)
+   - *What:* a sink attached to a fuzzy/regex/any-automaton query collects
+     every dictionary word the walk matched, during the search.
+   - *Why:* tantivy walks the FST to expand the query and already has each
+     matched word, but upstream discards them (`without_keys`). The snippet
+     and highlight stage needs exactly those words (FtsLib's
+     PreparedQueryGroups). Keeping them costs one copy per matched word,
+     outside the per-document loop, and avoids a second query or re-walk to
+     learn them.
+
+2. **Shortest-first term dictionary walk.**
+   (`termdict/fst_termdict/shortest_first.rs`, `termdict/mod.rs`)
+   - *What:* a breadth-first walk of the FST by word length in characters
+     (the quote `"` counts as zero width). All matches of length L come
+     before any of length L+1, and the caller stops pulling levels when it
+     has enough.
+   - *Why:* upstream walks matches in alphabetical order. To keep the best
+     N, it would have to walk the whole expansion and then cut. This walk
+     makes the cap work inside the walk: the bare word first, then the
+     shortest affixes, and the long tail of a broad pattern is never
+     visited.
+
+3. **Expansion cap instead of errors.**
+   (`query/automaton_weight.rs`: `set_max_expansions`,
+   `set_expansion_rank`; `fuzzy_query.rs`, `regex_query.rs`,
+   `phrase_query/regex_phrase_weight.rs`)
+   - *What:* an automaton query can be capped at N words (we use FtsLib's
+     2000). Unranked queries use the shortest-first walk, with ties going to
+     the more frequent word. Fuzzy is ranked by edit distance first.
+   - *Why:* upstream either expands without limit or fails the whole query
+     ("exceeded max expansions"). FtsLib caps broad patterns and still
+     returns results, and so must we.
+
+4. **Cap per segment.** (`query/automaton_weight.rs`)
+   - *What:* the cap is chosen in each segment's dictionary separately, and
+     the walk stops at the cap there.
+   - *Why:* it's simple and keeps all work inside each segment. Our builds
+     merge the index into one segment, where per-segment equals a single
+     global choice, as in FtsLib's one term index. After incremental updates
+     add segments, merge again to keep that.
+
+5. **SpanQuery: per-pair word distance over any walk.**
+   (`query/span_query.rs`, new)
+   - *What:* "word A, then within N words word B, then within M words word
+     C". Each gap has its own limit, gaps count words between, order is
+     optional, and one word never fills two slots. Each slot can be any term
+     source: an exact word, fuzzy, regex, or any of our Hebrew walks.
+   - *Why:* upstream's PhraseQuery has one shared slop budget and plain
+     terms only (RegexPhraseQuery: regex only). Otzaria's custom per-pair
+     spacing over expanded words needs both.
+
+Also small: `get_match_term_infos` honours the cap and the sink;
+`RegexPhraseWeight` is reachable crate-internally so SpanQuery can reuse its
+positioned union; and two query-parser tests that compare a query's Debug
+text include the new fields.
 
 ### hebrew-fts
 - **Tokenizer.** A port of FtsLib's `HtmlWordScanner`:

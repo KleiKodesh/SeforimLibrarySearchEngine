@@ -29,6 +29,10 @@ pub enum GroupSpec {
     /// A wildcard pattern (`*`, `?`). A rejected pattern (anchor too short,
     /// too many `?`) skips the slot but still counts toward word distance.
     Wildcard { pattern: String },
+    /// One slot satisfied by any of its alternatives (FtsLib `a | b`).
+    /// Alternatives that cannot search (empty word, rejected wildcard) are
+    /// dropped; if none remain, the slot is skipped.
+    Any { alternatives: Vec<GroupSpec> },
 }
 
 /// Serializable mirror of [`WalkOptions`].
@@ -333,6 +337,38 @@ impl SegmentCollector for PlacedSegmentCollector {
 }
 
 impl LineIndex {
+    /// The query for one slot, reporting into `sink`; None when the slot
+    /// cannot search (skipped).
+    fn group_query(&self, group: &GroupSpec, sink: &MatchedTermsSink) -> Option<Box<dyn Query>> {
+        match group {
+            GroupSpec::Word { word, options } => {
+                if word.is_empty() {
+                    return None;
+                }
+                let mut q = HebrewWalkQuery::new(self.fields.text, word.clone(), (*options).into());
+                q.set_matched_terms_sink(sink.clone());
+                Some(Box::new(q))
+            }
+            GroupSpec::Wildcard { pattern } => {
+                let mut q = HebrewWildcardQuery::new(self.fields.text, pattern).ok()?;
+                q.set_matched_terms_sink(sink.clone());
+                Some(Box::new(q))
+            }
+            GroupSpec::Any { alternatives } => {
+                let parts: Vec<(Occur, Box<dyn Query>)> = alternatives
+                    .iter()
+                    .filter_map(|a| self.group_query(a, sink))
+                    .map(|q| (Occur::Should, q))
+                    .collect();
+                match parts.len() {
+                    0 => None,
+                    1 => parts.into_iter().next().map(|(_, q)| q),
+                    _ => Some(Box::new(BooleanQuery::new(parts))),
+                }
+            }
+        }
+    }
+
     /// Runs `request`. Every matching line comes back in catalog order;
     /// the host fetches texts (in its own batches) and locates snippets
     /// through the returned session, which applies the word-distance and
@@ -362,24 +398,10 @@ impl LineIndex {
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         for group in &request.groups {
             let sink = MatchedTermsSink::new();
-            match group {
-                GroupSpec::Word { word, options } => {
-                    if word.is_empty() {
-                        continue;
-                    }
-                    let mut q = HebrewWalkQuery::new(self.fields.text, word.clone(), (*options).into());
-                    q.set_matched_terms_sink(sink.clone());
-                    clauses.push((Occur::Must, Box::new(q)));
-                }
-                GroupSpec::Wildcard { pattern } => {
-                    let Ok(mut q) = HebrewWildcardQuery::new(self.fields.text, pattern) else {
-                        continue;
-                    };
-                    q.set_matched_terms_sink(sink.clone());
-                    clauses.push((Occur::Must, Box::new(q)));
-                }
+            if let Some(q) = self.group_query(group, &sink) {
+                clauses.push((Occur::Must, q));
+                sinks.push(sink);
             }
-            sinks.push(sink);
         }
         if clauses.is_empty() {
             return Ok(SearchResult {

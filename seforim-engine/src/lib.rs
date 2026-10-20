@@ -195,6 +195,19 @@ mod tests {
             .unwrap();
         assert_eq!(result.hits.len(), 1);
 
+        // OR group: either word satisfies the slot; marks name the one present
+        let mut result = index
+            .search(&SearchRequest {
+                groups: vec![GroupSpec::Any {
+                    alternatives: vec![word("ברכה", false), word("שלום", false)],
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.hits.len(), 2);
+        let s = result.session.locate("ברכה רבה").unwrap();
+        assert_eq!(result.session.all_terms()[s.marks[2] as usize], "ברכה");
+
         // a rejected wildcard skips its slot rather than failing the search
         let result = index
             .search(&SearchRequest {

@@ -58,6 +58,10 @@ namespace FtsLib.SeforimDb
         /// batch locate; null when the line did not pass or was not located).</summary>
         internal Snippet? LocatedSnippet { get; set; }
 
+        /// <summary>True once the snippet was located (LocatedSnippet null then means
+        /// "does not pass the filters", not "not located yet").</summary>
+        internal bool IsLocated { get; set; }
+
         public override string ToString() => $"[{LineId}]";
     }
 }

@@ -15,6 +15,22 @@ namespace FtsLib.Fts5
     /// state) plus its term list. Locates are serialized (the session is not
     /// thread-safe); batch locates run multi-core inside the engine.
     /// </summary>
+    /// <summary>Opt-in host-stage counters (SEFORIM_HOST_TIMING): time spent in the
+    /// engine's snippet locate, split into batch locates and single-text locates (the
+    /// per-hit neighbour widening), with call counts. Diagnostic only.</summary>
+    public static class HostTiming
+    {
+        public static readonly bool Enabled =
+            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SEFORIM_HOST_TIMING"));
+        public static long BatchTicks, BatchCalls, BatchTexts, SingleTicks, SingleCalls;
+
+        public static void Reset() { BatchTicks = BatchCalls = BatchTexts = SingleTicks = SingleCalls = 0; }
+
+        public static string Report() =>
+            $"[host] locate batches: {BatchCalls} calls, {BatchTexts} texts, {BatchTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F0} ms; " +
+            $"single locates (widening): {SingleCalls} calls, {SingleTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F0} ms";
+    }
+
     internal sealed class SearchSessionRef : IDisposable
     {
         private readonly SearchSession _session;
@@ -34,8 +50,15 @@ namespace FtsLib.Fts5
         {
             lock (_lock)
             {
+                long t0 = HostTiming.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 var located = _session.LocateBatch(texts);
                 _terms.AddRange(_session.TakeNewTerms());
+                if (HostTiming.Enabled)
+                {
+                    long dt = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+                    if (texts.Count == 1) { HostTiming.SingleTicks += dt; HostTiming.SingleCalls++; }
+                    else { HostTiming.BatchTicks += dt; HostTiming.BatchCalls++; HostTiming.BatchTexts += texts.Count; }
+                }
                 return located;
             }
         }
@@ -176,7 +199,11 @@ namespace FtsLib.Fts5
                 var texts = new string[kv.Value.Count];
                 for (int i = 0; i < texts.Length; i++) texts[i] = kv.Value[i].Content;
                 var located = kv.Key.LocateBatch(texts);
-                for (int i = 0; i < texts.Length; i++) kv.Value[i].LocatedSnippet = located[i];
+                for (int i = 0; i < texts.Length; i++)
+                {
+                    kv.Value[i].LocatedSnippet = located[i];
+                    kv.Value[i].IsLocated = true;
+                }
             }
         }
 
@@ -186,8 +213,12 @@ namespace FtsLib.Fts5
                                                      int contextWords = DefaultContextWords)
         {
             if (result == null) return SnippetDescriptor.NoMatch;
-            var snippet = result.LocatedSnippet ?? result.Session.LocateBatch(new[] { result.Content })[0];
+            // A line the batch already located and that did not pass has LocatedSnippet
+            // null: it must not be located again (that re-located every filtered line of
+            // a distance query one native call at a time).
+            var snippet = result.IsLocated ? result.LocatedSnippet : result.Session.LocateBatch(new[] { result.Content })[0];
             result.LocatedSnippet = snippet;
+            result.IsLocated = true;
             return snippet == null ? SnippetDescriptor.NoMatch : new SnippetDescriptor(snippet, result.Session.TermAt);
         }
 
@@ -211,6 +242,43 @@ namespace FtsLib.Fts5
             string joined = JoinWithNeighbourLines(previousContent, result.Content, nextContent);
             var snippet = result.Session.LocateBatch(new[] { joined })[0];
             return snippet == null ? SnippetDescriptor.NoMatch : new SnippetDescriptor(snippet, result.Session.TermAt);
+        }
+
+        /// <summary>
+        /// <see cref="LocateSnippetWindowOverNeighbourLines"/> for many results at once: the
+        /// joined texts go to the engine in one batch call per search session (located
+        /// multi-core), instead of one native call per result. Same descriptors, in order.
+        /// </summary>
+        public SnippetDescriptor[] LocateSnippetWindowsOverNeighbourLines(IReadOnlyList<SearchResult> results,
+                                                                          IReadOnlyList<string> previousContents,
+                                                                          IReadOnlyList<string> nextContents)
+        {
+            var output = new SnippetDescriptor[results.Count];
+            var bySession = new Dictionary<SearchSessionRef, List<int>>();
+            for (int i = 0; i < results.Count; i++)
+            {
+                output[i] = SnippetDescriptor.NoMatch;
+                var r = results[i];
+                if (r == null || string.IsNullOrEmpty(r.Content)) continue;
+                if (!bySession.TryGetValue(r.Session, out var list)) bySession[r.Session] = list = new List<int>();
+                list.Add(i);
+            }
+            foreach (var kv in bySession)
+            {
+                var texts = new string[kv.Value.Count];
+                for (int k = 0; k < texts.Length; k++)
+                {
+                    int i = kv.Value[k];
+                    texts[k] = JoinWithNeighbourLines(previousContents[i], results[i].Content, nextContents[i]);
+                }
+                var located = kv.Key.LocateBatch(texts);
+                for (int k = 0; k < texts.Length; k++)
+                {
+                    var snippet = located[k];
+                    if (snippet != null) output[kv.Value[k]] = new SnippetDescriptor(snippet, kv.Key.TermAt);
+                }
+            }
+            return output;
         }
 
         /// <summary>FtsLib's <c>SnippetDescriptorPipeline.JoinWithNeighbourLines</c>:

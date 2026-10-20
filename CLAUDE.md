@@ -227,6 +227,11 @@ seforim.db knowledge).
   totals + per-book counts, cross-line phrases, streaming/cancellation, separate
   negative options, vocalized matching without a keep-marks index. Semantic search:
   ask the user first.
+- **Reuse Otzaria's tests**: its engine has ~309 inline-line search tests
+  (`rust/src/api/search_engine.rs`) and ~92 query tests (`hebrew_query.rs`); plan in
+  scratchpad `logs/otzaria-test-cases.md` (first 30 cases already translated to our
+  API). Suspected gaps to verify: paired readings "(הוצא) [היצא]" → keep the second
+  in the Dart sanitizer; maqaf counted as two words for distance.
 - **REMIND THE USER: matching across lines (a phrase spanning a line break, Otzaria's
   `continues_to_next_line`) still needs real work.** Whenever the user asks whether
   everything is ready, say this explicitly. Today only snippet widening crosses lines.

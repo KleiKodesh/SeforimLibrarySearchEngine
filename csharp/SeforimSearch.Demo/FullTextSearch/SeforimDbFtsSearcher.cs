@@ -340,17 +340,34 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             if (linesByPosition.Count == 0) return null;
             var index = engine.Index;
 
-            Parallel.ForEach(shortIndexes, new ParallelOptions { CancellationToken = cancellationToken }, i =>
+            // Deviation from Core (performance only, same results): Core re-located each
+            // short window with its own call inside a Parallel.ForEach. The tantivy
+            // session serialises locates (one native call each, ~140 µs), so here the
+            // joined texts of the whole batch go to the engine in ONE batch call, which
+            // locates them multi-core. Measured: 11,153 single calls took 1.6 s on a
+            // distance query; one call per batch removes the per-call overhead.
+            var pending = new List<(int Index, List<int> PreviousIds, List<int> NextIds, string Previous, string Next)>();
+            foreach (int i in shortIndexes)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var match = results[i];
                 var previousIds = new List<int>(NeighborLineRadius);
                 var nextIds = new List<int>(NeighborLineRadius);
                 string previous = JoinNeighbourSide(linesByPosition, match.Placement, -NeighborLineRadius, -1, previousIds);
                 string next = JoinNeighbourSide(linesByPosition, match.Placement, 1, NeighborLineRadius, nextIds);
-                if (previous.Length == 0 && next.Length == 0) return;
+                if (previous.Length == 0 && next.Length == 0) continue;
+                pending.Add((i, previousIds, nextIds, previous, next));
+            }
 
-                var extended = index.LocateSnippetWindowOverNeighbourLines(
-                    match, previous, next, requireOrdered, contextWords);
+            var extendedAll = index.LocateSnippetWindowsOverNeighbourLines(
+                pending.ConvertAll(p => results[p.Index]), pending.ConvertAll(p => p.Previous),
+                pending.ConvertAll(p => p.Next));
+
+            for (int k = 0; k < pending.Count; k++)
+            {
+                var (i, previousIds, nextIds, _, _) = pending[k];
+                var match = results[i];
+                var extended = extendedAll[k];
 
                 // Only the snippet descriptor is swapped in: score and word distance stay as
                 // computed on the matched line itself, because those are the relevance keys and
@@ -367,7 +384,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                     hit.SnippetLineIds = lineIds;
                     CopySnippetDescriptor(hit, in extended, terms);
                 }
-            });
+            }
 
             var textsById = new Dictionary<int, string>(linesByPosition.Count);
             foreach (var line in linesByPosition.Values) textsById[line.Id] = line.Text;

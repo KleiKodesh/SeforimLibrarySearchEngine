@@ -449,7 +449,8 @@ pub unsafe extern "C" fn se_buffer_free(buffer: SeBuffer) {
 /// term_id)). Offsets are UTF-16 units into each text.
 ///
 /// # Safety
-/// Arrays must hold `count` entries; each text valid for its length.
+/// Arrays must hold `count` entries; each text valid for its length and
+/// VALID UTF-8 (not re-checked, for speed: hosts pass text they just encoded).
 #[no_mangle]
 pub unsafe extern "C" fn se_search_locate_batch(
     search: *mut SearchResult,
@@ -464,14 +465,30 @@ pub unsafe extern "C" fn se_search_locate_batch(
     };
     guard(empty, || {
         let search = search.as_mut().ok_or("null search")?;
+        let timing = std::env::var_os("SEFORIM_ENGINE_TIMING").is_some();
+        let t0 = std::time::Instant::now();
         let texts = std::slice::from_raw_parts(texts, count);
         let lens = std::slice::from_raw_parts(lens, count);
+        // Texts are NOT re-validated: the contract (see the function docs) is
+        // that the host passes UTF-8 it just encoded (C# Encoding.UTF8, Dart
+        // utf8.encode). Re-validating 1.8 GB of text cost 3.8 s on an 800k-hit
+        // search. Null pointers are still rejected.
         let mut strs = Vec::with_capacity(count);
         for i in 0..count {
-            strs.push(str_arg(texts[i], lens[i])?);
+            if texts[i].is_null() {
+                if lens[i] != 0 {
+                    return Err("null text".into());
+                }
+                strs.push("");
+            } else {
+                strs.push(std::str::from_utf8_unchecked(std::slice::from_raw_parts(texts[i], lens[i])));
+            }
         }
+        let t1 = std::time::Instant::now();
+        let located = search.session.locate_many(&strs);
+        let t2 = std::time::Instant::now();
         let mut out = Vec::with_capacity(count * 16);
-        for snippet in search.session.locate_many(&strs) {
+        for snippet in located {
             match snippet {
                 Some(s) => {
                     out.push(1);
@@ -479,6 +496,15 @@ pub unsafe extern "C" fn se_search_locate_batch(
                 }
                 None => out.push(0),
             }
+        }
+        if timing {
+            let bytes: usize = lens.iter().sum();
+            eprintln!(
+                "  [ffi] locate_batch {count} texts ({bytes} bytes): utf8 check {:.2} ms, locate {:.2} ms, pack {:.2} ms",
+                (t1 - t0).as_secs_f64() * 1000.0,
+                (t2 - t1).as_secs_f64() * 1000.0,
+                t2.elapsed().as_secs_f64() * 1000.0
+            );
         }
         Ok(SeBuffer::from_vec(out))
     })

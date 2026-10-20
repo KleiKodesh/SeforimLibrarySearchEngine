@@ -69,7 +69,10 @@ fn out_string(s: String) -> *mut c_char {
 }
 
 /// Runs `f`, catching panics and recording errors. Returns `fallback` on error.
+/// Clears the thread's last error first, so a non-empty `se_last_error`
+/// after a call always belongs to that call.
 fn guard<T>(fallback: T, f: impl FnOnce() -> Result<T, String>) -> T {
+    LAST_ERROR.with(|e| *e.borrow_mut() = CString::default());
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {

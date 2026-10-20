@@ -1,0 +1,99 @@
+using System;
+using System.Runtime.InteropServices;
+
+namespace SeforimSearch.Engine.Native
+{
+    /// <summary>A u32 buffer owned by the native library (see se_buffer_free).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct SeBuffer
+    {
+        public IntPtr Data;
+        public UIntPtr Len;
+        public UIntPtr Cap;
+    }
+
+    /// <summary>
+    /// The C ABI of seforim_search_native (engine-ffi/src/lib.rs). Strings
+    /// cross as UTF-8 pointer + length; status calls return 0 / -1 with the
+    /// message in se_last_error.
+    /// </summary>
+    internal static unsafe class NativeMethods
+    {
+        private const string Lib = "seforim_search_native";
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_last_error();
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void se_string_free(IntPtr s);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_version();
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void se_buffer_free(SeBuffer buffer);
+
+        // ── Index ──
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IndexHandle se_index_create(byte* dir, UIntPtr dirLen, byte* options, UIntPtr optionsLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IndexHandle se_index_open(byte* dir, UIntPtr dirLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_index_exists(byte* dir, UIntPtr dirLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void se_index_close(IntPtr index);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_index_info(IndexHandle index);
+
+        // ── Writer ──
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern WriterHandle se_writer_open(IndexHandle index, UIntPtr heapBytes, UIntPtr numThreads);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_writer_add(WriterHandle writer, ulong lineId, ulong position, ulong bookId,
+                                               ulong lineIndex, ulong tocEntryId, byte* text, UIntPtr textLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_writer_delete(WriterHandle writer, ulong lineId);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_writer_commit(WriterHandle writer, byte* payload, UIntPtr payloadLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_writer_rollback(WriterHandle writer);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_writer_merge_and_close(IntPtr writer);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void se_writer_close(IntPtr writer);
+
+        // ── Search ──
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern SearchHandle se_search(IndexHandle index, byte* request, UIntPtr requestLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ulong se_search_hit_count(SearchHandle search);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ulong se_search_copy_hits(SearchHandle search, ulong offset, ulong count, ulong* output);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern SeBuffer se_search_locate_batch(SearchHandle search, IntPtr* texts, UIntPtr* lens, UIntPtr count);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern SeBuffer se_search_locate_with_neighbours(SearchHandle search,
+            byte* previous, UIntPtr previousLen, byte* text, UIntPtr textLen, byte* next, UIntPtr nextLen,
+            uint matchedScore, uint matchedWordDistance);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_search_take_new_terms(SearchHandle search);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void se_search_close(IntPtr search);
+    }
+}

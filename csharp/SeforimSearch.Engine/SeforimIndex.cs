@@ -1,0 +1,128 @@
+using System;
+using System.Collections.Generic;
+using SeforimSearch.Engine.Native;
+
+namespace SeforimSearch.Engine
+{
+    /// <summary>
+    /// A line index on disk. Thread safety: searches may run concurrently from
+    /// several threads (each <see cref="Search"/> returns its own session);
+    /// one writer at a time.
+    /// </summary>
+    public sealed unsafe class SeforimIndex : IDisposable
+    {
+        private readonly IndexHandle _handle;
+
+        private SeforimIndex(IndexHandle handle) { _handle = handle; }
+
+        internal IndexHandle Handle => _handle;
+
+        /// <summary>The native library's version.</summary>
+        public static string NativeVersion => Interop.FromUtf8Z(NativeMethods.se_version());
+
+        /// <summary>Creates a fresh index in <paramref name="directory"/>, WIPING it.</summary>
+        public static SeforimIndex Create(string directory, IndexOptions? options = null)
+        {
+            byte[] dir = Interop.ToUtf8(directory);
+            byte[] opts = Interop.ToUtf8((options ?? new IndexOptions()).ToJson());
+            fixed (byte* d = dir)
+            fixed (byte* o = opts)
+                return new SeforimIndex(Interop.Check(
+                    NativeMethods.se_index_create(d, (UIntPtr)dir.Length, o, (UIntPtr)opts.Length)));
+        }
+
+        /// <summary>Opens an existing index.</summary>
+        public static SeforimIndex Open(string directory)
+        {
+            byte[] dir = Interop.ToUtf8(directory);
+            fixed (byte* d = dir)
+                return new SeforimIndex(Interop.Check(NativeMethods.se_index_open(d, (UIntPtr)dir.Length)));
+        }
+
+        /// <summary>True when <paramref name="directory"/> holds an index.</summary>
+        public static bool Exists(string directory)
+        {
+            byte[] dir = Interop.ToUtf8(directory);
+            fixed (byte* d = dir)
+                return NativeMethods.se_index_exists(d, (UIntPtr)dir.Length) == 1;
+        }
+
+        /// <summary>Line count, build options and the last committed payload.</summary>
+        public IndexInfo GetInfo()
+        {
+            var obj = (Dictionary<string, object?>)Json.Parse(Interop.TakeString(NativeMethods.se_index_info(_handle)))!;
+            return new IndexInfo
+            {
+                NumLines = (long)(double)obj["num_lines"]!,
+                Positions = (bool)obj["positions"]!,
+                KeepMarks = (bool)obj["keep_marks"]!,
+                Payload = obj["payload"] as string,
+            };
+        }
+
+        /// <summary>Starts a writer. <paramref name="heapBytes"/> is the total
+        /// indexing memory (at least 15 MB per thread; threads are capped by it).</summary>
+        public SeforimIndexWriter OpenWriter(long heapBytes = 50_000_000, int threads = 0)
+        {
+            if (threads <= 0) threads = Math.Min(Environment.ProcessorCount, 4);
+            return new SeforimIndexWriter(Interop.Check(
+                NativeMethods.se_writer_open(_handle, (UIntPtr)(ulong)heapBytes, (UIntPtr)(uint)threads)));
+        }
+
+        /// <summary>Runs a search: every matching line in catalog order, plus the
+        /// snippet session for locating their snippets.</summary>
+        public SearchSession Search(SearchRequest request)
+        {
+            byte[] json = Interop.ToUtf8(request.ToJson());
+            fixed (byte* j = json)
+                return new SearchSession(Interop.Check(NativeMethods.se_search(_handle, j, (UIntPtr)json.Length)),
+                                         request.ContextWords);
+        }
+
+        public void Dispose() => _handle.Dispose();
+    }
+
+    /// <summary>Adds, deletes and commits lines. Not thread-safe.</summary>
+    public sealed unsafe class SeforimIndexWriter : IDisposable
+    {
+        private readonly WriterHandle _handle;
+
+        internal SeforimIndexWriter(WriterHandle handle) { _handle = handle; }
+
+        /// <summary>Queues a line. Not visible to searches until <see cref="Commit"/>.</summary>
+        public void Add(in LineDocument line)
+        {
+            byte[] text = Interop.ToUtf8(line.Text);
+            fixed (byte* t = text)
+                Interop.Check(NativeMethods.se_writer_add(_handle, (ulong)line.LineId, (ulong)line.Position,
+                    (ulong)line.BookId, (ulong)line.LineIndex, (ulong)line.TocEntryId, t, (UIntPtr)text.Length));
+        }
+
+        /// <summary>Queues deletion of a line. An update is Delete + Add.</summary>
+        public void Delete(long lineId) => Interop.Check(NativeMethods.se_writer_delete(_handle, (ulong)lineId));
+
+        /// <summary>Commits; <paramref name="payload"/> is stored atomically with the
+        /// documents (read back via <see cref="SeforimIndex.GetInfo"/>).</summary>
+        public void Commit(string? payload = null)
+        {
+            if (payload == null)
+            {
+                Interop.Check(NativeMethods.se_writer_commit(_handle, null, UIntPtr.Zero));
+                return;
+            }
+            byte[] p = Interop.ToUtf8(payload);
+            fixed (byte* pp = p.Length == 0 ? new byte[1] : p)
+                Interop.Check(NativeMethods.se_writer_commit(_handle, pp, (UIntPtr)p.Length));
+        }
+
+        /// <summary>Drops everything queued since the last commit.</summary>
+        public void Rollback() => Interop.Check(NativeMethods.se_writer_rollback(_handle));
+
+        /// <summary>Merges all segments into one (for a shipped, read-mostly index)
+        /// and closes the writer.</summary>
+        public void MergeAndClose() => Interop.Check(NativeMethods.se_writer_merge_and_close(_handle.Detach()));
+
+        /// <summary>Closes the writer, discarding anything uncommitted.</summary>
+        public void Dispose() => _handle.Dispose();
+    }
+}

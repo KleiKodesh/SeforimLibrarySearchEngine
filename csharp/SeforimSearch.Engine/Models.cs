@@ -1,0 +1,268 @@
+using System;
+using System.Collections.Generic;
+using System.Text;
+
+namespace SeforimSearch.Engine
+{
+    /// <summary>Thrown when the native engine reports an error.</summary>
+    public sealed class SeforimEngineException : Exception
+    {
+        public SeforimEngineException(string message) : base(message) { }
+    }
+
+    /// <summary>How an index is built. Fixed at creation.</summary>
+    public sealed class IndexOptions
+    {
+        /// <summary>Store word positions. Off: a smaller index; word distance is
+        /// still validated, from the line text by the snippet locator.</summary>
+        public bool Positions { get; set; } = true;
+
+        /// <summary>Keep nikud/te'amim in indexed terms (for vocalized text searched
+        /// with <see cref="WalkOptions.IgnoreNikud"/> / <see cref="WalkOptions.IgnoreTeamim"/>).</summary>
+        public bool KeepMarks { get; set; }
+
+        internal string ToJson() =>
+            "{\"positions\":" + (Positions ? "true" : "false") +
+            ",\"keep_marks\":" + (KeepMarks ? "true" : "false") + "}";
+    }
+
+    /// <summary>The state of an open index.</summary>
+    public sealed class IndexInfo
+    {
+        public long NumLines { get; internal set; }
+        public bool Positions { get; internal set; }
+        public bool KeepMarks { get; internal set; }
+
+        /// <summary>The payload committed with the last commit (resume watermark,
+        /// provenance stamp, …), or null.</summary>
+        public string? Payload { get; internal set; }
+    }
+
+    /// <summary>One line to index.</summary>
+    public struct LineDocument
+    {
+        public long LineId;
+        /// <summary>Rank in the library's catalog order: results are returned in it.</summary>
+        public long Position;
+        public long BookId;
+        public long LineIndex;
+        public long TocEntryId;
+        /// <summary>The raw line text (HTML allowed).</summary>
+        public string Text;
+    }
+
+    /// <summary>Hebrew walk options for a word (Otzaria's search options).</summary>
+    public sealed class WalkOptions
+    {
+        /// <summary>קידומות דקדוקיות (ו מ כש כ ב ש ל ה, combos up to 3 letters).</summary>
+        public bool GrammarPrefixes { get; set; }
+        /// <summary>סיומות דקדוקיות.</summary>
+        public bool GrammarSuffixes { get; set; }
+        /// <summary>קידומות ארמיות (ד/דא/א).</summary>
+        public bool AramaicPrefixes { get; set; }
+        /// <summary>סיומות ארמיות (ה↔א, ם↔ן).</summary>
+        public bool AramaicSuffixes { get; set; }
+        /// <summary>כתיב מלא/חסר.</summary>
+        public bool KtivMaleHaser { get; set; }
+        /// <summary>חלק ממילה.</summary>
+        public bool PartOfWord { get; set; }
+        /// <summary>קידומות (מתקדם): any letters before.</summary>
+        public bool AdvancedPrefixes { get; set; }
+        /// <summary>סיומות (מתקדם): any letters after.</summary>
+        public bool AdvancedSuffixes { get; set; }
+        /// <summary>התעלם מגרשיים.</summary>
+        public bool IgnoreQuotes { get; set; }
+        /// <summary>שגיאות כתיב / OCR מצויות.</summary>
+        public bool SpellingErrors { get; set; }
+        /// <summary>Ignore nikud (needs a KeepMarks index to matter).</summary>
+        public bool IgnoreNikud { get; set; }
+        /// <summary>Ignore te'amim (needs a KeepMarks index to matter).</summary>
+        public bool IgnoreTeamim { get; set; }
+
+        internal void WriteJson(StringBuilder sb)
+        {
+            sb.Append('{');
+            bool first = true;
+            void Flag(string name, bool value)
+            {
+                if (!value) return;
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append('"').Append(name).Append("\":true");
+            }
+            Flag("grammar_prefixes", GrammarPrefixes);
+            Flag("grammar_suffixes", GrammarSuffixes);
+            Flag("aramaic_prefixes", AramaicPrefixes);
+            Flag("aramaic_suffixes", AramaicSuffixes);
+            Flag("ktiv_male_haser", KtivMaleHaser);
+            Flag("part_of_word", PartOfWord);
+            Flag("advanced_prefixes", AdvancedPrefixes);
+            Flag("advanced_suffixes", AdvancedSuffixes);
+            Flag("ignore_quotes", IgnoreQuotes);
+            Flag("spelling_errors", SpellingErrors);
+            Flag("ignore_nikud", IgnoreNikud);
+            Flag("ignore_teamim", IgnoreTeamim);
+            sb.Append('}');
+        }
+    }
+
+    /// <summary>One AND slot of a query.</summary>
+    public abstract class QueryGroup
+    {
+        internal abstract void WriteJson(StringBuilder sb);
+
+        /// <summary>A word with walk options.</summary>
+        public static QueryGroup Word(string word, WalkOptions? options = null) => new WordGroup(word, options ?? new WalkOptions());
+
+        /// <summary>A wildcard pattern (* and ?). A rejected pattern (anchor shorter
+        /// than 2, more than 4 '?') skips its slot.</summary>
+        public static QueryGroup Wildcard(string pattern) => new WildcardGroup(pattern);
+
+        /// <summary>A slot any of the alternatives satisfies (a | b).</summary>
+        public static QueryGroup Any(params QueryGroup[] alternatives) => new AnyGroup(alternatives);
+
+        private sealed class WordGroup : QueryGroup
+        {
+            private readonly string _word;
+            private readonly WalkOptions _options;
+            public WordGroup(string word, WalkOptions options) { _word = word; _options = options; }
+            internal override void WriteJson(StringBuilder sb)
+            {
+                sb.Append("{\"kind\":\"word\",\"word\":");
+                Json.WriteString(sb, _word);
+                sb.Append(",\"options\":");
+                _options.WriteJson(sb);
+                sb.Append('}');
+            }
+        }
+
+        private sealed class WildcardGroup : QueryGroup
+        {
+            private readonly string _pattern;
+            public WildcardGroup(string pattern) { _pattern = pattern; }
+            internal override void WriteJson(StringBuilder sb)
+            {
+                sb.Append("{\"kind\":\"wildcard\",\"pattern\":");
+                Json.WriteString(sb, _pattern);
+                sb.Append('}');
+            }
+        }
+
+        private sealed class AnyGroup : QueryGroup
+        {
+            private readonly QueryGroup[] _alternatives;
+            public AnyGroup(QueryGroup[] alternatives) { _alternatives = alternatives; }
+            internal override void WriteJson(StringBuilder sb)
+            {
+                sb.Append("{\"kind\":\"any\",\"alternatives\":[");
+                for (int i = 0; i < _alternatives.Length; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    _alternatives[i].WriteJson(sb);
+                }
+                sb.Append("]}");
+            }
+        }
+    }
+
+    /// <summary>A search.</summary>
+    public sealed class SearchRequest
+    {
+        /// <summary>AND across groups, OR within each group's expansion.</summary>
+        public List<QueryGroup> Groups { get; } = new List<QueryGroup>();
+
+        /// <summary>Drop hits with more words than this between the matched slots
+        /// (מרחק בין מילים). Null = no limit.</summary>
+        public int? MaxWordDistance { get; set; }
+
+        /// <summary>Only windows where the groups appear in query order.</summary>
+        public bool RequireOrdered { get; set; }
+
+        /// <summary>Words of context per side of the match.</summary>
+        public int ContextWords { get; set; } = 8;
+
+        internal string ToJson()
+        {
+            var sb = new StringBuilder();
+            sb.Append("{\"groups\":[");
+            for (int i = 0; i < Groups.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                Groups[i].WriteJson(sb);
+            }
+            sb.Append("],\"max_word_distance\":");
+            sb.Append(MaxWordDistance.HasValue ? MaxWordDistance.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null");
+            sb.Append(",\"require_ordered\":").Append(RequireOrdered ? "true" : "false");
+            sb.Append(",\"context_words\":").Append(ContextWords.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            sb.Append('}');
+            return sb.ToString();
+        }
+    }
+
+    /// <summary>A matching line, in catalog order.</summary>
+    public readonly struct PlacedHit
+    {
+        public PlacedHit(long position, long lineId, long bookId, long lineIndex, long tocEntryId)
+        {
+            Position = position; LineId = lineId; BookId = bookId; LineIndex = lineIndex; TocEntryId = tocEntryId;
+        }
+        public long Position { get; }
+        public long LineId { get; }
+        public long BookId { get; }
+        public long LineIndex { get; }
+        public long TocEntryId { get; }
+    }
+
+    /// <summary>
+    /// A located snippet (FtsLib's SnippetDescriptor fields as copied onto FtsHit).
+    /// Offsets are UTF-16 units into the text that was located — .NET string
+    /// indices.
+    /// </summary>
+    public sealed class Snippet
+    {
+        public const int FlagLeadingEllipsis = 1;
+        public const int FlagTrailingEllipsis = 2;
+
+        /// <summary>Raw span of the tightest window (smaller = closer).</summary>
+        public int Score { get; internal set; }
+        /// <summary>Words between the matched slots in the tightest window.</summary>
+        public int WordDistance { get; internal set; }
+        /// <summary>Words the window spans after context expansion.</summary>
+        public int WindowWordCount { get; internal set; }
+        public int Start { get; internal set; }
+        public int End { get; internal set; }
+        /// <summary>(start, length, termId) triples; termId indexes the session's term table.</summary>
+        public int[] Marks { get; internal set; } = Array.Empty<int>();
+        /// <summary><see cref="FlagLeadingEllipsis"/> | <see cref="FlagTrailingEllipsis"/>.</summary>
+        public int Flags { get; internal set; }
+
+        public bool LeadingEllipsis => (Flags & FlagLeadingEllipsis) != 0;
+        public bool TrailingEllipsis => (Flags & FlagTrailingEllipsis) != 0;
+
+        /// <summary>Fewer words than the per-side context: widen over neighbour lines.</summary>
+        public bool IsShort(int contextWords) => WindowWordCount < contextWords;
+
+        /// <summary>Reads one record of the native flat format: header + marks.</summary>
+        internal static Snippet Read(uint[] data, ref int i)
+        {
+            var s = new Snippet
+            {
+                Score = Clamp(data[i]),
+                WordDistance = Clamp(data[i + 1]),
+                WindowWordCount = (int)data[i + 2],
+                Start = (int)data[i + 3],
+                End = (int)data[i + 4],
+                Flags = (int)data[i + 5],
+            };
+            int markCount = (int)data[i + 6];
+            i += 7;
+            var marks = new int[markCount * 3];
+            for (int m = 0; m < marks.Length; m++) marks[m] = (int)data[i + m];
+            i += marks.Length;
+            s.Marks = marks;
+            return s;
+        }
+
+        private static int Clamp(uint v) => v > int.MaxValue ? int.MaxValue : (int)v;
+    }
+}

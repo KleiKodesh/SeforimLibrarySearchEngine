@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The engine API package: a thin, safe .NET wrapper over the native
+    seforim_search_native library (Rust: tantivy fork + hebrew-fts +
+    seforim-engine, built from ../../engine-ffi).
+
+    netstandard2.0 so ONE build serves .NET (Core) 5+ / .NET 10 AND
+    .NET Framework 4.8.
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>SeforimSearch.Engine</RootNamespace>
+    <PackageId>SeforimSearch.Engine</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Hebrew full-text search engine (tantivy) with FtsLib-compatible snippets.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <!-- The native library. Built by: cargo build (release) of the engine-ffi crate.
+       Copied next to the consuming app's output (works for .NET Framework,
+       which has no runtimes/ resolution) and packed under runtimes/ for
+       NuGet consumers on .NET (Core). -->
+  <PropertyGroup>
+    <NativeLibDir>$(MSBuildThisFileDirectory)..\..\target\release\</NativeLibDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="$(NativeLibDir)seforim_search_native.dll" Condition="Exists('$(NativeLibDir)seforim_search_native.dll')">
+      <Link>seforim_search_native.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <PackagePath>runtimes/win-x64/native/</PackagePath>
+      <Pack>true</Pack>
+    </Content>
+    <Content Include="$(NativeLibDir)libseforim_search_native.so" Condition="Exists('$(NativeLibDir)libseforim_search_native.so')">
+      <Link>libseforim_search_native.so</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <PackagePath>runtimes/linux-x64/native/</PackagePath>
+      <Pack>true</Pack>
+    </Content>
+    <Content Include="$(NativeLibDir)libseforim_search_native.dylib" Condition="Exists('$(NativeLibDir)libseforim_search_native.dylib')">
+      <Link>libseforim_search_native.dylib</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <PackagePath>runtimes/osx/native/</PackagePath>
+      <Pack>true</Pack>
+    </Content>
+  </ItemGroup>
+
+</Project>

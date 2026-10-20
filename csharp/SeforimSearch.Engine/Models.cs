@@ -121,6 +121,24 @@ namespace SeforimSearch.Engine
         /// <summary>A slot any of the alternatives satisfies (a | b).</summary>
         public static QueryGroup Any(params QueryGroup[] alternatives) => new AnyGroup(alternatives);
 
+        /// <summary>Levenshtein neighbours of a word (word~N), closest first,
+        /// capped at 2000. Distance 1..2.</summary>
+        public static QueryGroup Fuzzy(string word, int distance) => new FuzzyGroup(word, distance);
+
+        private sealed class FuzzyGroup : QueryGroup
+        {
+            private readonly string _word;
+            private readonly int _distance;
+            public FuzzyGroup(string word, int distance) { _word = word; _distance = distance; }
+            internal override void WriteJson(StringBuilder sb)
+            {
+                sb.Append("{\"kind\":\"fuzzy\",\"word\":");
+                Json.WriteString(sb, _word);
+                sb.Append(",\"distance\":").Append(Math.Max(1, Math.Min(2, _distance)).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                sb.Append('}');
+            }
+        }
+
         private sealed class WordGroup : QueryGroup
         {
             private readonly string _word;

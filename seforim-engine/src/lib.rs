@@ -208,6 +208,40 @@ mod tests {
         let s = result.session.locate("ברכה רבה").unwrap();
         assert_eq!(result.session.all_terms()[s.marks[2] as usize], "ברכה");
 
+        // fuzzy slot: שלם~1 reaches שלום (one insertion)
+        let result = index
+            .search(&SearchRequest {
+                groups: vec![GroupSpec::Fuzzy {
+                    word: "שלם".into(),
+                    distance: 1,
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.hits.len(), 1);
+
+        // locate_many = locate one by one, term ids included
+        let texts: Vec<String> = (0..100)
+            .map(|i| if i % 2 == 0 { "ברכה רבה".to_string() } else { "רבה ברכה".to_string() })
+            .collect();
+        let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        let mut a = index
+            .search(&SearchRequest {
+                groups: vec![word("ברכה", false)],
+                ..Default::default()
+            })
+            .unwrap();
+        let mut b = index
+            .search(&SearchRequest {
+                groups: vec![word("ברכה", false)],
+                ..Default::default()
+            })
+            .unwrap();
+        let many = a.session.locate_many(&refs);
+        let one: Vec<_> = refs.iter().map(|t| b.session.locate(t)).collect();
+        assert_eq!(many, one);
+        assert_eq!(a.session.all_terms(), b.session.all_terms());
+
         // a rejected wildcard skips its slot rather than failing the search
         let result = index
             .search(&SearchRequest {

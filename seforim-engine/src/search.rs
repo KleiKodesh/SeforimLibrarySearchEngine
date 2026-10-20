@@ -29,6 +29,10 @@ pub enum GroupSpec {
     /// A wildcard pattern (`*`, `?`). A rejected pattern (anchor too short,
     /// too many `?`) skips the slot but still counts toward word distance.
     Wildcard { pattern: String },
+    /// Levenshtein neighbours of a word (FtsLib `word~N`), closest first,
+    /// capped at 2000 terms. Distance is clamped to 2 (tantivy's DFA limit;
+    /// FtsLib allowed 3).
+    Fuzzy { word: String, distance: u8 },
     /// One slot satisfied by any of its alternatives (FtsLib `a | b`).
     /// Alternatives that cannot search (empty word, rejected wildcard) are
     /// dropped; if none remain, the slot is skipped.
@@ -183,6 +187,84 @@ impl SnippetSession {
             .locator
             .locate(text, prepared, self.require_ordered, self.original_group_count);
         Self::finish(d, prepared, &mut self.terms, self.max_word_distance)
+    }
+
+    /// Locates a batch of matched lines across all cores (one locator per
+    /// thread; the prepared map is shared read-only), then numbers the marks'
+    /// terms in document order. Same results as calling [`locate`](Self::locate)
+    /// on each text in turn, term ids included.
+    pub fn locate_many(&mut self, texts: &[&str]) -> Vec<Option<Snippet>> {
+        let Some(prepared) = self.prepared.as_ref() else {
+            return vec![None; texts.len()];
+        };
+        let (require_ordered, original, max_distance, context, keep_marks) = (
+            self.require_ordered,
+            self.original_group_count,
+            self.max_word_distance,
+            self.context_words,
+            self.keep_marks,
+        );
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(texts.len().max(1));
+        // Snippets with marks still holding the query's term ORDINALS.
+        let mut located: Vec<Option<Snippet>> = Vec::with_capacity(texts.len());
+        if threads <= 1 || texts.len() < 32 {
+            for t in texts {
+                let d = self.locator.locate(t, prepared, require_ordered, original);
+                located.push(Self::raw(d, max_distance));
+            }
+        } else {
+            let chunk = texts.len().div_ceil(threads);
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = texts
+                    .chunks(chunk)
+                    .map(|part| {
+                        scope.spawn(move || {
+                            let mut locator = if keep_marks {
+                                SnippetWindowLocator::keeping_marks(context)
+                            } else {
+                                SnippetWindowLocator::new(context)
+                            };
+                            part.iter()
+                                .map(|t| {
+                                    let d = locator.locate(t, prepared, require_ordered, original);
+                                    Self::raw(d, max_distance)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                for h in handles {
+                    located.extend(h.join().expect("snippet thread panicked"));
+                }
+            });
+        }
+        // Ordinals → search-wide term ids, in document order (deterministic).
+        for s in located.iter_mut().flatten() {
+            for m in s.marks.chunks_exact_mut(3) {
+                m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
+            }
+        }
+        located
+    }
+
+    /// A passing descriptor as a Snippet whose marks carry term ordinals.
+    fn raw(d: hebrew_fts::SnippetDescriptor<'_>, max_word_distance: usize) -> Option<Snippet> {
+        if !d.is_match || d.word_distance > max_word_distance {
+            return None;
+        }
+        Some(Snippet {
+            score: d.score,
+            word_distance: d.word_distance,
+            window_word_count: d.window_word_count,
+            start: d.snap_start,
+            end: d.snap_end,
+            marks: d.mark_ranges.iter().map(|&v| v as u32).collect(),
+            flags: (if d.leading_ellipsis { SNIPPET_FLAG_LEADING_ELLIPSIS } else { 0 })
+                | (if d.trailing_ellipsis { SNIPPET_FLAG_TRAILING_ELLIPSIS } else { 0 }),
+        })
     }
 
     /// Re-locates a short line's snippet over the line joined with its
@@ -352,6 +434,16 @@ impl LineIndex {
             GroupSpec::Wildcard { pattern } => {
                 let mut q = HebrewWildcardQuery::new(self.fields.text, pattern).ok()?;
                 q.set_matched_terms_sink(sink.clone());
+                Some(Box::new(q))
+            }
+            GroupSpec::Fuzzy { word, distance } => {
+                if word.is_empty() {
+                    return None;
+                }
+                let term = tantivy::Term::from_field_text(self.fields.text, word);
+                let mut q = tantivy::query::FuzzyTermQuery::new(term, (*distance).clamp(1, 2), true);
+                q.set_matched_terms_sink(sink.clone());
+                q.set_max_expansions(hebrew_fts::walk::DEFAULT_MAX_EXPANDED_TERMS);
                 Some(Box::new(q))
             }
             GroupSpec::Any { alternatives } => {

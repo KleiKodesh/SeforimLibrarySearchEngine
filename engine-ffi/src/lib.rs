@@ -442,10 +442,13 @@ pub unsafe extern "C" fn se_search_locate_batch(
         let search = search.as_mut().ok_or("null search")?;
         let texts = std::slice::from_raw_parts(texts, count);
         let lens = std::slice::from_raw_parts(lens, count);
-        let mut out = Vec::with_capacity(count * 16);
+        let mut strs = Vec::with_capacity(count);
         for i in 0..count {
-            let text = str_arg(texts[i], lens[i])?;
-            match search.session.locate(text) {
+            strs.push(str_arg(texts[i], lens[i])?);
+        }
+        let mut out = Vec::with_capacity(count * 16);
+        for snippet in search.session.locate_many(&strs) {
+            match snippet {
                 Some(s) => {
                     out.push(1);
                     write_snippet(&s, &mut out);

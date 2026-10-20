@@ -56,6 +56,8 @@ FtsLib, so results match what KitveiHakodesh shows today.
 | `seforim-engine/` | The engine. **No database code**: the host feeds lines and texts. | hebrew-fts |
 | `engine-ffi/` | C ABI → `seforim_search_native.dll / .so / .dylib`. | seforim-engine |
 | `csharp/SeforimSearch.Engine/` | .NET API package (netstandard2.0 → .NET 10 and .NET Framework 4.8). | native lib |
+| `dart/seforim_search/` | Dart package over the native library (`dart:ffi`, finalizers). 6 tests. | native lib |
+| `dart/otzaria_demo/` | Dart CLI doing Otzaria's search on this engine: reads seforim.db (`sqlite3`, system libzstd), maps Otzaria's options to walks. See `dart/README.md` for gaps. | Dart package |
 | `csharp/SeforimSearch.Demo/` | Everything that reads seforim.db, plus an FtsLib-shaped facade. net10.0 and net48. | Engine package, SQLite, zstd |
 
 ## Build and run
@@ -173,6 +175,10 @@ positions.
   them. Matching ignores them through the "ignore gershayim" option, which the
   FtsLib facade turns on by default, so results match FtsLib. A quote after
   the last letter is punctuation and is never part of a term.
+- **Mark spans can contain tags.** A word that ends at a block tag (heading,
+  `<br>`, …) has its mark run up to that tag's `>`, e.g. `בראשית</h1`. This is
+  FtsLib's span exactly: its scanner flushes the word at the `>`. Renderers
+  must strip tags inside a mark, as the KitveiHakodesh page does.
 - **`%word`** uses FtsLib's GrammarExpander tables (34 prefixes / 32
   suffixes). The Otzaria prefix/suffix options are separate walk options.
 - **Ketiv/qere expansion** (`expandKetiv`) is replaced by the Otzaria walk
@@ -181,7 +187,14 @@ positions.
   distance is checked from the line text, so an index without positions works.
 
 ## Open
-- Dart binding over the same C ABI.
+- Otzaria gaps found by the Dart demo (see `dart/README.md`):
+  - תרגום ארמי and ראשי תיבות have no walk.
+  - Per-word-pair spacing isn't exposed in the C ABI request; the engine has
+    SpanQuery.
+  - The "most words" / "at least N" modes, exclusion words, and grouping are
+    missing.
+- Leading-`*` speed: a trigram side index for `*x*` (`*יצח*` 1.1 s vs FtsLib
+  0.26 s).
 - A full build compared side by side with FtsLib on the same queries.
 - Profiling: C# search is ~1.0 s (.NET 10) / ~1.5 s (net48), against 378 ms in
   the pure-Rust smoke test for the same query. That gap includes process start

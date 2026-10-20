@@ -1,0 +1,14 @@
+name: seforim_search
+description: Dart binding (dart:ffi) for the seforim_search_native Hebrew full-text engine.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.4.0
+
+dependencies:
+  ffi: ^2.1.0
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.0

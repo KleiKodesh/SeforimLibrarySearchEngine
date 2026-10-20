@@ -1,0 +1,16 @@
+name: otzaria_demo
+description: Otzaria-style full-text search over seforim.db on the seforim_search engine.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.4.0
+
+dependencies:
+  ffi: ^2.1.0
+  sqlite3: any
+  seforim_search:
+    path: ../seforim_search
+
+dev_dependencies:
+  lints: ^5.0.0

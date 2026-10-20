@@ -30,6 +30,7 @@ use tantivy::query::{
     AutomatonWeight, EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight,
 };
 use tantivy::schema::Field;
+use tantivy::termdict::ZeroWidthBytes;
 use tantivy_fst::Automaton;
 
 use crate::grammar;
@@ -482,6 +483,11 @@ impl Automaton for HebrewWalkAutomaton {
 /// `FuzzyExpander.DefaultMaxExpandedTerms`).
 pub const DEFAULT_MAX_EXPANDED_TERMS: usize = 2000;
 
+/// Bytes that do not count towards a term's length when the cap prefers
+/// shorter terms: the intra-word quote the tokenizer keeps (רש"י is as
+/// short as רשי, as in FtsLib whose terms carried no quotes).
+pub const ZERO_WIDTH_BYTES: ZeroWidthBytes = ZeroWidthBytes::new(b"\"");
+
 /// Tantivy query running the Otzaria walk for one word.
 #[derive(Debug, Clone)]
 pub struct HebrewWalkQuery {
@@ -524,6 +530,7 @@ impl HebrewWalkQuery {
             weight.set_matched_terms_sink(sink.clone());
         }
         weight.set_max_expansions(self.max_expansions);
+        weight.set_zero_width_bytes(ZERO_WIDTH_BYTES);
         weight
     }
 

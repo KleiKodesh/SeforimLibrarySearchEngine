@@ -4,7 +4,7 @@
 //! the texts the host fetches.
 
 use hebrew_fts::{
-    HebrewWalkQuery, HebrewWildcardQuery, PreparedQueryGroups, SnippetWindowLocator, WalkOptions,
+    HebrewFuzzyQuery, HebrewWalkQuery, HebrewWildcardQuery, PreparedQueryGroups, SnippetWindowLocator, WalkOptions,
     DEFAULT_CONTEXT_WORDS, MARK_STRIDE,
 };
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use tantivy::columnar::Column;
 use std::sync::Arc;
 
 use tantivy::query::{
-    AutomatonWeight, BooleanQuery, MatchedTermsSink, Occur, Query, SpanQuery, SpanTermSource,
+    BooleanQuery, MatchedTermsSink, Occur, Query, SpanQuery, SpanTermSource,
 };
 use tantivy::{DocId, Score, SegmentOrdinal, SegmentReader};
 
@@ -505,12 +505,9 @@ impl LineIndex {
                 if word.is_empty() {
                     return Ok(None);
                 }
-                let term = tantivy::Term::from_field_text(field, word);
-                let fuzzy = tantivy::query::FuzzyTermQuery::new(term, (*distance).clamp(1, 2), true);
-                let mut weight = AutomatonWeight::new(field, fuzzy.automaton()?);
-                weight.set_matched_terms_sink(sink.clone());
-                weight.set_max_expansions(hebrew_fts::walk::DEFAULT_MAX_EXPANDED_TERMS);
-                Some(Arc::new(weight))
+                let mut q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
+                q.set_matched_terms_sink(sink.clone());
+                Some(q.span_slot(searcher)?)
             }
             GroupSpec::Any { alternatives } => {
                 let mut sources = Vec::new();
@@ -608,10 +605,8 @@ impl LineIndex {
                 if word.is_empty() {
                     return None;
                 }
-                let term = tantivy::Term::from_field_text(self.fields.text, word);
-                let mut q = tantivy::query::FuzzyTermQuery::new(term, (*distance).clamp(1, 2), true);
+                let mut q = HebrewFuzzyQuery::new(self.fields.text, word.clone(), *distance);
                 q.set_matched_terms_sink(sink.clone());
-                q.set_max_expansions(hebrew_fts::walk::DEFAULT_MAX_EXPANDED_TERMS);
                 Some(Box::new(q))
             }
             GroupSpec::Any { alternatives } => {

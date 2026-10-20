@@ -83,6 +83,7 @@ impl HebrewGrammarQuery {
             weight.set_matched_terms_sink(sink.clone());
         }
         weight.set_max_expansions(crate::walk::DEFAULT_MAX_EXPANDED_TERMS);
+        weight.set_zero_width_bytes(crate::walk::ZERO_WIDTH_BYTES);
         weight
     }
 }

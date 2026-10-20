@@ -36,6 +36,12 @@ in one or two lines. Remove entries that turn out to be wrong.
 - **Engine changes belong IN tantivy when they reuse what the engine already computes**
   (e.g. keep the FST walk's matched words instead of throwing them away). Must cost
   nothing when unused.
+- **tantivy changes stay upstream-PR ready.** No Hebrew / FtsLib rule inside tantivy
+  (the zero-width quote is passed in by hebrew-fts via `ZeroWidthBytes`); both
+  dictionaries (FST and quickwit SSTable) must build and pass; don't touch upstream's
+  tests (hide new query fields from Debug instead); rustfmt-clean; CHANGELOG entry.
+  Test both: `cargo test --lib -- query:: termdict::` and the same with
+  `--features quickwit`.
 - **Expansion caps apply inside the walk**: walk shortest-first, stop at the cap, so the
   closest matches come first and the walk stays short. Applies to every wildcard /
   regex / walk expansion. Cap 2000 (FtsLib's), applied PER SEGMENT (user's
@@ -45,7 +51,10 @@ in one or two lines. Remove entries that turn out to be wrong.
 - **C# must build and run on .NET 10 AND .NET Framework 4.8.** Package =
   netstandard2.0; demo = `net10.0;net48`, x64.
 - **The C# demo mirrors FtsLib's API** (same class / member names) for easy switching.
-- **Commit as you go**, one commit per finished step; tests green first.
+- **Commit as you go**, one commit per finished step, without waiting to be asked;
+  tests green first.
+- **Run a QA subagent before EVERY commit**: it reviews the staged diff (correctness,
+  FtsLib parity, README kept current, no AI co-author line). Fix what it finds, then commit.
 - **NEVER add Claude as co-author** (no `Co-Authored-By: Claude` or any AI attribution
   line) in ANY commit or PR, in this repo AND in tantivy/. No exceptions, ever.
 - **Keep README.md current automatically**: every commit that adds, changes or
@@ -111,7 +120,7 @@ non-empty lines).
 - tantivy's `IndexWriter` needs ≥15 MB heap PER THREAD; cap threads by budget.
 - zstd dictionary training needs enough sample data (tests pad samples).
 - `MatchedTermsSink` keys a FuzzyTermQuery's Debug output; query-parser tests assert
-  Debug strings, so new fields on queries need those strings updated.
+  Debug strings, so hide new query fields from Debug; never edit upstream's tests.
 - C# search sessions must outlive result enumeration (Core snippets the last batch
   after the loop); the native session is freed by its SafeHandle.
 - The native last-error must be cleared at the start of every FFI call, or stale

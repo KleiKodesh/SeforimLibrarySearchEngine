@@ -9,4 +9,5 @@ license = "MIT"
 [dependencies]
 tantivy = { path = "../tantivy" }
 tantivy-fst = "0.5"
+levenshtein_automata = "0.2.1"
 unicode-general-category = "1.0"

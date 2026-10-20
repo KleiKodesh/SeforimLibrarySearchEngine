@@ -100,6 +100,12 @@ Our tantivy copy is upstream 0.27.0 (commit `67889269`) plus the changes below,
 all in `src/query/` and `src/termdict/`. Every change is opt-in: a query that
 doesn't use it runs upstream's exact code path, at no cost.
 
+The changes are kept **ready for an upstream pull request**, and what we run
+is that same code: nothing Hebrew or FtsLib-specific lives in tantivy (the
+quote rule is passed in by hebrew-fts), both term dictionaries (FST and
+quickwit's SSTable) are supported, upstream's tests are untouched, rustfmt
+is clean, and CHANGELOG.md has the entry.
+
 1. **MatchedTermsSink: return the matched words with the search.**
    (`query/automaton_weight.rs`, plus `fuzzy_query.rs` and `regex_query.rs`
    to attach a sink)
@@ -114,10 +120,14 @@ doesn't use it runs upstream's exact code path, at no cost.
 
 2. **Shortest-first term dictionary walk.**
    (`termdict/fst_termdict/shortest_first.rs`, `termdict/mod.rs`)
-   - *What:* a breadth-first walk of the FST by word length in characters
-     (the quote `"` counts as zero width). All matches of length L come
-     before any of length L+1, and the caller stops pulling levels when it
-     has enough.
+   - *What:* a breadth-first walk of the FST by word length in characters.
+     All matches of length L come before any of length L+1, and the caller
+     stops pulling levels when it has enough. The caller may name ASCII
+     bytes that count as zero width (`ZeroWidthBytes`); hebrew-fts passes
+     the intra-word quote, so רש"י is as short as רשי, as in FtsLib whose
+     terms carried no quotes. With quickwit's SSTable dictionary (no FST to
+     walk) the same API streams the whole expansion once and groups it by
+     length: same result, full-walk cost.
    - *Why:* upstream walks matches in alphabetical order. To keep the best
      N, it would have to walk the whole expansion and then cut. This walk
      makes the cap work inside the walk: the bare word first, then the
@@ -126,8 +136,8 @@ doesn't use it runs upstream's exact code path, at no cost.
 
 3. **Expansion cap instead of errors.**
    (`query/automaton_weight.rs`: `set_max_expansions`,
-   `set_expansion_rank`; `fuzzy_query.rs`, `regex_query.rs`,
-   `phrase_query/regex_phrase_weight.rs`)
+   `set_expansion_rank`, `set_zero_width_bytes`; `fuzzy_query.rs`,
+   `regex_query.rs`, `phrase_query/regex_phrase_weight.rs`)
    - *What:* an automaton query can be capped at N words (we use FtsLib's
      2000). Unranked queries use the shortest-first walk, with ties going to
      the more frequent word. Fuzzy is ranked by edit distance first.
@@ -153,10 +163,10 @@ doesn't use it runs upstream's exact code path, at no cost.
      terms only (RegexPhraseQuery: regex only). Otzaria's custom per-pair
      spacing over expanded words needs both.
 
-Also small: `get_match_term_infos` honours the cap and the sink;
+Also small: `get_match_term_infos` honours the cap and the sink, and
 `RegexPhraseWeight` is reachable crate-internally so SpanQuery can reuse its
-positioned union; and two query-parser tests that compare a query's Debug
-text include the new fields.
+positioned union. `FuzzyTermQuery`'s Debug text is unchanged (the new fields
+are not printed), so upstream's query-parser tests stay as they are.
 
 ### hebrew-fts
 - **Tokenizer.** A port of FtsLib's `HtmlWordScanner`:
@@ -199,6 +209,11 @@ text include the new fields.
   - It keeps the term table.
 - **Query groups:** word (with options), wildcard, grammar (`%`), fuzzy
   (distance ≤2), and OR of alternatives.
+- **Fuzzy** is hebrew-fts's own `HebrewFuzzyQuery` (same Levenshtein DFA as
+  tantivy's, which cannot be built from outside tantivy): cap 2000 per
+  segment, closest edit distance first, then shortest with the quote zero
+  width, then most frequent. The plain query and the span slot are the same
+  weight.
 - **Per-pair spacing** (Otzaria's customSpacing): `gaps` in the request (C#
   `SearchRequest.Gaps`, Dart `SearchRequest.gaps`, demo `--spacing 2,5`).
   - `gaps[i]` is the maximum number of words between query word i and i+1.

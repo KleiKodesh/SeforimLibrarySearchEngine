@@ -60,6 +60,23 @@ namespace SeforimSearch.Engine
             };
         }
 
+        /// <summary>Builds the FM-index sidecar over the term dictionary (FtsLib's
+        /// FM sidecar): leading-<c>*</c> wildcards and fuzzy words then run through
+        /// it instead of walking the whole dictionary, with identical results.
+        /// Needs a single segment: call after <see cref="SeforimIndexWriter.MergeAndClose"/>.
+        /// Idempotent. Returns false (nothing built; searches use the walk) when the
+        /// index has several segments, no terms, or a dictionary with more than 64
+        /// distinct characters (a marked index with nikud and te'amim).</summary>
+        public bool BuildFmSidecar()
+        {
+            int built = NativeMethods.se_index_build_fm_sidecar(_handle);
+            if (built < 0) throw new SeforimEngineException(Interop.LastError());
+            return built == 1;
+        }
+
+        /// <summary>True when a sidecar matching the current single segment exists.</summary>
+        public bool HasFmSidecar => NativeMethods.se_index_has_fm_sidecar(_handle) == 1;
+
         /// <summary>Starts a writer. <paramref name="heapBytes"/> is the total
         /// indexing memory (at least 15 MB per thread; threads are capped by it).</summary>
         public SeforimIndexWriter OpenWriter(long heapBytes = 50_000_000, int threads = 0)

@@ -10,9 +10,13 @@
 //!   fetches, applying the word-distance / order filters, and widens short
 //!   windows over neighbour lines the host supplies.
 
+pub mod fm_expand;
+pub mod fm_index;
+pub mod fm_sidecar;
 pub mod index;
 pub mod search;
 
+pub use fm_index::FmIndex;
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
 pub use search::{
     GroupSpec, PlacedHit, SearchRequest, SearchResult, Snippet, SnippetSession, WalkOptionsSpec,
@@ -24,6 +28,9 @@ pub use search::{
 pub enum Error {
     Tantivy(tantivy::TantivyError),
     Io(std::io::Error),
+    /// A request the index cannot serve (e.g. spacing without positions, an
+    /// FM-index over a dictionary with too many distinct characters).
+    Unsupported(String),
 }
 
 impl std::fmt::Display for Error {
@@ -31,6 +38,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Tantivy(e) => write!(f, "{e}"),
             Error::Io(e) => write!(f, "{e}"),
+            Error::Unsupported(m) => write!(f, "{m}"),
         }
     }
 }
@@ -298,5 +306,141 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result.hits.len(), 1);
+    }
+
+    /// The FM-index sidecar must give EXACTLY the walk's terms (and hits) for
+    /// every shape it serves, cap included. `test_only_disable_fm` exists for
+    /// this comparison alone.
+    #[test]
+    fn fm_sidecar_equals_the_walk() {
+        use std::sync::atomic::Ordering;
+        let letters: Vec<char> = "אבגדהוזחטיכלמנסעפצקרשת".chars().collect();
+        // > 2000 terms containing אב (cap exercised), some repeated (doc-count
+        // ties), quoted forms, short and long words.
+        let mut lines: Vec<LineDoc> = Vec::new();
+        let mut n = 0u64;
+        let mut push = |text: String, lines: &mut Vec<LineDoc>| {
+            lines.push(line(n, n, 1, n, &text));
+            n += 1;
+        };
+        for i in 0..letters.len() {
+            for j in 0..letters.len() {
+                for k in (0..letters.len()).step_by(3) {
+                    let w = format!("{}{}אב{}", letters[i], letters[j], letters[k]);
+                    let repeat = 1 + (i + j) % 3;
+                    for _ in 0..repeat {
+                        push(w.clone(), &mut lines);
+                    }
+                }
+            }
+        }
+        for w in [
+            "שלום", "שלומכם", "לום", "של\"ום", "רשי", "רש\"י", "רשיי", "רמב\"ם", "רמב\"ן", "רמבם",
+            "ישראלאב", "אבג", "אב", "יצחק", "ויצחק", "ליצחק", "יצח\"ק", "יצחקים", "אבאבאב",
+        ] {
+            push(w.into(), &mut lines);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let mut w = index.writer(60_000_000, 4).unwrap();
+        for l in &lines {
+            w.add(l).unwrap();
+        }
+        w.commit(None).unwrap();
+        w.merge_all().unwrap();
+        assert!(!index.has_fm_sidecar());
+        assert!(index.build_fm_sidecar().unwrap());
+        assert!(index.has_fm_sidecar());
+
+        let wildcard = |p: &str, ignore_quotes: bool| GroupSpec::Wildcard {
+            pattern: p.into(),
+            ignore_quotes,
+        };
+        let fuzzy = |w: &str, d: u8| GroupSpec::Fuzzy {
+            word: w.into(),
+            distance: d,
+        };
+        let groups: Vec<GroupSpec> = vec![
+            wildcard("*אב", false),
+            wildcard("*אב*", false),
+            wildcard("*אב*", true),
+            wildcard("*לום", false),
+            wildcard("*לום", true),
+            wildcard("*יצח*", false),
+            wildcard("*יצח*", true),
+            wildcard("*רש\"י", false),
+            wildcard("*רש\"י", true),
+            wildcard("*שי", false),
+            wildcard("*שי", true),
+            wildcard("*זזז*", false),
+            fuzzy("שלום", 1),
+            fuzzy("שלום", 2),
+            fuzzy("רשי", 1),
+            fuzzy("רמב\"ם", 1),
+            fuzzy("רמבם", 1),
+            fuzzy("יצחק", 2),
+            fuzzy("אב", 2),
+            fuzzy("זזזז", 1),
+        ];
+        for g in &groups {
+            let run = |disable_fm: bool| {
+                index.test_only_disable_fm.store(disable_fm, Ordering::Relaxed);
+                let mut r = index
+                    .search(&SearchRequest {
+                        groups: vec![g.clone()],
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let ids: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();
+                let mut terms: Vec<String> = Vec::new();
+                // every matched term, via the snippets of every hit
+                for h in &r.hits {
+                    if let Some(s) = r.session.locate(&lines[h.line_id as usize].text) {
+                        for m in s.marks.chunks_exact(3) {
+                            terms.push(r.session.all_terms()[m[2] as usize].clone());
+                        }
+                    }
+                }
+                terms.sort();
+                terms.dedup();
+                (ids, terms)
+            };
+            let fm = run(false);
+            let walk = run(true);
+            assert_eq!(fm, walk, "group {g:?}");
+        }
+        index.test_only_disable_fm.store(false, Ordering::Relaxed);
+        // the cap really bit: more than 2000 terms contain אב
+        let mut r = index
+            .search(&SearchRequest {
+                groups: vec![wildcard("*אב*", false)],
+                ..Default::default()
+            })
+            .unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for h in &r.hits {
+            if let Some(s) = r.session.locate(&lines[h.line_id as usize].text) {
+                seen.insert(s.marks[2]);
+            }
+        }
+        assert_eq!(seen.len(), 2000);
+
+        // a second commit makes two segments: the sidecar steps aside, the
+        // walk still answers; rebuilding after a merge brings it back
+        let mut w = index.writer(60_000_000, 1).unwrap();
+        w.add(&line(n, n, 1, n, "אבאב")).unwrap();
+        w.commit(None).unwrap();
+        assert!(!index.has_fm_sidecar());
+        let r = index
+            .search(&SearchRequest {
+                groups: vec![wildcard("*לום", false)],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.hits.len(), 2);
+        w.merge_all().unwrap();
+        assert!(index.build_fm_sidecar().unwrap());
+        assert!(index.has_fm_sidecar());
     }
 }

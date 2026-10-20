@@ -351,15 +351,22 @@ namespace FtsLib.Fts5
             // build commits every linesPerCommit lines, leaving dozens of segments,
             // and every expansion walk repeats per segment (measured: *יצח* 4.8 s
             // over 37 segments).
-            if (state.Complete) writer.MergeAndClose();
+            if (state.Complete)
+            {
+                writer.MergeAndClose();
+                Engine().BuildFmSidecar();
+            }
         }
 
         /// <summary>Merges the index into one segment if it has several (a no-op
-        /// otherwise). Call after updates when the index is mostly read.</summary>
+        /// otherwise) and builds the FM-index sidecar over it (FtsLib's
+        /// <c>BuildFmSidecar</c>; skipped when it already matches). Call after
+        /// updates when the index is mostly read.</summary>
         public void MergeSegments(long heapBytes = 200_000_000)
         {
-            using var writer = Engine().OpenWriter(heapBytes);
-            writer.MergeAndClose();
+            using (var writer = Engine().OpenWriter(heapBytes))
+                writer.MergeAndClose();
+            if (!Engine().HasFmSidecar) Engine().BuildFmSidecar();
         }
 
         public void Dispose()

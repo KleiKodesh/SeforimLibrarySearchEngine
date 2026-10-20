@@ -4,8 +4,8 @@
 //! the texts the host fetches.
 
 use hebrew_fts::{
-    HebrewFuzzyQuery, HebrewWalkQuery, HebrewWildcardQuery, PreparedQueryGroups, SnippetWindowLocator, WalkOptions,
-    DEFAULT_CONTEXT_WORDS, MARK_STRIDE,
+    ExactTermsQuery, HebrewFuzzyQuery, HebrewWalkQuery, HebrewWildcardQuery, PreparedQueryGroups,
+    SnippetWindowLocator, WalkOptions, DEFAULT_CONTEXT_WORDS, MARK_STRIDE,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{Collector, SegmentCollector};
@@ -17,6 +17,8 @@ use tantivy::query::{
 };
 use tantivy::{DocId, Score, SegmentOrdinal, SegmentReader};
 
+use crate::fm_expand;
+use crate::fm_index::FmIndex;
 use crate::index::LineIndex;
 use crate::{Error, Result};
 
@@ -471,8 +473,14 @@ impl LineIndex {
         group: &GroupSpec,
         sink: &MatchedTermsSink,
         searcher: &tantivy::Searcher,
+        fm: Option<&FmIndex>,
     ) -> Result<Option<Arc<dyn SpanTermSource>>> {
         let field = self.fields.text;
+        if let Some(terms) = self.fm_terms(fm, searcher, group)? {
+            let mut q = ExactTermsQuery::new(field, terms);
+            q.set_matched_terms_sink(sink.clone());
+            return Ok(Some(q.span_slot()));
+        }
         Ok(match group {
             GroupSpec::Word { word, options } => {
                 if word.is_empty() {
@@ -512,7 +520,7 @@ impl LineIndex {
             GroupSpec::Any { alternatives } => {
                 let mut sources = Vec::new();
                 for a in alternatives {
-                    if let Some(s) = self.group_slot(a, sink, searcher)? {
+                    if let Some(s) = self.group_slot(a, sink, searcher, fm)? {
                         sources.push(s);
                     }
                 }
@@ -532,6 +540,7 @@ impl LineIndex {
         request: &SearchRequest,
         gaps: &[u32],
         searcher: &tantivy::Searcher,
+        fm: Option<&FmIndex>,
         sinks: &mut Vec<MatchedTermsSink>,
     ) -> Result<Option<SpanQuery>> {
         if !self.options.positions {
@@ -549,7 +558,7 @@ impl LineIndex {
         let mut span: Option<SpanQuery> = None;
         for (i, group) in request.groups.iter().enumerate() {
             let sink = MatchedTermsSink::new();
-            let Some(slot) = self.group_slot(group, &sink, searcher)? else {
+            let Some(slot) = self.group_slot(group, &sink, searcher, fm)? else {
                 return Ok(None);
             };
             sinks.push(sink);
@@ -565,11 +574,22 @@ impl LineIndex {
 
     /// The query for one slot, reporting into `sink`; None when the slot
     /// cannot search (skipped).
-    fn group_query(&self, group: &GroupSpec, sink: &MatchedTermsSink) -> Option<Box<dyn Query>> {
-        match group {
+    fn group_query(
+        &self,
+        group: &GroupSpec,
+        sink: &MatchedTermsSink,
+        searcher: &tantivy::Searcher,
+        fm: Option<&FmIndex>,
+    ) -> Result<Option<Box<dyn Query>>> {
+        if let Some(terms) = self.fm_terms(fm, searcher, group)? {
+            let mut q = ExactTermsQuery::new(self.fields.text, terms);
+            q.set_matched_terms_sink(sink.clone());
+            return Ok(Some(Box::new(q)));
+        }
+        Ok(match group {
             GroupSpec::Word { word, options } => {
                 if word.is_empty() {
-                    return None;
+                    return Ok(None);
                 }
                 let mut q = HebrewWalkQuery::new(self.fields.text, word.clone(), (*options).into());
                 q.set_matched_terms_sink(sink.clone());
@@ -579,11 +599,12 @@ impl LineIndex {
                 pattern,
                 ignore_quotes,
             } => {
-                let mut q = if *ignore_quotes {
-                    HebrewWildcardQuery::new_ignoring_quotes(self.fields.text, pattern).ok()?
+                let parsed = if *ignore_quotes {
+                    HebrewWildcardQuery::new_ignoring_quotes(self.fields.text, pattern)
                 } else {
-                    HebrewWildcardQuery::new(self.fields.text, pattern).ok()?
+                    HebrewWildcardQuery::new(self.fields.text, pattern)
                 };
+                let Ok(mut q) = parsed else { return Ok(None) };
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
@@ -594,7 +615,7 @@ impl LineIndex {
                 ignore_quotes,
             } => {
                 if word.is_empty() {
-                    return None;
+                    return Ok(None);
                 }
                 let mut q = hebrew_fts::HebrewGrammarQuery::new(self.fields.text, word.clone(), *prefixes, *suffixes);
                 q.set_ignore_quotes(*ignore_quotes);
@@ -603,24 +624,90 @@ impl LineIndex {
             }
             GroupSpec::Fuzzy { word, distance } => {
                 if word.is_empty() {
-                    return None;
+                    return Ok(None);
                 }
                 let mut q = HebrewFuzzyQuery::new(self.fields.text, word.clone(), *distance);
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
             GroupSpec::Any { alternatives } => {
-                let parts: Vec<(Occur, Box<dyn Query>)> = alternatives
-                    .iter()
-                    .filter_map(|a| self.group_query(a, sink))
-                    .map(|q| (Occur::Should, q))
-                    .collect();
+                let mut parts: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                for a in alternatives {
+                    if let Some(q) = self.group_query(a, sink, searcher, fm)? {
+                        parts.push((Occur::Should, q));
+                    }
+                }
                 match parts.len() {
                     0 => None,
                     1 => parts.into_iter().next().map(|(_, q)| q),
                     _ => Some(Box::new(BooleanQuery::new(parts))),
                 }
             }
+        })
+    }
+
+    /// The FM-index sidecar to expand with, if the index has one for its
+    /// current single segment.
+    fn fm_sidecar_for(&self, searcher: &tantivy::Searcher) -> Option<Arc<FmIndex>> {
+        #[cfg(test)]
+        if self.test_only_disable_fm.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        self.fm.get(&self.dir, searcher, self.fields.text)
+    }
+
+    /// The exact terms for a group the sidecar can expand (a leading-`*`
+    /// wildcard of FtsLib's FM shape, or a fuzzy word), verified and capped
+    /// like the walk. None: the group runs as a walk.
+    fn fm_terms(
+        &self,
+        fm: Option<&FmIndex>,
+        searcher: &tantivy::Searcher,
+        group: &GroupSpec,
+    ) -> Result<Option<Vec<Vec<u8>>>> {
+        let Some(fm) = fm else { return Ok(None) };
+        let field = self.fields.text;
+        let dict = || -> Result<_> { Ok(searcher.segment_readers()[0].inverted_index(field)?) };
+        match group {
+            GroupSpec::Wildcard { pattern, ignore_quotes } => {
+                let Some((core, suffix_only)) = fm_expand::fm_wildcard_shape(pattern, *ignore_quotes) else {
+                    return Ok(None);
+                };
+                let parsed = if *ignore_quotes {
+                    HebrewWildcardQuery::new_ignoring_quotes(field, pattern)
+                } else {
+                    HebrewWildcardQuery::new(field, pattern)
+                };
+                // A rejected pattern is rejected on both paths (the slot is skipped).
+                let Ok(q) = parsed else { return Ok(None) };
+                let inverted = dict()?;
+                let terms = fm_expand::expand_wildcard(
+                    fm,
+                    inverted.terms(),
+                    &q.automaton(),
+                    &core,
+                    suffix_only,
+                    q.max_expansions(),
+                )?;
+                Ok(Some(terms))
+            }
+            GroupSpec::Fuzzy { word, distance } => {
+                if word.is_empty() {
+                    return Ok(None);
+                }
+                let q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
+                let inverted = dict()?;
+                let terms = fm_expand::expand_fuzzy(
+                    fm,
+                    inverted.terms(),
+                    &q.automaton(),
+                    q.word(),
+                    q.distance_limit(),
+                    q.max_expansions(),
+                )?;
+                Ok(Some(terms))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -649,11 +736,13 @@ impl LineIndex {
 
         let reader = self.index.reader()?;
         let searcher = reader.searcher();
+        let fm = self.fm_sidecar_for(&searcher);
+        let fm = fm.as_deref();
         let mut sinks = Vec::new();
 
         let query: Box<dyn Query> = if let Some(gaps) = &request.gaps {
             // Per-pair spacing: a span query, one slot per group, each gap its own limit.
-            match self.span_query(request, gaps, &searcher, &mut sinks)? {
+            match self.span_query(request, gaps, &searcher, fm, &mut sinks)? {
                 Some(q) => Box::new(q),
                 None => return Ok(SearchResult { hits: Vec::new(), session }),
             }
@@ -663,7 +752,7 @@ impl LineIndex {
             let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
             for group in &request.groups {
                 let sink = MatchedTermsSink::new();
-                if let Some(q) = self.group_query(group, &sink) {
+                if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
                     clauses.push((Occur::Must, q));
                     sinks.push(sink);
                 }

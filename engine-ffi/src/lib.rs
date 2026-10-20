@@ -181,6 +181,35 @@ pub unsafe extern "C" fn se_index_info(index: *const LineIndex) -> *mut c_char {
     })
 }
 
+/// Builds the FM-index sidecar over the term dictionary (FtsLib's
+/// `BuildFmSidecar`), which serves leading-`*` wildcards and fuzzy words
+/// without walking the whole dictionary. Needs a single segment: call after
+/// `se_writer_merge_and_close`. Idempotent. Returns 1 when a sidecar is in
+/// place, 0 when the index has several segments, no terms or more than 64
+/// distinct characters (searches then use the walk), -1 on error.
+///
+/// # Safety
+/// `index` must be a live index.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_build_fm_sidecar(index: *const LineIndex) -> i32 {
+    guard(-1, || {
+        let index = index.as_ref().ok_or("null index")?;
+        Ok(index.build_fm_sidecar().map_err(err)? as i32)
+    })
+}
+
+/// 1 when a sidecar matching the index's current single segment exists.
+///
+/// # Safety
+/// `index` must be a live index.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_has_fm_sidecar(index: *const LineIndex) -> i32 {
+    guard(0, || {
+        let index = index.as_ref().ok_or("null index")?;
+        Ok(index.has_fm_sidecar() as i32)
+    })
+}
+
 // ── Writer ──────────────────────────────────────────────────────────────
 
 /// Starts a writer. `heap_bytes` is the total budget (≥15 MB per thread).

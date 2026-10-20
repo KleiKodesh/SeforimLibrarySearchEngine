@@ -13,6 +13,7 @@
 //! Still to port: query parser + expanders, snippet window locator, searcher.
 
 pub mod chars;
+pub mod exact_terms;
 pub mod fuzzy;
 pub mod grammar;
 pub mod grammar_query;
@@ -28,6 +29,7 @@ pub mod wildcard;
 
 pub use wildcard::{HebrewWildcardQuery, WildcardPattern, WildcardRejected};
 
+pub use exact_terms::ExactTermsQuery;
 pub use fuzzy::HebrewFuzzyQuery;
 pub use grammar_query::HebrewGrammarQuery;
 pub use prepared::{PreparedQueryGroups, PreparedTerm};

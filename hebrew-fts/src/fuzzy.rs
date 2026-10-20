@@ -12,7 +12,8 @@
 
 use std::sync::{Arc, OnceLock};
 
-use levenshtein_automata::{Distance, LevenshteinAutomatonBuilder, DFA};
+pub use levenshtein_automata::Distance;
+use levenshtein_automata::{LevenshteinAutomatonBuilder, DFA};
 use tantivy::query::{
     AutomatonWeight, EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight,
 };

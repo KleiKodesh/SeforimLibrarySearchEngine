@@ -106,6 +106,10 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
   } finally {
     w.close();
   }
+  // One segment (the walks and their caps run per segment), then the
+  // FM-index sidecar for leading-* wildcards and fuzzy words.
+  index.openWriter(heapBytes: 200000000).mergeAndClose();
+  index.buildFmSidecar();
   stdout.writeln('Indexed $position lines into $dir in ${sw.elapsed.inMilliseconds} ms; '
       'payload ${index.info().payload}');
   index.close();

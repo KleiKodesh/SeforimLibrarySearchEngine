@@ -34,6 +34,11 @@ pub struct SetAutomaton {
 impl SetAutomaton {
     /// Builds the trie from the given strings.
     pub fn from_strings<S: AsRef<str>>(strings: impl IntoIterator<Item = S>) -> SetAutomaton {
+        Self::from_bytes(strings.into_iter().map(|s| s.as_ref().as_bytes().to_vec()))
+    }
+
+    /// Builds the trie from byte strings.
+    pub fn from_bytes<B: AsRef<[u8]>>(strings: impl IntoIterator<Item = B>) -> SetAutomaton {
         // Build with per-node edge vecs first, then flatten.
         struct Building {
             edges: Vec<(u8, u32)>,
@@ -45,7 +50,7 @@ impl SetAutomaton {
         }];
         for s in strings {
             let mut node = 0usize;
-            for &b in s.as_ref().as_bytes() {
+            for &b in s.as_ref() {
                 node = match building[node].edges.iter().find(|(eb, _)| *eb == b) {
                     Some(&(_, target)) => target as usize,
                     None => {

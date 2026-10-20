@@ -46,6 +46,10 @@ final class SeforimNative {
             int Function(Pointer<Uint8>, int)>('se_index_exists'),
         indexInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_index_info'),
+        indexBuildFmSidecar = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
+            'se_index_build_fm_sidecar'),
+        indexHasFmSidecar = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
+            'se_index_has_fm_sidecar'),
         writerOpen = lib.lookupFunction<Pointer<Void> Function(Pointer<Void>, Size, Size),
             Pointer<Void> Function(Pointer<Void>, int, int)>('se_writer_open'),
         writerAdd = lib.lookupFunction<
@@ -91,6 +95,8 @@ final class SeforimNative {
   final Pointer<Void> Function(Pointer<Uint8>, int) indexOpen;
   final int Function(Pointer<Uint8>, int) indexExists;
   final Pointer<Utf8> Function(Pointer<Void>) indexInfo;
+  final int Function(Pointer<Void>) indexBuildFmSidecar;
+  final int Function(Pointer<Void>) indexHasFmSidecar;
   final Pointer<Void> Function(Pointer<Void>, int, int) writerOpen;
   final int Function(Pointer<Void>, int, int, int, int, int, Pointer<Uint8>, int) writerAdd;
   final int Function(Pointer<Void>, int) writerDelete;

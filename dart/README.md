@@ -38,6 +38,7 @@ final index = SeforimIndex.create(dir, const IndexOptions(positions: true, keepM
 final w = index.openWriter(heapBytes: 50000000, threads: 0);
 w.add(LineDocument(lineId:, position:, bookId:, lineIndex:, tocEntryId:, text:));
 w.delete(lineId); w.commit('payload'); w.rollback(); w.mergeAndClose(); w.close();
+index.buildFmSidecar();  // after mergeAndClose: FM-index for leading-* and fuzzy (index.hasFmSidecar)
 index.info();                                   // IndexInfo(numLines, positions, keepMarks, payload)
 SeforimIndex.exists(dir); SeforimIndex.open(dir); SeforimIndex.nativeVersion;
 

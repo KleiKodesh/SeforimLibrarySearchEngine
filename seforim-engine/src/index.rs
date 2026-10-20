@@ -106,7 +106,14 @@ pub struct LineIndex {
     pub(crate) index: Index,
     pub(crate) fields: LineFields,
     pub(crate) options: IndexOptions,
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
+    /// The FM-index sidecar, opened on first use (see `fm_sidecar`).
+    pub(crate) fm: crate::fm_sidecar::FmCache,
+    /// TEST ONLY (compiled out of every non-test build): forces leading-`*`
+    /// and fuzzy to run as FST walks although a sidecar exists, so a test
+    /// can assert the sidecar and the walk give identical terms.
+    #[cfg(test)]
+    pub(crate) test_only_disable_fm: std::sync::atomic::AtomicBool,
 }
 
 impl LineIndex {
@@ -131,12 +138,19 @@ impl LineIndex {
             dir.join(OPTIONS_FILE),
             serde_json_lite::to_string(&options),
         )?;
-        Ok(LineIndex {
+        Ok(Self::wrap(index, fields, options, dir))
+    }
+
+    fn wrap(index: Index, fields: LineFields, options: IndexOptions, dir: &Path) -> LineIndex {
+        LineIndex {
             index,
             fields,
             options,
             dir: dir.to_path_buf(),
-        })
+            fm: Default::default(),
+            #[cfg(test)]
+            test_only_disable_fm: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// Opens an existing index.
@@ -148,12 +162,23 @@ impl LineIndex {
         let index = Index::open(MmapDirectory::open(dir)?)?;
         hebrew_fts::register_hebrew_tokenizer(index.tokenizers());
         let (_, fields) = line_schema(options);
-        Ok(LineIndex {
-            index,
-            fields,
-            options,
-            dir: dir.to_path_buf(),
-        })
+        Ok(Self::wrap(index, fields, options, dir))
+    }
+
+    /// Builds the FM-index sidecar over the term dictionary (FtsLib's
+    /// `BuildFmSidecar`). It serves leading-`*` wildcards and fuzzy words
+    /// without walking the whole dictionary. Needs a single segment: call
+    /// after [`LineWriter::merge_all`]. Returns false when the index has
+    /// several segments or no terms (nothing built; searches still work
+    /// through the FST walk).
+    pub fn build_fm_sidecar(&self) -> Result<bool> {
+        crate::fm_sidecar::build(&self.index, self.fields.text, &self.dir)
+    }
+
+    /// True when a sidecar matching the current single segment exists.
+    pub fn has_fm_sidecar(&self) -> bool {
+        let Ok(reader) = self.index.reader() else { return false };
+        self.fm.get(&self.dir, &reader.searcher(), self.fields.text).is_some()
     }
 
     /// True when `dir` holds an index.
@@ -176,6 +201,16 @@ impl LineIndex {
     /// always describes exactly what the index holds.
     pub fn committed_payload(&self) -> Result<Option<String>> {
         Ok(self.index.load_metas()?.payload)
+    }
+
+    /// A reader over the index (for tools and statistics).
+    pub fn reader(&self) -> Result<tantivy::IndexReader> {
+        Ok(self.index.reader()?)
+    }
+
+    /// The text field.
+    pub fn text_field(&self) -> Field {
+        self.fields.text
     }
 
     /// Number of lines in the index (as of the last commit).

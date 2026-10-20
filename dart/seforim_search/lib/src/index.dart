@@ -57,6 +57,22 @@ final class SeforimIndex implements Finalizable {
   /// Line count, build options and the last committed payload.
   IndexInfo info() => IndexInfo.fromJson(jsonDecode(_n.takeString(_n.indexInfo(handle))) as Map<String, dynamic>);
 
+  /// Builds the FM-index sidecar over the term dictionary (FtsLib's FM sidecar):
+  /// leading-`*` wildcards and fuzzy words then run through it instead of
+  /// walking the whole dictionary, with identical results. Needs a single
+  /// segment: call after [IndexWriter.mergeAndClose]. Idempotent. Returns
+  /// false (nothing built; searches use the walk) when the index has several
+  /// segments, no terms, or a dictionary with more than 64 distinct
+  /// characters (a marked index with nikud and te'amim).
+  bool buildFmSidecar() {
+    final r = _n.indexBuildFmSidecar(handle);
+    if (r < 0) throw _n.error();
+    return r == 1;
+  }
+
+  /// True when a sidecar matching the current single segment exists.
+  bool get hasFmSidecar => _n.indexHasFmSidecar(handle) == 1;
+
   /// Starts a writer. [heapBytes] is the total indexing memory (≥15 MB per thread).
   IndexWriter openWriter({int heapBytes = 50000000, int threads = 0}) {
     if (threads <= 0) threads = Platform.numberOfProcessors.clamp(1, 4);

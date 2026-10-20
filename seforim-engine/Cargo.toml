@@ -10,6 +10,7 @@ license = "MIT"
 tantivy = { path = "../tantivy" }
 hebrew-fts = { path = "../hebrew-fts" }
 serde = { version = "1", features = ["derive"] }
+memmap2 = "0.9"
 
 [dev-dependencies]
 tempfile = "3"

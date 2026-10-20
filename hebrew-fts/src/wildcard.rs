@@ -166,6 +166,11 @@ impl WildcardPattern {
         })
     }
 
+    /// True when the quote is transparent.
+    pub fn ignore_quotes(&self) -> bool {
+        self.ignore_quotes
+    }
+
     /// Parses `pattern` with the quote transparent: quotes in the pattern are
     /// dropped and quotes in indexed terms are skipped.
     pub fn parse_ignoring_quotes(pattern: &str) -> Result<WildcardPattern, WildcardRejected> {
@@ -221,6 +226,18 @@ impl WildcardAutomaton {
     /// Wraps a parsed pattern.
     pub fn new(pattern: WildcardPattern) -> WildcardAutomaton {
         WildcardAutomaton { pattern }
+    }
+
+    /// True when the whole `term` matches the pattern (budgets included).
+    pub fn accepts(&self, term: &[u8]) -> bool {
+        let mut state = self.start();
+        for &b in term {
+            if !self.can_match(&state) {
+                return false;
+            }
+            state = self.accept(&state, b);
+        }
+        self.is_match(&state)
     }
 
     fn close_into(&self, config: u64, set: &mut Vec<u64>) {
@@ -350,6 +367,21 @@ impl HebrewWildcardQuery {
     /// Overrides the expansion cap.
     pub fn set_max_expansions(&mut self, cap: usize) {
         self.max_expansions = cap;
+    }
+
+    /// The expansion cap.
+    pub fn max_expansions(&self) -> usize {
+        self.max_expansions
+    }
+
+    /// The parsed pattern.
+    pub fn pattern(&self) -> &WildcardPattern {
+        &self.pattern
+    }
+
+    /// The automaton the walk runs (for verifying candidates found another way).
+    pub fn automaton(&self) -> WildcardAutomaton {
+        WildcardAutomaton::new(self.pattern.clone())
     }
 
     fn automaton_weight(&self) -> AutomatonWeight<WildcardAutomaton> {

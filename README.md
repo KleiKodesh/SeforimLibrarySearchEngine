@@ -67,7 +67,7 @@ results match what KitveiHakodesh shows today.
 |---|---|---|
 | `tantivy/` | Our modified copy of tantivy 0.27.0 (the "KleiKodesh version"). Git submodule → github.com/KleiKodesh/tantivy (separate repo, plain commits on `main`). After tantivy commits, `git add tantivy` here to move the pointer. Clone with `--recurse-submodules`. | — |
 | `hebrew-fts/` | Hebrew layer: tokenizer, walks, wildcard, snippet locator. | tantivy |
-| `seforim-engine/` | The engine. **No database code**: the host feeds lines and texts. | hebrew-fts |
+| `seforim-engine/` | The engine. **No database code**: the host feeds lines and texts. Includes the FM-index sidecar (FtsLib's `FmIndex`) for leading-`*` and fuzzy. | hebrew-fts |
 | `engine-ffi/` | C ABI → `seforim_search_native.dll / .so / .dylib`. | seforim-engine |
 | `csharp/SeforimSearch.Engine/` | .NET API package (netstandard2.0 → .NET 10 and .NET Framework 4.8). | native lib |
 | `dart/seforim_search/` | Dart package over the native library (`dart:ffi`, finalizers). 6 tests. | native lib |
@@ -211,9 +211,29 @@ are not printed), so upstream's query-parser tests stay as they are.
   (distance ≤2), and OR of alternatives.
 - **Fuzzy** is hebrew-fts's own `HebrewFuzzyQuery` (the Levenshtein DFA
   tantivy uses, built here because tantivy's wrapper cannot be built from
-  outside): cap 2000 per segment, closest edit distance first, then shortest
-  with the quote zero width, then most frequent. The plain query and the
-  span slot are the same weight.
+  outside): plain Levenshtein edits (a transposition is two, as FtsLib's
+  `Levenshtein.Distance`), cap 2000 per segment, closest edit distance first,
+  then shortest with the quote zero width, then most frequent. The plain
+  query and the span slot are the same weight.
+- **FM-index sidecar** (`<segment-id>.fmi`, a port of FtsLib's `FmIndex`):
+  an FM-index over the term dictionary, built after the merge into one
+  segment (`LineIndex::build_fm_sidecar`, C# `BuildFmSidecar` /
+  `MergeSegments`, Dart `buildFmSidecar`), memory-mapped on first use.
+  - It serves the shapes FtsLib served with it: leading-`*` wildcards of
+    the form `*core` and `*core*` (no `?`, core of 2+ letters) and fuzzy
+    words. Everything else stays an FST walk.
+  - It finds candidates only: every candidate is verified with the walk's
+    own automaton and capped with the walk's ordering, so the result is the
+    same term list the walk gives (a test runs both paths and compares).
+    Its text is the quote-stripped form of each term, so it works with the
+    ignore-gershayim option; the verification restores exactness.
+  - When the index has several segments (after incremental updates) or no
+    sidecar, those groups fall back to the walk; merge and rebuild to get
+    it back. A `keep_marks` index whose dictionary has more than 64
+    distinct characters gets no sidecar (FtsLib's 6-bit sort keys); it
+    keeps using the walk.
+  - Measured on the full index (1,755,598 terms): built in 2.4 s, 41 MB;
+    `*יצח*` 41 ms against 1.1 s as a walk (FtsLib: 0.26 s).
 - **Per-pair spacing** (Otzaria's customSpacing): `gaps` in the request (C#
   `SearchRequest.Gaps`, Dart `SearchRequest.gaps`, demo `--spacing 2,5`).
   - `gaps[i]` is the maximum number of words between query word i and i+1.
@@ -250,8 +270,8 @@ On the full Otzaria DB (7,080,797 lines), first 2,000 hits per query: **16 of
 `|`, and distance 0/2/5. The one difference is `word~N`, where 2 hits differ
 because the fuzzy DFA counts an intra-word quote as an edit.
 
-Full build: 5 min plus a 70 s merge into one segment. The index is 1.6 GB with
-positions.
+Full build: 5 min plus a 70 s merge into one segment and 2.4 s for the
+FM-index sidecar. The index is 1.6 GB with positions.
 
 ## Differences from FtsLib (known, deliberate)
 - **Fuzzy distance** is capped at 2 (tantivy's limit; FtsLib allowed 3).
@@ -275,8 +295,6 @@ positions.
   - תרגום ארמי and ראשי תיבות have no walk.
   - The "most words" / "at least N" modes, exclusion words, and grouping are
     missing.
-- Leading-`*` speed: a trigram side index for `*x*` (`*יצח*` 1.1 s vs FtsLib
-  0.26 s).
 - A full build compared side by side with FtsLib on the same queries.
 - Profiling: C# search is ~1.0 s (.NET 10) / ~1.5 s (net48), against 378 ms in
   the pure-Rust smoke test for the same query. That gap includes process start

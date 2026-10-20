@@ -76,6 +76,7 @@ tantivy/ (our copy)   MatchedTermsSink · shortest-first capped walk · SpanQuer
 hebrew-fts/           tokenizer (FtsLib scanner) · walks · wildcard · snippet locator
    ↑
 seforim-engine/       line index fed by host · search in catalog order · snippet session
+                      · FM-index sidecar (FtsLib FmIndex) for leading-* and fuzzy
    ↑
 engine-ffi/           C ABI → seforim_search_native.dll
    ↑
@@ -135,8 +136,22 @@ non-empty lines).
 - A quote AFTER the last letter (יצחק") is punctuation: FtsLib drops it. Keeping it made
   separate terms and broke parity everywhere. Only quotes BETWEEN letters stay.
 - Index MUST be merged to one segment after a build: every walk repeats per segment
-  (*יצח* 4.8 s on 37 segments → 1.1 s on 1). Leading-* walks are still the slow case
-  (FtsLib used an FM-index/trigram sidecar for them).
+  (*יצח* 4.8 s on 37 segments → 1.1 s on 1), and the FM-index sidecar needs one segment.
+- **Leading-`*` and fuzzy go through the FM-index sidecar** (`seforim-engine/src/fm_index.rs`,
+  a port of FtsLib's `FmIndex.cs`; `fm_sidecar.rs` builds `<segment>.fmi` after the merge;
+  `fm_expand.rs` = FtsLib's `IsFmWildcard` / `ExpandWildcardWithFm` / `ExpandFuzzy`).
+  The user's instruction: "build an fm index like in fts lib", not a trigram index. The
+  sidecar only finds candidates (its text is quote-stripped); each is verified with the
+  walk's own automaton and capped with the walk's order, so FM == walk (the
+  `fm_sidecar_equals_the_walk` test proves it; the switch it uses,
+  `test_only_disable_fm`, is `#[cfg(test)]` and must never reach production code).
+  *יצח* 1.1 s → 41 ms.
+- FM-index trap: the suffix order "up to the first stop, then by position" puts the
+  SEP rows in position order, which is NOT LF order. Never map into the SEP range;
+  a fuzzy match reads its term off the term-start row (BWT == SEP) instead. FtsLib
+  used a rank→rowid table for the same reason.
+- FtsLib's fuzzy is plain Levenshtein (`Levenshtein.Distance`, no transposition); the
+  DFA must be built with `transposition = false`.
 - `%` is FtsLib's GrammarExpander (its own 34/32 tables), NOT the Otzaria walk options.
 - Parity is checked with `tools/parity` (FtsLibDump + `SeforimSearch.Demo dump` +
   compare.py) against the installed FtsLib index at

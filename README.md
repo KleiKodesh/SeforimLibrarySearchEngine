@@ -36,7 +36,7 @@ Framework 4.8.
 
 | Folder | What | Depends on |
 |---|---|---|
-| `tantivy/` | Our modified copy of tantivy 0.27.0 (the "KleiKodesh version"). Plain commits on `main`; upstream is `origin`. | — |
+| `tantivy/` | Our modified copy of tantivy 0.27.0 (the "KleiKodesh version"). Git submodule → github.com/KleiKodesh/tantivy (separate repo, plain commits on `main`). After tantivy commits, `git add tantivy` here to move the pointer. Clone with `--recurse-submodules`. | — |
 | `hebrew-fts/` | Hebrew layer: tokenizer, walks, wildcard, snippet locator. | tantivy |
 | `seforim-engine/` | The engine. **No database code**: the host feeds lines and texts. | hebrew-fts |
 | `engine-ffi/` | C ABI → `seforim_search_native.dll / .so / .dylib`. | seforim-engine |

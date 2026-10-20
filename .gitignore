@@ -1,7 +1,3 @@
-# Upstream clone of quickwit-oss/tantivy (v0.27.0, commit 67889269), unmodified.
-# hebrew-fts depends on it via path; see hebrew-fts/Cargo.toml.
-/tantivy/
-
 # Rust build artifacts
 target/
 Cargo.lock

@@ -21,8 +21,8 @@ in one or two lines. Remove entries that turn out to be wrong.
   seforim.db schema lives in the C# demo (`csharp/SeforimSearch.Demo`). The engine is
   fed lines and texts by the host.
 - **tantivy/ is our modified copy** ("KleiKodesh version", the user dislikes "fork"
-  meaning anything online). Commit straight to its `main`, no branches. Upstream stays
-  as `origin`.
+  meaning anything online). Commit straight to its `main`, no branches. It is a git submodule
+  (origin = KleiKodesh/tantivy); after tantivy commits, push it, then `git add tantivy` here.
 - **Engine changes belong IN tantivy when they reuse what the engine already computes**
   (e.g. keep the FST walk's matched words instead of throwing them away). Must cost
   nothing when unused.

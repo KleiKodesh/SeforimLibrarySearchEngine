@@ -1,0 +1,3 @@
+[submodule "tantivy"]
+	path = tantivy
+	url = https://github.com/KleiKodesh/tantivy.git

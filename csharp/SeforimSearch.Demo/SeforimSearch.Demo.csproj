@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The seforim.db side: everything that reads the database (schema probe,
+    zstd content, catalog order, provenance) plus a FtsLib-shaped facade over
+    the engine package (TantivySeforimIndex ~ Fts5SeforimIndex,
+    SeforimDbFtsSearcher.SearchInBatches, FtsHit, SnippetDescriptor), so an
+    app on FtsLib can switch with minimal changes.
+
+    Builds and runs on both .NET 10 and .NET Framework 4.8.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net10.0;net48</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <!-- Core's sources rely on implicit usings; on net48 the SDK adds the same set. -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- The native engine is x64. -->
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier Condition="'$(TargetFramework)' == 'net48'">win-x64</RuntimeIdentifier>
+    <RootNamespace>SeforimSearch.Demo</RootNamespace>
+    <NoWarn>$(NoWarn);CS1591;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SeforimSearch.Engine\SeforimSearch.Engine.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Using Include="SeforimSearch.Demo.Compat" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.14" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+  </ItemGroup>
+
+</Project>

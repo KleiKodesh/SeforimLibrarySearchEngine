@@ -7,7 +7,21 @@ Tantivy-based Hebrew search engine producing FtsLib-compatible results
 
 - `tantivy/` — **fork** of tantivy 0.27.0 (KleiKodesh version). Commit to
   `main`; upstream reachable via `origin/main`.
-- `hebrew-fts/` — the Hebrew layer, separate crate (`tantivy = { path = "../tantivy" }`).
+- `hebrew-fts/` — the Hebrew layer: tokenizer, walks, wildcard, snippet locator.
+- `seforim-engine/` — the engine, **no database code**: line index fed by the
+  host (optional positions; host payload committed atomically), search in
+  catalog order, snippet session (filters, neighbour widening, term table).
+- `engine-ffi/` — C ABI → `seforim_search_native.dll/.so/.dylib`.
+- `csharp/SeforimSearch.Engine/` — .NET package (netstandard2.0: .NET 10 and
+  .NET Framework 4.8) over the native library.
+- `csharp/SeforimSearch.Demo/` — everything that reads seforim.db (copied from
+  KitveiHakodesh Core) plus a FtsLib-shaped facade (`TantivySeforimIndex` ≈
+  `Fts5SeforimIndex`, `SeforimDbFtsSearcher.SearchInBatches`, `FtsHit`,
+  `SnippetDescriptor`, `QueryParser`). Targets net10.0 and net48.
+
+Build: `cargo build --release -p engine-ffi`, then `dotnet build csharp/SeforimSearch.Demo -c Release`.
+Run: `SeforimSearch.Demo build [--max-lines N] [--no-positions]`,
+`SeforimSearch.Demo search [--prefixes] [--distance N] <query>`.
 
 ## Done
 
@@ -59,27 +73,15 @@ pass, feeding the snippet stage. Any walk becomes a span slot via
   so the page renderer is unchanged. Term→group map built once per query from
   the per-group sinks.
 
-### seforimdb-search crate (everything that knows the seforim DB)
-- `schema.rs` / `content.rs`: the three DB shapes (Zayit, Otzaria pre-6,
-  Otzaria 6+ with `line_content` + zstd dictionaries), content codec incl.
-  base64-frame recovery.
-- `tree_order.rs` + `catalog_title.rs` + `abbreviations.rs`: catalog tree
-  order (port of SeforimDbBookTreeOrder + title tokenizer + abbreviation map).
-- `corpus.rs`: catalog-order line feed, placed-line fetch, neighbour fetch.
-- `fingerprint.rs`: index provenance stamp (port of SeforimDbContentFingerprint).
-- `index.rs`: tantivy line index (line_id/position/book_id/line_index/toc as
-  fast fields, text with positions, nothing stored), resumable batched build
-  (`build`), `replace_lines` for updates. Paths are always passed in.
-- `searcher.rs`: `search()` → batches in catalog order (FtsLib batch plan
-  256×16 then doubling to 2048), per-group sinks → PreparedQueryGroups,
-  parallel snippet locate, word-distance filter, short windows widened over
-  same-book neighbours (radius 2, non-empty), term table, first-100 line
-  texts seeded. No DB watcher / coordinator: the app decides when to build.
-- `examples/smoke.rs`: build (capped) + search against a real seforim.db.
+### Expansion caps
+Every walk (grammar, Otzaria options, wildcard, regex) is capped at 2000 terms
+INSIDE the walk: the term dictionary is walked shortest-first, level by level
+across all segments, and stops at the cap (ties: most frequent). Fuzzy keeps a
+distance-ranked cap.
 
 ## Next
-- C ABI for C#/Dart.
-- Query-string parsing into `SearchRequest` (Otzaria syntax).
+- Dart binding over the same C ABI.
+- Side-by-side check against FtsLib on a full build.
 
 ## Dev
 - Build/test: `cargo test` in `hebrew-fts/` (rust-lld + debug=0 for fast cycles).

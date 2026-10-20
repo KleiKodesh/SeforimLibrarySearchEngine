@@ -129,7 +129,11 @@ namespace FtsLib.Fts5
             if (request.Groups.Count == 0) yield break;
 
             onStage?.Invoke("search");
-            using var session = new SearchSessionRef(Engine().Search(request));
+            // NOT disposed with the enumeration: results outlive it (Core snippets the
+            // last batch after the loop ends), as FtsLib's results carried their own
+            // prepared state. The native session is freed when the last result holding
+            // it is collected (SafeHandle).
+            var session = new SearchSessionRef(Engine().Search(request));
             using var corpus = _openCorpus();
             batchSizeAt ??= _ => 256;
 

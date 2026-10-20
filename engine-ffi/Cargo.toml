@@ -2,4 +2,16 @@
 name = "engine-ffi"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
+description = "C ABI over seforim-engine: the native library the C# (and later Dart) packages bind to."
+license = "MIT"
 
+[lib]
+name = "seforim_search_native"
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+seforim-engine = { path = "../seforim-engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

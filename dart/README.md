@@ -79,6 +79,7 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 | שגיאות כתיב | `spellingErrors` |
 | קידומות / סיומות ארמיות | `aramaicPrefixes` / `aramaicSuffixes` |
 | התעלם מגרשיים | `ignoreQuotes` |
+| תרגום ארמי | Host-side port of Otzaria's `TranslationLexicon` (`lib/translation_lexicon.dart`) over the app's `assets/dictionary.json`: both directions, single-word glosses only, cap 16, appended to the word's alternatives (an `any` group), as Otzaria's `translation_alternatives`. Demo: `--translation --dictionary path`. |
 | ניקוד / טעמים (match the typed marks) | Needs an index built with `--keep-marks`. Without the option, the demo sets `ignoreNikud` / `ignoreTeamim` on such an index. |
 | `distance` (gap), default scope "in order" | `maxWordDistance`, `requireOrdered: true` |
 | `anyOrder` | `requireOrdered: false` |
@@ -92,7 +93,7 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 
 ### Gaps: what Otzaria does that the engine/demo can't (yet)
 
-- **Options with no walk:** תרגום ארמי and ראשי תיבות. The demo warns and ignores them.
+- **ראשי תיבות** (acronym ↔ phrase alternatives) is not mapped yet. The demo warns and ignores it.
 - **Scope `sameSection`** (under the same heading), and **grouping** (`sameSection` cards, `identicalText` merging). Each hit has a `tocEntryId`, so the host could group by it, but the demo doesn't.
 - **Relevance ordering.** Results come in catalog order only.
 - **Regex queries** (`/…/`), the semantic and smart query modes, per-book counts (`countByBook`) and cancellation.

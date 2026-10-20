@@ -1,5 +1,7 @@
 import 'package:seforim_search/seforim_search.dart';
 
+import 'translation_lexicon.dart';
+
 /// Otzaria's search modes (`SearchMode`).
 enum SearchMode { exact, advanced, fuzzy }
 
@@ -22,14 +24,14 @@ abstract final class OtzariaOption {
   static const aramaicPrefixes = 'קידומות ארמיות';
   static const aramaicSuffixes = 'סיומות ארמיות';
   static const ignoreGershayim = 'התעלם מגרשיים';
-  static const aramaicTranslation = 'תרגום ארמי'; // not supported by the engine
+  static const aramaicTranslation = 'תרגום ארמי'; // host lexicon (TranslationLexicon)
   static const acronyms = 'ראשי תיבות'; // not supported by the engine
   static const nikud = 'ניקוד';
   static const teamim = 'טעמים';
 
   /// Options exact mode allows (Otzaria `exactWordOptionKeys`).
   static const exactAllowed = {grammaticalPrefixes, grammaticalSuffixes, prefixes, suffixes, fullOrDefective};
-  static const unsupported = {aramaicTranslation, acronyms};
+  static const unsupported = {acronyms};
 }
 
 /// Otzaria's query sanitizer: ״/׳ → "/', maqaf and hyphen → space, collapse
@@ -69,6 +71,7 @@ class OtzariaSearch {
     this.customSpacing,
     this.negativeQuery = '',
     this.negativeScope = NegativeScope.wordDistance,
+    this.translations,
   })  :globalOptions = globalOptions ?? {},
         wordOptions = wordOptions ?? {},
         alternativeWords = alternativeWords ?? {};
@@ -121,6 +124,10 @@ class OtzariaSearch {
   /// `negativeDistance: state.distance`, `negativeScope: proximityScope`) and,
   /// in this demo, the same global options. Empty = none.
   final String negativeQuery;
+
+  /// Otzaria's Aramaic↔Hebrew dictionary for "תרגום ארמי"; null = not loaded
+  /// (the option then warns and does nothing, as Otzaria without the asset).
+  final TranslationLexicon? translations;
 
   /// Otzaria's negativeScope (its proximityScope).
   final NegativeScope negativeScope;
@@ -199,7 +206,15 @@ class OtzariaSearch {
     final groups = <QueryGroup>[];
     for (var i = 0; i < words.length; i++) {
       final o = _optionsFor(i);
-      final alts = mode == SearchMode.advanced ? (alternativeWords[i] ?? const []) : const <String>[];
+      final alts = <String>[
+        if (mode == SearchMode.advanced) ...?alternativeWords[i],
+        // Otzaria translation_alternatives: appended to the word's alternatives
+        if (mode == SearchMode.advanced && o.contains(OtzariaOption.aramaicTranslation))
+          ...?translations?.expansions(words[i]),
+      ];
+      if (mode == SearchMode.advanced && o.contains(OtzariaOption.aramaicTranslation) && translations == null) {
+        warnings.add('option "${OtzariaOption.aramaicTranslation}" needs --dictionary (Otzaria assets/dictionary.json)');
+      }
       final main = _wordGroup(words[i], o);
       groups.add(alts.isEmpty ? main : QueryGroup.any([main, for (final a in alts) _wordGroup(a, o)]));
     }

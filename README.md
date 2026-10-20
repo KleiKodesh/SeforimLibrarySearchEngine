@@ -315,7 +315,9 @@ FM-index sidecar. The index is 1.6 GB with positions.
 
 ## Open
 - Otzaria gaps found by the Dart demo (see `dart/README.md`):
-  - תרגום ארמי and ראשי תיבות have no walk.
+  - ראשי תיבות (acronym ↔ phrase alternatives) is not mapped yet. תרגום
+    ארמי is done host-side in the Dart demo (Otzaria's dictionary asset
+    → word alternatives).
   - Grouping (sameSection cards, identicalText merging) is missing.
 - A full build compared side by side with FtsLib on the same queries.
 - Profiling: C# search is ~1.0 s (.NET 10) / ~1.5 s (net48), against 378 ms in

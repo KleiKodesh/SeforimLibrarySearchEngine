@@ -169,10 +169,11 @@ seforim.db knowledge).
 
 - Benchmark span query vs FtsLib-style post-filter for very broad expansions.
 - Profile the C# search path (1.0 s net10 / 1.5 s net48 vs 0.38 s pure Rust).
-- Otzaria gaps still open: acronym (ראשי תיבות) phrase alternatives, Aramaic
-  translation lexicon (host-side `dictionary.json`), grouping.
+- Otzaria gaps still open: acronym (ראשי תיבות) phrase alternatives (needs an OR of
+  adjacent-phrase alternatives per query), grouping.
   Otzaria's sources: `github.com/Otzaria/otzaria` (Dart) and
   `github.com/Otzaria/otzaria_search_engine` v5.0.0 (Rust `hebrew_query.rs`,
   `api/search_engine.rs`, `lexicons.rs`); clone them into the scratchpad to port.
 - Done: Dart binding; full-DB side-by-side parity (16/17); FM sidecar; wordMatchMode;
-  negative query (`ExcludeSpec`).
+  negative query (`ExcludeSpec`); תרגום ארמי as a HOST lexicon (Dart demo
+  `translation_lexicon.dart`): app assets/dictionaries stay out of the engine.

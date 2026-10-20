@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:otzaria_demo/otzaria_query.dart';
 import 'package:otzaria_demo/seforim_db.dart';
+import 'package:otzaria_demo/translation_lexicon.dart';
 import 'package:seforim_search/seforim_search.dart';
 
 const _usage = '''
@@ -21,6 +22,7 @@ search options (Otzaria names):
   --spacing a,b,..    gap per consecutive word pair (customSpacing; needs positions)
   --fuzzy-distance N  (fuzzy mode, 1..2)
   --match all|any|most|atleast  (wordMatchMode; default all)   --match-count N  (for atleast)
+  --translation       תרגום ארמי (needs --dictionary path to Otzaria's assets/dictionary.json)
   --exclude "words"   negative query (same distance/order/options)
   --exclude-scope distance|paragraph|section   (negativeScope; default distance)
   --book TEXT         only books whose title/category contains TEXT
@@ -34,7 +36,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
   const valued = {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
     'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd', 'spacing', 'match',
-    'match-count', 'exclude', 'exclude-scope',
+    'match-count', 'exclude', 'exclude-scope', 'dictionary',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -172,6 +174,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     'aramaic-suffixes': OtzariaOption.aramaicSuffixes,
     'nikud': OtzariaOption.nikud,
     'teamim': OtzariaOption.teamim,
+    'translation': OtzariaOption.aramaicTranslation,
   };
   final contextWords = _int(o, 'context') ?? 8;
   final req = OtzariaSearch(
@@ -189,6 +192,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     },
     wordMatchCount: _int(o, 'match-count') ?? 1,
     negativeQuery: o['exclude'] ?? '',
+    translations: o['dictionary'] == null ? null : TranslationLexicon.load(o['dictionary']!),
     negativeScope: switch (o['exclude-scope'] ?? 'distance') {
       'paragraph' => NegativeScope.sameParagraph,
       'section' => NegativeScope.sameSection,

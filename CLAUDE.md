@@ -53,6 +53,9 @@ in one or two lines. Remove entries that turn out to be wrong.
 - **The C# demo mirrors FtsLib's API** (same class / member names) for easy switching.
 - **Commit as you go**, one commit per finished step, without waiting to be asked;
   tests green first.
+- **Commit only this session's own work.** Other sessions may be editing the tree:
+  stage your files by explicit path (never `git add -A` / `.`), and check the staged
+  diff holds only your changes before committing.
 - **Run a QA subagent before EVERY commit**: it reviews the staged diff (correctness,
   FtsLib parity, README kept current, no AI co-author line). Fix what it finds, then commit.
 - **NEVER add Claude as co-author** (no `Co-Authored-By: Claude` or any AI attribution

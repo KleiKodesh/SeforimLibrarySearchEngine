@@ -35,6 +35,9 @@ in one or two lines. Remove entries that turn out to be wrong.
   netstandard2.0; demo = `net10.0;net48`, x64.
 - **The C# demo mirrors FtsLib's API** (same class / member names) for easy switching.
 - **Commit as you go**, one commit per finished step; tests green first.
+- **Keep README.md current automatically**: every commit that adds, changes or
+  removes a feature, option, layout item, known difference or open item updates
+  README.md in the SAME commit. Never leave it for later; don't wait to be asked.
 - **Multi-platform**: any native OS through one C ABI; web goes through a server.
   The index is shipped prebuilt AND must be buildable/updatable on the user's machine.
 - Answer short. Confirm understanding before big work when asked. Report honest

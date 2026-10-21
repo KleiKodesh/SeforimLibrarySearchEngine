@@ -51,7 +51,7 @@ impl CancelToken {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn check(token: Option<&CancelToken>) -> Result<()> {
+    pub(crate) fn check(token: Option<&CancelToken>) -> Result<()> {
         if token.is_some_and(|t| t.is_cancelled()) {
             Err(Error::Cancelled)
         } else {
@@ -341,6 +341,10 @@ pub struct SearchRequest {
     /// their own lines; `cross_line` has no meaning here and is ignored.
     /// Needs an index with section ids.
     pub same_section: bool,
+    /// Otzaria's user regex of the `Line` kind (the whole wrapped query,
+    /// `/.../`): matched on each line's text (see `crate::line_search`).
+    /// When set, every other field but `books` and `context_words` is unused.
+    pub line_regex: Option<String>,
 }
 
 impl Default for SearchRequest {
@@ -361,6 +365,7 @@ impl Default for SearchRequest {
             vocalized: false,
             cross_line: false,
             same_section: false,
+            line_regex: None,
         }
     }
 }
@@ -521,6 +526,9 @@ pub struct SnippetSession {
     /// Cross-line matching is on: a next line's text given with a hit may
     /// complete its match (see [`locate_pair`](Self::locate_pair)).
     cross_line: bool,
+    /// A user regex of Otzaria's `Line` kind: `locate` runs it on the text
+    /// instead of the matchers (see `crate::line_search`).
+    pub(crate) line: Option<Arc<hebrew_fts::line_regex::LinePlan>>,
 }
 
 /// One way a line can match: prepared terms plus the filters to apply.
@@ -629,6 +637,36 @@ impl NegativeFilter {
 }
 
 impl SnippetSession {
+    /// The session of a line-regex search: `locate` runs `plan` on the text.
+    pub(crate) fn for_line(
+        plan: Arc<hebrew_fts::line_regex::LinePlan>,
+        context_words: usize,
+        keep_marks: bool,
+        cancel: Option<CancelToken>,
+    ) -> SnippetSession {
+        SnippetSession {
+            matchers: Vec::new(),
+            original_group_count: 1,
+            require_ordered: false,
+            max_word_distance: usize::MAX,
+            min_groups: 0,
+            context_words,
+            keep_marks,
+            negative: Vec::new(),
+            terms: TermTable::default(),
+            locator: if keep_marks {
+                SnippetWindowLocator::keeping_marks(context_words)
+            } else {
+                SnippetWindowLocator::new(context_words)
+            },
+            pool: Vec::new(),
+            count_needs_text: true,
+            cancel,
+            cross_line: false,
+            line: Some(plan),
+        }
+    }
+
     /// Locates the snippet in one matched line. None when the line does not
     /// pass (not all groups present, wrong order, too far apart, or the
     /// excluded words present).
@@ -642,6 +680,10 @@ impl SnippetSession {
     /// alone is tried first; a cross-line snippet's offsets are into
     /// `text + "\n" + next` and its `break_at` is the `\n`'s offset.
     pub fn locate_pair(&mut self, text: &str, next: Option<&str>) -> Option<Snippet> {
+        if let Some(plan) = self.line.clone() {
+            let s = crate::line_search::line_snippet(&plan, text)?;
+            return Some(self.number_line_marks(s, text));
+        }
         let next = next.filter(|_| self.cross_line);
         let (i, mut s) = locate_with(&self.matchers, &self.negative, &mut self.locator, (text, next))?;
         let prepared = &self.matchers[i].prepared;
@@ -692,6 +734,15 @@ impl SnippetSession {
     /// [`Error::Cancelled`] when the search's token is cancelled (checked
     /// per chunk of work).
     pub fn try_locate_many(&mut self, texts: &[&str]) -> Result<Vec<Option<Snippet>>> {
+        if let Some(plan) = self.line.clone() {
+            let items: Vec<HitText<'_>> = texts.iter().map(|&t| (t, None)).collect();
+            let located = self.run_many(&items, |_, _, _, t| crate::line_search::line_snippet(&plan, t.0))?;
+            return Ok(located
+                .into_iter()
+                .zip(texts)
+                .map(|(s, t)| s.map(|s| self.number_line_marks(s, t)))
+                .collect());
+        }
         if self.matchers.is_empty() {
             return Ok(vec![None; texts.len()]);
         }
@@ -723,6 +774,9 @@ impl SnippetSession {
     /// [`passes_many`](Self::passes_many) for hits given with their next
     /// line's text when they have one.
     pub fn passes_pairs(&mut self, texts: &[(&str, Option<&str>)]) -> Result<Vec<bool>> {
+        if let Some(plan) = self.line.clone() {
+            return self.run_many(texts, |_, _, _, t| crate::line_search::line_passes(&plan, t.0));
+        }
         if self.matchers.is_empty() {
             return Ok(vec![false; texts.len()]);
         }
@@ -732,6 +786,18 @@ impl SnippetSession {
             texts.iter().map(|&(t, _)| (t, None)).collect()
         };
         self.run_many(&items, |m, n, l, t| locate_with(m, n, l, t).is_some())
+    }
+
+    /// A line-regex snippet's marks carry the matched source text; number
+    /// them in the term table like the walks' terms.
+    fn number_line_marks(&mut self, mut s: Snippet, text: &str) -> Snippet {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        for m in s.marks.chunks_exact_mut(3) {
+            let (st, len) = (m[0] as usize, m[1] as usize);
+            let matched = String::from_utf16_lossy(&units[st.min(units.len())..(st + len).min(units.len())]);
+            m[2] = self.terms.id_of(&matched);
+        }
+        s
     }
 
     /// True when an exact count needs the hits' texts (see
@@ -891,6 +957,8 @@ pub struct SearchResult {
     notices: Vec<String>,
     /// A walk hit its expansion cap (see [`truncated`](Self::truncated)).
     truncated: bool,
+    /// A user regex of Otzaria's `Line` kind (see `crate::line_search`).
+    pub(crate) line: Option<crate::line_search::LineRun>,
 }
 
 /// How a search was served (see [`SearchResult::info`]).
@@ -925,8 +993,8 @@ struct CountTally {
 }
 
 impl SearchResult {
-    fn new(hits: Vec<PlacedHit>, session: SnippetSession) -> SearchResult {
-        SearchResult { hits, session, tally: CountTally::default(), scores: None, notices: Vec::new(), truncated: false }
+    pub(crate) fn new(hits: Vec<PlacedHit>, session: SnippetSession) -> SearchResult {
+        SearchResult { hits, session, tally: CountTally::default(), scores: None, notices: Vec::new(), truncated: false, line: None }
     }
 
     fn with_notices(mut self, notices: Vec<String>) -> SearchResult {
@@ -944,7 +1012,7 @@ impl SearchResult {
     /// segment): matching terms beyond the cap were not searched. Costs
     /// nothing when no cap is hit.
     pub fn truncated(&self) -> bool {
-        self.truncated
+        self.truncated || self.line.as_ref().is_some_and(|l| l.truncated)
     }
 
     /// Notices about how the search was served, not errors. Today one:
@@ -970,6 +1038,9 @@ impl SearchResult {
     /// hit order with [`count_batch`](Self::count_batch). False: every
     /// hit passes and [`counts`](Self::counts) is exact at once.
     pub fn count_needs_text(&self) -> bool {
+        if let Some(line) = &self.line {
+            return !line.done();
+        }
         self.session.count_needs_text && !self.hits.is_empty()
     }
 
@@ -979,6 +1050,11 @@ impl SearchResult {
     /// exactly [`SnippetSession::locate`]'s. When no text is needed the
     /// texts are not read (every hit passes).
     pub fn count_batch(&mut self, texts: &[&str]) -> Result<usize> {
+        if self.line.is_some() {
+            // a line regex counts what it matches (Otzaria's line hits, capped)
+            let found = self.line_match_batch(texts)?;
+            return Ok(found.iter().filter(|r| !r.is_empty()).count());
+        }
         let items: Vec<HitText<'_>> = texts.iter().map(|&t| (t, None)).collect();
         self.count_batch_pairs(&items)
     }
@@ -1018,6 +1094,9 @@ impl SearchResult {
     /// passes: counted from the hits' book ids, no text read); otherwise
     /// exact once [`count_batch`](Self::count_batch) has seen every hit.
     pub fn counts(&self) -> HitCounts {
+        if let Some(line) = &self.line {
+            return line.counts();
+        }
         if !self.count_needs_text() {
             let mut books = std::collections::BTreeMap::<u64, u64>::new();
             for h in &self.hits {
@@ -1041,16 +1120,16 @@ impl SearchResult {
 
 // ── Collector: every matching doc with its placement, from fast fields ───
 
-struct PlacedCollector {
+pub(crate) struct PlacedCollector {
     /// Book filter (see `SearchRequest::books`).
-    books: Option<Arc<std::collections::HashSet<u64>>>,
+    pub(crate) books: Option<Arc<std::collections::HashSet<u64>>>,
     /// Sections the negative query's section scope dropped.
-    drop_sections: Option<Arc<std::collections::HashSet<SectionKey>>>,
+    pub(crate) drop_sections: Option<Arc<std::collections::HashSet<SectionKey>>>,
     /// Keep each hit's doc id (relevance order scores them after the search).
-    keep_docs: bool,
+    pub(crate) keep_docs: bool,
 }
 
-struct PlacedSegmentCollector {
+pub(crate) struct PlacedSegmentCollector {
     columns: [Column<u64>; 3],
     books: Option<Arc<std::collections::HashSet<u64>>>,
     drop_sections: Option<(Arc<std::collections::HashSet<SectionKey>>, SectionColumns)>,
@@ -1527,6 +1606,9 @@ impl LineIndex {
     /// [`search_options_cancellable`](Self::search_options_cancellable)).
     pub fn search_cancellable(&self, request: &SearchRequest, cancel: Option<CancelToken>) -> Result<SearchResult> {
         CancelToken::check(cancel.as_ref())?;
+        if let Some(pattern) = &request.line_regex {
+            return self.line_regex_search(pattern, request, cancel);
+        }
         self.check_vocalized(request)?;
         // Otzaria's word options know whether the word stands alone (its
         // single-word vs phrase budgets): mark the words of a multi-word query.
@@ -1591,6 +1673,7 @@ impl LineIndex {
             count_needs_text: false,
             cancel: cancel.clone(),
             cross_line: cross,
+            line: None,
         };
         if section {
             session.require_ordered = false;

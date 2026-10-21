@@ -75,7 +75,7 @@ pub unsafe extern "C" fn se_reduce_paired_readings(query: *const u8, len: usize)
 
 /// Otzaria's `parse_user_regex` kind for `query`, as a JSON string:
 /// `"none"` (not `/.../`), `"invalid"` (searched as plain text),
-/// `"word"`, `"sequence"`, `"line"` (not supported yet). A host sets
+/// `"word"`, `"sequence"`, `"line"` (matched on each line's text: see `se_search_line_status`). A host sets
 /// `"user_regex": true` in the search to search `/.../` as a regex. Free
 /// with `se_string_free`.
 ///
@@ -872,6 +872,117 @@ pub unsafe extern "C" fn se_search_info(search: *const SearchResult) -> *mut c_c
     guard(ptr::null_mut(), || {
         let search = search.as_ref().ok_or("null search")?;
         Ok(out_string(serde_json::to_string(&search.info()).map_err(err)?))
+    })
+}
+
+// -- User regex, Otzaria's Line kind (see seforim_engine::line_search) --
+
+/// The state of a line-regex search as JSON
+/// `{"full_scan":false,"scope_lines":N,"fed":N,"matched":N,"truncated":false,"done":false}`,
+/// or `null` for any other search. `full_scan` false: feed the candidates'
+/// texts (the search's hits, in order) with `se_search_line_match_batch`;
+/// true: stream every line in scope (`scope_lines` of them, catalog order)
+/// with `se_search_line_scan_batch`. Free with `se_string_free`.
+///
+/// # Safety
+/// `search` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_line_status(search: *const SearchResult) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let search = search.as_ref().ok_or("null search")?;
+        Ok(out_string(serde_json::to_string(&search.line_regex()).map_err(err)?))
+    })
+}
+
+fn write_ranges(found: Vec<Vec<(u32, u32)>>) -> SeBuffer {
+    let mut out = Vec::with_capacity(found.len() * 3);
+    for ranges in found {
+        out.push(ranges.len() as u32);
+        for (s, e) in ranges {
+            out.push(s);
+            out.push(e);
+        }
+    }
+    SeBuffer::from_vec(out)
+}
+
+/// Line regex, candidate path: matches the texts of the next `count`
+/// candidates (hit order, continuing from the previous call). Output per
+/// text: `n`, then `n` UTF-16 `(start, end)` pairs into that text (`n` = 0:
+/// no match, or past the 100,000-line cap).
+///
+/// # Safety
+/// As `se_search_locate_batch`.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_line_match_batch(
+    search: *mut SearchResult,
+    texts: *const *const u8,
+    lens: *const usize,
+    count: usize,
+) -> SeBuffer {
+    let empty = SeBuffer { data: ptr::null_mut(), len: 0, cap: 0 };
+    guard(empty, || {
+        let search = search.as_mut().ok_or("null search")?;
+        let strs = text_args(texts, lens, count)?;
+        Ok(write_ranges(search.line_match_batch(&strs).map_err(err)?))
+    })
+}
+
+/// Line regex, full-scan path: matches `count` lines the host streams
+/// itself; `lines` holds 3 u64 per line (position, line_id, book_id).
+/// Output as `se_search_line_match_batch`.
+///
+/// # Safety
+/// `lines` must hold `count * 3` u64; texts as `se_search_locate_batch`.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_line_scan_batch(
+    search: *mut SearchResult,
+    lines: *const u64,
+    texts: *const *const u8,
+    lens: *const usize,
+    count: usize,
+) -> SeBuffer {
+    let empty = SeBuffer { data: ptr::null_mut(), len: 0, cap: 0 };
+    guard(empty, || {
+        let search = search.as_mut().ok_or("null search")?;
+        if count > 0 && lines.is_null() {
+            return Err("null lines".into());
+        }
+        let raw = if count == 0 { &[][..] } else { std::slice::from_raw_parts(lines, count * 3) };
+        let hits: Vec<seforim_engine::PlacedHit> = raw
+            .chunks_exact(3)
+            .map(|c| seforim_engine::PlacedHit { position: c[0], line_id: c[1], book_id: c[2], next_line_id: None })
+            .collect();
+        let strs = text_args(texts, lens, count)?;
+        Ok(write_ranges(search.line_scan_batch(&hits, &strs).map_err(err)?))
+    })
+}
+
+/// Copies the matching lines kept so far `[offset, offset+count)` (feed
+/// order) into `out` as 3 u64 each (position, line_id, book_id). Returns
+/// how many were copied. The number kept is the status's `matched`.
+///
+/// # Safety
+/// `out` must hold `count * 3` u64.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_copy_line_hits(
+    search: *const SearchResult,
+    offset: u64,
+    count: u64,
+    out: *mut u64,
+) -> u64 {
+    guard(0, || {
+        let search = search.as_ref().ok_or("null search")?;
+        let hits = search.line_hits();
+        let start = (offset as usize).min(hits.len());
+        let end = start.saturating_add(count as usize).min(hits.len());
+        let out = std::slice::from_raw_parts_mut(out, (end - start) * 3);
+        for (i, h) in hits[start..end].iter().enumerate() {
+            out[i * 3] = h.position;
+            out[i * 3 + 1] = h.line_id;
+            out[i * 3 + 2] = h.book_id;
+        }
+        Ok((end - start) as u64)
     })
 }
 

@@ -281,7 +281,19 @@ impl SearchOptions {
                         ..Default::default()
                     });
                 }
-                Err(e @ hebrew_fts::UserRegexError::LineKind) => return Err(Error::Unsupported(e.to_string())),
+                // Otzaria's Line kind: matched on each line's text (see
+                // `crate::line_search`); a pattern that cannot compile is
+                // searched as plain text, as an invalid one.
+                Err(hebrew_fts::UserRegexError::LineKind) => {
+                    if hebrew_fts::user_regex::parse_line(&self.query).is_ok() {
+                        return Ok(SearchRequest {
+                            line_regex: Some(self.query.clone()),
+                            context_words: self.context_words,
+                            books: self.books.clone(),
+                            ..Default::default()
+                        });
+                    }
+                }
                 Err(hebrew_fts::UserRegexError::Invalid(_)) => {}
             }
         }
@@ -351,6 +363,7 @@ impl SearchOptions {
             vocalized,
             cross_line: self.cross_line,
             same_section: self.same_section,
+            line_regex: None,
         })
     }
 }

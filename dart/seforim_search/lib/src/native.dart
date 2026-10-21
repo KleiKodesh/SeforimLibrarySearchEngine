@@ -117,6 +117,17 @@ final class SeforimNative {
             Pointer<Utf8> Function(Pointer<Void>)>('se_search_counts'),
         searchInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_search_info'),
+        lineStatus = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Void>)>('se_search_line_status'),
+        lineMatchBatch = lib.lookupFunction<
+            SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Size),
+            SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int)>('se_search_line_match_batch'),
+        lineScanBatch = lib.lookupFunction<
+            SeBuffer Function(Pointer<Void>, Pointer<Uint64>, Pointer<Pointer<Uint8>>, Pointer<Size>, Size),
+            SeBuffer Function(
+                Pointer<Void>, Pointer<Uint64>, Pointer<Pointer<Uint8>>, Pointer<Size>, int)>('se_search_line_scan_batch'),
+        copyLineHits = lib.lookupFunction<Uint64 Function(Pointer<Void>, Uint64, Uint64, Pointer<Uint64>),
+            int Function(Pointer<Void>, int, int, Pointer<Uint64>)>('se_search_copy_line_hits'),
         indexCloseFinalizer = NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_index_close').cast()),
         writerCloseFinalizer = NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_writer_close').cast()),
         searchCloseFinalizer = NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_search_close').cast()),
@@ -163,6 +174,10 @@ final class SeforimNative {
   final int Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) countBatch;
   final Pointer<Utf8> Function(Pointer<Void>) searchCounts;
   final Pointer<Utf8> Function(Pointer<Void>) searchInfo;
+  final Pointer<Utf8> Function(Pointer<Void>) lineStatus;
+  final SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) lineMatchBatch;
+  final SeBuffer Function(Pointer<Void>, Pointer<Uint64>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) lineScanBatch;
+  final int Function(Pointer<Void>, int, int, Pointer<Uint64>) copyLineHits;
   final NativeFinalizer indexCloseFinalizer;
   final NativeFinalizer writerCloseFinalizer;
   final NativeFinalizer searchCloseFinalizer;

@@ -176,6 +176,73 @@ final class SearchSession implements Finalizable {
   SearchInfo info() =>
       SearchInfo.fromJson(jsonDecode(_n.takeString(_n.searchInfo(_h))) as Map<String, dynamic>);
 
+  // -- User regex, Otzaria's Line kind --
+
+  /// The state of a user regex of Otzaria's Line kind (matched on each line's
+  /// text); null for any other search. Not [LineRegexStatus.fullScan]: feed
+  /// the candidates' texts (this session's hits, in order) to
+  /// [lineMatchBatch]. fullScan: stream every line in scope
+  /// ([LineRegexStatus.scopeLines], catalog order) to [lineScanBatch].
+  LineRegexStatus? lineRegex() {
+    final j = jsonDecode(_n.takeString(_n.lineStatus(_h)));
+    return j == null ? null : LineRegexStatus.fromJson(j as Map<String, dynamic>);
+  }
+
+  /// Line regex, candidate path: matches the texts of the next
+  /// `texts.length` candidates (hit order, continuing from the previous
+  /// call), across all cores. Per text: its matches as UTF-16 (start, end)
+  /// ranges (empty: no match, or past the 100,000-line cap).
+  List<List<(int, int)>> lineMatchBatch(List<String> texts) {
+    if (texts.isEmpty) return const [];
+    final data = _withTexts(texts, (ptrs, lens) => _n.takeBuffer(_n.lineMatchBatch(_h, ptrs, lens, texts.length)));
+    return _ranges(data, texts.length);
+  }
+
+  /// Line regex, full-scan path: matches lines the host streams itself
+  /// (every line in scope, catalog order), each with its placement.
+  List<List<(int, int)>> lineScanBatch(List<PlacedHit> lines, List<String> texts) {
+    if (lines.length != texts.length) throw ArgumentError('one text per line');
+    if (texts.isEmpty) return const [];
+    final raw = calloc<Uint64>(lines.length * 3);
+    try {
+      for (var i = 0; i < lines.length; i++) {
+        raw[i * 3] = lines[i].position;
+        raw[i * 3 + 1] = lines[i].lineId;
+        raw[i * 3 + 2] = lines[i].bookId;
+      }
+      final data =
+          _withTexts(texts, (ptrs, lens) => _n.takeBuffer(_n.lineScanBatch(_h, raw, ptrs, lens, texts.length)));
+      return _ranges(data, texts.length);
+    } finally {
+      calloc.free(raw);
+    }
+  }
+
+  static List<List<(int, int)>> _ranges(List<int> data, int n) {
+    final out = <List<(int, int)>>[];
+    var at = 0;
+    for (var i = 0; i < n; i++) {
+      final k = data[at++];
+      out.add([for (var j = 0; j < k; j++) (data[at + 2 * j], data[at + 2 * j + 1])]);
+      at += 2 * k;
+    }
+    return out;
+  }
+
+  /// Line regex: the matching lines kept so far [offset, offset+count), in
+  /// feed order.
+  List<PlacedHit> lineHits(int offset, int count) {
+    if (count <= 0) return const [];
+    final raw = calloc<Uint64>(count * 3);
+    try {
+      final copied = _n.copyLineHits(_h, offset, count, raw);
+      final v = raw.asTypedList(copied * 3);
+      return [for (var i = 0; i < copied; i++) PlacedHit(v[i * 3], v[i * 3 + 1], v[i * 3 + 2])];
+    } finally {
+      calloc.free(raw);
+    }
+  }
+
   /// One line's snippet.
   Snippet? locate(String text) => locateBatch([text])[0];
 
@@ -190,6 +257,32 @@ final class SearchSession implements Finalizable {
     _n.searchClose(_handle);
     _handle = nullptr;
   }
+}
+
+/// The state of a line-regex search ([SearchSession.lineRegex]).
+class LineRegexStatus {
+  const LineRegexStatus(this.fullScan, this.scopeLines, this.fed, this.matched, this.truncated, this.done);
+
+  /// No selective fixed word: the host streams every line in scope.
+  final bool fullScan;
+
+  /// Lines to feed: the candidates, or every live line in scope.
+  final int scopeLines;
+
+  /// Lines in scope fed so far.
+  final int fed;
+
+  /// Matching lines kept so far.
+  final int matched;
+
+  /// The 100,000-line cap was reached.
+  final bool truncated;
+
+  /// Every line in scope was fed, or the cap was reached.
+  final bool done;
+
+  static LineRegexStatus fromJson(Map<String, dynamic> j) => LineRegexStatus(j['full_scan'] as bool,
+      j['scope_lines'] as int, j['fed'] as int, j['matched'] as int, j['truncated'] as bool, j['done'] as bool);
 }
 
 /// How a search was served ([SearchSession.info]).

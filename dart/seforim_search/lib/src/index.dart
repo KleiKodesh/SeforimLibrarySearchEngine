@@ -53,8 +53,8 @@ final class SeforimIndex implements Finalizable {
   static String get nativeVersion => _n.nativeVersion;
 
   /// Otzaria's user-regex kind of [query]: `none` (not `/.../`), `invalid`
-  /// (searched as plain text), `word`, `sequence`, `line` (not supported
-  /// yet). Set [SearchOptions.userRegex] to search `/.../` as a regex.
+  /// (searched as plain text), `word`, `sequence`, `line` (matched on each
+  /// line's text: [SearchSession.lineRegex]). Set [SearchOptions.userRegex] to search `/.../` as a regex.
   static String userRegexKind(String query) {
     return using((a) {
       final (q, ql) = utf8Native(query, a);

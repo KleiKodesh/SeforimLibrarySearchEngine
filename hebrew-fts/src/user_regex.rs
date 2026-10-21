@@ -23,8 +23,8 @@
 //!   matched-terms sink.
 //! - Otzaria's third kind, `Line` (a pattern crossing spaces explicitly,
 //!   inner anchors / `\b`, or a word made only of wildcards in a sequence),
-//!   is matched on each line's TEXT. It is reported as
-//!   [`UserRegexError::LineKind`]: see the README's open items.
+//!   is matched on each line's TEXT: `parse` reports it as
+//!   [`UserRegexError::LineKind`] and [`parse_line`] compiles it (`crate::line_regex`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -67,7 +67,7 @@ pub enum UserRegexError {
     /// the app then searches the query as plain text).
     Invalid(String),
     /// Otzaria's `Line` kind (`CrossSpace`): matched on the line text, not
-    /// on dictionary terms. Not supported yet.
+    /// on dictionary terms. Compiled by [`parse_line`].
     LineKind,
 }
 
@@ -77,7 +77,7 @@ impl std::fmt::Display for UserRegexError {
             UserRegexError::Invalid(r) => write!(f, "invalid user regex: {r}"),
             UserRegexError::LineKind => write!(
                 f,
-                "user regex crosses spaces or uses inner anchors (Otzaria's line kind): not supported yet"
+                "user regex crosses spaces or uses inner anchors (Otzaria's line kind): matched on the line text (parse_line)"
             ),
         }
     }
@@ -99,8 +99,8 @@ pub fn is_wrapped(query: &str) -> bool {
 
 /// What a query is, as Otzaria's `parse_user_regex` reports it: `"none"`
 /// (not wrapped in `/.../`), `"invalid"` (searched as plain text),
-/// `"word"`, `"sequence"`, or `"line"` (Otzaria's line kind, not supported
-/// yet).
+/// `"word"`, `"sequence"`, or `"line"` (Otzaria's line kind, matched on the line
+/// text).
 pub fn classify(query: &str) -> &'static str {
     if !is_wrapped(query) {
         return "none";
@@ -108,7 +108,9 @@ pub fn classify(query: &str) -> &'static str {
     match parse(query) {
         Ok(re) if re.words.len() == 1 => "word",
         Ok(_) => "sequence",
-        Err(UserRegexError::LineKind) => "line",
+        // a line pattern that cannot compile is invalid (Otzaria's line_plan error)
+        Err(UserRegexError::LineKind) if parse_line(query).is_ok() => "line",
+        Err(UserRegexError::LineKind) => "invalid",
         Err(UserRegexError::Invalid(_)) => "invalid",
     }
 }
@@ -200,7 +202,7 @@ fn top_elements(hir: Hir) -> Vec<Hir> {
     out
 }
 
-fn literal_text(hir: &Hir) -> Option<&str> {
+pub(crate) fn literal_text(hir: &Hir) -> Option<&str> {
     match hir.kind() {
         HirKind::Literal(lit) => std::str::from_utf8(&lit.0).ok(),
         _ => None,
@@ -208,7 +210,7 @@ fn literal_text(hir: &Hir) -> Option<&str> {
 }
 
 /// Otzaria's `is_separator`: whitespace and nothing else, at least once.
-fn is_separator(hir: &Hir) -> bool {
+pub(crate) fn is_separator(hir: &Hir) -> bool {
     match hir.kind() {
         HirKind::Literal(_) => literal_text(hir).is_some_and(|t| t.chars().all(char::is_whitespace)),
         HirKind::Class(Class::Unicode(class)) => {
@@ -258,6 +260,34 @@ fn is_wildcard_word(hir: &Hir) -> bool {
 
 /// Parses a wrapped query (Otzaria's `parse`) into a term regex.
 pub fn parse(query: &str) -> Result<UserRegex, UserRegexError> {
+    let (_, parts, spans_space) = split(query)?;
+    if spans_space {
+        return Err(UserRegexError::LineKind);
+    }
+    let mut words = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let pattern = part.to_string();
+        term_part(&pattern)?;
+        words.push(pattern);
+    }
+    Ok(UserRegex { words })
+}
+
+/// Parses a wrapped query of Otzaria's `Line` kind into its line plan
+/// (Otzaria's `parse` + `line_plan`). `Err(Invalid)` when it is a term regex
+/// (a `Word` / `Sequence`) or cannot compile.
+pub fn parse_line(query: &str) -> Result<crate::line_regex::LinePlan, UserRegexError> {
+    let (elements, _, spans_space) = split(query)?;
+    if !spans_space {
+        return Err(UserRegexError::Invalid("not a line pattern".into()));
+    }
+    crate::line_regex::LinePlan::new(&elements).map_err(UserRegexError::Invalid)
+}
+
+/// Otzaria's `parse` up to the kind: the top-level elements (edge anchors
+/// and separators dropped), the words they split into, and whether the
+/// pattern spans a space (the `Line` kind).
+fn split(query: &str) -> Result<(Vec<Hir>, Vec<Hir>, bool), UserRegexError> {
     let trimmed = query.trim();
     let inner = trimmed
         .strip_prefix('/')
@@ -311,16 +341,21 @@ pub fn parse(query: &str) -> Result<UserRegex, UserRegexError> {
     let spans_space = inner_looks
         || parts.iter().any(has_explicit_whitespace)
         || (parts.len() > 1 && parts.iter().any(is_wildcard_word));
-    if spans_space {
-        return Err(UserRegexError::LineKind);
-    }
-    let mut words = Vec::with_capacity(parts.len());
-    for part in &parts {
-        let pattern = part.to_string();
-        term_part(&pattern)?;
-        words.push(pattern);
-    }
-    Ok(UserRegex { words })
+    Ok((elements, parts, spans_space))
+}
+
+/// Otzaria's `contains_part`: `.*fragment.*` as a whole-term automaton over
+/// any character, quote transparent (a candidate clause of a line pattern).
+pub fn contains_automaton(fragment: &str) -> Result<QuoteFree<RegexTermAutomaton>, String> {
+    let any = Hir::repetition(Repetition {
+        min: 0,
+        max: None,
+        greedy: true,
+        sub: Box::new(Hir::class(Class::Unicode(ClassUnicode::new([ClassUnicodeRange::new('\0', char::MAX)])))),
+    });
+    let hir = Hir::concat(vec![any.clone(), Hir::literal(fragment.as_bytes().to_vec()), any]);
+    let dfa = build_dfa(&hir)?;
+    Ok(QuoteFree::new(RegexTermAutomaton(Arc::new(TermPart { dfa, verify: None })), true))
 }
 
 /// Otzaria's `TERM_ALPHABET`: letters, digits and quotes that index terms
@@ -340,7 +375,7 @@ fn term_alphabet() -> &'static ClassUnicode {
 }
 
 /// Otzaria's `cost`: roughly the automaton states compiling `hir` takes.
-fn cost(hir: &Hir) -> u64 {
+pub(crate) fn cost(hir: &Hir) -> u64 {
     match hir.kind() {
         HirKind::Empty | HirKind::Look(_) => 1,
         HirKind::Literal(lit) => lit.0.len() as u64,

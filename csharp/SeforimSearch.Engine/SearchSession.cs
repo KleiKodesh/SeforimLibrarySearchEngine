@@ -245,6 +245,84 @@ namespace SeforimSearch.Engine
             return new SearchInfo(notices, (bool)o["truncated"]!);
         }
 
+        // -- User regex, Otzaria's Line kind --
+
+        /// <summary>The state of a user regex of Otzaria's Line kind (matched on each
+        /// line's text); null for any other search. Not <see cref="LineRegexStatus.FullScan"/>:
+        /// feed the candidates' texts (this session's hits, in order) to
+        /// <see cref="LineMatchBatch"/>. FullScan: stream every line in scope
+        /// (<see cref="LineRegexStatus.ScopeLines"/>, catalog order) to <see cref="LineScanBatch"/>.</summary>
+        public LineRegexStatus? GetLineRegexStatus()
+        {
+            var o = Json.Parse(Interop.TakeString(NativeMethods.se_search_line_status(_handle))) as Dictionary<string, object?>;
+            if (o == null) return null;
+            return new LineRegexStatus((bool)o["full_scan"]!, (long)(double)o["scope_lines"]!, (long)(double)o["fed"]!,
+                                       (long)(double)o["matched"]!, (bool)o["truncated"]!, (bool)o["done"]!);
+        }
+
+        /// <summary>Line regex, candidate path: matches the texts of the next
+        /// <c>texts.Count</c> candidates (hit order, continuing from the previous call),
+        /// across all cores. Per text: its matches as UTF-16 (Start, End) ranges (empty:
+        /// no match, or past the 100,000-line cap).</summary>
+        public (int Start, int End)[][] LineMatchBatch(IReadOnlyList<string> texts)
+        {
+            if (texts.Count == 0) return Array.Empty<(int, int)[]>();
+            uint[] data = WithTexts(texts, (p, l) =>
+                Interop.TakeBuffer(NativeMethods.se_search_line_match_batch(_handle, p, l, (UIntPtr)texts.Count)));
+            return ReadRanges(data, texts.Count);
+        }
+
+        /// <summary>Line regex, full-scan path: matches lines the host streams itself
+        /// (every line in scope, catalog order), each with its placement.</summary>
+        public (int Start, int End)[][] LineScanBatch(IReadOnlyList<PlacedHit> lines, IReadOnlyList<string> texts)
+        {
+            if (lines.Count != texts.Count) throw new ArgumentException("one text per line");
+            if (texts.Count == 0) return Array.Empty<(int, int)[]>();
+            var raw = new ulong[lines.Count * 3];
+            for (int i = 0; i < lines.Count; i++)
+            {
+                raw[i * 3] = (ulong)lines[i].Position;
+                raw[i * 3 + 1] = (ulong)lines[i].LineId;
+                raw[i * 3 + 2] = (ulong)lines[i].BookId;
+            }
+            uint[] data;
+            fixed (ulong* r = raw)
+            {
+                ulong* rp = r;
+                data = WithTexts(texts, (p, l) =>
+                    Interop.TakeBuffer(NativeMethods.se_search_line_scan_batch(_handle, rp, p, l, (UIntPtr)texts.Count)));
+            }
+            return ReadRanges(data, texts.Count);
+        }
+
+        private static (int Start, int End)[][] ReadRanges(uint[] data, int n)
+        {
+            var result = new (int, int)[n][];
+            int at = 0;
+            for (int i = 0; i < n; i++)
+            {
+                int k = (int)data[at++];
+                var ranges = new (int, int)[k];
+                for (int j = 0; j < k; j++, at += 2) ranges[j] = ((int)data[at], (int)data[at + 1]);
+                result[i] = ranges;
+            }
+            return result;
+        }
+
+        /// <summary>Line regex: the matching lines kept so far [offset, offset+count), in feed order.</summary>
+        public PlacedHit[] GetLineHits(long offset, int count)
+        {
+            if (count <= 0) return Array.Empty<PlacedHit>();
+            var raw = new ulong[count * 3];
+            ulong copied;
+            fixed (ulong* r = raw)
+                copied = NativeMethods.se_search_copy_line_hits(_handle, (ulong)offset, (ulong)count, r);
+            var hits = new PlacedHit[(int)copied];
+            for (int i = 0; i < hits.Length; i++)
+                hits[i] = new PlacedHit((long)raw[i * 3], (long)raw[i * 3 + 1], (long)raw[i * 3 + 2]);
+            return hits;
+        }
+
         /// <summary>Locates one matched line's snippet (see <see cref="LocateBatch"/>).</summary>
         public Snippet? Locate(string text) => LocateBatch(new[] { text })[0];
 
@@ -265,6 +343,28 @@ namespace SeforimSearch.Engine
             _registration.Dispose();   // waits for a running cancel callback
             _cancel?.Dispose();
         }
+    }
+
+    /// <summary>The state of a line-regex search (<see cref="SearchSession.GetLineRegexStatus"/>).</summary>
+    public sealed class LineRegexStatus
+    {
+        public LineRegexStatus(bool fullScan, long scopeLines, long fed, long matched, bool truncated, bool done)
+        {
+            FullScan = fullScan; ScopeLines = scopeLines; Fed = fed; Matched = matched; Truncated = truncated; Done = done;
+        }
+
+        /// <summary>No selective fixed word: the host streams every line in scope.</summary>
+        public bool FullScan { get; }
+        /// <summary>Lines to feed: the candidates, or every live line in scope.</summary>
+        public long ScopeLines { get; }
+        /// <summary>Lines in scope fed so far.</summary>
+        public long Fed { get; }
+        /// <summary>Matching lines kept so far.</summary>
+        public long Matched { get; }
+        /// <summary>The 100,000-line cap was reached.</summary>
+        public bool Truncated { get; }
+        /// <summary>Every line in scope was fed, or the cap was reached.</summary>
+        public bool Done { get; }
     }
 
     /// <summary>How a search was served (<see cref="SearchSession.GetInfo"/>).</summary>

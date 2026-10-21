@@ -34,8 +34,8 @@ namespace SeforimSearch.Engine
         }
 
         /// <summary>Otzaria's user-regex kind of <paramref name="query"/>: "none" (not
-        /// /.../), "invalid" (searched as plain text), "word", "sequence", "line" (not
-        /// supported yet). Set <see cref="SearchOptions.UserRegex"/> to search /.../ as a regex.</summary>
+        /// /.../), "invalid" (searched as plain text), "word", "sequence", "line" (matched on
+        /// each line's text: <see cref="SearchSession.GetLineRegexStatus"/>). Set <see cref="SearchOptions.UserRegex"/> to search /.../ as a regex.</summary>
         public static string UserRegexKind(string query)
         {
             byte[] q = Interop.ToUtf8(query);

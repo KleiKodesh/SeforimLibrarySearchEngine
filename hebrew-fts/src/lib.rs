@@ -27,6 +27,7 @@ pub mod scanner;
 pub mod set_automaton;
 pub mod snippet;
 pub mod tokenizer;
+pub mod line_regex;
 pub mod user_regex;
 pub mod variants;
 pub mod walk;

@@ -229,6 +229,13 @@ namespace FtsLib.Fts5
         {
             options ??= new TantivySearchOptions();
             using var session = Engine().Search(ToRequest(query, options), ct);
+            var line = session.GetLineRegexStatus();
+            if (line != null)
+            {
+                RunLineRegex(session, line, ct, batchSize, null);
+                info = session.GetInfo();
+                return session.GetCounts();
+            }
             info = session.GetInfo();
             if (!session.CountNeedsText) return session.GetCounts();
             using var corpus = _openCorpus();
@@ -247,6 +254,59 @@ namespace FtsLib.Fts5
                 session.CountBatch(texts);
             }
             return session.GetCounts();
+        }
+
+        /// <summary>
+        /// Runs a user regex of Otzaria's Line kind to the end (or its 100,000-line cap):
+        /// the candidates' texts are fetched by line id and fed in hit order; a full scan
+        /// streams every line of the DB in catalog order (book by book, as Otzaria reads the
+        /// books) with its position and book id. <paramref name="onMatch"/> gets each
+        /// matching line with its UTF-16 match ranges.
+        /// </summary>
+        public void RunLineRegex(SearchSession session, LineRegexStatus status, CancellationToken ct, int batchSize,
+                                 Action<long, string, (int Start, int End)[]>? onMatch)
+        {
+            using var corpus = _openCorpus();
+            if (!status.FullScan)
+            {
+                for (long offset = 0; offset < session.HitCount;)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    PlacedHit[] hits = session.GetHits(offset, batchSize);
+                    if (hits.Length == 0) break;
+                    offset += hits.Length;
+                    var ids = new int[hits.Length];
+                    for (int i = 0; i < hits.Length; i++) ids[i] = (int)hits[i].LineId;
+                    var byId = new Dictionary<int, string>(hits.Length);
+                    foreach (var (id, text, _) in corpus.FetchPlacedDocuments(ids)) byId[id] = text;
+                    var texts = new string[hits.Length];
+                    for (int i = 0; i < ids.Length; i++) texts[i] = byId.TryGetValue(ids[i], out var t) ? t : string.Empty;
+                    var found = session.LineMatchBatch(texts);
+                    for (int i = 0; i < found.Length; i++)
+                        if (found[i].Length > 0) onMatch?.Invoke(hits[i].LineId, texts[i], found[i]);
+                    if (session.GetLineRegexStatus()!.Done) break;
+                }
+                return;
+            }
+            var lines = new List<PlacedHit>(batchSize);
+            var batchTexts = new List<string>(batchSize);
+            long position = 0;
+            bool Flush()
+            {
+                var found = session.LineScanBatch(lines, batchTexts);
+                for (int i = 0; i < found.Length; i++)
+                    if (found[i].Length > 0) onMatch?.Invoke(lines[i].LineId, batchTexts[i], found[i]);
+                lines.Clear();
+                batchTexts.Clear();
+                return session.GetLineRegexStatus()!.Done;
+            }
+            foreach (var (id, text, bookId) in corpus.ReadDocumentsWithBookInResultOrder(0, ct))
+            {
+                lines.Add(new PlacedHit(position++, id, bookId));
+                batchTexts.Add(text);
+                if (lines.Count >= batchSize && Flush()) return;
+            }
+            if (lines.Count > 0) Flush();
         }
 
         // ── Snippet windows ───────────────────────────────────────────

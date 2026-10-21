@@ -355,10 +355,50 @@ are not printed), so upstream's query-parser tests stay as they are.
     part is deferred with cross-line matching. An index that keeps marks
     reads the term marks as zero width (`MarkFree`), so the folded pattern
     matches what it matches on the mark-stripped index.
-  - Not yet: Otzaria's `Line` kind (`CrossSpace`: an explicit space class
-    such as `[ ,]`, inner anchors or `\b`, a wildcard-only word in a
-    sequence), which Otzaria matches on each line's text. Such a query
-    returns an error for now.
+  - Otzaria's `Line` kind (`CrossSpace`: an explicit space class such as
+    `[ ,]`, inner anchors or `\b`, a wildcard-only word in a sequence) is
+    matched on each line's TEXT, ported as Otzaria does it
+    (`hebrew-fts/src/line_regex.rs`: `LinePlan`, `required_clauses`,
+    `LineView`; `seforim-engine/src/line_search.rs`: `candidate_query`,
+    the verify / scan loop). Kind `"line"` from `user_regex_kind`.
+    - Plan: the regex with a word boundary implied on each edge that can
+      be a word char, plus a prefilter without word-boundary assertions;
+      run on Otzaria's line view (markup removed, a breaking tag or a space
+      entity a space, nikud / te'amim dropped, maqaf / paseq / `|` a space,
+      spaces collapsed, quotes ASCII, presentation forms decomposed,
+      lowercase), with a map from the view back to UTF-16 offsets.
+    - Candidates from the index (bare-minimum rule: no text in the index):
+      the pattern's required fixed words, ANDed rarest first, inside the
+      book filter. A whole fragment is its term; a partial one every term
+      containing it (`.*frag.*`, quote transparent, walked over the
+      dictionary). A clause over 3,000,000 postings or a partial fragment
+      over 50,000 terms is dropped (Otzaria's budgets). The candidates are
+      the search's hits, catalog order.
+    - Full scan when no clause is selective (or on a keep-marks index,
+      whose vocalized terms the folded fragments cannot name): no hits;
+      the host streams every line in scope, catalog order, with its
+      placement.
+    - The host feeds texts in batches; the engine matches them across all
+      cores and returns each line's matches as UTF-16 `(start, end)`
+      ranges. At most 100,000 matching lines (Otzaria's `MAX_LINE_HITS`),
+      then the search is truncated (the truncation flag). Every batch
+      checks the cancel token. Rust `SearchResult::line_regex` /
+      `line_match_batch` / `line_scan_batch` / `line_hits`; C ABI
+      `se_search_line_status` (JSON) / `se_search_line_match_batch` /
+      `se_search_line_scan_batch` / `se_search_copy_line_hits`; C#
+      `SearchSession.GetLineRegexStatus` / `LineMatchBatch` /
+      `LineScanBatch` / `GetLineHits` (demo `TantivySeforimIndex.RunLineRegex`,
+      used by `count --regex`); Dart `lineRegex()` / `lineMatchBatch` /
+      `lineScanBatch` / `lineHits` (the Otzaria demo prints the matches).
+    - A host that only locates snippets keeps its usual loop on the
+      candidates: `locate` returns the whole line as the window (never
+      short) with every match marked, and `count_batch` counts through
+      the same cap. A line pattern that cannot compile is searched as
+      plain text (kind `"invalid"`), as Otzaria's app does.
+    - Deviations, named: Otzaria's per-search result cache, book-wise
+      reading strategy (5,000-candidate threshold) and snippet painting
+      are host concerns here; the 20M-keys-per-segment scan budget is not
+      ported (one merged segment, about 1.8M terms).
   - Measured (full index, C# demo `count --regex`, positions / no
     positions): a one-word pattern with `?` 102,774 lines in 209 / 284 ms;
     a broad `.*` word (capped) 707,649 lines in 285 / 216 ms; a two-word
@@ -965,11 +1005,6 @@ what a page needs.
   distance is checked from the line text, so an index without positions works.
 
 ## Open
-- Otzaria's user-regex `Line` kind (a pattern matched on each line's text:
-  an explicit space class, inner anchors or `\b`, a wildcard-only word in
-  a sequence) returns an error: its single-line part needs an engine
-  design (candidate lines from the pattern's required literals, the host's
-  texts validated on Otzaria's line view).
 - Otzaria gaps found by the Dart demo (see `dart/README.md`):
   - ראשי תיבות and תרגום ארמי are done host-side in the Dart demo
     (Otzaria's dictionary assets → phrase / word alternatives).

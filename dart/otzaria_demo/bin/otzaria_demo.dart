@@ -268,6 +268,13 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     stderr.writeln('notice: $n');
   }
   if (searchInfo.truncated) stderr.writeln('truncated: a walk hit its expansion cap');
+  final lineRegex = session.lineRegex();
+  if (lineRegex != null) {
+    _lineRegex(db, session, lineRegex, request.books, titles, limit, offset, sw);
+    session.close();
+    index.close();
+    return;
+  }
 
   // The negative sameSection scope is the engine's (the index keeps each
   // line's section id): the hits come back already filtered.
@@ -343,6 +350,81 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   }
   session.close();
   index.close();
+}
+
+/// A user regex of Otzaria's Line kind: the engine matches each line's text.
+/// Candidates: their texts are fetched by line id and fed in hit order. Full
+/// scan: every line in scope is streamed in catalog order (book by book, as
+/// Otzaria reads the books; positions as the build numbered them). Stops at
+/// the engine's 100,000-line cap. Prints the first results with the matches
+/// in [ ].
+void _lineRegex(SeforimDb db, SearchSession session, LineRegexStatus status, List<int>? books,
+    Map<int, String> titles, int limit, int offset, Stopwatch sw) {
+  final shown = <(int, int, String, List<(int, int)>)>[];
+  var found = 0;
+  void take(List<PlacedHit> lines, List<String> texts, List<List<(int, int)>> ranges) {
+    for (var i = 0; i < lines.length; i++) {
+      if (ranges[i].isEmpty) continue;
+      if (found++ >= offset && shown.length < limit) shown.add((lines[i].lineId, lines[i].bookId, texts[i], ranges[i]));
+    }
+  }
+
+  if (!status.fullScan) {
+    for (var o = 0; o < session.hitCount && !session.lineRegex()!.done; o += 2048) {
+      final batch = session.hits(o, 2048);
+      final texts = db.lineTexts(batch.map((h) => h.lineId));
+      final lineTexts = [for (final h in batch) texts[h.lineId] ?? ''];
+      take(batch, lineTexts, session.lineMatchBatch(lineTexts));
+    }
+  } else {
+    final scope = books?.toSet();
+    var position = 0;
+    final lines = <PlacedHit>[], texts = <String>[];
+    void flush() {
+      take(lines, texts, session.lineScanBatch(lines, texts));
+      lines.clear();
+      texts.clear();
+    }
+
+    outer:
+    for (final bookId in db.catalogBookOrder()) {
+      if (scope != null && !scope.contains(bookId)) {
+        // keep the build's numbering without reading the book
+        position += db.db.select('SELECT COUNT(*) FROM line WHERE bookId = ?', [bookId]).first.columnAt(0) as int;
+        continue;
+      }
+      for (final line in db.bookLines(bookId)) {
+        lines.add(PlacedHit(position++, line.id, bookId));
+        texts.add(line.text);
+        if (lines.length >= 4096) {
+          flush();
+          if (session.lineRegex()!.done) break outer;
+        }
+      }
+    }
+    if (lines.isNotEmpty) flush();
+  }
+  final end = session.lineRegex()!;
+  stdout.writeln('Line regex: ${end.fullScan ? 'full scan' : '${end.scopeLines} candidate lines'}, '
+      '${end.matched} matching lines${end.truncated ? ' (truncated at the cap)' : ''}, '
+      '${sw.elapsedMilliseconds < 1000 ? '${sw.elapsedMilliseconds} ms' : '${(sw.elapsedMilliseconds / 60000).toStringAsFixed(2)} min'}');
+  final refs = db.heRefs(shown.map((r) => r.$1));
+  var n = offset;
+  for (final (id, book, text, ranges) in shown) {
+    final b = StringBuffer();
+    var at = 0;
+    for (final (s, e) in ranges) {
+      b
+        ..write(text.substring(at, s))
+        ..write('[')
+        ..write(text.substring(s, e))
+        ..write(']');
+      at = e;
+    }
+    b.write(text.substring(at));
+    stdout.writeln('${++n}. ${titles[book] ?? book} | ${refs[id] ?? ''}  (line $id)');
+    stdout.writeln('   ${b.toString().replaceAll(RegExp(r'<[^>]*>'), '')}');
+  }
 }
 
 /// Exact totals (Otzaria's count / countByBook) from the engine: when no

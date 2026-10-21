@@ -15,6 +15,7 @@ pub mod fm_expand;
 pub mod fm_index;
 pub mod fm_sidecar;
 pub mod index;
+pub mod line_search;
 pub mod options;
 pub mod relevance;
 pub(crate) mod section_scope;
@@ -29,6 +30,7 @@ pub use hebrew_fts::word_rule::keep_second_of_paired_readings as reduce_paired_r
 /// Otzaria's user-regex kind of a query (see `hebrew_fts::user_regex::classify`).
 pub use hebrew_fts::user_regex::classify as user_regex_kind;
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter, LINE_FLAG_NO_CROSS};
+pub use line_search::LineRegexStatus;
 pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, WordOptions};
 pub use relevance::{ResultsOrder, NOTICE_RELEVANCE_NEEDS_POSITIONS};
 pub use search::{

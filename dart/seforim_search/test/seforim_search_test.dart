@@ -258,4 +258,36 @@ void main() {
     flat.close();
     dir.deleteSync(recursive: true);
   });
+
+  test('user regex of the line kind: candidates, text matching, full scan', () {
+    final dir = Directory.systemTemp.createTempSync('se_dart_line_');
+    final idx = SeforimIndex.create(dir.path);
+    final w = idx.openWriter(heapBytes: 30000000, threads: 1);
+    const texts = ['alpha beta gamma', 'alpha gamma', 'a c'];
+    for (var i = 0; i < texts.length; i++) {
+      w.add(LineDocument(lineId: 10 + i, position: i, bookId: 1, text: texts[i]));
+    }
+    w.commit();
+    w.close();
+    expect(SeforimIndex.userRegexKind('/alpha .* gamma/'), 'line');
+    final s = idx.search(SearchOptions('/alpha .* gamma/', userRegex: true));
+    final st = s.lineRegex()!;
+    expect(st.fullScan, isFalse);
+    final hits = s.allHits().toList();
+    expect(hits.map((h) => h.lineId), [10, 11]);
+    final found = s.lineMatchBatch([for (final h in hits) texts[h.lineId - 10]]);
+    expect(found[0], [(0, 16)]);
+    expect(found[1], isEmpty);
+    expect(s.lineRegex()!.done, isTrue);
+    expect(s.lineHits(0, 10).map((h) => h.lineId), [10]);
+    s.close();
+    final f = idx.search(SearchOptions(r'/\w[ ]c/', userRegex: true));
+    expect(f.lineRegex()!.fullScan, isTrue);
+    expect(f.lineRegex()!.scopeLines, 3);
+    final r = f.lineScanBatch([for (var i = 0; i < 3; i++) PlacedHit(i, 10 + i, 1)], texts);
+    expect(r[2], [(0, 3)]);
+    f.close();
+    idx.close();
+    dir.deleteSync(recursive: true);
+  });
 }

@@ -48,8 +48,6 @@ List<String> splitQueryWords(String query) {
   return words;
 }
 
-bool _isAcronym(String w) => w.contains('"');
-int _letters(String w) => w.replaceAll(RegExp('["\']'), '').length;
 
 /// Everything an Otzaria search request carries that the engine can use.
 class OtzariaSearch {
@@ -118,7 +116,8 @@ class OtzariaSearch {
   final bool marksIndex;
 
   /// Otzaria's customSpacing: gap per consecutive word pair (index i = between
-  /// word i and i+1). Missing pairs use [distance]. Runs as a span query.
+  /// word i and i+1). As Otzaria's `resolve_gaps`: a missing pair takes the
+  /// largest custom value, and any order is ignored when it is set.
   final Map<int, int>? customSpacing;
 
   /// Otzaria's negativeQuery: words that must not appear. It runs with the
@@ -182,13 +181,13 @@ class OtzariaSearch {
   QueryGroup _wordGroup(String w, Set<String> o) {
     if (w.contains('*') || w.contains('?')) return QueryGroup.wildcard(w);
     if (mode == SearchMode.fuzzy) return QueryGroup.fuzzy(w, fuzzyDistance);
-    // Otzaria: grammatical affixes skip words under 3 letters, except acronyms.
-    final grammarOk = _letters(w) >= 3 || _isAcronym(w);
+    // Otzaria's 3-letter root floor for grammatical affixes (acronyms exempt)
+    // is the engine's walk rule; nothing to do here.
     return QueryGroup.word(
       w,
       WalkOptions(
-        grammarPrefixes: grammarOk && o.contains(OtzariaOption.grammaticalPrefixes),
-        grammarSuffixes: grammarOk && o.contains(OtzariaOption.grammaticalSuffixes),
+        grammarPrefixes: o.contains(OtzariaOption.grammaticalPrefixes),
+        grammarSuffixes: o.contains(OtzariaOption.grammaticalSuffixes),
         advancedPrefixes: o.contains(OtzariaOption.prefixes),
         advancedSuffixes: o.contains(OtzariaOption.suffixes),
         ktivMaleHaser: o.contains(OtzariaOption.fullOrDefective),
@@ -218,11 +217,24 @@ class OtzariaSearch {
     // proximityScope: wordDistance → distance/order; sameParagraph → the
     // whole line, no limits.
     final limits = negativeScope == NegativeScope.wordDistance && groups.length > 1;
-    return ExcludeSpec(
-      groups: groups,
-      maxWordDistance: limits ? distance : null,
-      requireOrdered: limits && !anyOrder,
-    );
+    // the demo has no separate negative spacing (Otzaria's
+    // negativeCustomSpacing): the positive distance and order
+    return ExcludeSpec(groups: groups, proximity: limits ? _proximity(groups.length, null) : null);
+  }
+
+  /// Otzaria's `resolve_gaps` + `resolve_proximity` (hebrew_query.rs) for
+  /// [wordCount] words, sent as the engine's own proximity rule: with
+  /// [spacing], each pair its value (a missing pair takes the largest one),
+  /// in order; without, [distance] for every pair, in order or (anyOrder)
+  /// all words inside one window of (k-1)(distance+1) positions.
+  Proximity _proximity(int wordCount, Map<int, int>? spacing) {
+    if (spacing == null || spacing.isEmpty) {
+      return anyOrder
+          ? Proximity.anyOrder(distance)
+          : Proximity.ordered(List.filled(wordCount - 1, distance));
+    }
+    final maxCustom = spacing.values.fold<int>(0, (m, v) => v > m ? v : m);
+    return Proximity.ordered([for (var i = 0; i < wordCount - 1; i++) spacing[i] ?? maxCustom]);
   }
 
   /// The negative words as engine groups (advanced mode only).
@@ -271,21 +283,9 @@ class OtzariaSearch {
       return SearchRequest(
           groups: groups, minGroups: min, contextWords: contextWords, exclude: exclude, phraseAlternatives: phrases);
     }
-    final spacing = customSpacing;
-    if (spacing != null && spacing.isNotEmpty && groups.length > 1) {
-      return SearchRequest(
-        groups: groups,
-        gaps: [for (var i = 0; i < groups.length - 1; i++) spacing[i] ?? distance],
-        requireOrdered: !anyOrder,
-        contextWords: contextWords,
-        exclude: exclude,
-        phraseAlternatives: phrases,
-      );
-    }
     return SearchRequest(
       groups: groups,
-      maxWordDistance: groups.length > 1 ? distance : null,
-      requireOrdered: !anyOrder && groups.length > 1,
+      proximity: groups.length > 1 ? _proximity(groups.length, customSpacing) : null,
       contextWords: contextWords,
       exclude: exclude,
       phraseAlternatives: phrases,

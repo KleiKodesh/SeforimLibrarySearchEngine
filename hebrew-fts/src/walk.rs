@@ -11,17 +11,24 @@
 //! Options (per the Otzaria spec):
 //! - חלק ממילה: word inside a larger word, ≤3 any-letters per side (≤2 when
 //!   the word has ≥4 letters). ספר ↔ מספרים.
-//! - כתיב מלא/חסר: insert/remove י/ו inside the word only (≤32 variants).
+//! - כתיב מלא/חסר: Otzaria's י/ו rules (`variants::ktiv_male_haser_variants_limited`):
+//!   מצות ↔ מצוות but not מצת, אותו ↛ אות, שבת ↛ שבות (≤32 variants, 16
+//!   with grammatical options).
 //! - קידומות דקדוקיות: combos of ו מ כש כ ב ש ל ה up to 3 letters; with
-//!   Aramaic also ד דא א (ודמלכתא). תורה ↔ והתורה.
-//! - סיומות דקדוקיות: plural/possessive/pronoun endings (incl. ותיהם); full
-//!   morphology combo adds rare יא תא.
-//! - סיומות ארמיות: ending equivalence ה↔א, ם↔ן, applied to the base word and
-//!   to every suffix alternative.
+//!   Aramaic also ד דא א (ודמלכתא). תורה ↔ והתורה. A root under 3 letters
+//!   takes none (ית ↛ בית) unless an abbreviation (ר' → ור').
+//! - סיומות דקדוקיות: Otzaria's table (`GRAM_SUFFIXES`), past-tense endings
+//!   for 3–4 letter roots; a final letter takes its base form (מלך → מלכים) and
+//!   a final ה turns to ת/ות (תורה → תורתו); a root under 3 letters takes
+//!   none (אב ↛ אבות) unless an abbreviation (ר' → ר'ים).
+//! - סיומות ארמיות: ending equivalence ה↔א, ם↔ן on the root.
+//! - Always (unless `exact_quotes`): an index term also matches by its
+//!   quote-free form, רמבם ↔ רמב"ם (Otzaria's quote-free twin, at query time).
 //! - קידומות/סיומות מתקדם: ANY letters — ≤3 before (≤5 for a short word),
 //!   ≤5 after (≤7 for a short word); both together ≡ חלק ממילה.
 //! - התעלם מגרשיים: the canonical '"' is transparent anywhere.
-//! - שגיאות כתיב/OCR: single confusion-pair substitutions.
+//! - שגיאות כתיב/OCR: single confusion-pair substitutions, or one quote
+//!   dropped (רמב"ם → רמבם, as Otzaria's typo deletion).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -33,7 +40,7 @@ use tantivy::schema::Field;
 use tantivy::termdict::ZeroWidthBytes;
 use tantivy_fst::Automaton;
 
-use crate::grammar;
+use crate::quote_free::QuoteFree;
 use crate::set_automaton::SetAutomaton;
 use crate::variants;
 
@@ -62,6 +69,11 @@ pub struct WalkOptions {
     pub advanced_suffixes: bool,
     /// התעלם מגרשיים
     pub ignore_quotes: bool,
+    /// Off (default, Otzaria): an index term also matches by its quote-free
+    /// form, so `רמבם` finds `רמב"ם` (Otzaria's quote-free twin token, done at
+    /// query time by [`crate::quote_free::QuoteFree`]). On: index terms must
+    /// match as written.
+    pub exact_quotes: bool,
     /// שגיאות כתיב/OCR מצויות
     pub spelling_errors: bool,
     /// Ignore nikud: בראשית matches בְּרֵאשִׁית (needs a marks-keeping field,
@@ -88,10 +100,35 @@ pub struct WalkOptions {
 const PREFIX_UNITS: [&str; 8] = ["ו", "מ", "כש", "כ", "ב", "ש", "ל", "ה"];
 const ARAMAIC_PREFIX_UNITS: [&str; 3] = ["דא", "ד", "א"];
 
-/// Rare suffixes added in full-morphology / Aramaic modes.
-const RARE_SUFFIXES: [&str; 2] = ["יא", "תא"];
-/// Suffix from the Otzaria spec missing from the FtsLib table.
-const EXTRA_SUFFIXES: [&str; 1] = ["ותיהם"];
+/// סיומות דקדוקיות: Otzaria's `GRAM_SUFFIX_ALTS` (hebrew_query.rs), possessive,
+/// plural and the rare יות/יא/תא endings. Not FtsLib's `%` table
+/// ([`grammar::SUFFIXES`](crate::grammar::SUFFIXES)), which stays FtsLib's.
+const GRAM_SUFFIXES: [&str; 32] = [
+    "ותי", "ותיך", "ותיו", "ותיה", "ותינו", "ותיכם", "ותיכן", "ותיהם", "ותיהן", "יות", "יי",
+    "יך", "יו", "יה", "יא", "תא", "ינו", "יכם", "יכן", "יהם", "יהן", "י", "ך", "ו", "ה", "נו",
+    "כם", "כן", "ם", "ן", "ים", "ות",
+];
+/// Past-tense person endings (Otzaria `VERB_SUFFIX_ALTS`), only for a
+/// verb-sized root: see [`takes_verb_suffixes`].
+const VERB_SUFFIXES: [&str; 4] = ["תי", "ת", "תם", "תן"];
+/// A root ending in ה drops it before a suffix: ת or ות (Otzaria `HE_STEM_ALTS`).
+const HE_STEMS: [&str; 2] = ["ות", "ת"];
+/// Grammatical prefixes and suffixes need a root of this many letters
+/// (Otzaria `MIN_GRAM_PREFIX_ROOT_LETTERS` / `MIN_GRAM_SUFFIX_ROOT_LETTERS`);
+/// abbreviations (a quote inside: ר', רמב"ם) are exempt.
+const MIN_GRAM_ROOT_LETTERS: usize = 3;
+
+// Tags of a core form (its trie node's flags): what may follow it.
+/// The form may end the term.
+const CORE_BARE: u8 = SetAutomaton::MATCH;
+/// Grammatical suffixes may follow.
+const CORE_GRAM: u8 = 2;
+/// The past-tense endings may follow too.
+const CORE_VERB: u8 = 4;
+/// The advanced any-letter suffix window may follow.
+const CORE_WINDOW: u8 = 8;
+/// The form takes grammatical prefixes (root long enough, or an abbreviation).
+const CORE_PREFIXABLE: u8 = 16;
 
 /// All closed-list prefixes: sequences of distinct units, total ≤ `max_letters`.
 fn closed_prefixes(aramaic: bool, max_letters: usize) -> BTreeSet<String> {
@@ -118,22 +155,94 @@ fn closed_prefixes(aramaic: bool, max_letters: usize) -> BTreeSet<String> {
     out
 }
 
-/// All closed-list suffixes for the given options, with Aramaic ending
-/// equivalence applied to every alternative when requested.
-fn closed_suffixes(options: &WalkOptions) -> BTreeSet<String> {
-    let mut out: BTreeSet<String> = grammar::SUFFIXES.iter().map(|s| s.to_string()).collect();
-    out.extend(EXTRA_SUFFIXES.iter().map(|s| s.to_string()));
-    let full_morphology = options.grammar_prefixes || options.aramaic_prefixes;
-    if options.aramaic_suffixes {
-        if full_morphology {
-            out.extend(RARE_SUFFIXES.iter().map(|s| s.to_string()));
-        }
-        out = variants::expand_set(&out, variants::aramaic_ending_variants);
-    }
-    out
+fn is_quote_char(c: char) -> bool {
+    matches!(c, '\'' | '"')
 }
 
-/// Builds the core word-variant set from the enabled generators.
+/// Letters of a form, marks not counted (Otzaria `base_len`).
+fn form_letters(form: &str) -> usize {
+    form.chars()
+        .filter(|&c| !crate::chars::is_nikud(c) && !crate::chars::is_taam(c))
+        .count()
+}
+
+/// Byte index and char of the form's last letter, marks skipped.
+fn last_letter(form: &str) -> Option<(usize, char)> {
+    form.char_indices()
+        .rev()
+        .find(|&(_, c)| !crate::chars::is_nikud(c) && !crate::chars::is_taam(c))
+}
+
+/// The base form of a final letter (מלך → מלכ־ before a suffix).
+fn base_form_of_final(c: char) -> Option<char> {
+    match c {
+        'ך' => Some('כ'),
+        'ם' => Some('מ'),
+        'ן' => Some('נ'),
+        'ף' => Some('פ'),
+        'ץ' => Some('צ'),
+        _ => None,
+    }
+}
+
+/// Otzaria `takes_verb_suffixes`: a 3–4 letter root, not an abbreviation,
+/// not ending in ה or ת (whose past forms change shape).
+fn takes_verb_suffixes(form: &str, letters: usize) -> bool {
+    (3..=4).contains(&letters)
+        && !form.contains(is_quote_char)
+        && last_letter(form).is_some_and(|(_, c)| c != 'ה' && c != 'ת')
+}
+
+/// The tagged core forms of one root form: a port of Otzaria's
+/// `affix_arms` root-length rule and `suffix_sides` (hebrew_query.rs).
+/// Before a suffix a final letter takes its base form (מלך → מלכים, never
+/// מלךים) and a final ה gives way to ת/ות (תורה → תורתו/תורות, never
+/// תורהו); a root of fewer than 3 letters takes no grammatical affix
+/// (אב ↛ אבות, מה ↛ מות, ית ↛ בית) unless it is an abbreviation (ר' → ר'ים).
+fn tagged_forms(form: &str, options: &WalkOptions, window: bool, out: &mut Vec<(String, u8)>) {
+    let letters = form_letters(form);
+    let Some((at, last)) = last_letter(form) else {
+        return;
+    };
+    let long_enough = form.contains(is_quote_char) || letters >= MIN_GRAM_ROOT_LETTERS;
+    let prefixable = if long_enough { CORE_PREFIXABLE } else { 0 };
+    let gram = options.grammar_suffixes && long_enough;
+    let gram_tags = if gram {
+        CORE_GRAM
+            | if takes_verb_suffixes(form, letters) {
+                CORE_VERB
+            } else {
+                0
+            }
+    } else {
+        0
+    };
+    let window_tag = if window { CORE_WINDOW } else { 0 };
+    if !window && !gram {
+        out.push((form.to_string(), CORE_BARE | prefixable));
+        return;
+    }
+    let head = &form[..at];
+    let tail = &form[at + last.len_utf8()..];
+    if let Some(base) = base_form_of_final(last) {
+        out.push((form.to_string(), CORE_BARE | prefixable));
+        out.push((format!("{head}{base}{tail}"), window_tag | gram_tags | prefixable));
+        return;
+    }
+    if last == 'ה' && gram {
+        out.push((form.to_string(), CORE_BARE | window_tag | prefixable));
+        for stem in HE_STEMS {
+            out.push((format!("{head}{stem}"), CORE_BARE | gram_tags | prefixable));
+        }
+        return;
+    }
+    out.push((form.to_string(), CORE_BARE | window_tag | gram_tags | prefixable));
+}
+
+/// Builds the core word-variant set from the enabled generators, in
+/// Otzaria's order (`build_word_regex` → `word_to_pattern`): typo variants,
+/// each with its Aramaic final-letter swap, each fanned into its כתיב
+/// מלא/חסר variants.
 fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
     // Strip from the query word whatever the walk will treat as transparent:
     // the self-loops then do the matching against the index.
@@ -147,14 +256,25 @@ fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
         .collect();
     let mut set = BTreeSet::new();
     set.insert(word);
-    if options.ktiv_male_haser {
-        set = variants::expand_set(&set, variants::ktiv_male_haser_variants);
-    }
     if options.spelling_errors {
         set = variants::expand_set(&set, variants::spelling_variants);
     }
     if options.aramaic_suffixes {
         set = variants::expand_set(&set, variants::aramaic_ending_variants);
+    }
+    if options.ktiv_male_haser {
+        // Otzaria `spelling_limit`: a tighter cap through the grammatical arms.
+        let limit = if options.grammar_prefixes || options.grammar_suffixes || options.aramaic_prefixes
+        {
+            variants::KTIV_GRAMMATICAL_VARIANTS_CAP
+        } else {
+            variants::KTIV_VARIANTS_CAP
+        };
+        set = variants::expand_set(&set, |w| {
+            variants::ktiv_male_haser_variants_limited(w, limit)
+                .into_iter()
+                .collect()
+        });
     }
     set
 }
@@ -175,6 +295,12 @@ const TAG_PRE_ANY: u64 = 1;
 const TAG_CORE: u64 = 2;
 const TAG_POST: u64 = 3;
 const TAG_POST_ANY: u64 = 4;
+/// Closed-suffix trie node of the grammatical + past-tense suffix set.
+const TAG_POST_VERB: u64 = 5;
+
+/// A core config reached through a grammatical prefix (bit 38): its form
+/// must be tagged [`CORE_PREFIXABLE`] to end or take a suffix.
+const PREFIXED: u64 = 1 << 38;
 
 const PEND_NONE: u64 = 0;
 const PEND_LETTER: u64 = 1;
@@ -187,7 +313,7 @@ fn pack(tag: u64, pending: u64, value: u32) -> Config {
 }
 #[inline]
 fn tag(c: Config) -> u64 {
-    c >> 35
+    (c >> 35) & 0b111
 }
 #[inline]
 fn pending(c: Config) -> u64 {
@@ -236,7 +362,12 @@ pub struct HebrewWalkAutomaton {
     prefixes: Option<SetAutomaton>,
     any_prefix_max: u32,
     suffixes: Option<SetAutomaton>,
+    /// Grammatical suffixes plus the past-tense endings (verb-sized roots).
+    verb_suffixes: Option<SetAutomaton>,
     any_suffix_max: u32,
+    /// A grammatical prefix needs a core form tagged [`CORE_PREFIXABLE`].
+    /// Off under Aramaic prefixes: Otzaria's Aramaic arm has no root floor.
+    gate_prefixes: bool,
     transparent_quotes: bool,
     ignore_nikud: bool,
     ignore_teamim: bool,
@@ -282,18 +413,29 @@ impl HebrewWalkAutomaton {
         } else {
             None
         };
-        let suffixes = if any_post == 0 && options.grammar_suffixes {
-            Some(SetAutomaton::from_strings(&closed_suffixes(options)))
+        // Otzaria composes the suffix window with the grammatical suffixes
+        // (`affix_arms`: the trail is the union of the selected options).
+        let (suffixes, verb_suffixes) = if options.grammar_suffixes {
+            (
+                Some(SetAutomaton::from_strings(GRAM_SUFFIXES)),
+                Some(SetAutomaton::from_strings(GRAM_SUFFIXES.iter().chain(&VERB_SUFFIXES))),
+            )
         } else {
-            None
+            (None, None)
         };
+        let mut tagged = Vec::new();
+        for form in core_variants(word, options) {
+            tagged_forms(&form, options, any_post > 0, &mut tagged);
+        }
 
         HebrewWalkAutomaton {
-            core: SetAutomaton::from_strings(&core_variants(word, options)),
+            core: SetAutomaton::from_tagged(tagged),
             prefixes,
             any_prefix_max: any_pre,
             suffixes,
+            verb_suffixes,
             any_suffix_max: any_post,
+            gate_prefixes: !options.aramaic_prefixes,
             transparent_quotes: options.ignore_quotes,
             ignore_nikud: options.ignore_nikud,
             ignore_teamim: options.ignore_teamim,
@@ -313,7 +455,11 @@ impl HebrewWalkAutomaton {
             TAG_PRE => {
                 if let Some(prefixes) = &self.prefixes {
                     if prefixes.node_is_match(value(config)) {
-                        self.close_into(pack(TAG_CORE, PEND_NONE, SetAutomaton::ROOT), set);
+                        let gate = if self.gate_prefixes { PREFIXED } else { 0 };
+                        self.close_into(
+                            pack(TAG_CORE, PEND_NONE, SetAutomaton::ROOT) | gate,
+                            set,
+                        );
                     }
                 }
             }
@@ -321,13 +467,16 @@ impl HebrewWalkAutomaton {
                 self.close_into(pack(TAG_CORE, PEND_NONE, SetAutomaton::ROOT), set);
             }
             TAG_CORE => {
-                if self.core.node_is_match(value(config)) {
-                    if self.suffixes.is_some() {
+                let flags = self.core_flags(config);
+                if flags & CORE_GRAM != 0 {
+                    if flags & CORE_VERB != 0 && self.verb_suffixes.is_some() {
+                        self.close_into(pack(TAG_POST_VERB, PEND_NONE, SetAutomaton::ROOT), set);
+                    } else if self.suffixes.is_some() {
                         self.close_into(pack(TAG_POST, PEND_NONE, SetAutomaton::ROOT), set);
                     }
-                    if self.any_suffix_max > 0 {
-                        self.close_into(pack(TAG_POST_ANY, PEND_NONE, 0), set);
-                    }
+                }
+                if flags & CORE_WINDOW != 0 && self.any_suffix_max > 0 {
+                    self.close_into(pack(TAG_POST_ANY, PEND_NONE, 0), set);
                 }
             }
             _ => {}
@@ -348,8 +497,21 @@ impl HebrewWalkAutomaton {
     }
 
     /// Successors of one config on `byte`, with closure, into `out`.
+    /// The tags of the core form ending at a core config (0: none ends
+    /// here, or it was reached through a grammatical prefix it cannot take).
+    fn core_flags(&self, config: Config) -> u8 {
+        let flags = self.core.node_flags(value(config));
+        if config & PREFIXED != 0 && flags & CORE_PREFIXABLE == 0 {
+            0
+        } else {
+            flags
+        }
+    }
+
     fn step_config(&self, config: Config, byte: u8, out: &mut Vec<Config>) {
         let t = tag(config);
+        // The prefix gate travels with the core configs.
+        let gate = config & PREFIXED;
         match pending(config) {
             // Resolving a possible skipped mark: 0xD6 <tail>.
             PEND_MARK_D6 => {
@@ -357,14 +519,14 @@ impl HebrewWalkAutomaton {
                     || (self.ignore_nikud && is_nikud_d6_tail(byte))
                 {
                     // Mark skipped; back to where we were.
-                    self.close_into(pack(t, PEND_NONE, value(config)), out);
+                    self.close_into(pack(t, PEND_NONE, value(config)) | gate, out);
                 }
                 return;
             }
             // Resolving a possible skipped 0xD7-encoded nikud.
             PEND_MARK_D7 => {
                 if self.ignore_nikud && is_nikud_d7_tail(byte) {
-                    self.close_into(pack(t, PEND_NONE, value(config)), out);
+                    self.close_into(pack(t, PEND_NONE, value(config)) | gate, out);
                 }
                 return;
             }
@@ -380,10 +542,10 @@ impl HebrewWalkAutomaton {
 
         // Mark transparency applies in every phase: a mark may begin here.
         if byte == MARK_LEAD && (self.ignore_nikud || self.ignore_teamim) {
-            self.close_into(pack(t, PEND_MARK_D6, value(config)), out);
+            self.close_into(pack(t, PEND_MARK_D6, value(config)) | gate, out);
         }
         if byte == HEBREW_LEAD && self.ignore_nikud {
-            self.close_into(pack(t, PEND_MARK_D7, value(config)), out);
+            self.close_into(pack(t, PEND_MARK_D7, value(config)) | gate, out);
         }
 
         match t {
@@ -413,16 +575,21 @@ impl HebrewWalkAutomaton {
             }
             TAG_CORE => {
                 if let Some(next) = self.core.step(value(config), byte) {
-                    self.close_into(pack(TAG_CORE, PEND_NONE, next), out);
+                    self.close_into(pack(TAG_CORE, PEND_NONE, next) | gate, out);
                 }
                 if self.transparent_quotes && byte == b'"' {
                     self.close_into(config, out);
                 }
             }
-            TAG_POST => {
-                if let Some(suffixes) = &self.suffixes {
+            TAG_POST | TAG_POST_VERB => {
+                let suffixes = if t == TAG_POST {
+                    &self.suffixes
+                } else {
+                    &self.verb_suffixes
+                };
+                if let Some(suffixes) = suffixes {
                     if let Some(next) = suffixes.step(value(config), byte) {
-                        self.close_into(pack(TAG_POST, PEND_NONE, next), out);
+                        self.close_into(pack(t, PEND_NONE, next), out);
                     }
                 }
             }
@@ -436,9 +603,13 @@ impl HebrewWalkAutomaton {
         }
         match tag(config) {
             // Zero suffix: the word may simply end here.
-            TAG_CORE => self.core.node_is_match(value(config)),
+            TAG_CORE => self.core_flags(config) & CORE_BARE != 0,
             TAG_POST => self
                 .suffixes
+                .as_ref()
+                .is_some_and(|s| s.node_is_match(value(config))),
+            TAG_POST_VERB => self
+                .verb_suffixes
                 .as_ref()
                 .is_some_and(|s| s.node_is_match(value(config))),
             TAG_POST_ANY => value(config) >= 1,
@@ -523,8 +694,11 @@ impl HebrewWalkQuery {
         self.max_expansions = cap;
     }
 
-    fn automaton_weight(&self) -> AutomatonWeight<HebrewWalkAutomaton> {
-        let automaton = HebrewWalkAutomaton::new(&self.word, &self.options);
+    fn automaton_weight(&self) -> AutomatonWeight<QuoteFree<HebrewWalkAutomaton>> {
+        let automaton = QuoteFree::new(
+            HebrewWalkAutomaton::new(&self.word, &self.options),
+            !self.options.exact_quotes,
+        );
         let mut weight = AutomatonWeight::new(self.field, automaton);
         if let Some(sink) = &self.matched_terms_sink {
             weight.set_matched_terms_sink(sink.clone());
@@ -553,7 +727,7 @@ impl Query for HebrewWalkQuery {
 mod tests {
     use super::*;
 
-    fn matches(a: &HebrewWalkAutomaton, s: &str) -> bool {
+    fn matches<A: Automaton>(a: &A, s: &str) -> bool {
         let mut state = a.start();
         for &b in s.as_bytes() {
             if !a.can_match(&state) {
@@ -932,8 +1106,115 @@ mod tests {
         );
         assert!(matches(&a, "הספרים")); // prefix + suffix
         assert!(matches(&a, "וספריו"));
-        assert!(matches(&a, "דספרין")); // Aramaic prefix + ים↔ין suffix variant
-        assert!(matches(&a, "ספריא")); // rare Aramaic suffix in full morphology
+        assert!(matches(&a, "דספרים")); // Aramaic prefix + suffix
+        assert!(matches(&a, "ספריא")); // rare suffix in Otzaria's table
+        assert!(!matches(&a, "דספרין")); // Otzaria swaps the root's ending only
         assert!(!matches(&a, "ספרקים")); // junk between word and suffix
+    }
+
+    fn quote_free(word: &str, options: WalkOptions) -> QuoteFree<HebrewWalkAutomaton> {
+        QuoteFree::new(HebrewWalkAutomaton::new(word, &options), !options.exact_quotes)
+    }
+
+    // Otzaria quote_free_indexing_and_ignore_quotes_option.
+    #[test]
+    fn plain_word_matches_quoted_terms() {
+        let a = quote_free("רמבם", WalkOptions::default());
+        assert!(matches(&a, "רמבם"));
+        assert!(matches(&a, "רמב\"ם"));
+        let q = quote_free("רמב\"ם", WalkOptions::default());
+        assert!(matches(&q, "רמב\"ם"));
+        assert!(!matches(&q, "רמבם"));
+        let q = quote_free("רמב\"ם", WalkOptions { ignore_quotes: true, ..Default::default() });
+        assert!(matches(&q, "רמבם") && matches(&q, "רמב\"ם"));
+        // composes with prefixes: the quote-free form goes through the walk
+        let a = quote_free("רמבם", WalkOptions { grammar_prefixes: true, ..Default::default() });
+        assert!(matches(&a, "להרמב\"ם"));
+        // exact_quotes: as written only
+        let a = quote_free("רמבם", WalkOptions { exact_quotes: true, ..Default::default() });
+        assert!(!matches(&a, "רמב\"ם"));
+    }
+
+    // Otzaria advanced_typo_and_prefix_flags_work_on_gershayim_tokens.
+    #[test]
+    fn typos_and_prefixes_on_gershayim_words() {
+        let a = quote_free("רמב\"ם", WalkOptions { spelling_errors: true, ..Default::default() });
+        assert!(matches(&a, "רמבם"));
+        let a = quote_free("רמב\"ם", WalkOptions { grammar_prefixes: true, ..Default::default() });
+        assert!(matches(&a, "הרמב\"ם"));
+    }
+
+    #[test]
+    fn ktiv_follows_otzaria_rules() {
+        let k = WalkOptions { ktiv_male_haser: true, ..Default::default() };
+        let a = walk("מצות", k);
+        assert!(matches(&a, "מצוות") && matches(&a, "מצות"));
+        assert!(matches(&a, "מצת")); // Otzaria: one internal ו may go
+        assert!(!matches(&walk("מצוות", k), "מצת")); // but one per run
+        assert!(!matches(&walk("מצת", k), "מצוות")); // no adjacent insertions
+        let a = walk("אותו", k);
+        assert!(matches(&a, "אותו"));
+        assert!(!matches(&a, "אות"));
+        let a = walk("שבת", k);
+        assert!(!matches(&a, "שבות"));
+        assert!(matches(&a, "שובת"));
+        assert!(!matches(&walk("מצוה", k), "מצה"));
+    }
+
+    // Otzaria suffixes_follow_final_letters_and_final_he.
+    #[test]
+    fn grammar_suffixes_follow_final_letters_and_final_he() {
+        let gs = WalkOptions { grammar_suffixes: true, ..Default::default() };
+        for (root, forms) in [
+            ("מלך", &["מלך", "מלכים", "מלכו", "מלכיהם", "מלכם"][..]),
+            ("ארץ", &["ארץ", "ארצות", "ארצו"]),
+            ("תורה", &["תורה", "תורות", "תורתו", "תורתי", "תורותיו", "תורתם"]),
+            ("מצוה", &["מצות", "מצוות", "מצותיו"]),
+        ] {
+            let a = walk(root, gs);
+            for form in forms {
+                assert!(matches(&a, form), "{root} → {form}");
+            }
+        }
+        for (root, form) in [("מלך", "מלךים"), ("ארץ", "ארץות"), ("תורה", "תורהו"), ("תורה", "תורהה")] {
+            assert!(!matches(&walk(root, gs), form), "{root} ↛ {form}");
+        }
+        // the suffix window too follows the final letter
+        let w = WalkOptions { advanced_suffixes: true, ..Default::default() };
+        assert!(matches(&walk("מלך", w), "מלכים"));
+        assert!(!matches(&walk("מלך", w), "מלךים"));
+    }
+
+    // Otzaria grammatical_suffixes_need_a_root.
+    #[test]
+    fn grammar_suffixes_need_a_root() {
+        let gs = WalkOptions { grammar_suffixes: true, ..Default::default() };
+        for (word, term) in [("מה", "מות"), ("מה", "מתי"), ("זה", "זות"), ("אב", "אבות")] {
+            assert!(!matches(&walk(word, gs), term), "{word} {term}");
+            assert!(matches(&walk(word, gs), word), "{word}");
+        }
+        assert!(matches(&walk("תורה", gs), "תורתו"));
+        assert!(matches(&walk("ר\"", gs), "ר\"ים")); // abbreviation exempt
+    }
+
+    // Otzaria grammatical_prefixes_need_a_root_and_skip_bare_alef (root part).
+    #[test]
+    fn grammar_prefixes_need_a_root() {
+        let gp = WalkOptions { grammar_prefixes: true, ..Default::default() };
+        assert!(!matches(&walk("ית", gp), "בית"));
+        assert!(matches(&walk("ית", gp), "ית"));
+        assert!(matches(&walk("ר\"", gp), "ור\""));
+        assert!(matches(&walk("רמב\"ם", gp), "להרמב\"ם"));
+    }
+
+    // Otzaria grammatical_morphology_covers_verbs_and_stacked_prefixes (suffix part).
+    #[test]
+    fn verb_suffixes_for_verb_sized_roots() {
+        let both = WalkOptions { grammar_prefixes: true, grammar_suffixes: true, ..Default::default() };
+        for form in ["אמרתי", "אמרת", "ואמרתם", "אמרתן", "אמרנו", "ואמרו"] {
+            assert!(matches(&walk("אמר", both), form), "{form}");
+        }
+        assert!(!matches(&walk("ירושלים", both), "ירושלימתי"));
+        assert!(!matches(&walk("שבת", both), "שבתתי"));
     }
 }

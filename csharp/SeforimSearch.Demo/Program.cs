@@ -85,6 +85,7 @@ namespace SeforimSearch.Demo
             var wordOptions = new WalkOptions
             {
                 IgnoreQuotes = !args.Contains("--exact-quotes"),
+                ExactQuotes = args.Contains("--exact-quotes"),
                 GrammarPrefixes = args.Contains("--prefixes"),
                 GrammarSuffixes = args.Contains("--suffixes"),
             };

@@ -181,6 +181,13 @@ is clean, and CHANGELOG.md has the entry.
    - *Why:* upstream's PhraseQuery has one shared slop budget and plain
      terms only (RegexPhraseQuery: regex only). Otzaria's custom per-pair
      spacing over expanded words needs both.
+   - *Window mode* (`set_window(Some(max_span))`): every slot at its own
+     position, in any order, all inside one window of `max_span` positions
+     (Otzaria's any-order proximity). One sweep over the slots' merged
+     positions; a bipartite slot/position matching runs only when one
+     position can fill several slots (a repeated word, overlapping walks).
+   - The ordered check is a linear forward sweep per slot (every position
+     where a valid chain can end), no backtracking.
 
 Also small: `get_match_term_infos` honours the cap and the sink, and
 `RegexPhraseWeight` is reachable crate-internally so SpanQuery can reuse its
@@ -199,7 +206,23 @@ are not printed), so upstream's query-parser tests stay as they are.
   - **Grammar** (`%word`, `word%`): 34 prefixes and 32 suffixes.
   - **Otzaria options:** grammatical/Aramaic prefixes and suffixes, ktiv
     male/haser, part-of-word, advanced prefixes/suffixes, ignore gershayim,
-    spelling/OCR errors, ignore nikud, ignore te'amim.
+    spelling/OCR errors, ignore nikud, ignore te'amim. Ported from Otzaria's
+    code (`hebrew_query.rs`, `quote_expansion.rs`), all inside the walk:
+    - **Quote-free terms** (always, unless `exact_quotes`): an index term also
+      matches by its quote-free form, so `רמבם` finds `רמב"ם` (Otzaria's
+      quote-free twin token, done at query time; the index keeps no twin).
+      `רמב"ם` typed still needs the quote unless `ignore_quotes`.
+    - **כתיב מלא/חסר**: Otzaria's י/ו rules: internal letters only, one
+      deletion per run, no adjacent insertions, 3-letter words only take ו
+      after the first letter, no י/ו dropped before a final ה (מצות ↔ מצוות,
+      also מצת as in Otzaria; אותו ↛ אות; שבת ↛ שבות). Cap 32 (16 with
+      grammatical options).
+    - **סיומות דקדוקיות**: Otzaria's suffix table (not FtsLib's `%` table),
+      past-tense endings for 3–4 letter roots, final letter in its base form
+      (מלך → מלכים), final ה → ת/ות (תורה → תורתו).
+    - **Root floor**: grammatical prefixes and suffixes need a root of 3
+      letters (אב ↛ אבות, ית ↛ בית); abbreviations are exempt (ר' → ר'ים).
+    - **Spelling errors** may also drop one quote (רמב"ם → רמבם).
   - **Length limits are set by the caller** (Otzaria), as plain ints; unset
     means the default:
 
@@ -298,7 +321,31 @@ are not printed), so upstream's query-parser tests stay as they are.
   the text with FtsLib's distance rule, which lets a repeated word fill a
   gap). `locate` tries the main query, then each phrase, and marks the words
   of whichever matched. The acronym dictionary itself stays in the host.
-- **Per-pair spacing** (Otzaria's customSpacing): `gaps` in the request (C#
+- **Otzaria word proximity** (`proximity` in the request, `ProximitySpec`;
+  C# `SearchRequest.Proximity` = `Proximity.Ordered(gaps)` /
+  `Proximity.AnyOrder(distance)`, Dart `Proximity.ordered` / `.anyOrder`;
+  also on `ExcludeSpec` for the negative query). Otzaria's rule
+  (`gap_phrase.rs` `Proximity`, `hebrew_query.rs` `resolve_proximity`):
+  - `ordered { gaps }`: words in query order, at most `gaps[i]` words
+    between word i and i+1 (Otzaria: `distance` for every pair, or
+    customSpacing per pair).
+  - `any_order { distance }`: every word at its own position, any order,
+    all inside a window of `(k-1)(distance+1)` positions for k words.
+    A repeated query word needs its own occurrence.
+  - With positions: one span query (gaps, or window mode), the rule checked
+    on each candidate's positions. Without positions: the AND of the words,
+    and the snippet locator validates the same rule on the line's tokens
+    (the index positions ARE the locator's tokens: same scanner), in the
+    one tokenize + locate pass, reusing its per-token term numbers. Both
+    index flavours return the same lines and the same windows
+    (`proximity_positions_equal_text_validation`).
+  - Snippet: the tightest window (raw chars, ties = earliest) that
+    satisfies the rule; marks = every query-term token in the window.
+  - Precedence: when set it replaces `max_word_distance`,
+    `require_ordered` and `gaps` for the main query (FtsLib's rule, kept
+    unchanged when it is None); `min_groups` below the group count wins
+    over it (as Otzaria); every word must be searchable, else no hits.
+- **Per-pair spacing** (FtsLib-style request field, positions only): `gaps` in the request (C#
   `SearchRequest.Gaps`, Dart `SearchRequest.gaps`, demo `--spacing 2,5`).
   - `gaps[i]` is the maximum number of words between query word i and i+1.
   - Every group kind works as a slot; word order follows `RequireOrdered`.
@@ -402,7 +449,10 @@ what a page needs.
 - **Quotes:** the index keeps intra-word quotes (רש"י) where FtsLib dropped
   them. Matching ignores them through the "ignore gershayim" option, which the
   FtsLib facade turns on by default, so results match FtsLib. A quote after
-  the last letter is punctuation and is never part of a term.
+  the last letter is punctuation and is never part of a term. Walks also
+  match a term by its quote-free form unless `exact_quotes` is set (Otzaria's
+  `QuoteTransparent`); in FtsLib mode that is FtsLib's own behaviour, since
+  its index stored only quote-free terms (parity queries רמבם, רשי, זל).
 - **Mark spans can contain tags.** A word that ends at a block tag (heading,
   `<br>`, …) has its mark run up to that tag's `>`, e.g. `בראשית</h1`. This is
   FtsLib's span exactly: its scanner flushes the word at the `>`. Renderers

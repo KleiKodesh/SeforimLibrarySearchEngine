@@ -18,7 +18,7 @@ pub mod search;
 pub use fm_index::FmIndex;
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
 pub use search::{
-    ExcludeSpec, GroupSpec, PlacedHit, SearchRequest, SearchResult, Snippet, SnippetSession,
+    ExcludeSpec, GroupSpec, PlacedHit, ProximitySpec, SearchRequest, SearchResult, Snippet, SnippetSession,
     WalkOptionsSpec, SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,
 };
 

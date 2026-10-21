@@ -37,6 +37,158 @@ const SAFETY_CEILING: usize = 4000;
 /// [`SnippetWindowLocator`]'s per-token ordinal for a token that is no query term.
 const NO_TERM: u32 = u32::MAX;
 
+/// Otzaria's word proximity, checked on the line's tokens (the index's word
+/// positions: both come from the same scanner, one position per token).
+///
+/// - `Ordered { gaps }`: groups in query order at positions
+///   `p0 < p1 < ...`, with `p[i+1] - p[i] - 1 <= gaps[i]` (words BETWEEN
+///   each consecutive pair).
+/// - `AnyOrder { max_span }`: every group at its own token, in any order,
+///   the last at most `max_span` positions after the first.
+///
+/// The located window is the TIGHTEST window (raw char span, ties = the
+/// earliest) that satisfies the rule, so the snippet always shows a valid
+/// occurrence; marks are every query-term token inside the expanded window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Proximity {
+    /// One limit per consecutive pair of groups (`group_count - 1` entries).
+    Ordered { gaps: Vec<u32> },
+    /// One window for all groups.
+    AnyOrder { max_span: u32 },
+}
+
+/// Scratch for [`SnippetWindowLocator::locate_proximity_tokenized`], reused
+/// across lines (no per-line allocation once grown).
+#[derive(Default)]
+struct ProximityScratch {
+    /// Ordered: (token, latest chain start) for the groups so far / next.
+    chain: Vec<(usize, usize)>,
+    next: Vec<(usize, usize)>,
+    /// Ordered: sliding maximum of chain starts.
+    deque: std::collections::VecDeque<(usize, usize)>,
+    /// Any order: term tokens per group inside the window.
+    coverage: Vec<u32>,
+    /// Any order: per group, the window's tokens it can take, in order.
+    in_window: Vec<std::collections::VecDeque<usize>>,
+    /// Any order matching, kept incrementally: group matched to each token
+    /// (or FREE), token matched to each group (or FREE).
+    owner: Vec<usize>,
+    taken: Vec<usize>,
+    /// Visit marks of the current augmenting search (`generation`).
+    stamp: Vec<u32>,
+    generation: u32,
+    /// Augmenting path: (group, next candidate index in its `in_window`).
+    stack: Vec<(usize, usize)>,
+}
+
+impl ProximityScratch {
+    /// Readies the any-order state for `n` tokens and `k` groups.
+    fn reset_any_order(&mut self, n: usize, k: usize) {
+        self.coverage.clear();
+        self.coverage.resize(k, 0);
+        self.in_window.resize_with(k, Default::default);
+        self.in_window.iter_mut().for_each(|d| d.clear());
+        self.owner.clear();
+        self.owner.resize(n, FREE);
+        self.taken.clear();
+        self.taken.resize(k, FREE);
+        self.stamp.clear();
+        self.stamp.resize(n, 0);
+        self.generation = 0;
+    }
+
+    /// Token `t` (groups `gs`) enters the window at its right (`front`:
+    /// back at its left, undoing [`Self::remove_front`]).
+    fn add(&mut self, t: usize, gs: &[usize], front: bool, w: &mut WindowCounts) {
+        w.terms += 1;
+        for &g in gs {
+            w.covered += usize::from(self.coverage[g] == 0);
+            self.coverage[g] += 1;
+            if front {
+                self.in_window[g].push_front(t);
+            } else {
+                self.in_window[g].push_back(t);
+            }
+        }
+    }
+
+    /// The window's leftmost token `t` leaves; its group, if matched, is freed.
+    fn remove_front(&mut self, t: usize, gs: &[usize], w: &mut WindowCounts) {
+        if gs.is_empty() {
+            return;
+        }
+        w.terms -= 1;
+        for &g in gs {
+            self.coverage[g] -= 1;
+            w.covered -= usize::from(self.coverage[g] == 0);
+            let front = self.in_window[g].pop_front();
+            debug_assert_eq!(front, Some(t));
+        }
+        let holder = self.owner[t];
+        if holder != FREE {
+            self.owner[t] = FREE;
+            self.taken[holder] = FREE;
+            w.matched -= 1;
+        }
+    }
+
+    /// Whether every group can take its own token in the window: augments
+    /// only the free groups of the kept matching.
+    fn complete(&mut self, k: usize, w: &mut WindowCounts) -> bool {
+        if w.covered < k || w.terms < k {
+            return false;
+        }
+        for g in 0..k {
+            if self.taken[g] == FREE {
+                if !self.augment(g) {
+                    return false;
+                }
+                w.matched += 1;
+            }
+        }
+        true
+    }
+
+    /// Kuhn's augmenting path from the free group `start`, iterative; on
+    /// success the path is flipped and `start` is matched.
+    fn augment(&mut self, start: usize) -> bool {
+        self.generation += 1;
+        let generation = self.generation;
+        self.stack.clear();
+        self.stack.push((start, 0));
+        while let Some(&(g, i)) = self.stack.last() {
+            let Some(&t) = self.in_window[g].get(i) else {
+                self.stack.pop();
+                continue;
+            };
+            self.stack.last_mut().expect("non-empty").1 = i + 1;
+            if self.stamp[t] == generation {
+                continue;
+            }
+            self.stamp[t] = generation;
+            let holder = self.owner[t];
+            if holder == FREE {
+                for &(h, next) in &self.stack {
+                    let token = self.in_window[h][next - 1];
+                    self.owner[token] = h;
+                    self.taken[h] = token;
+                }
+                return true;
+            }
+            self.stack.push((holder, 0));
+        }
+        false
+    }
+}
+
+/// Any-order window counters: groups covered, term tokens, matched groups.
+#[derive(Default)]
+struct WindowCounts {
+    covered: usize,
+    terms: usize,
+    matched: usize,
+}
+
 /// Ints per entry in [`SnippetDescriptor::mark_ranges`]: start, length, term
 /// ordinal.
 pub const MARK_STRIDE: usize = 3;
@@ -107,6 +259,7 @@ pub struct SnippetWindowLocator {
     /// Groups a window must cover; 0 = all of them (FtsLib). See
     /// [`set_min_groups`](Self::set_min_groups).
     min_groups: usize,
+    proximity: ProximityScratch,
 }
 
 impl Default for SnippetWindowLocator {
@@ -136,6 +289,7 @@ impl SnippetWindowLocator {
             group_count: vec![0; 8],
             mark_ranges: Vec::with_capacity(24),
             min_groups: 0,
+            proximity: ProximityScratch::default(),
         }
     }
 
@@ -195,6 +349,7 @@ impl SnippetWindowLocator {
             group_count,
             mark_ranges,
             min_groups,
+            ..
         } = self;
         let tokens = text_tokens.tokens();
         if tokens.is_empty() {
@@ -244,6 +399,64 @@ impl SnippetWindowLocator {
             score,
             word_distance: word_dist,
             window_word_count: window_words,
+            snap_start,
+            snap_end,
+            leading_ellipsis: snap_start > 0,
+            trailing_ellipsis: snap_end < raw_len,
+            mark_ranges,
+        }
+    }
+
+    /// Otzaria's word proximity over the text last passed to
+    /// [`tokenize`](Self::tokenize): a match only when every group sits
+    /// where `proximity` allows (see [`Proximity`]). Reuses the per-token
+    /// term ordinals (one hash probe per token, as `locate_tokenized`) and
+    /// runs one sweep: ordered = one pass per group with a sliding maximum,
+    /// any order = one two-pointer pass (a bipartite matching only when a
+    /// token fills several groups). `word_distance` = words between the
+    /// matched slots of the located window. Ignores `min_groups`.
+    pub fn locate_proximity_tokenized(
+        &mut self,
+        prepared: &PreparedQueryGroups,
+        proximity: &Proximity,
+    ) -> SnippetDescriptor<'_> {
+        if prepared.is_empty() {
+            return SnippetDescriptor::NO_MATCH;
+        }
+        let SnippetWindowLocator {
+            context_words,
+            text_tokens,
+            ordinals,
+            mark_ranges,
+            proximity: scratch,
+            ..
+        } = self;
+        let tokens = text_tokens.tokens();
+        if tokens.is_empty() {
+            return SnippetDescriptor::NO_MATCH;
+        }
+        let raw_len = text_tokens.raw_utf16_len();
+        ordinals.clear();
+        ordinals.extend(tokens.iter().map(|t| {
+            prepared.get(text_tokens.norm_of(t)).map_or(NO_TERM, |p| p.ordinal as u32)
+        }));
+        let ordinals = &ordinals[..];
+        let k = prepared.group_count();
+        let found = match proximity {
+            Proximity::Ordered { gaps } => ordered_window(tokens, ordinals, prepared, gaps, scratch),
+            Proximity::AnyOrder { max_span } => any_order_window(tokens, ordinals, prepared, *max_span as usize, scratch),
+        };
+        let Some((i_left, i_right, score)) = found else {
+            return SnippetDescriptor::NO_MATCH;
+        };
+        let (snap_start, snap_end, s_idx, e_idx) =
+            expand_window(tokens, raw_len, i_left, i_right, *context_words);
+        collect_mark_ranges(tokens, ordinals, snap_start, snap_end, mark_ranges);
+        SnippetDescriptor {
+            is_match: true,
+            score,
+            word_distance: (i_right - i_left).saturating_sub(k.saturating_sub(1)),
+            window_word_count: e_idx - s_idx + 1,
             snap_start,
             snap_end,
             leading_ellipsis: snap_start > 0,
@@ -325,6 +538,136 @@ fn find_window(
 
     (best_i_left, best_i_right, best_score)
 }
+
+// ── Proximity windows ─────────────────────────────────────────────────
+
+fn in_group(ordinals: &[u32], prepared: &PreparedQueryGroups, t: usize, g: usize) -> bool {
+    ordinals[t] != NO_TERM && prepared.groups_at(ordinals[t] as usize).contains(&g)
+}
+
+/// Ordered proximity: the tightest (i_left, i_right, char span) chain
+/// `p0 < p1 < ...` with `p[i+1] - p[i] - 1 <= gaps[i]`. Per group, every
+/// token where a valid chain can end keeps its LATEST start (the tightest
+/// chain ending there); a sliding maximum over the previous group's ends
+/// within `gap + 1` tokens gives it in one pass. None without a chain.
+fn ordered_window(
+    tokens: &[TextToken],
+    ordinals: &[u32],
+    prepared: &PreparedQueryGroups,
+    gaps: &[u32],
+    scratch: &mut ProximityScratch,
+) -> Option<(usize, usize, usize)> {
+    let k = prepared.group_count();
+    let ProximityScratch { chain, next, deque, .. } = scratch;
+    chain.clear();
+    chain.extend((0..tokens.len()).filter(|&t| in_group(ordinals, prepared, t, 0)).map(|t| (t, t)));
+    for g in 1..k {
+        if chain.is_empty() {
+            return None;
+        }
+        let reach = (*gaps.get(g - 1)? as usize).saturating_add(1);
+        next.clear();
+        deque.clear();
+        let mut j = 0;
+        for t in 0..tokens.len() {
+            if !in_group(ordinals, prepared, t, g) {
+                continue;
+            }
+            while j < chain.len() && chain[j].0 < t {
+                let e = chain[j];
+                while deque.back().is_some_and(|b| b.1 <= e.1) {
+                    deque.pop_back();
+                }
+                deque.push_back(e);
+                j += 1;
+            }
+            while deque.front().is_some_and(|f| f.0.saturating_add(reach) < t) {
+                deque.pop_front();
+            }
+            if let Some(&(_, start)) = deque.front() {
+                next.push((t, start));
+            }
+        }
+        std::mem::swap(chain, next);
+    }
+    let mut best: Option<(usize, usize, usize)> = None;
+    for &(end, start) in chain.iter() {
+        let span = tokens[end].utf16_end - tokens[start].utf16_start;
+        if best.is_none_or(|b| span < b.2) {
+            best = Some((start, end, span));
+        }
+    }
+    best
+}
+
+/// Any-order proximity: the tightest (i_left, i_right, char span) window of
+/// at most `max_span` positions where every group gets its own token. One
+/// two-pointer pass: for each right end the latest feasible left end (the
+/// feasible lefts only move right). Feasibility is a group/token matching
+/// kept up to date as tokens enter and leave the window: only freed groups
+/// are re-augmented, never the whole matching.
+fn any_order_window(
+    tokens: &[TextToken],
+    ordinals: &[u32],
+    prepared: &PreparedQueryGroups,
+    max_span: usize,
+    scratch: &mut ProximityScratch,
+) -> Option<(usize, usize, usize)> {
+    let k = prepared.group_count();
+    scratch.reset_any_order(tokens.len(), k);
+    let groups_of = |t: usize| -> &[usize] {
+        if ordinals[t] == NO_TERM {
+            &[]
+        } else {
+            prepared.groups_at(ordinals[t] as usize)
+        }
+    };
+    let mut w = WindowCounts::default();
+    let mut best: Option<(usize, usize, usize)> = None;
+    let mut l = 0usize;
+    for r in 0..tokens.len() {
+        let gs = groups_of(r);
+        if gs.is_empty() {
+            continue; // a window never needs to end on a non-term token
+        }
+        scratch.add(r, gs, false, &mut w);
+        while r - l > max_span {
+            scratch.remove_front(l, groups_of(l), &mut w);
+            l += 1;
+        }
+        if !scratch.complete(k, &mut w) {
+            continue;
+        }
+        // Shrink from the left while the rest still gives every group a token.
+        while l < r {
+            let gs = groups_of(l);
+            if gs.is_empty() {
+                l += 1;
+                continue;
+            }
+            if w.terms - 1 < k || gs.iter().any(|&g| scratch.coverage[g] == 1) {
+                break;
+            }
+            scratch.remove_front(l, gs, &mut w);
+            if scratch.complete(k, &mut w) {
+                l += 1;
+            } else {
+                // put it back: the window was feasible with it
+                scratch.add(l, gs, true, &mut w);
+                let restored = scratch.complete(k, &mut w);
+                debug_assert!(restored);
+                break;
+            }
+        }
+        let span = tokens[r].utf16_end - tokens[l].utf16_start;
+        if best.is_none_or(|b| span < b.2) {
+            best = Some((l, r, span));
+        }
+    }
+    best
+}
+
+const FREE: usize = usize::MAX;
 
 // ── Ordered-match validation ──────────────────────────────────────────
 
@@ -610,6 +953,162 @@ mod tests {
         loc.set_min_groups(0);
         let d = loc.locate("סיני אב משה גד תורה", &p, true, 0);
         assert!(!d.is_match);
+    }
+
+    fn prox_lines(text: &str, groups: &[&[&str]], proximity: &Proximity) -> Option<(String, usize)> {
+        let mut loc = SnippetWindowLocator::new(0);
+        let p = PreparedQueryGroups::from_groups(groups);
+        loc.tokenize(text);
+        let d = loc.locate_proximity_tokenized(&p, proximity);
+        d.is_match.then(|| (slice16(text, d.snap_start, d.snap_end).trim_end().to_string(), d.word_distance))
+    }
+
+    #[test]
+    fn proximity_ordered_per_pair_gaps() {
+        let ordered = |gaps: &[u32]| Proximity::Ordered { gaps: gaps.to_vec() };
+        let g: &[&[&str]] = &[&["ויאמר"], &["אל"], &["משה"]];
+        // Otzaria's advanced_custom_spacing_is_enforced_per_pair
+        let spacing = ordered(&[2, 0]);
+        assert!(prox_lines("ויאמר ה' צבאות אל משה", g, &spacing).is_some());
+        assert!(prox_lines("ויאמר אל העם ואל משה", g, &spacing).is_none());
+        // exactly at the limit / one past it
+        assert!(prox_lines("ויאמר אא בב אל משה", g, &spacing).is_some());
+        assert!(prox_lines("ויאמר אא בב גג אל משה", g, &spacing).is_none());
+        // order matters
+        assert!(prox_lines("משה אל ויאמר", g, &ordered(&[5, 5])).is_none());
+        // a later start is the only one that reaches the next word
+        let (w, d) = prox_lines("ויאמר אא בב גג ויאמר אל משה", g, &spacing).unwrap();
+        assert_eq!((w.as_str(), d), ("ויאמר אל משה", 0));
+        // the tightest satisfying window, not the tightest cover
+        let two: &[&[&str]] = &[&["אב"], &["גד"]];
+        let (w, _) = prox_lines("גד אב קק גד", two, &ordered(&[3])).unwrap();
+        assert_eq!(w, "אב קק גד");
+    }
+
+    #[test]
+    fn proximity_any_order_window() {
+        let any = |max_span| Proximity::AnyOrder { max_span };
+        let g: &[&[&str]] = &[&["חייב"], &["להחזיר"]];
+        // Otzaria's any_order_finds_reversed_words_within_the_window_only:
+        // two words, distance d → max_span d + 1
+        let lines = ["חייב להחזיר", "להחזיר חייב", "להחזיר את החפץ חייב", "להחזיר את החפץ הזה חייב", "חייב לשלם ולא להחזיר"];
+        let hits = |span| (0..lines.len()).filter(|&i| prox_lines(lines[i], g, &any(span)).is_some()).collect::<Vec<_>>();
+        assert_eq!(hits(1), [0, 1]);
+        assert_eq!(hits(3), [0, 1, 2, 4]);
+        assert_eq!(hits(4), [0, 1, 2, 3, 4]);
+        // repeated words each need their own token
+        let twice: &[&[&str]] = &[&["אמר"], &["אמר"]];
+        assert!(prox_lines("אמר רבי יוחנן", twice, &any(5)).is_none());
+        assert!(prox_lines("אמר רבי אמר", twice, &any(1)).is_none());
+        assert!(prox_lines("אמר רבי אמר", twice, &any(2)).is_some());
+        let three: &[&[&str]] = &[&["רבי"], &["אמר"], &["רבי"]];
+        assert!(prox_lines("אמר רבי אמר", three, &any(10)).is_none());
+        // a token in two groups: the matching gives each group its own
+        let shared: &[&[&str]] = &[&["אב", "גד"], &["אב"]];
+        assert!(prox_lines("אב קק", shared, &any(5)).is_none());
+        let (w, _) = prox_lines("אב קק גד", shared, &any(5)).unwrap();
+        assert_eq!(w, "אב קק גד");
+        // the tightest window wins
+        let (w, d) = prox_lines("להחזיר את חייב להחזיר", g, &any(5)).unwrap();
+        assert_eq!((w.as_str(), d), ("חייב להחזיר", 0));
+    }
+
+    /// Brute force: the tightest window (token span, then earliest) where
+    /// every group takes its own token, last minus first <= max_span.
+    fn any_order_reference(groups_per_token: &[Vec<usize>], k: usize, max_span: usize) -> Option<(usize, usize)> {
+        fn place(g: usize, k: usize, l: usize, r: usize, gpt: &[Vec<usize>], used: &mut Vec<usize>) -> bool {
+            if g == k {
+                return true;
+            }
+            for t in l..=r {
+                if !used.contains(&t) && gpt[t].contains(&g) {
+                    used.push(t);
+                    if place(g + 1, k, l, r, gpt, used) {
+                        return true;
+                    }
+                    used.pop();
+                }
+            }
+            false
+        }
+        let n = groups_per_token.len();
+        let mut best: Option<(usize, usize)> = None;
+        for r in 0..n {
+            for l in (r.saturating_sub(max_span)..=r).rev() {
+                if place(0, k, l, r, groups_per_token, &mut Vec::new()) {
+                    if best.is_none_or(|b| r - l < b.1 - b.0) {
+                        best = Some((l, r));
+                    }
+                    break;
+                }
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn proximity_any_order_equals_brute_force() {
+        // words of equal width, so the char span orders like the token span
+        let vocab = ["אב", "גד", "הו", "זח", "קק"];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let mut loc = SnippetWindowLocator::new(0);
+        for _ in 0..3000 {
+            let k = 1 + next(4) as usize;
+            // each group: one or two of the first four words (shared tokens)
+            let groups: Vec<Vec<&str>> = (0..k)
+                .map(|_| {
+                    let a = vocab[next(4) as usize];
+                    let b = vocab[next(4) as usize];
+                    if next(2) == 0 { vec![a] } else { vec![a, b] }
+                })
+                .collect();
+            let n = 1 + next(12) as usize;
+            let words: Vec<&str> = (0..n).map(|_| vocab[next(5) as usize]).collect();
+            let text = words.join(" ");
+            let max_span = next(6) as usize;
+            let gpt: Vec<Vec<usize>> = words
+                .iter()
+                .map(|w| (0..k).filter(|&g| groups[g].contains(w)).collect())
+                .collect();
+            let want = any_order_reference(&gpt, k, max_span);
+            let p = PreparedQueryGroups::from_groups(&groups);
+            loc.tokenize(&text);
+            let d = loc.locate_proximity_tokenized(&p, &Proximity::AnyOrder { max_span: max_span as u32 });
+            let got = d.is_match.then(|| {
+                let start = (0..n).position(|i| words[..i].iter().map(|w| w.chars().count() + 1).sum::<usize>() == d.snap_start).unwrap();
+                (start, start + d.word_distance + k - 1)
+            });
+            // the located window's token span must equal the reference's
+            assert_eq!(got.map(|(l, r)| r - l), want.map(|(l, r)| r - l), "{text} {groups:?} span {max_span}");
+            assert_eq!(got.is_some(), want.is_some());
+        }
+    }
+
+    #[test]
+    fn proximity_any_order_dense_broad_group_is_fast() {
+        // 2,000 tokens; three groups take every token (a broad walk), two
+        // take a word found every sixth token: no window of span 4 holds two
+        // of those, so every window is matched and fails.
+        let mut words = Vec::new();
+        for i in 0..2000 {
+            words.push(if i % 6 == 0 { "בב" } else { "אא" });
+        }
+        let text = words.join(" ");
+        let broad = vec!["אא", "בב"];
+        let groups = vec![broad.clone(), broad.clone(), broad, vec!["בב"], vec!["בב"]];
+        let p = PreparedQueryGroups::from_groups(&groups);
+        let mut loc = SnippetWindowLocator::new(0);
+        let t = std::time::Instant::now();
+        loc.tokenize(&text);
+        assert!(!loc.locate_proximity_tokenized(&p, &Proximity::AnyOrder { max_span: 4 }).is_match);
+        assert!(loc.locate_proximity_tokenized(&p, &Proximity::AnyOrder { max_span: 6 }).is_match);
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
     }
 
     #[test]

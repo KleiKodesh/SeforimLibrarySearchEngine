@@ -14,8 +14,9 @@ struct TrieNode {
     edges_start: u32,
     /// Number of edges.
     edges_len: u32,
-    /// This node completes one of the set's strings.
-    is_match: bool,
+    /// OR of the tags of the set's strings that end at this node; 0 = none
+    /// ends here. Plain sets tag every string [`SetAutomaton::MATCH`].
+    flags: u8,
 }
 
 /// Byte-trie automaton over a finite string set. Cheap to clone is not needed
@@ -39,16 +40,32 @@ impl SetAutomaton {
 
     /// Builds the trie from byte strings.
     pub fn from_bytes<B: AsRef<[u8]>>(strings: impl IntoIterator<Item = B>) -> SetAutomaton {
+        Self::from_tagged_bytes(strings.into_iter().map(|s| (s, Self::MATCH)))
+    }
+
+    /// Builds the trie from strings that each carry a non-zero tag; a node
+    /// where several strings end holds the OR of their tags (composite walks
+    /// read them with [`SetAutomaton::node_flags`]). As an automaton on its
+    /// own, a node matches when its tags include [`SetAutomaton::MATCH`].
+    pub fn from_tagged<S: AsRef<str>>(strings: impl IntoIterator<Item = (S, u8)>) -> SetAutomaton {
+        Self::from_tagged_bytes(
+            strings
+                .into_iter()
+                .map(|(s, tag)| (s.as_ref().as_bytes().to_vec(), tag)),
+        )
+    }
+
+    fn from_tagged_bytes<B: AsRef<[u8]>>(strings: impl IntoIterator<Item = (B, u8)>) -> SetAutomaton {
         // Build with per-node edge vecs first, then flatten.
         struct Building {
             edges: Vec<(u8, u32)>,
-            is_match: bool,
+            flags: u8,
         }
         let mut building: Vec<Building> = vec![Building {
             edges: Vec::new(),
-            is_match: false,
+            flags: 0,
         }];
-        for s in strings {
+        for (s, tag) in strings {
             let mut node = 0usize;
             for &b in s.as_ref() {
                 node = match building[node].edges.iter().find(|(eb, _)| *eb == b) {
@@ -58,13 +75,13 @@ impl SetAutomaton {
                         building[node].edges.push((b, target as u32));
                         building.push(Building {
                             edges: Vec::new(),
-                            is_match: false,
+                            flags: 0,
                         });
                         target
                     }
                 };
             }
-            building[node].is_match = true;
+            building[node].flags |= tag;
         }
         let mut nodes = Vec::with_capacity(building.len());
         let mut edges = Vec::new();
@@ -73,7 +90,7 @@ impl SetAutomaton {
             nodes.push(TrieNode {
                 edges_start: edges.len() as u32,
                 edges_len: b.edges.len() as u32,
-                is_match: b.is_match,
+                flags: b.flags,
             });
             edges.extend_from_slice(&b.edges);
         }
@@ -97,10 +114,19 @@ impl SetAutomaton {
     /// Root node index (for composite walks).
     pub(crate) const ROOT: u32 = 0;
 
-    /// Whether `node` completes one of the set's strings.
+    /// The tag of a plain set's strings.
+    pub const MATCH: u8 = 1;
+
+    /// Whether `node` completes one of the set's strings (tag [`Self::MATCH`]).
     #[inline]
     pub(crate) fn node_is_match(&self, node: u32) -> bool {
-        self.nodes[node as usize].is_match
+        self.nodes[node as usize].flags & Self::MATCH != 0
+    }
+
+    /// The OR of the tags of the strings ending at `node` (0: none).
+    #[inline]
+    pub(crate) fn node_flags(&self, node: u32) -> u8 {
+        self.nodes[node as usize].flags
     }
 
     #[inline]
@@ -124,7 +150,7 @@ impl Automaton for SetAutomaton {
     }
 
     fn is_match(&self, state: &Option<u32>) -> bool {
-        state.is_some_and(|node| self.nodes[node as usize].is_match)
+        state.is_some_and(|node| self.node_is_match(node))
     }
 
     fn accept(&self, state: &Option<u32>, byte: u8) -> Option<u32> {

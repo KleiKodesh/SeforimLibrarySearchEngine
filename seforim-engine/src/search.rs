@@ -5,7 +5,7 @@
 
 use hebrew_fts::{
     ExactTermsQuery, HebrewFuzzyQuery, HebrewWalkQuery, HebrewWildcardQuery, PreparedQueryGroups,
-    SnippetWindowLocator, WalkOptions, DEFAULT_CONTEXT_WORDS,
+    Proximity, SnippetWindowLocator, WalkOptions, DEFAULT_CONTEXT_WORDS,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{Collector, SegmentCollector};
@@ -79,6 +79,8 @@ pub struct WalkOptionsSpec {
     pub advanced_prefixes: bool,
     pub advanced_suffixes: bool,
     pub ignore_quotes: bool,
+    /// Index terms must match as written (off: also by their quote-free form).
+    pub exact_quotes: bool,
     pub spelling_errors: bool,
     pub ignore_nikud: bool,
     pub ignore_teamim: bool,
@@ -101,6 +103,7 @@ impl From<WalkOptionsSpec> for WalkOptions {
             advanced_prefixes: s.advanced_prefixes,
             advanced_suffixes: s.advanced_suffixes,
             ignore_quotes: s.ignore_quotes,
+            exact_quotes: s.exact_quotes,
             spelling_errors: s.spelling_errors,
             ignore_nikud: s.ignore_nikud,
             ignore_teamim: s.ignore_teamim,
@@ -109,6 +112,57 @@ impl From<WalkOptionsSpec> for WalkOptions {
             part_of_word_max_letters: s.part_of_word_max_letters,
             grammar_prefix_max_letters: s.grammar_prefix_max_letters,
         }
+    }
+}
+
+/// Otzaria's word proximity (its `Proximity`, `gap_phrase.rs`), an engine
+/// rule of its own, next to FtsLib's `max_word_distance` / `require_ordered`.
+/// Evaluated with positions on an index that has them (one span query; the
+/// rule is checked on each candidate's positions) and validated on the line
+/// text by the snippet locator on an index without them (the query is then
+/// the AND of the groups). Both give the same lines: the locator checks the
+/// rule on the positions-index hits too, and the index positions are the
+/// locator's tokens (same scanner).
+///
+/// JSON: `{"mode":"ordered","gaps":[2,0]}` / `{"mode":"any_order","distance":2}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ProximitySpec {
+    /// Groups in query order, at most `gaps[i]` words between group i and
+    /// group i+1 (0 = adjacent). One entry per consecutive pair. Otzaria:
+    /// `distance` for every pair, or its `customSpacing` per pair.
+    Ordered { gaps: Vec<u32> },
+    /// Groups in any order, each at its own word, all inside one window of
+    /// `(k - 1) * (distance + 1)` positions for k groups (last minus first
+    /// position): the span an ordered match with `distance` words between
+    /// each pair can take (Otzaria's `Proximity::any_order`). Otzaria
+    /// ignores any order when customSpacing is set; the host sends
+    /// `Ordered` then.
+    AnyOrder { distance: u32 },
+}
+
+impl ProximitySpec {
+    /// The locator's rule for `group_count` groups. Errors when `gaps` does
+    /// not have one entry per consecutive pair.
+    fn resolve(&self, group_count: usize) -> Result<Proximity> {
+        Ok(match self {
+            ProximitySpec::Ordered { gaps } => {
+                if gaps.len() + 1 != group_count {
+                    return Err(Error::Tantivy(tantivy::TantivyError::InvalidArgument(format!(
+                        "proximity gaps must have one entry per consecutive pair: {} groups, {} gaps",
+                        group_count,
+                        gaps.len()
+                    ))));
+                }
+                Proximity::Ordered { gaps: gaps.clone() }
+            }
+            ProximitySpec::AnyOrder { distance } => {
+                let pairs = u32::try_from(group_count.saturating_sub(1)).unwrap_or(u32::MAX);
+                Proximity::AnyOrder {
+                    max_span: pairs.saturating_mul(distance.saturating_add(1)),
+                }
+            }
+        })
     }
 }
 
@@ -150,6 +204,15 @@ pub struct SearchRequest {
     /// looser: the tightest window covering the words must be gap-free, so
     /// a repeated word can fill a gap (רבי משה בן רבי נחמן passes).
     pub phrase_alternatives: Vec<Vec<GroupSpec>>,
+    /// Otzaria's word proximity (see [`ProximitySpec`]). When set it is the
+    /// main query's distance rule and `max_word_distance`,
+    /// `require_ordered` and `gaps` are ignored for the main query (they
+    /// are FtsLib's rule, unchanged when this is None). Partial matching
+    /// (`min_groups` below the group count) wins over it, as in Otzaria.
+    /// Every group must be searchable (a skipped slot would shift the
+    /// pairs): otherwise the main query matches nothing. Phrase
+    /// alternatives and the negative query keep their own rules.
+    pub proximity: Option<ProximitySpec>,
     /// Filtered search by book: only lines whose `book_id` is in this set
     /// come back (an empty set = no hits). None = every book. Checked per
     /// doc against the `book_id` fast column during collection, so it
@@ -167,6 +230,7 @@ impl Default for SearchRequest {
             context_words: DEFAULT_CONTEXT_WORDS,
             gaps: None,
             min_groups: None,
+            proximity: None,
             exclude: None,
             phrase_alternatives: Vec::new(),
             books: None,
@@ -202,6 +266,11 @@ pub struct ExcludeSpec {
     pub require_ordered: bool,
     /// Per-pair spacing for the excluded words (needs positions).
     pub gaps: Option<Vec<u32>>,
+    /// Otzaria's proximity for the excluded words (its negative distance /
+    /// customSpacing / any order). When set, `max_word_distance`,
+    /// `require_ordered` and `gaps` are ignored. With positions it is
+    /// excluded in the query (span query); without, on the line text.
+    pub proximity: Option<ProximitySpec>,
 }
 
 /// One matching line, in catalog order: only the ids the index keeps. The
@@ -296,12 +365,18 @@ struct Matcher {
     require_ordered: bool,
     max_word_distance: usize,
     min_groups: usize,
+    /// Otzaria's proximity: replaces the three FtsLib filters above.
+    proximity: Option<Proximity>,
 }
 
 impl Matcher {
     /// A passing snippet with marks holding THIS matcher's term ordinals,
     /// over the text the locator last tokenized.
     fn locate(&self, locator: &mut SnippetWindowLocator) -> Option<Snippet> {
+        if let Some(proximity) = &self.proximity {
+            let d = locator.locate_proximity_tokenized(&self.prepared, proximity);
+            return SnippetSession::raw(d, usize::MAX);
+        }
         locator.set_min_groups(self.min_groups);
         let d = locator.locate_tokenized(&self.prepared, self.require_ordered, self.original_group_count);
         SnippetSession::raw(d, self.max_word_distance)
@@ -336,12 +411,17 @@ struct NegativeFilter {
     prepared: PreparedQueryGroups,
     max_word_distance: usize,
     require_ordered: bool,
+    /// Otzaria's proximity: replaces the two FtsLib limits above.
+    proximity: Option<Proximity>,
 }
 
 impl NegativeFilter {
     /// True when `text` carries the excluded words within the limits.
     /// Reads the text the locator last tokenized.
     fn excludes(&self, locator: &mut SnippetWindowLocator, min_groups: usize) -> bool {
+        if let Some(proximity) = &self.proximity {
+            return locator.locate_proximity_tokenized(&self.prepared, proximity).is_match;
+        }
         // the negative always needs ALL its words, whatever the positive's mode
         locator.set_min_groups(0);
         let d = locator.locate_tokenized(&self.prepared, self.require_ordered, 0);
@@ -661,12 +741,17 @@ impl LineIndex {
         })
     }
 
-    /// The span query for a request with per-pair `gaps`. Every group must be
-    /// searchable (a skipped group would shift the gaps); None when one is not.
+    /// The span query over `groups` with per-pair `gaps` (`ordered` or
+    /// pairwise either order), or, with `window`, all groups in any order
+    /// inside one window of that many positions (gaps then unused). Every
+    /// group must be searchable (a skipped group would shift the gaps);
+    /// None when one is not.
     fn span_query(
         &self,
-        request: &SearchRequest,
+        groups: &[GroupSpec],
         gaps: &[u32],
+        ordered: bool,
+        window: Option<u32>,
         searcher: &tantivy::Searcher,
         fm: Option<&FmIndex>,
         sinks: &mut Vec<MatchedTermsSink>,
@@ -676,15 +761,15 @@ impl LineIndex {
                 "per-pair word spacing needs an index built with positions".into(),
             )));
         }
-        if gaps.len() + 1 != request.groups.len() {
+        if window.is_none() && gaps.len() + 1 != groups.len() {
             return Err(Error::Tantivy(tantivy::TantivyError::InvalidArgument(format!(
                 "gaps must have one entry per consecutive pair: {} groups, {} gaps",
-                request.groups.len(),
+                groups.len(),
                 gaps.len()
             ))));
         }
         let mut span: Option<SpanQuery> = None;
-        for (i, group) in request.groups.iter().enumerate() {
+        for (i, group) in groups.iter().enumerate() {
             let sink = MatchedTermsSink::new();
             let Some(slot) = self.group_slot(group, &sink, searcher, fm)? else {
                 return Ok(None);
@@ -692,11 +777,12 @@ impl LineIndex {
             sinks.push(sink);
             span = Some(match span {
                 None => SpanQuery::new(self.fields.text, slot),
-                Some(s) => s.then_within(gaps[i - 1], slot),
+                Some(s) => s.then_within(gaps.get(i - 1).copied().unwrap_or(0), slot),
             });
         }
         let mut span = span.expect("at least one group");
-        span.set_ordered(request.require_ordered);
+        span.set_ordered(ordered);
+        span.set_window(window);
         Ok(Some(span))
     }
 
@@ -871,6 +957,11 @@ impl LineIndex {
             .filter(|&k| k < request.groups.len())
             .map(|k| k.max(1));
         let partial = partial_min.is_some();
+        // Otzaria's proximity (partial matching wins over it).
+        let proximity = match (&request.proximity, partial) {
+            (Some(p), false) if !request.groups.is_empty() => Some(p.resolve(request.groups.len())?),
+            _ => None,
+        };
         let mut session = SnippetSession {
             matchers: Vec::new(),
             original_group_count: request.groups.len(),
@@ -891,9 +982,38 @@ impl LineIndex {
         let fm = fm.as_deref();
         let mut sinks = Vec::new();
 
-        let main_query: Option<Box<dyn Query>> = if let (Some(gaps), false) = (&request.gaps, partial) {
+        let main_query: Option<Box<dyn Query>> = if let Some(prox) = &proximity {
+            if self.options.positions && request.groups.len() > 1 {
+                // One span query: the rule checked on each candidate's positions.
+                let (gaps, window) = match prox {
+                    Proximity::Ordered { gaps } => (gaps.clone(), None),
+                    Proximity::AnyOrder { max_span } => (Vec::new(), Some(*max_span)),
+                };
+                self.span_query(&request.groups, &gaps, true, window, &searcher, fm, &mut sinks)?
+                    .map(|q| Box::new(q) as Box<dyn Query>)
+            } else {
+                // Without positions: every group present; the locator
+                // validates the rule on the text. All groups must search.
+                let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                let mut complete = true;
+                for group in &request.groups {
+                    let sink = MatchedTermsSink::new();
+                    match self.group_query(group, &sink, &searcher, fm)? {
+                        Some(q) => {
+                            clauses.push((Occur::Must, q));
+                            sinks.push(sink);
+                        }
+                        None => complete = false,
+                    }
+                }
+                if !complete {
+                    sinks.clear();
+                }
+                (complete && !clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>)
+            }
+        } else if let (Some(gaps), false) = (&request.gaps, partial) {
             // Per-pair spacing: a span query, one slot per group, each gap its own limit.
-            self.span_query(request, gaps, &searcher, fm, &mut sinks)?
+            self.span_query(&request.groups, gaps, request.require_ordered, None, &searcher, fm, &mut sinks)?
                 .map(|q| Box::new(q) as Box<dyn Query>)
         } else {
             // One query + one sink per searchable slot. Rejected wildcards skip
@@ -930,13 +1050,7 @@ impl LineIndex {
             }
             let mut alt_sinks = Vec::new();
             let q: Option<Box<dyn Query>> = if self.options.positions && phrase.len() > 1 {
-                let req = SearchRequest {
-                    groups: phrase.clone(),
-                    require_ordered: true,
-                    gaps: Some(vec![0; phrase.len() - 1]),
-                    ..Default::default()
-                };
-                self.span_query(&req, &vec![0; phrase.len() - 1], &searcher, fm, &mut alt_sinks)?
+                self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, fm, &mut alt_sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else {
                 let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -975,17 +1089,22 @@ impl LineIndex {
         // The negative query (see ExcludeSpec): excluded in the query itself,
         // or on the text at locate time.
         let mut negative_sinks: Vec<MatchedTermsSink> = Vec::new();
-        let mut text_level_negative: Option<(usize, bool)> = None;
+        let mut text_level_negative: Option<(usize, bool, Option<Proximity>)> = None;
         let mut query = query;
         if let Some(ex) = &request.exclude {
-            let negative: Option<Box<dyn Query>> = if let Some(gaps) = &ex.gaps {
-                let req = SearchRequest {
-                    groups: ex.groups.clone(),
-                    require_ordered: ex.require_ordered,
-                    gaps: Some(gaps.clone()),
-                    ..Default::default()
+            let ex_proximity = match &ex.proximity {
+                Some(p) if ex.groups.len() > 1 => Some(p.resolve(ex.groups.len())?),
+                _ => None,
+            };
+            let negative: Option<Box<dyn Query>> = if let (Some(prox), true) = (&ex_proximity, self.options.positions) {
+                let (gaps, window) = match prox {
+                    Proximity::Ordered { gaps } => (gaps.clone(), None),
+                    Proximity::AnyOrder { max_span } => (Vec::new(), Some(*max_span)),
                 };
-                self.span_query(&req, gaps, &searcher, fm, &mut negative_sinks)?
+                self.span_query(&ex.groups, &gaps, true, window, &searcher, fm, &mut negative_sinks)?
+                    .map(|q| Box::new(q) as Box<dyn Query>)
+            } else if let (Some(gaps), None) = (&ex.gaps, &ex.proximity) {
+                self.span_query(&ex.groups, gaps, ex.require_ordered, None, &searcher, fm, &mut negative_sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else {
                 let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -999,8 +1118,15 @@ impl LineIndex {
                 (!clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>)
             };
             if let Some(negative) = negative {
-                let bound = ex.max_word_distance.is_some() || ex.require_ordered;
-                let needs_text = ex.gaps.is_none() && negative_sinks.len() > 1 && bound;
+                let needs_text = if ex_proximity.is_some() {
+                    // without positions the rule is checked on the text; a
+                    // skipped word would shift the pairs: no exclusion then
+                    !self.options.positions && negative_sinks.len() == ex.groups.len()
+                } else {
+                    let bound = ex.max_word_distance.is_some() || ex.require_ordered;
+                    ex.gaps.is_none() && negative_sinks.len() > 1 && bound
+                };
+                let skip = ex_proximity.is_some() && !self.options.positions && !needs_text;
                 if needs_text {
                     // Build the scorers once so the walks report the excluded
                     // forms; the docs themselves are not needed.
@@ -1009,8 +1135,8 @@ impl LineIndex {
                         let _ = w.scorer(segment, 1.0)?;
                     }
                     text_level_negative =
-                        Some((ex.max_word_distance.unwrap_or(usize::MAX), ex.require_ordered));
-                } else {
+                        Some((ex.max_word_distance.unwrap_or(usize::MAX), ex.require_ordered, ex_proximity.clone()));
+                } else if !skip {
                     query = Box::new(BooleanQuery::new(vec![(Occur::Must, query), (Occur::MustNot, negative)]));
                 }
             }
@@ -1053,7 +1179,7 @@ impl LineIndex {
             eprintln!("  [timing] collect {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);
         }
         hits.sort_unstable_by_key(|h| h.position);
-        if let Some((max_word_distance, require_ordered)) = text_level_negative {
+        if let Some((max_word_distance, require_ordered, proximity)) = text_level_negative {
             let negative_terms: Vec<Vec<String>> = negative_sinks.iter().map(|s| s.take_strings()).collect();
             // a word with no indexed form can never be present: no exclusion
             if negative_terms.iter().all(|g| !g.is_empty()) {
@@ -1061,6 +1187,7 @@ impl LineIndex {
                     prepared: PreparedQueryGroups::from_groups(&negative_terms),
                     max_word_distance,
                     require_ordered,
+                    proximity,
                 });
             }
         }
@@ -1086,6 +1213,7 @@ impl LineIndex {
                 require_ordered: session.require_ordered,
                 max_word_distance: session.max_word_distance,
                 min_groups: session.min_groups,
+                proximity: proximity.clone(),
             });
         }
         for (alt_sinks, _) in &alternatives {
@@ -1097,6 +1225,7 @@ impl LineIndex {
                     require_ordered: true,
                     max_word_distance: 0,
                     min_groups: 0,
+                    proximity: None,
                 });
             }
         }

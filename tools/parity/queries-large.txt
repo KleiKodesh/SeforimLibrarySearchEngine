@@ -20,6 +20,10 @@
 ע"ש
 חז"ל
 תוס'
+# the same words typed without the quote (FtsLib's index is quote-free)
+רמבם
+רשי
+זל
 # multi-word, any distance
 משה רבנו
 אברהם יצחק יעקב

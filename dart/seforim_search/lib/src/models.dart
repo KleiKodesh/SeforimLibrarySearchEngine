@@ -65,6 +65,7 @@ class WalkOptions {
     this.advancedPrefixes = false,
     this.advancedSuffixes = false,
     this.ignoreQuotes = false,
+    this.exactQuotes = false,
     this.spellingErrors = false,
     this.ignoreNikud = false,
     this.ignoreTeamim = false,
@@ -100,6 +101,10 @@ class WalkOptions {
 
   /// התעלם מגרשיים.
   final bool ignoreQuotes;
+
+  /// Index terms must match as written. Off (default, Otzaria): a term also
+  /// matches by its quote-free form, so רמבם finds רמב"ם.
+  final bool exactQuotes;
 
   /// שגיאות כתיב / OCR מצויות.
   final bool spellingErrors;
@@ -146,6 +151,7 @@ class WalkOptions {
     flag('advanced_prefixes', advancedPrefixes);
     flag('advanced_suffixes', advancedSuffixes);
     flag('ignore_quotes', ignoreQuotes);
+    flag('exact_quotes', exactQuotes);
     flag('spelling_errors', spellingErrors);
     flag('ignore_nikud', ignoreNikud);
     flag('ignore_teamim', ignoreTeamim);
@@ -206,6 +212,29 @@ class AnyGroup extends QueryGroup {
   Map<String, Object?> toJson() => {'kind': 'any', 'alternatives': [for (final a in alternatives) a.toJson()]};
 }
 
+/// Otzaria's word proximity, an engine rule of its own (the engine's
+/// `ProximitySpec`). With positions it runs in the query; without, the
+/// snippet locator validates it on the line text: both return the same lines.
+class Proximity {
+  /// Groups in query order, at most gaps[i] words between group i and group
+  /// i+1 (0 = adjacent); one entry per consecutive pair.
+  const Proximity.ordered(List<int> this.gaps) : distance = 0;
+
+  /// Groups in any order, each at its own word, all inside one window of
+  /// (k - 1) * (distance + 1) positions for k groups.
+  const Proximity.anyOrder(this.distance) : gaps = null;
+
+  final List<int>? gaps;
+  final int distance;
+
+  Map<String, Object?> toJson() => gaps == null
+      ? {'mode': 'any_order', 'distance': distance < 0 ? 0 : distance}
+      : {
+          'mode': 'ordered',
+          'gaps': [for (final g in gaps!) g < 0 ? 0 : g]
+        };
+}
+
 /// A search.
 class SearchRequest {
   SearchRequest(
@@ -215,6 +244,7 @@ class SearchRequest {
       this.contextWords = 8,
       this.gaps,
       this.minGroups,
+      this.proximity,
       this.exclude,
       List<List<QueryGroup>>? phraseAlternatives,
       this.books})
@@ -246,6 +276,11 @@ class SearchRequest {
   /// entry per consecutive pair. Null = not used.
   List<int>? gaps;
 
+  /// Otzaria's word proximity. When set it is the main query's distance rule:
+  /// [maxWordDistance], [requireOrdered] and [gaps] are ignored for it (they
+  /// are FtsLib's rule). [minGroups] below the group count wins over it.
+  Proximity? proximity;
+
   /// AND across groups, OR within each group's expansion.
   final List<QueryGroup> groups;
 
@@ -265,6 +300,7 @@ class SearchRequest {
         'context_words': contextWords,
         if (gaps != null) 'gaps': [for (final g in gaps!) g < 0 ? 0 : g],
         if (minGroups != null) 'min_groups': minGroups,
+        if (proximity != null) 'proximity': proximity!.toJson(),
         if (exclude != null) 'exclude': exclude!.toJson(),
         if (books != null) 'books': books,
         if (phraseAlternatives.isNotEmpty)
@@ -284,7 +320,7 @@ class SearchRequest {
 /// SQLite (`line_toc`), intersect, and drop the positive hits there.
 class ExcludeSpec {
   ExcludeSpec(
-      {List<QueryGroup>? groups, this.maxWordDistance, this.requireOrdered = false, this.gaps})
+      {List<QueryGroup>? groups, this.maxWordDistance, this.requireOrdered = false, this.gaps, this.proximity})
       : groups = groups ?? [];
 
   /// AND across groups, OR within each group's expansion.
@@ -299,11 +335,16 @@ class ExcludeSpec {
   /// Per-pair spacing for the excluded words (needs positions).
   List<int>? gaps;
 
+  /// Otzaria's proximity for the excluded words; when set, [maxWordDistance],
+  /// [requireOrdered] and [gaps] are ignored.
+  Proximity? proximity;
+
   Map<String, Object?> toJson() => {
         'groups': [for (final g in groups) g.toJson()],
         'max_word_distance': maxWordDistance,
         'require_ordered': requireOrdered,
         if (gaps != null) 'gaps': [for (final g in gaps!) g < 0 ? 0 : g],
+        if (proximity != null) 'proximity': proximity!.toJson(),
       };
 }
 

@@ -9,7 +9,7 @@
 
 use std::time::Instant;
 
-use hebrew_fts::{scan_with, PreparedQueryGroups, SnippetWindowLocator, TextTokens};
+use hebrew_fts::{scan_with, PreparedQueryGroups, Proximity, SnippetWindowLocator, TextTokens};
 
 fn synthetic_line() -> String {
     // ~2.2 KB: vocalised words, inline and block tags, an entity, quotes.
@@ -80,6 +80,21 @@ fn main() {
         for l in &lines {
             let d = loc.locate(l, &prepared, false, 0);
             sink = sink.wrapping_add(d.score as u64);
+        }
+    });
+    // 6. Otzaria proximity on the same tokens (ordered per-pair gaps / any order)
+    let ordered = Proximity::Ordered { gaps: vec![2] };
+    rate("tokenize + locate_proximity (ordered)", &mut || {
+        for l in &lines {
+            loc.tokenize(l);
+            sink = sink.wrapping_add(loc.locate_proximity_tokenized(&prepared, &ordered).score as u64);
+        }
+    });
+    let any = Proximity::AnyOrder { max_span: 3 };
+    rate("tokenize + locate_proximity (any order)", &mut || {
+        for l in &lines {
+            loc.tokenize(l);
+            sink = sink.wrapping_add(loc.locate_proximity_tokenized(&prepared, &any).score as u64);
         }
     });
     println!("(sink {sink})");

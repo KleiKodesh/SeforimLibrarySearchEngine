@@ -181,6 +181,7 @@ namespace FtsLib.Search
                 AdvancedPrefixes = o.AdvancedPrefixes,
                 AdvancedSuffixes = o.AdvancedSuffixes,
                 IgnoreQuotes = o.IgnoreQuotes,
+                ExactQuotes = o.ExactQuotes,
                 SpellingErrors = o.SpellingErrors,
                 IgnoreNikud = o.IgnoreNikud,
                 IgnoreTeamim = o.IgnoreTeamim,

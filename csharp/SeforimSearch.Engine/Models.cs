@@ -73,6 +73,9 @@ namespace SeforimSearch.Engine
         public bool AdvancedSuffixes { get; set; }
         /// <summary>התעלם מגרשיים.</summary>
         public bool IgnoreQuotes { get; set; }
+        /// <summary>Index terms must match as written. Off (default, Otzaria):
+        /// a term also matches by its quote-free form, so רמבם finds רמב"ם.</summary>
+        public bool ExactQuotes { get; set; }
         /// <summary>שגיאות כתיב / OCR מצויות.</summary>
         public bool SpellingErrors { get; set; }
         /// <summary>Ignore nikud (needs a KeepMarks index to matter).</summary>
@@ -128,6 +131,7 @@ namespace SeforimSearch.Engine
             Flag("advanced_prefixes", AdvancedPrefixes);
             Flag("advanced_suffixes", AdvancedSuffixes);
             Flag("ignore_quotes", IgnoreQuotes);
+            Flag("exact_quotes", ExactQuotes);
             Flag("spelling_errors", SpellingErrors);
             Flag("ignore_nikud", IgnoreNikud);
             Flag("ignore_teamim", IgnoreTeamim);
@@ -246,6 +250,46 @@ namespace SeforimSearch.Engine
         }
     }
 
+    /// <summary>Otzaria's word proximity, an engine rule of its own (see the engine's
+    /// <c>ProximitySpec</c>). With positions it runs in the query; without, the snippet
+    /// locator validates it on the line text: both return the same lines.</summary>
+    public sealed class Proximity
+    {
+        private readonly List<int>? _gaps;
+        private readonly int _distance;
+
+        private Proximity(List<int>? gaps, int distance)
+        {
+            _gaps = gaps;
+            _distance = distance;
+        }
+
+        /// <summary>Groups in query order, at most gaps[i] words between group i and
+        /// group i+1 (0 = adjacent); one entry per consecutive pair.</summary>
+        public static Proximity Ordered(IEnumerable<int> gaps) => new Proximity(new List<int>(gaps), 0);
+
+        /// <summary>Groups in any order, each at its own word, all inside one window of
+        /// (k - 1) * (distance + 1) positions for k groups.</summary>
+        public static Proximity AnyOrder(int distance) => new Proximity(null, distance);
+
+        internal void WriteJson(StringBuilder sb)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (_gaps == null)
+            {
+                sb.Append("{\"mode\":\"any_order\",\"distance\":").Append(Math.Max(0, _distance).ToString(inv)).Append('}');
+                return;
+            }
+            sb.Append("{\"mode\":\"ordered\",\"gaps\":[");
+            for (int i = 0; i < _gaps.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append(Math.Max(0, _gaps[i]).ToString(inv));
+            }
+            sb.Append("]}");
+        }
+    }
+
     /// <summary>A search.</summary>
     public sealed class SearchRequest
     {
@@ -273,6 +317,11 @@ namespace SeforimSearch.Engine
         /// RequireOrdered and Gaps are not applied; the snippet is the tightest window
         /// holding that many groups.</summary>
         public int? MinGroups { get; set; }
+
+        /// <summary>Otzaria's word proximity. When set it is the main query's distance
+        /// rule: MaxWordDistance, RequireOrdered and Gaps are ignored for it (they are
+        /// FtsLib's rule). MinGroups below the group count wins over it. Null = not used.</summary>
+        public Proximity? Proximity { get; set; }
 
         /// <summary>Otzaria's negative query: lines carrying these words are dropped.
         /// Null = none.</summary>
@@ -312,6 +361,11 @@ namespace SeforimSearch.Engine
             }
             if (MinGroups.HasValue)
                 sb.Append(",\"min_groups\":").Append(MinGroups.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (Proximity != null)
+            {
+                sb.Append(",\"proximity\":");
+                Proximity.WriteJson(sb);
+            }
             if (PhraseAlternatives.Count > 0)
             {
                 sb.Append(",\"phrase_alternatives\":[");
@@ -370,6 +424,10 @@ namespace SeforimSearch.Engine
         /// <summary>Per-pair spacing for the excluded words (needs positions).</summary>
         public List<int>? Gaps { get; set; }
 
+        /// <summary>Otzaria's proximity for the excluded words; when set, MaxWordDistance,
+        /// RequireOrdered and Gaps are ignored. Null = not used.</summary>
+        public Proximity? Proximity { get; set; }
+
         internal void WriteJson(StringBuilder sb)
         {
             sb.Append("{\"groups\":[");
@@ -390,6 +448,11 @@ namespace SeforimSearch.Engine
                     sb.Append(Math.Max(0, Gaps[i]).ToString(System.Globalization.CultureInfo.InvariantCulture));
                 }
                 sb.Append(']');
+            }
+            if (Proximity != null)
+            {
+                sb.Append(",\"proximity\":");
+                Proximity.WriteJson(sb);
             }
             sb.Append('}');
         }

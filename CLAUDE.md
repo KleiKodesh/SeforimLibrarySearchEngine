@@ -29,6 +29,14 @@ in one or two lines. Remove entries that turn out to be wrong.
   Grouping, sections, line index, references, neighbours: the HOST does them with
   SQLite on the returned line ids ("easy sqlite super speed"). Applies to C# and Dart
   too, and to any similar future need.
+- **NO HACKS. A missing capability is built properly INTO THE ENGINE.** If Otzaria (or
+  FtsLib) has a feature we lack, design it as a real engine feature, never a host-side
+  workaround or a composition of existing calls that only approximates it. Example (the
+  user's): Otzaria's per-pair word distance must be an engine capability, evaluated with
+  positions on an index that has them (SpanQuery gaps) and validated on the line text by
+  the locator on an index without positions — NOT "search by pairs" or remapping it onto
+  a different distance rule. Same for every other gap (cross-line phrases, sameSection
+  scope, quote-free matching, ...).
 - **Long runs: progress + full log + error tracking, always.** Any build, index
   build, parity dump or benchmark that takes more than a few seconds writes its FULL
   output to a log file (`2>&1 | tee <scratchpad>/logs/<name>.log`), shows its progress

@@ -503,12 +503,13 @@ are not printed), so upstream's query-parser tests stay as they are.
 - `SeforimSearch.Demo build` prints progress, then each stage's time
   (indexing, merge into one segment, FM-index sidecar), the total, and the
   index size in total and per file type.
-- `python -I tools/report/search_report.py <demo exe> <index> <queries> <out>`
+- `python -I tools/report/search_report.py <demo exe> <index> <queries> <out> [--runs N]`
   runs every query with the engine's stage timing on and writes
   `search-report.md`: per query the engine hits and the time of each stage
   (query weight; FST walks / FM lookups + hit collection; host text fetch +
   snippet locate + widening), time to the first batch, total, and exit code. Every run's full
-  log is kept next to the report.
+  log is kept next to the report. `--runs N` adds one warm-up run, then
+  reports each stage as the median of N runs (every run in `search-<n>.log`).
 
 ## Snippet-locate speed
 

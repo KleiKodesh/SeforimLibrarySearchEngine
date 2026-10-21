@@ -78,6 +78,9 @@ if (args.Length > 0 && args[0] == "search")
     return;
 }
 
+// --ketiv (anywhere): FtsLib's expandKetiv = true (KetivExpander variants).
+bool ketiv = args.Contains("--ketiv");
+args = args.Where(a => a != "--ketiv").ToArray();
 string db = args[0], index = args[1], queries = args[2], outDir = args[3];
 int maxHits = args.Length > 4 ? int.Parse(args[4]) : 2000;
 Directory.CreateDirectory(outDir);
@@ -97,7 +100,7 @@ foreach (var raw in File.ReadAllLines(queries, Encoding.UTF8))
     using var w = new StreamWriter(Path.Combine(outDir, $"{n}.jsonl"), false, new UTF8Encoding(false));
     w.WriteLine(Header(query, distance));
     foreach (var batch in searcher.SearchInBatches(engine, query, distance, false,
-                 SeforimDbFtsSearcher.DefaultContextWords, false, terms))
+                 SeforimDbFtsSearcher.DefaultContextWords, ketiv, terms))
     {
         var all = terms.All();
         foreach (var hit in batch.Hits)

@@ -34,8 +34,9 @@ pub use line_search::LineRegexStatus;
 pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, WordOptions};
 pub use relevance::{ResultsOrder, NOTICE_RELEVANCE_NEEDS_POSITIONS};
 pub use search::{
-    CancelToken, ExcludeSpec, GroupSpec, HitCounts, PlacedHit, SearchInfo, ProximitySpec, SearchRequest, SearchResult, Snippet, SnippetSession,
-    TypoModeSpec, WalkOptionsSpec, SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,
+    CancelToken, ExcludeSpec, GroupSpec, HitCounts, PlacedHit, ProximitySpec, SearchInfo,
+    SearchRequest, SearchResult, Snippet, SnippetSession, KtivRulesSpec, TypoModeSpec, WalkOptionsSpec,
+    SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,
 };
 
 /// Engine errors.

@@ -1,0 +1,13 @@
+# ketiv-ON parity set (FtsLibDump --ketiv / SeforimSearch.Demo dump --ketiv)
+שלום
+מצות
+ירושלים
+גלגלים
+תיקון
+*שלום*
+מצות*
+*כהן
+%תורה
+מלך%
+שלום ירושלים
+מצות תורה	5

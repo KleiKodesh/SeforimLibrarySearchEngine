@@ -16,7 +16,7 @@ use hebrew_fts::{tokenize_query, QueryTerm, QueryToken, DEFAULT_CONTEXT_WORDS};
 use serde::{Deserialize, Serialize};
 
 use crate::relevance::ResultsOrder;
-use crate::search::{ExcludeSpec, GroupSpec, ProximitySpec, SearchRequest, TypoModeSpec, WalkOptionsSpec};
+use crate::search::{ExcludeSpec, GroupSpec, KtivRulesSpec, ProximitySpec, SearchRequest, TypoModeSpec, WalkOptionsSpec};
 use crate::{Error, Result};
 
 /// A search: the query string and the options of every word.
@@ -38,6 +38,9 @@ pub struct SearchOptions {
     pub aramaic_suffixes: bool,
     /// כתיב מלא/חסר.
     pub ktiv_male_haser: bool,
+    /// Which rules `ktiv_male_haser` uses: Otzaria's (default) or FtsLib's
+    /// `KetivExpander`. JSON `"otzaria"` / `"ftslib"`.
+    pub ktiv_rules: KtivRulesSpec,
     /// חלק ממילה.
     pub part_of_word: bool,
     /// קידומות (any letters before).
@@ -127,6 +130,7 @@ impl Default for SearchOptions {
             aramaic_prefixes: false,
             aramaic_suffixes: false,
             ktiv_male_haser: false,
+            ktiv_rules: KtivRulesSpec::default(),
             part_of_word: false,
             advanced_prefixes: false,
             advanced_suffixes: false,
@@ -169,6 +173,7 @@ pub struct WordOptions {
     pub aramaic_prefixes: Option<bool>,
     pub aramaic_suffixes: Option<bool>,
     pub ktiv_male_haser: Option<bool>,
+    pub ktiv_rules: Option<KtivRulesSpec>,
     pub part_of_word: Option<bool>,
     pub advanced_prefixes: Option<bool>,
     pub advanced_suffixes: Option<bool>,
@@ -234,6 +239,7 @@ impl SearchOptions {
             aramaic_prefixes: self.aramaic_prefixes,
             aramaic_suffixes: self.aramaic_suffixes,
             ktiv_male_haser: self.ktiv_male_haser,
+            ktiv_rules: self.ktiv_rules,
             part_of_word: self.part_of_word,
             advanced_prefixes: self.advanced_prefixes,
             advanced_suffixes: self.advanced_suffixes,
@@ -408,6 +414,7 @@ impl WordOptions {
             aramaic_prefixes: self.aramaic_prefixes.unwrap_or(base.aramaic_prefixes),
             aramaic_suffixes: self.aramaic_suffixes.unwrap_or(base.aramaic_suffixes),
             ktiv_male_haser: self.ktiv_male_haser.unwrap_or(base.ktiv_male_haser),
+            ktiv_rules: self.ktiv_rules.unwrap_or(base.ktiv_rules),
             part_of_word: self.part_of_word.unwrap_or(base.part_of_word),
             advanced_prefixes: self.advanced_prefixes.unwrap_or(base.advanced_prefixes),
             advanced_suffixes: self.advanced_suffixes.unwrap_or(base.advanced_suffixes),
@@ -445,8 +452,8 @@ fn phrases(list: &[PhraseOptions], keep_marks: bool) -> Vec<Vec<GroupSpec>> {
 /// with `ktiv_male_haser` on, a wildcard's literal core (only leading /
 /// trailing `*`, no `?`) and a `%` word also search their spelling
 /// variants, ORed in the slot (FtsLib, KitveiHakodesh `71162c83`: else
-/// `*word*` would match fewer lines than `word`). The variants are the ktiv
-/// walk's (Otzaria's rules), which replace FtsLib's `KetivExpander` here.
+/// `*word*` would match fewer lines than `word`). The variants follow the
+/// word's `ktiv_rules`: FtsLib's `KetivExpander` (cap 40) or Otzaria's.
 fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
     let ignore_quotes = o.ignore_quotes;
     match term {
@@ -454,7 +461,7 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
         QueryTerm::Unindexed(word) => GroupSpec::Unindexed { word },
         QueryTerm::Wildcard(pattern) => {
             let variants: Vec<GroupSpec> = match (o.ktiv_male_haser, star_core(&pattern)) {
-                (true, Some((lead, core, trail))) => ktiv_variants(core)
+                (true, Some((lead, core, trail))) => ktiv_variants(core, o.ktiv_rules)
                     .into_iter()
                     .map(|v| GroupSpec::Wildcard { pattern: format!("{lead}{v}{trail}"), ignore_quotes })
                     .collect(),
@@ -465,7 +472,7 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
         QueryTerm::Fuzzy { word, distance } => GroupSpec::Fuzzy { word, distance, ignore_quotes },
         QueryTerm::Grammar { word, prefixes, suffixes } => {
             let variants: Vec<GroupSpec> = if o.ktiv_male_haser {
-                ktiv_variants(&word)
+                ktiv_variants(&word, o.ktiv_rules)
                     .into_iter()
                     .map(|v| GroupSpec::Grammar { word: v, prefixes, suffixes, ignore_quotes })
                     .collect()
@@ -492,8 +499,16 @@ fn star_core(pattern: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// The ktiv male / haser variants of `word`, the word itself left out.
-fn ktiv_variants(word: &str) -> Vec<String> {
-    hebrew_fts::variants::ktiv_male_haser_variants(word).into_iter().filter(|v| v != word).collect()
+fn ktiv_variants(word: &str, rules: KtivRulesSpec) -> Vec<String> {
+    match rules {
+        KtivRulesSpec::FtsLib => hebrew_fts::ftslib_ketiv::ftslib_ketiv_variants(
+            word,
+            hebrew_fts::ftslib_ketiv::FTSLIB_KTIV_MAX_VARIANTS,
+        ),
+        KtivRulesSpec::Otzaria => {
+            hebrew_fts::variants::ktiv_male_haser_variants(word).into_iter().filter(|v| v != word).collect()
+        }
+    }
 }
 
 /// `base`, or an OR slot of `base` and its variants.
@@ -681,6 +696,35 @@ fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptions
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ktiv_rules: "ftslib"` (here per word) makes a wildcard core's
+    /// variants FtsLib's `KetivExpander` output, in its order.
+    #[test]
+    fn ktiv_rules_ftslib_uses_ftslib_variants() {
+        let word = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
+        let json = format!(
+            r#"{{"query":"*{word}*","ktiv_male_haser":true,"words":{{"0":{{"ktiv_rules":"ftslib"}}}}}}"#
+        );
+        let o: SearchOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(o.ktiv_rules, KtivRulesSpec::Otzaria);
+        let want: Vec<String> = hebrew_fts::ftslib_ketiv::ftslib_ketiv_variants(word, 40)
+            .into_iter()
+            .map(|v| format!("*{v}*"))
+            .collect();
+        match &o.to_request(false).unwrap().groups[0] {
+            GroupSpec::Any { alternatives } => {
+                let got: Vec<String> = alternatives[1..]
+                    .iter()
+                    .map(|a| match a {
+                        GroupSpec::Wildcard { pattern, .. } => pattern.clone(),
+                        other => panic!("{other:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, want);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     /// FtsLib 71162c83: with ktiv on, a star-only wildcard core and a `%`
     /// word take their spelling variants (ORed); off, the slot is unchanged.

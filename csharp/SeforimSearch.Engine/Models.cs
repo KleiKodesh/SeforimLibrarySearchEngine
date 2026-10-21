@@ -74,6 +74,15 @@ namespace SeforimSearch.Engine
         FullEdit1 = 1,
     }
 
+    /// <summary>Which rules the ktiv male / haser option uses.</summary>
+    public enum KtivRules
+    {
+        /// <summary>Otzaria's vav / yod rules (default).</summary>
+        Otzaria = 0,
+        /// <summary>FtsLib's KetivExpander rules (cap 40), the walk's core forms.</summary>
+        FtsLib = 1,
+    }
+
     /// <summary>Hebrew walk options for a word (Otzaria's search options).</summary>
     public sealed class WalkOptions
     {
@@ -87,6 +96,9 @@ namespace SeforimSearch.Engine
         public bool AramaicSuffixes { get; set; }
         /// <summary>כתיב מלא/חסר.</summary>
         public bool KtivMaleHaser { get; set; }
+        /// <summary>Which rules <see cref="KtivMaleHaser"/> uses. Default
+        /// <see cref="KtivRules.Otzaria"/>; the FtsLib facade sets <see cref="KtivRules.FtsLib"/>.</summary>
+        public KtivRules KtivRules { get; set; }
         /// <summary>חלק ממילה.</summary>
         public bool PartOfWord { get; set; }
         /// <summary>קידומות (מתקדם): any letters before.</summary>
@@ -164,6 +176,12 @@ namespace SeforimSearch.Engine
                 if (!first) sb.Append(',');
                 first = false;
                 sb.Append("\"typo_mode\":\"full_edit1\"");
+            }
+            if (KtivRules == KtivRules.FtsLib)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append("\"ktiv_rules\":\"ftslib\"");
             }
             Flag("match_nikud", MatchNikud);
             Flag("match_teamim", MatchTeamim);
@@ -570,6 +588,9 @@ namespace SeforimSearch.Engine
         public bool AramaicSuffixes { get; set; }
         /// <summary>כתיב מלא/חסר.</summary>
         public bool KtivMaleHaser { get; set; }
+        /// <summary>Which rules <see cref="KtivMaleHaser"/> uses. Default
+        /// <see cref="KtivRules.Otzaria"/>; the FtsLib facade sets <see cref="KtivRules.FtsLib"/>.</summary>
+        public KtivRules KtivRules { get; set; }
         /// <summary>חלק ממילה.</summary>
         public bool PartOfWord { get; set; }
         /// <summary>קידומות (any letters before).</summary>
@@ -653,7 +674,7 @@ namespace SeforimSearch.Engine
             WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes, KtivMaleHaser,
                 PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes, SpellingErrors,
                 MatchNikud, MatchTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters, PartOfWordMaxLetters,
-                GrammarPrefixMaxLetters);
+                GrammarPrefixMaxLetters, KtivRules);
             WriteWords(sb, Words);
             if (MaxWordDistance.HasValue) sb.Append(",\"max_word_distance\":").Append(MaxWordDistance.Value.ToString(inv));
             if (RequireOrdered) sb.Append(",\"require_ordered\":true");
@@ -724,7 +745,8 @@ namespace SeforimSearch.Engine
             bool? aramaicPrefixes, bool? aramaicSuffixes, bool? ktivMaleHaser, bool? partOfWord,
             bool? advancedPrefixes, bool? advancedSuffixes, bool? ignoreQuotes, bool? exactQuotes,
             bool? spellingErrors, bool? matchNikud, bool? matchTeamim, TypoMode? typoMode,
-            int? prefixMaxLetters, int? suffixMaxLetters, int? partOfWordMaxLetters, int? grammarPrefixMaxLetters)
+            int? prefixMaxLetters, int? suffixMaxLetters, int? partOfWordMaxLetters, int? grammarPrefixMaxLetters,
+            KtivRules? ktivRules = null)
         {
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             void Flag(string name, bool? v)
@@ -754,6 +776,8 @@ namespace SeforimSearch.Engine
             Limit("suffix_max_letters", suffixMaxLetters);
             Limit("part_of_word_max_letters", partOfWordMaxLetters);
             Limit("grammar_prefix_max_letters", grammarPrefixMaxLetters);
+            if (ktivRules.HasValue)
+                sb.Append(",\"ktiv_rules\":").Append(ktivRules.Value == KtivRules.FtsLib ? "\"ftslib\"" : "\"otzaria\"");
         }
     }
 
@@ -766,6 +790,7 @@ namespace SeforimSearch.Engine
         public bool? AramaicPrefixes { get; set; }
         public bool? AramaicSuffixes { get; set; }
         public bool? KtivMaleHaser { get; set; }
+        public KtivRules? KtivRules { get; set; }
         public bool? PartOfWord { get; set; }
         public bool? AdvancedPrefixes { get; set; }
         public bool? AdvancedSuffixes { get; set; }
@@ -795,7 +820,7 @@ namespace SeforimSearch.Engine
             SearchOptions.WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes,
                 KtivMaleHaser, PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes,
                 SpellingErrors, MatchNikud, MatchTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters,
-                PartOfWordMaxLetters, GrammarPrefixMaxLetters);
+                PartOfWordMaxLetters, GrammarPrefixMaxLetters, KtivRules);
             sb.Append('}');
         }
     }

@@ -72,7 +72,8 @@ namespace FtsLib.Fts5
     {
         /// <summary>Otzaria's per-word options (prefixes, suffixes, ktiv, nikud…).
         /// IgnoreQuotes defaults ON here: FtsLib always matched רשי ↔ רש"י.</summary>
-        public WalkOptions WordOptions { get; set; } = new WalkOptions { IgnoreQuotes = true };
+        /// KtivRules defaults to FtsLib's KetivExpander rules here (FtsLib's expandKetiv).
+        public WalkOptions WordOptions { get; set; } = new WalkOptions { IgnoreQuotes = true, KtivRules = KtivRules.FtsLib };
 
         /// <summary>מרחק בין מילים. Null = no limit.</summary>
         public int? MaxWordDistance { get; set; }
@@ -190,6 +191,7 @@ namespace FtsLib.Fts5
                 AramaicPrefixes = w.AramaicPrefixes,
                 AramaicSuffixes = w.AramaicSuffixes,
                 KtivMaleHaser = w.KtivMaleHaser,
+                KtivRules = w.KtivRules,
                 PartOfWord = w.PartOfWord,
                 AdvancedPrefixes = w.AdvancedPrefixes,
                 AdvancedSuffixes = w.AdvancedSuffixes,

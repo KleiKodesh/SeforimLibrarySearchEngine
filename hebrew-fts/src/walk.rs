@@ -55,6 +55,17 @@ use crate::variants;
 /// prefix/suffix allowances).
 pub const SHORT_WORD_MAX_LETTERS: usize = 3;
 
+/// Which rule set the ktiv male / haser option uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum KtivRules {
+    /// Otzaria's vav / yod rules (`variants::ktiv_male_haser_variants_limited`).
+    #[default]
+    Otzaria,
+    /// FtsLib's `KetivExpander` rules (`ftslib_ketiv::ftslib_ketiv_variants`,
+    /// cap 40): the word and its variants as core forms.
+    FtsLib,
+}
+
 /// How the typo option (שגיאות כתיב) expands a word.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TypoMode {
@@ -84,6 +95,8 @@ pub struct WalkOptions {
     pub aramaic_suffixes: bool,
     /// כתיב מלא/חסר
     pub ktiv_male_haser: bool,
+    /// Which rules [`Self::ktiv_male_haser`] uses.
+    pub ktiv_rules: KtivRules,
     /// חלק ממילה
     pub part_of_word: bool,
     /// קידומות (מתקדם) — any letters before the word
@@ -321,7 +334,19 @@ fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
     if options.aramaic_suffixes {
         set = variants::expand_set(&set, variants::aramaic_ending_variants);
     }
-    if options.ktiv_male_haser {
+    if options.ktiv_male_haser && options.ktiv_rules == KtivRules::FtsLib {
+        // FtsLib's ExpandGroup: the word, then KetivExpander.Expand(word).
+        set = variants::expand_set(&set, |w| {
+            let mut forms: BTreeSet<String> = crate::ftslib_ketiv::ftslib_ketiv_variants(
+                w,
+                crate::ftslib_ketiv::FTSLIB_KTIV_MAX_VARIANTS,
+            )
+            .into_iter()
+            .collect();
+            forms.insert(w.to_string());
+            forms
+        });
+    } else if options.ktiv_male_haser {
         // Otzaria `spelling_limit`: a tighter cap through the grammatical arms.
         let limit = if options.grammar_prefixes || options.grammar_suffixes || options.aramaic_prefixes
         {
@@ -1751,6 +1776,47 @@ mod tests {
         assert!(!matches(&a, "שבות"));
         assert!(matches(&a, "שובת"));
         assert!(!matches(&walk("מצוה", k), "מצה"));
+    }
+
+    /// With `KtivRules::FtsLib` the walk accepts exactly the word and FtsLib's
+    /// `KetivExpander` output (checked over a candidate universe: FtsLib's
+    /// forms, Otzaria's forms, every single vav / yod insertion / deletion).
+    #[test]
+    fn ktiv_ftslib_rules_accept_exactly_ftslib_forms() {
+        let k = WalkOptions {
+            ktiv_male_haser: true,
+            ktiv_rules: KtivRules::FtsLib,
+            ..Default::default()
+        };
+        for &(word, expected) in crate::ftslib_ketiv::FTSLIB_CASES {
+            let a = walk(word, k);
+            let want: BTreeSet<String> =
+                expected.iter().map(|s| s.to_string()).chain([word.to_string()]).collect();
+            let mut universe = want.clone();
+            universe.extend(variants::ktiv_male_haser_variants_limited(word, 1000));
+            let chars: Vec<char> = word.chars().collect();
+            for i in 0..=chars.len() {
+                for ins in ['\u{05D5}', '\u{05D9}'] {
+                    let mut c = chars.clone();
+                    c.insert(i, ins);
+                    universe.insert(c.into_iter().collect());
+                }
+                if i < chars.len() {
+                    let mut c = chars.clone();
+                    c.remove(i);
+                    universe.insert(c.into_iter().collect());
+                }
+            }
+            for cand in &universe {
+                assert_eq!(
+                    matches(&a, cand),
+                    want.contains(cand),
+                    "word {} cand {}",
+                    word.escape_unicode(),
+                    cand.escape_unicode()
+                );
+            }
+        }
     }
 
     // Otzaria suffixes_follow_final_letters_and_final_he.

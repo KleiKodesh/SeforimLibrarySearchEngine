@@ -132,7 +132,11 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 
             var searchOptions = new TantivySearchOptions
             {
-                WordOptions = wordOptions ?? new SeforimSearch.Engine.WalkOptions { IgnoreQuotes = true },
+                WordOptions = wordOptions ?? new SeforimSearch.Engine.WalkOptions
+                {
+                    IgnoreQuotes = true,
+                    KtivRules = SeforimSearch.Engine.KtivRules.FtsLib, // FtsLib's KetivExpander
+                },
                 MaxWordDistance = maxWordDistance >= int.MaxValue ? (int?)null : maxWordDistance,
                 RequireOrdered = requireOrdered,
                 ContextWords = contextWords,

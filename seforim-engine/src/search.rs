@@ -128,6 +128,19 @@ pub enum TypoModeSpec {
     FullEdit1,
 }
 
+/// Serializable mirror of [`hebrew_fts::KtivRules`]: which rules
+/// `ktiv_male_haser` uses. JSON `"otzaria"` (default) / `"ftslib"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KtivRulesSpec {
+    /// Otzaria's vav / yod rules.
+    #[default]
+    Otzaria,
+    /// FtsLib's `KetivExpander` rules.
+    #[serde(rename = "ftslib")]
+    FtsLib,
+}
+
 /// Serializable mirror of [`WalkOptions`].
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -137,6 +150,8 @@ pub struct WalkOptionsSpec {
     pub aramaic_prefixes: bool,
     pub aramaic_suffixes: bool,
     pub ktiv_male_haser: bool,
+    /// Which rules `ktiv_male_haser` uses.
+    pub ktiv_rules: KtivRulesSpec,
     pub part_of_word: bool,
     pub advanced_prefixes: bool,
     pub advanced_suffixes: bool,
@@ -178,6 +193,10 @@ impl From<WalkOptionsSpec> for WalkOptions {
             aramaic_prefixes: s.aramaic_prefixes,
             aramaic_suffixes: s.aramaic_suffixes,
             ktiv_male_haser: s.ktiv_male_haser,
+            ktiv_rules: match s.ktiv_rules {
+                KtivRulesSpec::Otzaria => hebrew_fts::KtivRules::Otzaria,
+                KtivRulesSpec::FtsLib => hebrew_fts::KtivRules::FtsLib,
+            },
             part_of_word: s.part_of_word,
             advanced_prefixes: s.advanced_prefixes,
             advanced_suffixes: s.advanced_suffixes,

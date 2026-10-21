@@ -78,6 +78,15 @@ enum TypoMode {
   fullEdit1,
 }
 
+/// Which rules the ktiv male / haser option uses.
+enum KtivRules {
+  /// Otzaria's vav / yod rules (default).
+  otzaria,
+
+  /// FtsLib's KetivExpander rules (cap 40), as the walk's core forms.
+  ftslib,
+}
+
 /// The order of the hits (Otzaria's ResultsOrder).
 enum ResultsOrder {
   /// Catalog order, as FtsLib (the default; costs nothing).
@@ -102,6 +111,7 @@ class WalkOptions {
     this.aramaicPrefixes = false,
     this.aramaicSuffixes = false,
     this.ktivMaleHaser = false,
+    this.ktivRules = KtivRules.otzaria,
     this.partOfWord = false,
     this.advancedPrefixes = false,
     this.advancedSuffixes = false,
@@ -131,6 +141,9 @@ class WalkOptions {
 
   /// כתיב מלא/חסר.
   final bool ktivMaleHaser;
+
+  /// Which rules [ktivMaleHaser] uses. Default [KtivRules.otzaria].
+  final KtivRules ktivRules;
 
   /// חלק ממילה.
   final bool partOfWord;
@@ -200,6 +213,7 @@ class WalkOptions {
     flag('exact_quotes', exactQuotes);
     flag('spelling_errors', spellingErrors);
     if (typoMode == TypoMode.fullEdit1) m['typo_mode'] = 'full_edit1';
+    if (ktivRules == KtivRules.ftslib) m['ktiv_rules'] = 'ftslib';
     flag('match_nikud', matchNikud);
     flag('match_teamim', matchTeamim);
     return m;
@@ -554,6 +568,7 @@ class SearchOptions {
     this.aramaicPrefixes = false,
     this.aramaicSuffixes = false,
     this.ktivMaleHaser = false,
+    this.ktivRules = KtivRules.otzaria,
     this.partOfWord = false,
     this.advancedPrefixes = false,
     this.advancedSuffixes = false,
@@ -610,6 +625,7 @@ class SearchOptions {
   bool ignoreQuotes;
   bool exactQuotes, spellingErrors, matchNikud, matchTeamim;
   TypoMode typoMode;
+  KtivRules ktivRules;
   int? prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters, grammarPrefixMaxLetters;
 
   /// Per-word overrides by word index: the place, from 0, of the word as
@@ -668,7 +684,7 @@ class SearchOptions {
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
             matchNikud, matchTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,
-            grammarPrefixMaxLetters),
+            grammarPrefixMaxLetters, ktivRules),
         if (words.isNotEmpty) 'words': {for (final e in words.entries) '${e.key}': e.value.toJson()},
         if (maxWordDistance != null) 'max_word_distance': maxWordDistance,
         if (requireOrdered) 'require_ordered': true,
@@ -706,7 +722,8 @@ Map<String, Object?> _wordFields(
     int? prefixMaxLetters,
     int? suffixMaxLetters,
     int? partOfWordMaxLetters,
-    int? grammarPrefixMaxLetters) {
+    int? grammarPrefixMaxLetters,
+    [KtivRules? ktivRules]) {
   final m = <String, Object?>{};
   void flag(String k, bool? v) {
     if (v != null) m[k] = v;
@@ -730,6 +747,7 @@ Map<String, Object?> _wordFields(
   flag('match_nikud', matchNikud);
   flag('match_teamim', matchTeamim);
   if (typoMode != null) m['typo_mode'] = typoMode == TypoMode.fullEdit1 ? 'full_edit1' : 'otzaria';
+  if (ktivRules != null) m['ktiv_rules'] = ktivRules == KtivRules.ftslib ? 'ftslib' : 'otzaria';
   limit('prefix_max_letters', prefixMaxLetters);
   limit('suffix_max_letters', suffixMaxLetters);
   limit('part_of_word_max_letters', partOfWordMaxLetters);
@@ -746,6 +764,7 @@ class WordOptions {
     this.aramaicPrefixes,
     this.aramaicSuffixes,
     this.ktivMaleHaser,
+    this.ktivRules,
     this.partOfWord,
     this.advancedPrefixes,
     this.advancedSuffixes,
@@ -766,6 +785,7 @@ class WordOptions {
   bool? ktivMaleHaser, partOfWord, advancedPrefixes, advancedSuffixes;
   bool? ignoreQuotes, exactQuotes, spellingErrors, matchNikud, matchTeamim;
   TypoMode? typoMode;
+  KtivRules? ktivRules;
   int? prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters, grammarPrefixMaxLetters;
 
   /// Extra words for this word's slot (Otzaria's alternativeWords), in query
@@ -777,7 +797,7 @@ class WordOptions {
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
             matchNikud, matchTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,
-            grammarPrefixMaxLetters),
+            grammarPrefixMaxLetters, ktivRules),
       };
 }
 

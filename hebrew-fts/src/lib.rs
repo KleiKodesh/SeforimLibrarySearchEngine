@@ -14,6 +14,7 @@
 
 pub mod chars;
 pub mod exact_terms;
+pub mod ftslib_ketiv;
 pub mod fuzzy;
 pub mod grammar;
 pub mod grammar_query;
@@ -47,4 +48,4 @@ pub use set_automaton::SetAutomaton;
 pub use user_regex::{HebrewRegexQuery, UserRegex, UserRegexError};
 pub use tokenizer::{register_hebrew_tokenizer, HebrewTokenizer, HEBREW_TOKENIZER_NAME};
 pub use marks::MarkFree;
-pub use walk::{HebrewWalkAutomaton, HebrewWalkQuery, TypoMode, WalkOptions};
+pub use walk::{HebrewWalkAutomaton, HebrewWalkQuery, KtivRules, TypoMode, WalkOptions};

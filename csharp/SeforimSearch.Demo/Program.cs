@@ -177,6 +177,10 @@ namespace SeforimSearch.Demo
             string queries = Option(args, "--queries") ?? throw new ArgumentException("--queries");
             string outDir = Option(args, "--out") ?? throw new ArgumentException("--out");
             int maxHits = int.TryParse(Option(args, "--max-hits"), out var mh) ? mh : 2000;
+            // --ketiv: FtsLib's expandKetiv through the facade (ktiv with FtsLib's rules).
+            var dumpWordOptions = args.Contains("--ketiv")
+                ? new WalkOptions { IgnoreQuotes = true, KtivMaleHaser = true, KtivRules = KtivRules.FtsLib }
+                : null;
             Directory.CreateDirectory(outDir);
             int n = 0;
             foreach (var raw in File.ReadAllLines(queries, Encoding.UTF8))
@@ -192,7 +196,7 @@ namespace SeforimSearch.Demo
                 {
                     w.WriteLine("{\"query\":" + JsonStr(query) + ",\"distance\":" + distance + "}");
                     foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
-                                 engine, query, distance, false, SeforimDbFtsSearcher.DefaultContextWords, null, terms))
+                                 engine, query, distance, false, SeforimDbFtsSearcher.DefaultContextWords, dumpWordOptions, terms))
                     {
                         var all = terms.All();
                         foreach (var h in batch.Hits)

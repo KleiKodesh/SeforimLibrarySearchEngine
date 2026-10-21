@@ -52,10 +52,23 @@ namespace SeforimSearch.Engine
         public string Text;
     }
 
+    /// <summary>How the typo option (שגיאות כתיב) expands a word.</summary>
+    public enum TypoMode
+    {
+        /// <summary>Exactly Otzaria: edit distance 1 (its Levenshtein-1 scan) for a
+        /// lone word of 4+ letters with typo as its only option; otherwise
+        /// Otzaria's sampled list (confusions, transpositions, deletions,
+        /// insertions of 13 letters; 3 letters: confusions only).</summary>
+        Otzaria = 0,
+        /// <summary>Edit distance 1 for every 4+-letter word in every combination
+        /// (confusions only for 3 letters, nothing for 2 or fewer).</summary>
+        FullEdit1 = 1,
+    }
+
     /// <summary>Hebrew walk options for a word (Otzaria's search options).</summary>
     public sealed class WalkOptions
     {
-        /// <summary>קידומות דקדוקיות (ו מ כש כ ב ש ל ה, combos up to 3 letters).</summary>
+        /// <summary>קידומות דקדוקיות (Otzaria's slots: ו מ דא כש כ ב ש ל ה ד, then כש כ ב ש ל ה ד, then ה).</summary>
         public bool GrammarPrefixes { get; set; }
         /// <summary>סיומות דקדוקיות.</summary>
         public bool GrammarSuffixes { get; set; }
@@ -76,8 +89,11 @@ namespace SeforimSearch.Engine
         /// <summary>Index terms must match as written. Off (default, Otzaria):
         /// a term also matches by its quote-free form, so רמבם finds רמב"ם.</summary>
         public bool ExactQuotes { get; set; }
-        /// <summary>שגיאות כתיב / OCR מצויות.</summary>
+        /// <summary>שגיאות כתיב, expanded per <see cref="TypoMode"/>.</summary>
         public bool SpellingErrors { get; set; }
+        /// <summary>Which typo behaviour <see cref="SpellingErrors"/> uses. Default
+        /// <see cref="TypoMode.Otzaria"/>.</summary>
+        public TypoMode TypoMode { get; set; }
         /// <summary>Ignore nikud (needs a KeepMarks index to matter).</summary>
         public bool IgnoreNikud { get; set; }
         /// <summary>Ignore te'amim (needs a KeepMarks index to matter).</summary>
@@ -96,7 +112,7 @@ namespace SeforimSearch.Engine
         public int? PartOfWordMaxLetters { get; set; }
 
         /// <summary>קידומות דקדוקיות: max total letters of a stacked prefix.
-        /// Null = default (3).</summary>
+        /// Null = no cap (Otzaria's full set).</summary>
         public int? GrammarPrefixMaxLetters { get; set; }
 
         internal void WriteJson(StringBuilder sb)
@@ -133,6 +149,12 @@ namespace SeforimSearch.Engine
             Flag("ignore_quotes", IgnoreQuotes);
             Flag("exact_quotes", ExactQuotes);
             Flag("spelling_errors", SpellingErrors);
+            if (TypoMode == TypoMode.FullEdit1)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append("\"typo_mode\":\"full_edit1\"");
+            }
             Flag("ignore_nikud", IgnoreNikud);
             Flag("ignore_teamim", IgnoreTeamim);
             sb.Append('}');

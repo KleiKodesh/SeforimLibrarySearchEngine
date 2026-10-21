@@ -66,6 +66,20 @@ pub enum GroupSpec {
     Any { alternatives: Vec<GroupSpec> },
 }
 
+/// Serializable mirror of [`hebrew_fts::TypoMode`]: which typo behaviour
+/// `spelling_errors` uses. JSON `"otzaria"` (default) / `"full_edit1"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypoModeSpec {
+    /// Exactly Otzaria: the Levenshtein-1 scan for a lone 4+-letter word
+    /// with typo as its only option, Otzaria's sampled list otherwise.
+    #[default]
+    Otzaria,
+    /// Edit distance 1 in every combination (≥4 letters).
+    #[serde(rename = "full_edit1")]
+    FullEdit1,
+}
+
 /// Serializable mirror of [`WalkOptions`].
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -82,6 +96,11 @@ pub struct WalkOptionsSpec {
     /// Index terms must match as written (off: also by their quote-free form).
     pub exact_quotes: bool,
     pub spelling_errors: bool,
+    /// Which typo behaviour `spelling_errors` uses.
+    pub typo_mode: TypoModeSpec,
+    /// Set by the engine: the word is one of several in the query.
+    #[serde(skip)]
+    pub phrase_word: bool,
     pub ignore_nikud: bool,
     pub ignore_teamim: bool,
     /// Caller-set limits (Otzaria). Absent = the walk's defaults.
@@ -89,6 +108,15 @@ pub struct WalkOptionsSpec {
     pub suffix_max_letters: Option<u32>,
     pub part_of_word_max_letters: Option<u32>,
     pub grammar_prefix_max_letters: Option<u32>,
+}
+
+/// Sets `phrase_word` on every word of `group`.
+fn mark_phrase_word(group: &mut GroupSpec) {
+    match group {
+        GroupSpec::Word { options, .. } => options.phrase_word = true,
+        GroupSpec::Any { alternatives } => alternatives.iter_mut().for_each(mark_phrase_word),
+        _ => {}
+    }
 }
 
 impl From<WalkOptionsSpec> for WalkOptions {
@@ -105,6 +133,11 @@ impl From<WalkOptionsSpec> for WalkOptions {
             ignore_quotes: s.ignore_quotes,
             exact_quotes: s.exact_quotes,
             spelling_errors: s.spelling_errors,
+            typo_mode: match s.typo_mode {
+                TypoModeSpec::Otzaria => hebrew_fts::TypoMode::Otzaria,
+                TypoModeSpec::FullEdit1 => hebrew_fts::TypoMode::FullEdit1,
+            },
+            phrase_word: s.phrase_word,
             ignore_nikud: s.ignore_nikud,
             ignore_teamim: s.ignore_teamim,
             prefix_max_letters: s.prefix_max_letters,
@@ -942,6 +975,17 @@ impl LineIndex {
     /// through the returned session, which applies the word-distance and
     /// order filters.
     pub fn search(&self, request: &SearchRequest) -> Result<SearchResult> {
+        // Otzaria's word options know whether the word stands alone (its
+        // single-word vs phrase budgets): mark the words of a multi-word query.
+        let phrase;
+        let request = if request.groups.len() > 1 {
+            let mut r = request.clone();
+            r.groups.iter_mut().for_each(mark_phrase_word);
+            phrase = r;
+            &phrase
+        } else {
+            request
+        };
         let keep_marks = self.options.keep_marks;
         let locator = if keep_marks {
             SnippetWindowLocator::keeping_marks(request.context_words)

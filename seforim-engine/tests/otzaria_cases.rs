@@ -15,7 +15,7 @@
 
 use seforim_engine::{
     ExcludeSpec, GroupSpec, IndexOptions, LineDoc, LineIndex, ProximitySpec, SearchRequest,
-    WalkOptionsSpec,
+    TypoModeSpec, WalkOptionsSpec,
 };
 
 fn w(word: &str) -> GroupSpec {
@@ -150,6 +150,41 @@ fn cases() -> Vec<Case> {
         Case { name: "רמב\"ם grammatical prefixes", lines: RAMBAM2,
             req: || SearchRequest { groups: vec![wo("רמב\"ם", |o| o.grammar_prefixes = true)], ..Default::default() },
             expect: Contains(&[2], &[]), positions_only: false },
+        // Otzaria advanced_typo_only_single_word_covers_full_edit_distance.
+        Case { name: "typo ברכה: full edit distance 1", lines: &["ברכה בראשית", "ברכגה אחר", "תורה צוה"],
+            req: || SearchRequest { groups: vec![wo("ברכה", |o| o.spelling_errors = true)], ..Default::default() },
+            expect: Exactly(&[1, 2]), positions_only: false },
+        // TypoMode::Otzaria: with another option, Otzaria's sampled list
+        // (no ג insertion); FullEdit1: the full edit distance 1.
+        Case { name: "typo + grammatical prefixes ברכה (Otzaria list)", lines: &["ברכה", "ברכגה", "והברקה", "תורה"],
+            req: || SearchRequest { groups: vec![wo("ברכה", |o| { o.spelling_errors = true; o.grammar_prefixes = true; })], ..Default::default() },
+            expect: Exactly(&[1, 3]), positions_only: false },
+        Case { name: "typo + grammatical prefixes ברכה (FullEdit1)", lines: &["ברכה", "ברכגה", "והברקה", "תורה"],
+            req: || SearchRequest { groups: vec![wo("ברכה", |o| { o.spelling_errors = true; o.grammar_prefixes = true; o.typo_mode = TypoModeSpec::FullEdit1; })], ..Default::default() },
+            expect: Exactly(&[1, 2, 3]), positions_only: false },
+        // Otzaria: a phrase word takes the sampled list, not the scan.
+        Case { name: "typo in a phrase ברכה בראשית (Otzaria list)", lines: &["ברכגה בראשית", "ברקה בראשית"],
+            req: || SearchRequest { groups: vec![wo("ברכה", |o| o.spelling_errors = true), w("בראשית")], ..Default::default() },
+            expect: Exactly(&[2]), positions_only: false },
+        // Otzaria advanced_typo_partial_single_word_finds_document.
+        Case { name: "typo + part of word משה", lines: &["ויאמר משה אל העם", "ספר בראשית"],
+            req: || SearchRequest { groups: vec![wo("משה", |o| { o.spelling_errors = true; o.part_of_word = true; })], ..Default::default() },
+            expect: Exactly(&[1]), positions_only: false },
+        // Otzaria typo_tolerance_scales_with_word_length (3 letters / 2 letters).
+        Case { name: "typo שבת: confusions only", lines: &["שבת", "שבט", "סבת", "שבתי", "בשת", "שב"],
+            req: || SearchRequest { groups: vec![wo("שבת", |o| o.spelling_errors = true)], ..Default::default() },
+            expect: Exactly(&[1, 2, 3]), positions_only: false },
+        Case { name: "typo אב: none", lines: &["אב", "עב", "אם", "אבג"],
+            req: || SearchRequest { groups: vec![wo("אב", |o| o.spelling_errors = true)], ..Default::default() },
+            expect: Exactly(&[1]), positions_only: false },
+        // Otzaria grammatical_morphology_covers_verbs_and_stacked_prefixes and
+        // grammatical_prefixes_need_a_root_and_skip_bare_alef.
+        Case { name: "grammatical prefix slots אמר", lines: &["וכשאמר", "ושכשאמר", "אאמר", "דאמר", "דאכשהאמר"],
+            req: || SearchRequest { groups: vec![wo("אמר", |o| o.grammar_prefixes = true)], ..Default::default() },
+            expect: Exactly(&[1, 4, 5]), positions_only: false },
+        Case { name: "grammatical prefix needs a root ית", lines: &["ית", "בית"],
+            req: || SearchRequest { groups: vec![wo("ית", |o| o.grammar_prefixes = true)], ..Default::default() },
+            expect: Exactly(&[1]), positions_only: false },
         Case { name: "custom spacing 0-1:2 1-2:0", lines: &["ויאמר ה' צבאות אל משה", "ויאמר אל העם ואל משה"],
             req: || spacing(vec![w("ויאמר"), w("אל"), w("משה")], vec![2, 0]),
             expect: Exactly(&[1]), positions_only: false },

@@ -13,9 +13,6 @@ pub const KTIV_VARIANTS_CAP: usize = 32;
 /// Aramaic prefixes (Otzaria `MAX_GRAMMATICAL_SPELLING_BRANCHES`).
 pub const KTIV_GRAMMATICAL_VARIANTS_CAP: usize = 16;
 
-/// Cap on variants produced by the spelling/OCR confusion expansion.
-pub const SPELLING_VARIANTS_CAP: usize = 64;
-
 /// The quote bytes a word can carry (the index folds ׳/״ to them).
 #[inline]
 fn is_quote(c: char) -> bool {
@@ -231,57 +228,130 @@ pub fn aramaic_ending_variants(word: &str) -> BTreeSet<String> {
     out
 }
 
-/// Common Hebrew misspelling / OCR confusion pairs. Tunable; each pair works
-/// in both directions, one substitution per variant.
-///
-/// Spelling (phonetic): א↔ע, ת↔ט, כ↔ק, ס↔ש, ח↔כ
-/// OCR (shape): ד↔ר, ה↔ח, ו↔ן, ב↔כ, י↔ו
-pub const CONFUSION_PAIRS: [(char, char); 10] = [
-    // phonetic
-    ('א', 'ע'),
-    ('ת', 'ט'),
-    ('כ', 'ק'),
-    ('ס', 'ש'),
-    ('ח', 'כ'),
-    // OCR shape
-    ('ד', 'ר'),
-    ('ה', 'ח'),
-    ('ו', 'ן'),
-    ('ב', 'כ'),
-    ('י', 'ו'),
-];
+// ── Otzaria's sampled typo list (hebrew_query.rs :1686-1820) ──
 
-/// שגיאות כתיב/OCR: single-substitution variants over [`CONFUSION_PAIRS`],
-/// plus, as in Otzaria's typo option (its quote is a grapheme a single
-/// deletion may drop), the word with one quote removed: רמב"ם → רמבם.
-/// Capped at [`SPELLING_VARIANTS_CAP`]; the original word is always included.
-pub fn spelling_variants(word: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    out.insert(word.to_string());
-    let chars: Vec<char> = word.chars().collect();
-    for i in 0..chars.len() {
-        if is_quote(chars[i]) {
-            let mut v = chars.clone();
-            v.remove(i);
-            out.insert(v.iter().collect());
+/// Otzaria `typo_substitutions`: the letter confusions a typo may make.
+pub fn typo_substitutions(c: char) -> &'static [char] {
+    match c {
+        'א' => &['ע', 'ה'],
+        'ע' => &['א', 'ה'],
+        'ה' => &['א', 'ע', 'ח'],
+        'ח' => &['ה'],
+        'ו' => &['ב'],
+        'ב' => &['ו'],
+        'כ' => &['ק'],
+        'ק' => &['כ'],
+        'ט' => &['ת'],
+        'ת' => &['ט'],
+        'ס' => &['ש'],
+        'ש' => &['ס'],
+        'צ' => &['ז'],
+        'ז' => &['צ'],
+        _ => &[],
+    }
+}
+
+/// Otzaria `INSERTION_LETTERS`: the letters its sampled list inserts
+/// (ordered by frequency).
+const TYPO_INSERTION_LETTERS: [char; 13] =
+    ['ו', 'י', 'א', 'ה', 'פ', 'ל', 'מ', 'נ', 'ב', 'כ', 'ש', 'ת', 'ר'];
+
+/// Otzaria `typo_letter_count`: letters a typo may change, quotes and
+/// marks not counted.
+pub fn typo_letter_count(word: &str) -> usize {
+    word.chars()
+        .filter(|&c| !is_quote(c) && !crate::chars::is_nikud(c) && !crate::chars::is_taam(c))
+        .count()
+}
+
+/// Otzaria `generate_common_typo_variations`: the word, its letter
+/// confusions, then its adjacent transpositions.
+fn common_typo_variations(chars: &[char], out: &mut Vec<String>, seen: &mut HashSet<String>) {
+    let mut push = |v: String| {
+        if seen.insert(v.clone()) {
+            out.push(v);
+        }
+    };
+    push(chars.iter().collect());
+    for (i, &c) in chars.iter().enumerate() {
+        for &sub in typo_substitutions(c) {
+            let mut v = chars.to_vec();
+            v[i] = sub;
+            push(v.iter().collect());
         }
     }
-    'outer: for i in 0..chars.len() {
-        for (a, b) in CONFUSION_PAIRS {
-            let alt = if chars[i] == a {
-                Some(b)
-            } else if chars[i] == b {
-                Some(a)
-            } else {
-                None
-            };
-            if let Some(alt) = alt {
+    for i in 0..chars.len().saturating_sub(1) {
+        if chars[i] != chars[i + 1] {
+            let mut v = chars.to_vec();
+            v.swap(i, i + 1);
+            push(v.iter().collect());
+        }
+    }
+}
+
+/// Otzaria `generate_typo_variations`, original first, capped at `max`:
+/// nothing for ≤2 letters, the letter confusions for 3, and for ≥4 the
+/// confusions and transpositions, then single deletions, then single
+/// insertions of [`TYPO_INSERTION_LETTERS`] (word start and end first, then
+/// the interior). Quotes are characters a deletion may drop (רמב"ם → רמבם).
+/// Its characters are Otzaria's graphemes on a mark-free word.
+pub fn otzaria_typo_variations(word: &str, max: usize) -> Vec<String> {
+    if word.is_empty() {
+        return vec![String::new()];
+    }
+    let letters = typo_letter_count(word);
+    if letters < 3 {
+        return vec![word.to_string()];
+    }
+    let chars: Vec<char> = word.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    if letters < 4 {
+        out.push(word.to_string());
+        seen.insert(word.to_string());
+        for (i, &c) in chars.iter().enumerate() {
+            for &sub in typo_substitutions(c) {
                 let mut v = chars.clone();
-                v[i] = alt;
-                out.insert(v.iter().collect());
-                if out.len() >= SPELLING_VARIANTS_CAP {
-                    break 'outer;
+                v[i] = sub;
+                let v: String = v.iter().collect();
+                if seen.insert(v.clone()) {
+                    out.push(v);
                 }
+            }
+        }
+        out.truncate(max.max(1));
+        return out;
+    }
+    let mut common = Vec::new();
+    common_typo_variations(&chars, &mut common, &mut HashSet::new());
+    let mut add = |v: String, out: &mut Vec<String>| -> bool {
+        if v.is_empty() || seen.contains(&v) {
+            return true;
+        }
+        seen.insert(v.clone());
+        out.push(v);
+        out.len() < max
+    };
+    for v in common {
+        if !add(v, &mut out) {
+            return out;
+        }
+    }
+    for i in 0..chars.len() {
+        let mut v = chars.clone();
+        v.remove(i);
+        if !v.is_empty() && !add(v.iter().collect(), &mut out) {
+            return out;
+        }
+    }
+    let mut positions = vec![0, chars.len()];
+    positions.extend(1..chars.len());
+    for pos in positions {
+        for letter in TYPO_INSERTION_LETTERS {
+            let mut v = chars.clone();
+            v.insert(pos, letter);
+            if !add(v.iter().collect(), &mut out) {
+                return out;
             }
         }
     }
@@ -401,19 +471,45 @@ mod tests {
         assert_eq!(aramaic_ending_variants("ספר").len(), 1);
     }
 
+    // Otzaria typo_tolerance_scales_with_word_length (the list part).
     #[test]
-    fn spelling_substitutions() {
-        let v = spelling_variants("אבד");
-        assert!(v.contains("עבד")); // א↔ע
-        assert!(v.contains("אבר")); // ד↔ר
-        assert!(v.contains("אכד")); // ב↔כ
-        assert!(v.contains("אבד"));
+    fn otzaria_typo_list_scales_with_word_length() {
+        assert_eq!(otzaria_typo_variations("אב", 100), vec!["אב"]);
+        let three = otzaria_typo_variations("שבת", 100);
+        for v in ["שבת", "סבת", "שות", "שבט"] {
+            assert!(three.contains(&v.to_string()), "{v}");
+        }
+        for v in ["שב", "שבתי", "בשת", "ששבת"] {
+            assert!(!three.contains(&v.to_string()), "{v}");
+        }
+        let four = otzaria_typo_variations("ברכה", 500);
+        for v in ["ברכ", "רבכה", "בברכה", "ברקה"] {
+            assert!(four.contains(&v.to_string()), "{v}");
+        }
+        assert!(!four.contains(&"ברכגה".to_string())); // ג is not an insertion letter
+        assert!(!four.contains(&"ברזה".to_string())); // כ↔ז is not a confusion
+        assert_eq!(typo_letter_count("ר\"ת"), 2);
     }
 
+    // Otzaria common_typo_covers_substitution_and_transposition.
     #[test]
-    fn spelling_errors_drop_a_quote() {
-        // Otzaria advanced_typo_and_prefix_flags_work_on_gershayim_tokens.
-        assert!(spelling_variants("רמב\"ם").contains("רמבם"));
-        assert!(!spelling_variants("רמבם").contains("רמב\"ם"));
+    fn otzaria_common_typos() {
+        let chars: Vec<char> = "בא".chars().collect();
+        let mut v = Vec::new();
+        common_typo_variations(&chars, &mut v, &mut HashSet::new());
+        assert_eq!(v[0], "בא");
+        for w in ["וא", "בע", "בה", "אב"] {
+            assert!(v.contains(&w.to_string()), "{w}");
+        }
+    }
+
+    // Otzaria typo_variations_respect_cap; original first.
+    #[test]
+    fn otzaria_typo_list_respects_cap() {
+        let v = otzaria_typo_variations("ברכות", 10);
+        assert_eq!(v.len(), 10);
+        assert_eq!(v[0], "ברכות");
+        assert!(otzaria_typo_variations("ברכות", 128).len() <= 128);
+        assert!(otzaria_typo_variations("רמב\"ם", 128).contains(&"רמבם".to_string()));
     }
 }

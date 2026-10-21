@@ -129,6 +129,14 @@ impl SetAutomaton {
         self.nodes[node as usize].flags
     }
 
+    /// The outgoing edges of `node`, sorted by byte (for composite walks
+    /// that step by whole characters, e.g. the typo edits).
+    #[inline]
+    pub(crate) fn edges(&self, node: u32) -> &[(u8, u32)] {
+        let n = self.nodes[node as usize];
+        &self.edges[n.edges_start as usize..(n.edges_start + n.edges_len) as usize]
+    }
+
     #[inline]
     pub(crate) fn step(&self, node: u32, byte: u8) -> Option<u32> {
         let n = self.nodes[node as usize];

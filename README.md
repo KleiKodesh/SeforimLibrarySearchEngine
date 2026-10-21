@@ -206,7 +206,7 @@ are not printed), so upstream's query-parser tests stay as they are.
   - **Grammar** (`%word`, `word%`): 34 prefixes and 32 suffixes.
   - **Otzaria options:** grammatical/Aramaic prefixes and suffixes, ktiv
     male/haser, part-of-word, advanced prefixes/suffixes, ignore gershayim,
-    spelling/OCR errors, ignore nikud, ignore te'amim. Ported from Otzaria's
+    typos (שגיאות כתיב), ignore nikud, ignore te'amim. Ported from Otzaria's
     code (`hebrew_query.rs`, `quote_expansion.rs`), all inside the walk:
     - **Quote-free terms** (always, unless `exact_quotes`): an index term also
       matches by its quote-free form, so `רמבם` finds `רמב"ם` (Otzaria's
@@ -222,7 +222,31 @@ are not printed), so upstream's query-parser tests stay as they are.
       (מלך → מלכים), final ה → ת/ות (תורה → תורתו).
     - **Root floor**: grammatical prefixes and suffixes need a root of 3
       letters (אב ↛ אבות, ית ↛ בית); abbreviations are exempt (ר' → ר'ים).
-    - **Spelling errors** may also drop one quote (רמב"ם → רמבם).
+    - **קידומות דקדוקיות**: Otzaria's `prefix_group`, three optional slots:
+      one of ו מ דא כש כ ב ש ל ה ד, then one of כש כ ב ש ל ה ד, then ה
+      (up to 5 letters: דאכשה־); Aramaic prefixes add א to the first slot.
+      Composes with the advanced prefix window (union, as Otzaria's lead).
+    - **שגיאות כתיב**, two behaviours, chosen by `typo_mode` (letters
+      counted without quotes/marks; ≤2 letters never take a typo):
+      - `otzaria` (default, exactly Otzaria): a lone word of ≥4 letters
+        whose only option is typo gets edit distance 1 (substitution,
+        deletion, insertion, adjacent transposition: Otzaria's
+        Levenshtein-1 scan). Otherwise (another option, a phrase word, or
+        3 letters) Otzaria's sampled list `generate_typo_variations`:
+        confusions (א/ע/ה, ח/ה, ו/ב, כ/ק, ט/ת, ס/ש, צ/ז) and adjacent
+        transpositions, then deletions, then insertions of its 13 letters;
+        3 letters only confusions; cap 128 roots (64 in a phrase), each
+        through the other options.
+      - `full_edit1`: edit distance 1 for every ≥4-letter word in every
+        combination; 3 letters only the confusions.
+      The edit distance is edit states of the walk automaton's core phase;
+      the sampled list is core forms of the same walk's trie. Either way one
+      walk per word, shortest-first and capped, with the matched-terms sink.
+      Not ported: Otzaria's phrase char budget (`MAX_PATTERN_CHARS`), which
+      only trims regex text it compiles.
+    - **Plain fast path**: a word whose options only add core forms (none,
+      ktiv, Aramaic endings, the typo list) walks the core trie alone, with
+      no per-byte option checks.
   - **Length limits are set by the caller** (Otzaria), as plain ints; unset
     means the default:
 
@@ -231,7 +255,7 @@ are not printed), so upstream's query-parser tests stay as they are.
     | `PrefixMaxLetters` | 3 (5 for a word of ≤3 letters) |
     | `SuffixMaxLetters` | 5 (7 for a short word) |
     | `PartOfWordMaxLetters` | 3 per side (2 for 4+-letter words) |
-    | `GrammarPrefixMaxLetters` | 3 |
+    | `GrammarPrefixMaxLetters` | none (Otzaria's full set, ≤5 letters) |
   - **Wildcard** (`*`, `?`) with FtsLib's limits:
     - at least 2 real letters, at most 4 `?`
     - `*` may cover 3 characters before the anchor, 4 after it, or 7 in total

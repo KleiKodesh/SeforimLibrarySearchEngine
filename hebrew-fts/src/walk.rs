@@ -5,8 +5,9 @@
 //! phase], where each phase is either a closed trie (grammatical
 //! prefixes/suffixes, incl. Aramaic) or a counted any-letter run (advanced /
 //! part-of-word). Core variants come from the enabled generators (ktiv
-//! מלא/חסר, Aramaic endings, spelling/OCR confusions). The walk visits only
-//! branches a candidate shape allows; the index itself verifies existence.
+//! מלא/חסר, Aramaic endings); the typo option adds edit states to the core
+//! phase. The walk visits only branches a candidate shape allows; the index
+//! itself verifies existence.
 //!
 //! Options (per the Otzaria spec):
 //! - חלק ממילה: word inside a larger word, ≤3 any-letters per side (≤2 when
@@ -14,9 +15,12 @@
 //! - כתיב מלא/חסר: Otzaria's י/ו rules (`variants::ktiv_male_haser_variants_limited`):
 //!   מצות ↔ מצוות but not מצת, אותו ↛ אות, שבת ↛ שבות (≤32 variants, 16
 //!   with grammatical options).
-//! - קידומות דקדוקיות: combos of ו מ כש כ ב ש ל ה up to 3 letters; with
-//!   Aramaic also ד דא א (ודמלכתא). תורה ↔ והתורה. A root under 3 letters
-//!   takes none (ית ↛ בית) unless an abbreviation (ר' → ור').
+//! - קידומות דקדוקיות: Otzaria's three optional slots (`prefix_group`):
+//!   one of ו מ דא כש כ ב ש ל ה ד, then one of כש כ ב ש ל ה ד, then ה
+//!   (והתורה, ושבכשה…); with Aramaic the first slot also takes א
+//!   (ודמלכתא). A root under 3 letters takes none (ית ↛ בית) unless an
+//!   abbreviation (ר' → ור'). Composes with the advanced prefix window
+//!   (Otzaria's lead is the union of both).
 //! - סיומות דקדוקיות: Otzaria's table (`GRAM_SUFFIXES`), past-tense endings
 //!   for 3–4 letter roots; a final letter takes its base form (מלך → מלכים) and
 //!   a final ה turns to ת/ות (תורה → תורתו); a root under 3 letters takes
@@ -27,8 +31,12 @@
 //! - קידומות/סיומות מתקדם: ANY letters — ≤3 before (≤5 for a short word),
 //!   ≤5 after (≤7 for a short word); both together ≡ חלק ממילה.
 //! - התעלם מגרשיים: the canonical '"' is transparent anywhere.
-//! - שגיאות כתיב/OCR: single confusion-pair substitutions, or one quote
-//!   dropped (רמב"ם → רמבם, as Otzaria's typo deletion).
+//! - שגיאות כתיב (Otzaria's typo option, `generate_typo_variations` /
+//!   its Levenshtein-1 scan): a typed word of ≥4 letters (quotes and marks
+//!   not counted) takes edit distance 1 — one substitution, deletion,
+//!   insertion or adjacent transposition — as edit states of this walk;
+//!   a 3-letter word only Otzaria's letter-confusion substitutions
+//!   (`typo_substitutions`); ≤2 letters nothing.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -47,6 +55,22 @@ use crate::variants;
 /// A word with ≤ this many letters counts as "short" (raises the advanced
 /// prefix/suffix allowances).
 pub const SHORT_WORD_MAX_LETTERS: usize = 3;
+
+/// How the typo option (שגיאות כתיב) expands a word.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TypoMode {
+    /// Exactly Otzaria (default): edit distance 1 (its Levenshtein-1 scan)
+    /// when the word has ≥4 letters, typo is its only expansion option and
+    /// it is the query's only word; otherwise Otzaria's sampled list
+    /// (`generate_typo_variations`: confusions, transpositions, deletions,
+    /// insertions of 13 letters; 3 letters: confusions only; cap 128, 64 in
+    /// a phrase), composed with the other options.
+    #[default]
+    Otzaria,
+    /// Edit distance 1 for every word of ≥4 letters in every combination
+    /// (confusions only for 3 letters, nothing for ≤2).
+    FullEdit1,
+}
 
 /// Search options, mirroring Otzaria's checkboxes. All off = exact word.
 #[derive(Debug, Clone, Copy, Default)]
@@ -74,8 +98,13 @@ pub struct WalkOptions {
     /// query time by [`crate::quote_free::QuoteFree`]). On: index terms must
     /// match as written.
     pub exact_quotes: bool,
-    /// שגיאות כתיב/OCR מצויות
+    /// שגיאות כתיב (Otzaria's typo option), expanded per [`TypoMode`].
     pub spelling_errors: bool,
+    /// Which typo behaviour [`Self::spelling_errors`] uses.
+    pub typo_mode: TypoMode,
+    /// The word is one of several in the query (Otzaria's phrase budget,
+    /// and no Levenshtein scan in [`TypoMode::Otzaria`]). Set by the engine.
+    pub phrase_word: bool,
     /// Ignore nikud: בראשית matches בְּרֵאשִׁית (needs a marks-keeping field,
     /// `hebrew_marked`). Off: vocalization must match exactly.
     pub ignore_nikud: bool,
@@ -92,13 +121,19 @@ pub struct WalkOptions {
     /// חלק ממילה: max letters on each side. Default 3, or 2 for a word of
     /// ≥4 letters.
     pub part_of_word_max_letters: Option<u32>,
-    /// קידומות דקדוקיות: max total letters of a stacked prefix. Default 3.
+    /// קידומות דקדוקיות: optional cap on the letters of a stacked prefix.
+    /// None (default) = Otzaria's full three-slot set (up to 5 letters).
     pub grammar_prefix_max_letters: Option<u32>,
 }
 
-/// Prefix units for the closed grammatical prefix phase.
-const PREFIX_UNITS: [&str; 8] = ["ו", "מ", "כש", "כ", "ב", "ש", "ל", "ה"];
-const ARAMAIC_PREFIX_UNITS: [&str; 3] = ["דא", "ד", "א"];
+/// First slot of the grammatical prefix (Otzaria `GRAM_PREFIX_ALTS_A`).
+const GRAM_PREFIX_A: [&str; 10] = ["ו", "מ", "דא", "כש", "כ", "ב", "ש", "ל", "ה", "ד"];
+/// First slot under Aramaic prefixes (Otzaria `ARAMAIC_PREFIX_ALTS_A`).
+const ARAMAIC_PREFIX_A: [&str; 11] = ["ו", "מ", "דא", "א", "כש", "כ", "ב", "ש", "ל", "ה", "ד"];
+/// Second slot (Otzaria `GRAM_PREFIX_ALTS_B`).
+const GRAM_PREFIX_B: [&str; 7] = ["כש", "כ", "ב", "ש", "ל", "ה", "ד"];
+/// Last slot, the definite article (Otzaria `HE_ALTS`).
+const HE_PREFIX: [&str; 1] = ["ה"];
 
 /// סיומות דקדוקיות: Otzaria's `GRAM_SUFFIX_ALTS` (hebrew_query.rs), possessive,
 /// plural and the rare יות/יא/תא endings. Not FtsLib's `%` table
@@ -130,29 +165,37 @@ const CORE_WINDOW: u8 = 8;
 /// The form takes grammatical prefixes (root long enough, or an abbreviation).
 const CORE_PREFIXABLE: u8 = 16;
 
-/// All closed-list prefixes: sequences of distinct units, total ≤ `max_letters`.
-fn closed_prefixes(aramaic: bool, max_letters: usize) -> BTreeSet<String> {
-    let mut units: Vec<&str> = PREFIX_UNITS.to_vec();
-    if aramaic {
-        units.extend(ARAMAIC_PREFIX_UNITS);
-    }
+/// The closed prefix set: Otzaria's `prefix_group`, three optional slots
+/// `(A)?(B)?(ה)?` with A = [`GRAM_PREFIX_A`] (or [`ARAMAIC_PREFIX_A`]),
+/// B = [`GRAM_PREFIX_B`]. The bare (empty) prefix is the walk's direct path
+/// to the core. `max_letters`: the caller's optional cap.
+fn closed_prefixes(aramaic: bool, max_letters: Option<usize>) -> BTreeSet<String> {
+    let first: &[&str] = if aramaic { &ARAMAIC_PREFIX_A } else { &GRAM_PREFIX_A };
+    let slot = |alts: &'static [&'static str]| std::iter::once("").chain(alts.iter().copied());
     let mut out = BTreeSet::new();
-    // Each unit is used at most once, so depth is bounded by the unit count.
-    fn recurse(units: &[&str], current: String, used: u32, max: usize, out: &mut BTreeSet<String>) {
-        for (i, unit) in units.iter().enumerate() {
-            if used & (1 << i) != 0 {
-                continue;
+    for a in std::iter::once("").chain(first.iter().copied()) {
+        for b in slot(&GRAM_PREFIX_B) {
+            for h in slot(&HE_PREFIX) {
+                let p = format!("{a}{b}{h}");
+                if !p.is_empty() && max_letters.is_none_or(|m| p.chars().count() <= m) {
+                    out.insert(p);
+                }
             }
-            let combined = format!("{current}{unit}");
-            if combined.chars().count() > max {
-                continue;
-            }
-            out.insert(combined.clone());
-            recurse(units, combined, used | (1 << i), max, out);
         }
     }
-    recurse(&units, String::new(), 0, max_letters, &mut out);
     out
+}
+
+/// Otzaria's typo tolerance by the typed word's length
+/// (`MIN_TYPO_SUBSTITUTION_LETTERS` / `MIN_TYPO_EDIT_LETTERS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Typo {
+    Off,
+    /// 3 letters: one [`typo_substitutions`] substitution.
+    Confusions,
+    /// ≥4 letters: edit distance 1 (substitution, deletion, insertion,
+    /// adjacent transposition; Otzaria's `FuzzyTermQuery(.., 1, true)`).
+    Full,
 }
 
 fn is_quote_char(c: char) -> bool {
@@ -255,9 +298,12 @@ fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
         })
         .collect();
     let mut set = BTreeSet::new();
-    set.insert(word);
-    if options.spelling_errors {
-        set = variants::expand_set(&set, variants::spelling_variants);
+    // Otzaria's order: the typo roots first, each through the other options.
+    match typo_plan(&word, options) {
+        TypoPlan::List(cap) => set.extend(variants::otzaria_typo_variations(&word, cap)),
+        _ => {
+            set.insert(word);
+        }
     }
     if options.aramaic_suffixes {
         set = variants::expand_set(&set, variants::aramaic_ending_variants);
@@ -279,6 +325,51 @@ fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
     set
 }
 
+/// How the typo option expands this word.
+enum TypoPlan {
+    Off,
+    /// Edit states in the walk's core phase.
+    Automaton(Typo),
+    /// Otzaria's sampled list (cap) as core forms of the walk's trie.
+    List(usize),
+}
+
+/// Otzaria `WordFlags::expands_beyond_typo`.
+fn expands_beyond_typo(o: &WalkOptions) -> bool {
+    o.advanced_prefixes
+        || o.advanced_suffixes
+        || o.grammar_prefixes
+        || o.grammar_suffixes
+        || o.ktiv_male_haser
+        || o.part_of_word
+        || o.aramaic_prefixes
+        || o.aramaic_suffixes
+}
+
+fn typo_plan(word: &str, options: &WalkOptions) -> TypoPlan {
+    if !options.spelling_errors {
+        return TypoPlan::Off;
+    }
+    let letters = variants::typo_letter_count(word);
+    match options.typo_mode {
+        TypoMode::FullEdit1 => match letters {
+            0..=2 => TypoPlan::Off,
+            3 => TypoPlan::Automaton(Typo::Confusions),
+            _ => TypoPlan::Automaton(Typo::Full),
+        },
+        TypoMode::Otzaria => {
+            if letters < 3 {
+                TypoPlan::Off
+            } else if letters >= 4 && !options.phrase_word && !expands_beyond_typo(options) {
+                TypoPlan::Automaton(Typo::Full)
+            } else {
+                // SINGLE_WORD_BUDGET / PHRASE_BUDGET `typo_variations`.
+                TypoPlan::List(if options.phrase_word { 64 } else { 128 })
+            }
+        }
+    }
+}
+
 // ── Composite automaton ──────────────────────────────────────────────────
 
 /// NFA configuration, packed: tag(3) | pending-kind(3) | value(32).
@@ -288,7 +379,7 @@ fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
 /// any-letter phase; 2 = saw a possible mark lead 0xD6 (skipping a
 /// nikud/ta'am); 3 = saw a possible 0xD7-encoded nikud (shin/sin dots,
 /// qamatz qatan).
-type Config = u64;
+pub type Config = u64;
 
 const TAG_PRE: u64 = 0;
 const TAG_PRE_ANY: u64 = 1;
@@ -306,6 +397,53 @@ const PEND_NONE: u64 = 0;
 const PEND_LETTER: u64 = 1;
 const PEND_MARK_D6: u64 = 2;
 const PEND_MARK_D7: u64 = 3;
+/// Typo edit in the core: read the lead byte (kept in the data bits) of a
+/// two-byte character.
+const PEND_EDIT_LEAD: u64 = 4;
+/// Typo transposition: the swapped-out character (data bits, as a
+/// [`char_key`]) must come next, then the walk resumes at the value node.
+const PEND_OWE: u64 = 5;
+/// The same, its lead byte already read: the tail byte (data bits) is owed.
+const PEND_OWE_TAIL: u64 = 6;
+
+/// A core config that has used its one typo edit (bit 39).
+const EDITED: u64 = 1 << 39;
+/// Data bits of the typo pending kinds (bits 40..56).
+const DATA_SHIFT: u32 = 40;
+
+#[inline]
+fn data(c: Config) -> u16 {
+    (c >> DATA_SHIFT) as u16
+}
+#[inline]
+fn with_data(c: Config, d: u16) -> Config {
+    c | ((d as u64) << DATA_SHIFT)
+}
+
+/// A one- or two-byte UTF-8 character as one number (lead << 8 | tail).
+#[inline]
+fn char_key(lead: u8, tail: Option<u8>) -> u16 {
+    match tail {
+        None => lead as u16,
+        Some(tail) => ((lead as u16) << 8) | tail as u16,
+    }
+}
+#[inline]
+fn is_two_byte_lead(b: u8) -> bool {
+    (0xC2..=0xDF).contains(&b)
+}
+#[inline]
+fn is_continuation(b: u8) -> bool {
+    (0x80..=0xBF).contains(&b)
+}
+fn key_char(key: u16) -> Option<char> {
+    let bytes = if key < 0x80 {
+        vec![key as u8]
+    } else {
+        vec![(key >> 8) as u8, key as u8]
+    };
+    std::str::from_utf8(&bytes).ok()?.chars().next()
+}
 
 #[inline]
 fn pack(tag: u64, pending: u64, value: u32) -> Config {
@@ -368,6 +506,11 @@ pub struct HebrewWalkAutomaton {
     /// A grammatical prefix needs a core form tagged [`CORE_PREFIXABLE`].
     /// Off under Aramaic prefixes: Otzaria's Aramaic arm has no root floor.
     gate_prefixes: bool,
+    /// שגיאות כתיב: the one edit the core may take.
+    typo: Typo,
+    /// No phase, edit or transparency besides the core trie: walk the trie
+    /// alone ([`WalkState::Trie`]).
+    trie_only: bool,
     transparent_quotes: bool,
     ignore_nikud: bool,
     ignore_teamim: bool,
@@ -404,9 +547,15 @@ impl HebrewWalkAutomaton {
                     .unwrap_or(if short { 7 } else { 5 });
             }
         }
-        let grammar_prefix_max = options.grammar_prefix_max_letters.unwrap_or(3) as usize;
+        let grammar_prefix_max = options.grammar_prefix_max_letters.map(|m| m as usize);
+        let typo = match typo_plan(word, options) {
+            TypoPlan::Automaton(t) => t,
+            TypoPlan::Off | TypoPlan::List(_) => Typo::Off,
+        };
 
-        let prefixes = if any_pre == 0 && grammar_prefixes {
+        // Otzaria's lead is the union of the prefix window and the
+        // grammatical prefix group (`affix_arms`), so both may run.
+        let prefixes = if grammar_prefixes {
             Some(SetAutomaton::from_strings(
                 &closed_prefixes(options.aramaic_prefixes, grammar_prefix_max),
             ))
@@ -428,6 +577,7 @@ impl HebrewWalkAutomaton {
             tagged_forms(&form, options, any_post > 0, &mut tagged);
         }
 
+        let prefixes_none = prefixes.is_none();
         HebrewWalkAutomaton {
             core: SetAutomaton::from_tagged(tagged),
             prefixes,
@@ -436,6 +586,15 @@ impl HebrewWalkAutomaton {
             verb_suffixes,
             any_suffix_max: any_post,
             gate_prefixes: !options.aramaic_prefixes,
+            typo,
+            trie_only: prefixes_none
+                && any_pre == 0
+                && !options.grammar_suffixes
+                && any_post == 0
+                && typo == Typo::Off
+                && !options.ignore_nikud
+                && !options.ignore_teamim
+                && !options.ignore_quotes,
             transparent_quotes: options.ignore_quotes,
             ignore_nikud: options.ignore_nikud,
             ignore_teamim: options.ignore_teamim,
@@ -467,6 +626,13 @@ impl HebrewWalkAutomaton {
                 self.close_into(pack(TAG_CORE, PEND_NONE, SetAutomaton::ROOT), set);
             }
             TAG_CORE => {
+                // Typo deletion: skip one character of the core form.
+                if self.typo == Typo::Full && config & EDITED == 0 {
+                    let gate = config & PREFIXED;
+                    self.for_each_child_char(value(config), |_, target| {
+                        self.close_into(pack(TAG_CORE, PEND_NONE, target) | gate | EDITED, set);
+                    });
+                }
                 let flags = self.core_flags(config);
                 if flags & CORE_GRAM != 0 {
                     if flags & CORE_VERB != 0 && self.verb_suffixes.is_some() {
@@ -508,11 +674,97 @@ impl HebrewWalkAutomaton {
         }
     }
 
+    /// Calls `f(char_key, node)` for every one- or two-byte character the
+    /// core trie spells from `node`.
+    fn for_each_child_char(&self, node: u32, mut f: impl FnMut(u16, u32)) {
+        for &(b, t) in self.core.edges(node) {
+            if b < 0x80 {
+                f(char_key(b, None), t);
+            } else if is_two_byte_lead(b) {
+                for &(b2, t2) in self.core.edges(t) {
+                    f(char_key(b, Some(b2)), t2);
+                }
+            }
+        }
+    }
+
+    /// The typo edits once the term has shown a whole character `read` at
+    /// the unedited core config `config`: insertion (the character is extra),
+    /// substitution (it replaces one of the form's), transposition (it is
+    /// the form's next-but-one, swapped with the next).
+    fn typo_after_char(&self, config: Config, read: u16, out: &mut Vec<Config>) {
+        let node = value(config);
+        let gate = config & PREFIXED;
+        match self.typo {
+            Typo::Off => {}
+            Typo::Confusions => {
+                let Some(r) = key_char(read) else { return };
+                self.for_each_child_char(node, |k, target| {
+                    if key_char(k).is_some_and(|k| variants::typo_substitutions(k).contains(&r)) {
+                        self.close_into(pack(TAG_CORE, PEND_NONE, target) | gate | EDITED, out);
+                    }
+                });
+            }
+            Typo::Full => {
+                self.close_into(pack(TAG_CORE, PEND_NONE, node) | gate | EDITED, out);
+                self.for_each_child_char(node, |k, target| {
+                    if k == read {
+                        return;
+                    }
+                    self.close_into(pack(TAG_CORE, PEND_NONE, target) | gate | EDITED, out);
+                    let mut after = None;
+                    self.for_each_child_char(target, |k2, t2| {
+                        if k2 == read {
+                            after = Some(t2);
+                        }
+                    });
+                    if let Some(t2) = after {
+                        let owe = with_data(pack(TAG_CORE, PEND_OWE, t2) | gate | EDITED, k);
+                        if !out.contains(&owe) {
+                            out.push(owe);
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     fn step_config(&self, config: Config, byte: u8, out: &mut Vec<Config>) {
         let t = tag(config);
-        // The prefix gate travels with the core configs.
-        let gate = config & PREFIXED;
+        // The prefix gate and the used typo edit travel with the core configs.
+        let gate = config & (PREFIXED | EDITED);
         match pending(config) {
+            PEND_EDIT_LEAD => {
+                if is_continuation(byte) {
+                    let base = pack(TAG_CORE, PEND_NONE, value(config)) | gate;
+                    self.typo_after_char(base, char_key(data(config) as u8, Some(byte)), out);
+                }
+                return;
+            }
+            PEND_OWE => {
+                let owed = data(config);
+                let resume = pack(TAG_CORE, PEND_NONE, value(config)) | gate | EDITED;
+                if owed < 0x80 {
+                    if byte as u16 == owed {
+                        self.close_into(resume, out);
+                    }
+                } else if byte as u16 == owed >> 8 {
+                    let next = with_data(
+                        pack(TAG_CORE, PEND_OWE_TAIL, value(config)) | gate | EDITED,
+                        owed & 0xFF,
+                    );
+                    if !out.contains(&next) {
+                        out.push(next);
+                    }
+                }
+                return;
+            }
+            PEND_OWE_TAIL => {
+                if byte as u16 == data(config) {
+                    self.close_into(pack(TAG_CORE, PEND_NONE, value(config)) | gate | EDITED, out);
+                }
+                return;
+            }
             // Resolving a possible skipped mark: 0xD6 <tail>.
             PEND_MARK_D6 => {
                 if (self.ignore_teamim && is_taam_tail(byte))
@@ -574,8 +826,23 @@ impl HebrewWalkAutomaton {
                 }
             }
             TAG_CORE => {
+                let edited = config & EDITED;
                 if let Some(next) = self.core.step(value(config), byte) {
-                    self.close_into(pack(TAG_CORE, PEND_NONE, next) | gate, out);
+                    self.close_into(pack(TAG_CORE, PEND_NONE, next) | gate | edited, out);
+                }
+                // The typo edits, as walk states: one per core path.
+                if self.typo != Typo::Off && edited == 0 {
+                    if byte < 0x80 {
+                        self.typo_after_char(config, char_key(byte, None), out);
+                    } else if is_two_byte_lead(byte) {
+                        let lead = with_data(
+                            pack(TAG_CORE, PEND_EDIT_LEAD, value(config)) | gate,
+                            byte as u16,
+                        );
+                        if !out.contains(&lead) {
+                            out.push(lead);
+                        }
+                    }
                 }
                 if self.transparent_quotes && byte == b'"' {
                     self.close_into(config, out);
@@ -619,32 +886,59 @@ impl HebrewWalkAutomaton {
 
 }
 
+/// A walk state. A query whose options only add core forms (none, ktiv,
+/// Aramaic endings, Otzaria's typo list) walks the core trie alone, as a
+/// plain term set: no option checks and no config sets per byte. Every
+/// other query walks the composite NFA.
+#[derive(Clone, Debug)]
+pub enum WalkState {
+    /// Core trie node; None = dead.
+    Trie(Option<u32>),
+    /// Sorted NFA config set; empty = dead.
+    Nfa(Vec<Config>),
+}
+
 impl Automaton for HebrewWalkAutomaton {
-    type State = Vec<Config>;
+    type State = WalkState;
 
-    fn start(&self) -> Vec<Config> {
-        self.start_configs()
-    }
-
-    fn is_match(&self, state: &Vec<Config>) -> bool {
-        state.iter().any(|&c| self.config_is_match(c))
-    }
-
-    fn accept(&self, state: &Vec<Config>, byte: u8) -> Vec<Config> {
-        let mut out = Vec::with_capacity(state.len());
-        for &config in state {
-            self.step_config(config, byte, &mut out);
+    fn start(&self) -> WalkState {
+        if self.trie_only {
+            WalkState::Trie(Some(SetAutomaton::ROOT))
+        } else {
+            WalkState::Nfa(self.start_configs())
         }
-        out.sort_unstable();
-        out.dedup();
-        out
     }
 
-    fn can_match(&self, state: &Vec<Config>) -> bool {
-        !state.is_empty()
+    fn is_match(&self, state: &WalkState) -> bool {
+        match state {
+            WalkState::Trie(node) => node.is_some_and(|n| self.core.node_flags(n) & CORE_BARE != 0),
+            WalkState::Nfa(configs) => configs.iter().any(|&c| self.config_is_match(c)),
+        }
     }
 
-    fn will_always_match(&self, _state: &Vec<Config>) -> bool {
+    fn accept(&self, state: &WalkState, byte: u8) -> WalkState {
+        match state {
+            WalkState::Trie(node) => WalkState::Trie(node.and_then(|n| self.core.step(n, byte))),
+            WalkState::Nfa(configs) => {
+                let mut out = Vec::with_capacity(configs.len());
+                for &config in configs {
+                    self.step_config(config, byte, &mut out);
+                }
+                out.sort_unstable();
+                out.dedup();
+                WalkState::Nfa(out)
+            }
+        }
+    }
+
+    fn can_match(&self, state: &WalkState) -> bool {
+        match state {
+            WalkState::Trie(node) => node.is_some(),
+            WalkState::Nfa(configs) => !configs.is_empty(),
+        }
+    }
+
+    fn will_always_match(&self, _state: &WalkState) -> bool {
         false
     }
 }
@@ -743,6 +1037,24 @@ mod tests {
     }
 
     #[test]
+    fn core_only_options_walk_the_trie_alone() {
+        for o in [
+            WalkOptions::default(),
+            WalkOptions { ktiv_male_haser: true, aramaic_suffixes: true, ..Default::default() },
+            WalkOptions { spelling_errors: true, phrase_word: true, ..Default::default() },
+        ] {
+            assert!(matches!(walk("תורה", o).start(), WalkState::Trie(_)), "{o:?}");
+        }
+        for o in [
+            WalkOptions { grammar_prefixes: true, ..Default::default() },
+            WalkOptions { ignore_quotes: true, ..Default::default() },
+            WalkOptions { spelling_errors: true, ..Default::default() }, // lone word: edit states
+        ] {
+            assert!(matches!(walk("תורה", o).start(), WalkState::Nfa(_)), "{o:?}");
+        }
+    }
+
+    #[test]
     fn exact_by_default() {
         let a = walk("תורה", WalkOptions::default());
         assert!(matches(&a, "תורה"));
@@ -763,7 +1075,8 @@ mod tests {
         assert!(matches(&a, "התורה"));
         assert!(matches(&a, "בתורה"));
         assert!(matches(&a, "והתורה")); // combo ו+ה
-        assert!(!matches(&a, "דתורה")); // Aramaic off
+        assert!(matches(&a, "דתורה")); // ד is in Otzaria's group
+        assert!(!matches(&a, "אתורה")); // bare א only with Aramaic
         assert!(!matches(&a, "קתורה")); // not a prefix unit
     }
 
@@ -958,17 +1271,193 @@ mod tests {
         assert!(!matches(&a3, "רמב\"ם"));
     }
 
+    fn typo() -> WalkOptions {
+        WalkOptions {
+            spelling_errors: true,
+            typo_mode: TypoMode::FullEdit1,
+            ..Default::default()
+        }
+    }
+
+    fn otz(o: WalkOptions) -> WalkOptions {
+        WalkOptions { spelling_errors: true, typo_mode: TypoMode::Otzaria, ..o }
+    }
+
+    // TypoMode::Otzaria, Otzaria's typo_tolerance_scales_with_word_length
+    // and advanced_typo_only_single_word_covers_full_edit_distance: a lone
+    // 4+-letter word with typo only gets the Levenshtein-1 scan.
     #[test]
-    fn spelling_errors() {
+    fn otzaria_typo_lone_word_is_edit_distance_1() {
+        let a = walk("ברכה", otz(WalkOptions::default()));
+        for v in ["ברכה", "ברכ", "רבכה", "בברכה", "ברקה", "ברכגה", "ברזה"] {
+            assert!(matches(&a, v), "{v}");
+        }
+        assert!(!matches(&a, "תורה"));
+        let a = walk("שבת", otz(WalkOptions::default()));
+        for v in ["שבת", "סבת", "שות", "שבט"] {
+            assert!(matches(&a, v), "{v}");
+        }
+        for v in ["שב", "שבתי", "בשת", "ששבת"] {
+            assert!(!matches(&a, v), "{v}");
+        }
+        assert!(!matches(&walk("אב", otz(WalkOptions::default())), "עב"));
+    }
+
+    // TypoMode::Otzaria: with another option, or inside a phrase, the
+    // sampled list (generate_typo_variations) replaces the scan.
+    #[test]
+    fn otzaria_typo_with_options_uses_the_sampled_list() {
+        let a = walk("ברכה", otz(WalkOptions { grammar_prefixes: true, ..Default::default() }));
+        for v in ["והברקה", "ברכ", "רבכה", "בברכה", "וברכה"] {
+            assert!(matches(&a, v), "{v}");
+        }
+        assert!(!matches(&a, "ברכגה")); // ג is not an insertion letter
+        assert!(!matches(&a, "ברזה")); // כ↔ז is not a confusion
+        let a = walk("ברכה", otz(WalkOptions { phrase_word: true, ..Default::default() }));
+        assert!(matches(&a, "ברקה"));
+        assert!(!matches(&a, "ברכגה"));
+        // Otzaria advanced_typo_partial_single_word_finds_document.
+        let a = walk("משה", otz(WalkOptions { part_of_word: true, ..Default::default() }));
+        assert!(matches(&a, "משה"));
+        assert!(matches(&a, "ממשה"));
+    }
+
+    // Otzaria typo_tolerance_scales_with_word_length.
+    #[test]
+    fn typo_tolerance_scales_with_word_length() {
+        // ≤2 letters: no typo at all.
+        let a = walk("אב", typo());
+        assert!(matches(&a, "אב"));
+        for v in ["עב", "אבג", "א", "בא", "אה"] {
+            assert!(!matches(&a, v), "{v}");
+        }
+        // 3 letters: only the confusion-table substitutions.
+        let a = walk("שבת", typo());
+        for v in ["שבת", "סבת", "שות", "שבט"] {
+            assert!(matches(&a, v), "{v}");
+        }
+        for v in ["שב", "שבתי", "בשת", "ששבת", "שבר"] {
+            assert!(!matches(&a, v), "{v}");
+        }
+        // ≥4 letters: full edit distance 1.
+        let a = walk("ברכה", typo());
+        for v in ["ברכה", "ברכ", "רבכה", "בברכה", "ברקה", "ברכגה", "ברזה"] {
+            assert!(matches(&a, v), "{v}");
+        }
+        for v in ["רבקה", "בר", "ברכהות", "הברכות"] {
+            assert!(!matches(&a, v), "{v}");
+        }
+        // Quotes are not counted as letters (ר"ת: 2 letters, no typo).
+        let a = walk("ר\"ת", typo());
+        assert!(!matches(&a, "ר\"ט"));
+    }
+
+    // Otzaria common_typo_covers_substitution_and_transposition (on a
+    // 4-letter word; Otzaria's length rule gives a 2-letter word none).
+    #[test]
+    fn typo_edit_kinds() {
+        let a = walk("משפט", typo());
+        assert!(matches(&a, "מספט")); // substitution
+        assert!(matches(&a, "שמפט")); // transposition
+        assert!(matches(&a, "משפטt")); // insertion of a one-byte char
+        assert!(matches(&a, "מפט")); // deletion
+        assert!(matches(&a, "משפ\"ט")); // the quote counts as a char
+        assert!(!matches(&a, "שמפת")); // two edits
+        assert!(!matches(&a, "ממשפטי")); // two insertions
+    }
+
+    // Otzaria advanced_typo_only_single_word_covers_full_edit_distance.
+    #[test]
+    fn typo_covers_any_insertion_letter() {
+        let a = walk("ברכה", typo());
+        assert!(matches(&a, "ברכגה")); // ג is not in INSERTION_LETTERS
+        assert!(!matches(&a, "תורה"));
+    }
+
+    #[test]
+    fn typo_composes_with_affixes() {
         let a = walk(
-            "אבד",
+            "ברכה",
             WalkOptions {
                 spelling_errors: true,
+                typo_mode: TypoMode::FullEdit1,
+                grammar_prefixes: true,
+                grammar_suffixes: true,
                 ..Default::default()
             },
         );
-        assert!(matches(&a, "עבד")); // א↔ע
-        assert!(matches(&a, "אבר")); // ד↔ר OCR
+        assert!(matches(&a, "והברקה")); // prefix + substituted core
+        assert!(matches(&a, "וברכות")); // exact core + suffix
+        assert!(matches(&a, "ברקתו")); // edited core + suffix
+        assert!(!matches(&a, "רבקתו")); // two edits
+        // An edit never spends inside a mark: ignore-nikud keeps one edit.
+        let a = walk(
+            "ברכה",
+            WalkOptions {
+                spelling_errors: true,
+                typo_mode: TypoMode::FullEdit1,
+                ignore_nikud: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches(&a, "בְּרָקָה"));
+        assert!(!matches(&a, "בְּרָקָח"));
+    }
+
+    // Otzaria grammatical_prefix_uses_full_rich_group:
+    // (?:ו|מ|דא|כש|כ|ב|ש|ל|ה|ד)?(?:כש|כ|ב|ש|ל|ה|ד)?(?:ה)?ספר
+    #[test]
+    fn grammar_prefix_group_is_otzarias() {
+        let set = closed_prefixes(false, None);
+        assert!(set.contains("דאכשה")); // 5 letters: A + B + ה
+        assert!(set.contains("ההה"));
+        assert!(set.contains("שש"));
+        assert!(!set.contains("א"));
+        assert!(!set.contains("כשו")); // ו only in the first slot
+        assert!(closed_prefixes(true, None).contains("א"));
+        assert!(closed_prefixes(true, None).contains("אכשה"));
+        let gp = WalkOptions { grammar_prefixes: true, ..Default::default() };
+        let a = walk("ספר", gp);
+        for v in ["ספר", "הספר", "ושהספר", "דאכשהספר", "לספר", "דספר"] {
+            assert!(matches(&a, v), "{v}");
+        }
+        for v in ["אספר", "שוספר", "וווספר", "ושבהספר"] {
+            assert!(!matches(&a, v), "{v}");
+        }
+    }
+
+    // Otzaria grammatical_morphology_covers_verbs_and_stacked_prefixes
+    // (prefix part) and grammatical_prefixes_need_a_root_and_skip_bare_alef.
+    #[test]
+    fn grammar_prefix_stacking_and_alef() {
+        let gp = WalkOptions { grammar_prefixes: true, ..Default::default() };
+        let a = walk("אמר", gp);
+        for v in ["כשאמר", "וכשאמר", "דאמר", "שאמר", "ואמר"] {
+            assert!(matches(&a, v), "{v}");
+        }
+        assert!(!matches(&a, "ושכשאמר"));
+        assert!(!matches(&a, "אאמר"));
+        assert!(!matches(&walk("שבת", gp), "אשבת"));
+        let ar = WalkOptions { aramaic_prefixes: true, ..Default::default() };
+        assert!(matches(&walk("שבת", ar), "אשבת"));
+    }
+
+    // Otzaria affix_arms: the lead is the union of the prefix window and the
+    // grammatical group, so a 5-letter grammatical prefix still matches with
+    // a 3-letter window.
+    #[test]
+    fn grammar_prefixes_compose_with_the_window() {
+        let a = walk(
+            "תורה",
+            WalkOptions {
+                grammar_prefixes: true,
+                advanced_prefixes: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches(&a, "קקקתורה")); // window
+        assert!(matches(&a, "וכשהתורה")); // grammatical, 4 letters
+        assert!(!matches(&a, "קקקקתורה"));
     }
 
     #[test]

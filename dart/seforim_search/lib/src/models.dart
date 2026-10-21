@@ -53,6 +53,19 @@ class LineDocument {
   final String text;
 }
 
+/// How the typo option (שגיאות כתיב) expands a word.
+enum TypoMode {
+  /// Exactly Otzaria: edit distance 1 (its Levenshtein-1 scan) for a lone
+  /// word of 4+ letters with typo as its only option; otherwise Otzaria's
+  /// sampled list (confusions, transpositions, deletions, insertions of 13
+  /// letters; 3 letters: confusions only).
+  otzaria,
+
+  /// Edit distance 1 for every 4+-letter word in every combination
+  /// (confusions only for 3 letters, nothing for 2 or fewer).
+  fullEdit1,
+}
+
 /// Hebrew walk options for a word (Otzaria's search options).
 class WalkOptions {
   const WalkOptions({
@@ -67,6 +80,7 @@ class WalkOptions {
     this.ignoreQuotes = false,
     this.exactQuotes = false,
     this.spellingErrors = false,
+    this.typoMode = TypoMode.otzaria,
     this.ignoreNikud = false,
     this.ignoreTeamim = false,
     this.prefixMaxLetters,
@@ -106,8 +120,11 @@ class WalkOptions {
   /// matches by its quote-free form, so רמבם finds רמב"ם.
   final bool exactQuotes;
 
-  /// שגיאות כתיב / OCR מצויות.
+  /// שגיאות כתיב, expanded per [typoMode].
   final bool spellingErrors;
+
+  /// Which typo behaviour [spellingErrors] uses. Default [TypoMode.otzaria].
+  final TypoMode typoMode;
 
   /// Ignore nikud (matters on a keepMarks index).
   final bool ignoreNikud;
@@ -125,7 +142,7 @@ class WalkOptions {
   /// Part of word: max letters per side. Null = default (3, or 2 for 4+ letters).
   final int? partOfWordMaxLetters;
 
-  /// Grammar prefixes: max total letters of a stacked prefix. Null = 3.
+  /// Grammar prefixes: max total letters of a stacked prefix. Null = no cap.
   final int? grammarPrefixMaxLetters;
 
   Map<String, Object?> toJson() {
@@ -153,6 +170,7 @@ class WalkOptions {
     flag('ignore_quotes', ignoreQuotes);
     flag('exact_quotes', exactQuotes);
     flag('spelling_errors', spellingErrors);
+    if (typoMode == TypoMode.fullEdit1) m['typo_mode'] = 'full_edit1';
     flag('ignore_nikud', ignoreNikud);
     flag('ignore_teamim', ignoreTeamim);
     return m;

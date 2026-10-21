@@ -233,6 +233,11 @@ seforim.db knowledge).
   exclusion in the engine, was a mistake the user corrected: the index keeps only
   line_id, position, book_id; sections/line index come from SQLite on the host.
 - PowerShell 5.1 strips quotes from JSON arguments to native exes: pass via a file.
+- **NetFree filter blocks requests ("API Error: 418 I'm a Teapot")**, killing agents twice.
+  Rule (user's): keep Hebrew content out of prompts, reports and tool output where possible;
+  refer to Hebrew by unicode escapes / hex / file+line, never paste Hebrew text or long Hebrew
+  dumps; do Hebrew-heavy work (reading Otzaria/FtsLib sources, test data) inside subagents
+  told the same, and have them report without Hebrew.
 
 ## Open decisions / next
 

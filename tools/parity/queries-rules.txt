@@ -1,0 +1,25 @@
+# Otzaria tokenizer rules parity set: period / brackets / bidi chars joining words,
+# no Hebrew/Latin split and other scripts, trailing geresh, typographic quotes and
+# presentation forms, paired readings, a word too long to be indexed. One query per
+# line; optional TAB + max word distance. FtsLib syntax.
+ע.ש
+עש
+א.ב
+וי[א]מר
+ויאמר‏ משה	0
+the
+torah
+de la
+בabc
+και
+תוס'
+תוס' ד״ה	2
+ר' יוחנן	0
+רש”י
+ז’ל
+רמב”ם הלכות	3
+שׂלום
+(הוצא) [היצא]
+היצא אותם	1
+משה אאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאא רבנו	1
+משה רבנו	0

@@ -29,6 +29,16 @@ final class SeforimIndex implements Finalizable {
   /// The native library's version.
   static String get nativeVersion => _n.nativeVersion;
 
+  /// Otzaria's query sanitizer step: every paired reading `(X) [Y]` becomes
+  /// ` Y `, as the engine's query parser does. A host that numbers the
+  /// query's words itself (per-word options, per-pair spacing) runs it first.
+  static String reducePairedReadings(String query) {
+    return using((a) {
+      final (q, ql) = utf8Native(query, a);
+      return _n.takeString(_n.reducePairedReadings(q, ql));
+    });
+  }
+
   /// Creates a fresh index in [directory], WIPING it.
   static SeforimIndex create(String directory, [IndexOptions options = const IndexOptions()]) {
     return using((a) {

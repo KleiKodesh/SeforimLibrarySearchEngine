@@ -292,7 +292,7 @@ fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
     let word: String = word
         .chars()
         .filter(|&c| {
-            !(options.ignore_quotes && c == '"')
+            !(options.ignore_quotes && crate::chars::is_term_quote(c))
                 && !(options.ignore_nikud && crate::chars::is_nikud(c))
                 && !(options.ignore_teamim && crate::chars::is_taam(c))
         })
@@ -521,7 +521,7 @@ impl HebrewWalkAutomaton {
     /// normalized the way the index normalizes (lowercase ASCII, nikud
     /// stripped, canonical '"').
     pub fn new(word: &str, options: &WalkOptions) -> HebrewWalkAutomaton {
-        let letters = word.chars().filter(|&c| crate::chars::is_word_char(c)).count(); // Otzaria counts digits too
+        let letters = word.chars().filter(|&c| crate::chars::starts_word(c)).count(); // letters and digits, marks not
         let short = letters <= SHORT_WORD_MAX_LETTERS;
 
         let grammar_prefixes = options.grammar_prefixes || options.aramaic_prefixes;
@@ -844,7 +844,7 @@ impl HebrewWalkAutomaton {
                         }
                     }
                 }
-                if self.transparent_quotes && byte == b'"' {
+                if self.transparent_quotes && crate::chars::is_term_quote_byte(byte) {
                     self.close_into(config, out);
                 }
             }
@@ -951,7 +951,7 @@ pub const DEFAULT_MAX_EXPANDED_TERMS: usize = 2000;
 /// Bytes that do not count towards a term's length when the cap prefers
 /// shorter terms: the intra-word quote the tokenizer keeps (רש"י is as
 /// short as רשי, as in FtsLib whose terms carried no quotes).
-pub const ZERO_WIDTH_BYTES: ZeroWidthBytes = ZeroWidthBytes::new(b"\"");
+pub const ZERO_WIDTH_BYTES: ZeroWidthBytes = ZeroWidthBytes::new(b"\"'");
 
 /// Tantivy query running the Otzaria walk for one word.
 #[derive(Debug, Clone)]

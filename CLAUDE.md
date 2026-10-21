@@ -233,6 +233,14 @@ seforim.db knowledge).
   exclusion in the engine, was a mistake the user corrected: the index keeps only
   line_id, position, book_id; sections/line index come from SQLite on the host.
 - PowerShell 5.1 strips quotes from JSON arguments to native exes: pass via a file.
+- Git Bash heredocs turn `\\u` into `\u`: Python with `\u` escapes must be written to a
+  .py file (Write tool), never a heredoc. `python -I` ignores PYTHONIOENCODING: use
+  `python -I -X utf8` for scripts that print Hebrew (compare.py).
+- Tokenizer = Otzaria's rules in both engines (tantivy7 / fts8): terms keep `'` and `"`
+  (both zero-width in walks); a trailing geresh is in the term, so every automaton must
+  accept a quote AFTER its pattern too (the wildcard missed it: 5 parity diffs).
+- With every script a word char the dictionary has ~280 chars: FM codes are 16-bit.
+  FtsLib's `UnicodeTables.cs` is generated from Rust (`tools/unicode-tables/gen.rs`).
 - **NetFree filter blocks requests ("API Error: 418 I'm a Teapot")**, killing agents twice.
   Rule (user's): keep Hebrew content out of prompts, reports and tool output where possible;
   refer to Hebrew by unicode escapes / hex / file+line, never paste Hebrew text or long Hebrew
@@ -250,8 +258,8 @@ seforim.db knowledge).
 - **Reuse Otzaria's tests**: its engine has ~309 inline-line search tests
   (`rust/src/api/search_engine.rs`) and ~92 query tests (`hebrew_query.rs`); plan in
   scratchpad `logs/otzaria-test-cases.md` (first 30 cases already translated to our
-  API). Suspected gaps to verify: paired readings "(הוצא) [היצא]" → keep the second
-  in the Dart sanitizer; maqaf counted as two words for distance.
+  API). Paired readings: done (engine rule; hosts call
+  se_reduce_paired_readings). Suspected gap to verify: maqaf counted as two words for distance.
 - **REMIND THE USER: matching across lines (a phrase spanning a line break, Otzaria's
   `continues_to_next_line`) still needs real work.** Whenever the user asks whether
   everything is ready, say this explicitly. Today only snippet widening crosses lines.

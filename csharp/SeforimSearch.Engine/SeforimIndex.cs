@@ -20,6 +20,18 @@ namespace SeforimSearch.Engine
         /// <summary>The native library's version.</summary>
         public static string NativeVersion => Interop.FromUtf8Z(NativeMethods.se_version());
 
+        /// <summary>
+        /// Otzaria's query sanitizer step: every paired reading <c>(X) [Y]</c> becomes
+        /// <c> Y </c>, as the engine's query parser does. A host that numbers the query's
+        /// words itself (per-word options, per-pair spacing) runs it first.
+        /// </summary>
+        public static string ReducePairedReadings(string query)
+        {
+            byte[] q = Interop.ToUtf8(query);
+            fixed (byte* p = q)
+                return Interop.TakeString(NativeMethods.se_reduce_paired_readings(p, (UIntPtr)q.Length));
+        }
+
         /// <summary>Creates a fresh index in <paramref name="directory"/>, WIPING it.</summary>
         public static SeforimIndex Create(string directory, IndexOptions? options = null)
         {

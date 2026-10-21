@@ -216,17 +216,27 @@ impl SearchOptions {
             Some(w) => (w.apply(global), w.alternatives.as_slice()),
             None => (global, &[]),
         });
-        let proximity = self.proximity.as_ref().map(|p| main.lower(p)).transpose()?;
+        // With a proximity rule the too long words leave the query and keep
+        // their positions in the rule; without, they stay as skipped slots
+        // that count toward word distance (FtsLib's originalGroupCount).
+        let (groups, proximity) = match &self.proximity {
+            Some(p) => (main.searched_groups(), Some(main.lower(p)?)),
+            None => (main.groups.clone(), None),
+        };
         let min_groups = match self.word_match {
-            Some(m) => m.min_groups(main.groups.len()),
+            Some(m) => m.min_groups(main.searched_count()),
             None => self.min_groups,
         };
         let exclude = match &self.exclude {
             Some(e) => {
                 let ex = slots(&e.query, keep_marks, |_| (global, &[]));
+                let (groups, proximity) = match &e.proximity {
+                    Some(p) => (ex.searched_groups(), Some(ex.lower(p)?)),
+                    None => (ex.groups.clone(), None),
+                };
                 Some(ExcludeSpec {
-                    proximity: e.proximity.as_ref().map(|p| ex.lower(p)).transpose()?,
-                    groups: ex.groups,
+                    proximity,
+                    groups,
                     max_word_distance: e.max_word_distance,
                     require_ordered: e.require_ordered,
                     gaps: None,
@@ -241,10 +251,12 @@ impl SearchOptions {
                 let o = WalkOptionsSpec { ignore_quotes: p.ignore_quotes, ..Default::default() };
                 slots(&p.query, keep_marks, |_| (o, &[])).groups
             })
-            .filter(|p| !p.is_empty())
+            // A phrase with a word too long to be indexed can never match
+            // (Otzaria: its literal matches no term).
+            .filter(|p: &Vec<GroupSpec>| !p.is_empty() && !p.iter().any(is_long))
             .collect();
         Ok(SearchRequest {
-            groups: main.groups,
+            groups,
             max_word_distance: self.max_word_distance,
             require_ordered: self.require_ordered,
             context_words: self.context_words,
@@ -322,9 +334,20 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
     let ignore_quotes = o.ignore_quotes;
     match term {
         QueryTerm::Word(word) => GroupSpec::Word { word, options: o },
+        QueryTerm::Unindexed(word) => GroupSpec::Unindexed { word },
         QueryTerm::Wildcard(pattern) => GroupSpec::Wildcard { pattern, ignore_quotes },
         QueryTerm::Fuzzy { word, distance } => GroupSpec::Fuzzy { word, distance, ignore_quotes },
         QueryTerm::Grammar { word, prefixes, suffixes } => GroupSpec::Grammar { word, prefixes, suffixes, ignore_quotes },
+    }
+}
+
+/// True for a slot of words too long to be indexed only
+/// ([`GroupSpec::Unindexed`], or an OR slot of nothing else).
+fn is_long(g: &GroupSpec) -> bool {
+    match g {
+        GroupSpec::Unindexed { .. } => true,
+        GroupSpec::Any { alternatives } => !alternatives.is_empty() && alternatives.iter().all(is_long),
+        _ => false,
     }
 }
 
@@ -337,24 +360,35 @@ struct Slots {
 }
 
 impl Slots {
-    /// A proximity given per typed word, as the slots' own proximity.
+    /// The slots a proximity rule searches: a slot of words too long to be
+    /// indexed has no term, so it leaves the query and its position goes
+    /// into the rule ([`Self::lower`]).
+    fn searched_groups(&self) -> Vec<GroupSpec> {
+        self.groups.iter().filter(|g| !is_long(g)).cloned().collect()
+    }
+
+    /// Slots that search (words too long to be indexed not counted).
+    fn searched_count(&self) -> usize {
+        self.groups.iter().filter(|g| !is_long(g)).count()
+    }
+
+    /// A proximity given per typed word, as the proximity of
+    /// [`Self::searched_groups`].
     ///
     /// Every word is a slot of its own, matched at its position (one-letter
-    /// words and digit runs included: FtsLib's word model is Otzaria's). A
-    /// dropped word is a typed word with no letters or digits (`,`), which
-    /// the text tokenizer gives no position either, or a term over
-    /// `MAX_TERM_BYTES` (no index term; Otzaria drops it from the query
-    /// too). It is cut out of the rule and the gaps around it merge:
-    /// `a x b` with gaps `[g0, g1]` → `a b` with `g0 + g1`. In Otzaria
-    /// (`resolve_gaps`) `x` would be a word of its own, at one position, with
-    /// at most `g0` words before it and `g1` after it up to `b`; with `x`
-    /// invisible that leaves at most `g0 + g1` words between `a` and `b`. Sub-words of
-    /// one typed word (`אשר־שמע` typed as one word) are adjacent: gap 0. The
-    /// gap before an OR slot (`a | b`) is the one before its first word, the
-    /// gap after it the one after its last word. Any order: Otzaria's window
-    /// for its `n` words is `(n - 1) * (distance + 1)` positions; each
-    /// dropped word took one of them, so the window over the kept words is
-    /// that minus the dropped count.
+    /// words and digit runs included). A dropped word is a typed word with
+    /// no letters or digits (`,`), which the text tokenizer gives no
+    /// position either: it is cut out of the rule and the gaps around it
+    /// merge, `a x b` with gaps `[g0, g1]` -> `a b` with `g0 + g1`. A word too
+    /// long to be indexed keeps its one position (the text keeps the
+    /// position of such a word): `a x b` -> `a b` with `g0 + 1 + g1`. Sub-words
+    /// of one typed word (two words joined by a maqaf, typed as one word) are
+    /// adjacent: gap 0. The gap before an OR slot (`a | b`) is the one
+    /// before its first word, the gap after it the one after its last word.
+    /// A leading or trailing removed word takes its gap with it. Any order:
+    /// Otzaria's window for its `n` words is `(n - 1) * (distance + 1)`
+    /// positions; each dropped or too long word took one of them, so the
+    /// window over the searched words is that minus their count.
     fn lower(&self, p: &ProximitySpec) -> Result<ProximitySpec> {
         let n = self.typed.len();
         let k = self.groups.len();
@@ -377,24 +411,42 @@ impl Slots {
                         }
                     }
                 }
-                let lowered = (1..k)
-                    .map(|g| {
-                        let (a, b) = (span[g - 1].1, span[g].0);
-                        if a >= b {
-                            0 // sub-words of one typed word
-                        } else {
-                            gaps[a..b].iter().fold(0u32, |acc, &x| acc.saturating_add(x))
+                let slot_gap = |g: usize| -> u32 {
+                    let (a, b) = (span[g - 1].1, span[g].0);
+                    if a >= b {
+                        0 // sub-words of one typed word
+                    } else {
+                        gaps[a..b].iter().fold(0u32, |acc, &x| acc.saturating_add(x))
+                    }
+                };
+                // too long slots leave: their gaps and their one position merge
+                let mut lowered = Vec::new();
+                let mut carry = 0u32;
+                let mut seen = false;
+                for g in 0..k {
+                    if g > 0 {
+                        carry = carry.saturating_add(slot_gap(g));
+                    }
+                    if is_long(&self.groups[g]) {
+                        if seen {
+                            carry = carry.saturating_add(1);
                         }
-                    })
-                    .collect();
+                        continue;
+                    }
+                    if seen {
+                        lowered.push(carry);
+                    }
+                    seen = true;
+                    carry = 0;
+                }
                 ProximitySpec::Ordered { gaps: lowered }
             }
             ProximitySpec::AnyOrder { distance } => {
-                let dropped = self.typed.iter().filter(|t| t.is_none()).count();
+                let dropped = self.typed.iter().filter(|t| t.is_none()).count() + (k - self.searched_count());
                 if dropped == 0 {
                     p.clone()
                 } else {
-                    let words = u32::try_from(k + dropped).unwrap_or(u32::MAX);
+                    let words = u32::try_from(self.searched_count() + dropped).unwrap_or(u32::MAX);
                     let window = words.saturating_sub(1).saturating_mul(distance.saturating_add(1));
                     ProximitySpec::Window {
                         max_span: window.saturating_sub(u32::try_from(dropped).unwrap_or(u32::MAX)),
@@ -528,12 +580,12 @@ mod tests {
     #[test]
     fn typed_word_index_reaches_every_sub_word() {
         // word 1 is typed as one word and split in two (maqaf); word 2 is
-        // split at the Latin/Hebrew boundary; the override of word 3 must
+        // split at a comma; the override of word 3 must
         // not shift onto a sub-word
         let mut words = BTreeMap::new();
         words.insert(1, WordOptions { part_of_word: Some(true), ..Default::default() });
         words.insert(3, WordOptions { ktiv_male_haser: Some(true), ..Default::default() });
-        let o = SearchOptions { query: "משה אשר־שמע abcשלום תורה".into(), words, ..Default::default() };
+        let o = SearchOptions { query: "משה אשר־שמע abc,שלום תורה".into(), words, ..Default::default() };
         let r = o.to_request(false).unwrap();
         let got: Vec<_> = r.groups.iter().map(|g| { let (w, o) = word_of(g); (w.to_string(), o.part_of_word, o.ktiv_male_haser) }).collect();
         assert_eq!(
@@ -581,6 +633,35 @@ mod tests {
             prox("משה תורה", ProximitySpec::AnyOrder { distance: 2 }).unwrap(),
             ProximitySpec::AnyOrder { distance: 2 }
         );
+        // a word too long to be indexed keeps its one position: g0 + 1 + g1
+        let long = "\u{05D0}".repeat(64);
+        assert_eq!(
+            prox(&format!("\u{05DE}\u{05E9}\u{05D4} {long} \u{05EA}\u{05D5}\u{05E8}\u{05D4}"), ProximitySpec::Ordered { gaps: vec![2, 3] }).unwrap(),
+            ProximitySpec::Ordered { gaps: vec![6] }
+        );
+        // leading / trailing: its gap leaves with it
+        assert_eq!(
+            prox(&format!("{long} \u{05DE}\u{05E9}\u{05D4} \u{05EA}\u{05D5}\u{05E8}\u{05D4} {long}"), ProximitySpec::Ordered { gaps: vec![5, 2, 7] }).unwrap(),
+            ProximitySpec::Ordered { gaps: vec![2] }
+        );
+        assert_eq!(
+            prox(&format!("\u{05DE}\u{05E9}\u{05D4} {long} \u{05EA}\u{05D5}\u{05E8}\u{05D4}"), ProximitySpec::AnyOrder { distance: 2 }).unwrap(),
+            ProximitySpec::Window { max_span: 2 * 3 - 1 }
+        );
+        // without a proximity it stays a skipped slot (counted in word distance)
+        let r = SearchOptions { query: format!("\u{05DE}\u{05E9}\u{05D4} {long} \u{05EA}\u{05D5}\u{05E8}\u{05D4}"), ..Default::default() }
+            .to_request(false)
+            .unwrap();
+        assert_eq!(r.groups.len(), 3);
+        assert!(matches!(r.groups[1], GroupSpec::Unindexed { .. }));
+        let r = SearchOptions {
+            query: format!("\u{05DE}\u{05E9}\u{05D4} {long} \u{05EA}\u{05D5}\u{05E8}\u{05D4}"),
+            proximity: Some(ProximitySpec::Ordered { gaps: vec![0, 0] }),
+            ..Default::default()
+        }
+        .to_request(false)
+        .unwrap();
+        assert_eq!(r.groups.len(), 2);
         // the negative query lowers its own proximity the same way
         let o = SearchOptions {
             query: "משה".into(),

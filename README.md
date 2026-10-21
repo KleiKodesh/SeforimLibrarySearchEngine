@@ -198,17 +198,31 @@ are not printed), so upstream's query-parser tests stay as they are.
 - **Tokenizer.** A port of FtsLib's `HtmlWordScanner`:
   - HTML-aware: inline tags are transparent; block tags, entities and maqaf
     split words.
-  - **Word model = Otzaria's** (FtsLib was changed to it, 2026-10-21, FtsLib
-    index `fts7`): a word is a run of letters (Hebrew, ASCII) and ASCII
-    digits, any length, one letter included (`ו`, `12`, `ב5`, `אב3גד`).
-    Digits are script-neutral (`5ab`; a Hebrew/Latin switch still splits:
-    `a5ב` → `a5`, `ב`). Every word is indexed with its position; a word
-    whose normalized form is over 128 bytes (`MAX_TERM_BYTES`, an inner quote
-    counting one byte) is not a term but keeps its position (Otzaria's
-    `RemoveLongFilter`, FtsLib's `Tokenizer.OnWord`). Index, query parser
-    and snippet locator count the same words, so index positions = the
-    locator's tokens and FtsLib's distance = Otzaria's.
-  - Intra-word quotes are kept as `"`.
+  - **Word rule = Otzaria's tokenizer** (`hebrew_tokenizer.rs`; FtsLib
+    follows it since index `fts8`): a word starts at a letter or digit of
+    any script (Hebrew, ASCII, and every other Unicode alphanumeric char:
+    no Hebrew/Latin split, `abc` + Hebrew is one word) and runs over
+    letters, digits and marks, any length, one letter included. Terms are
+    lowercased in every script (Rust `to_lowercase`).
+  - Transparent chars join a word and vanish from it: `.` `[` `]` `*` `~`
+    `^` `$` `\` `+` backtick and the zero-width / bidi controls
+    (U+200B..U+200F, U+202A..U+202E, U+2066..U+2069, U+FEFF): pe.bet.yod is
+    one word.
+  - Quotes: between letters one geresh is kept as `'`, two gereshes or one
+    gershayim as `"`; another run of quotes splits. After a word a geresh
+    is kept (`'`, inside the word's span), a gershayim is not. Typographic
+    quotes (U+2018/2019, U+201C/201D) count as geresh / gershayim; Hebrew
+    presentation forms (U+FB1D..U+FB4F) fold to their letters.
+  - Paired readings `(X) [Y]` (ketiv / qere): Y takes X's position, in the
+    index and in the locator's distances.
+  - Every word takes a position; a word whose term (before lowercasing,
+    quotes included) has 128 UTF-8 bytes or more is not a term but keeps
+    its position (Otzaria's `RemoveLongFilter`, which keeps `len < 128`).
+    Index, query parser and snippet locator count the same words, so index
+    positions = the locator's positions and FtsLib's distance = Otzaria's.
+  - `scanner_reference.rs` runs Otzaria's own functions (`word_rule.rs`,
+    verbatim) on the visible text; a property test keeps the single-pass
+    scanner equal to it.
   - Two variants: `hebrew` strips nikud and te'amim, `hebrew_marked` keeps
     them.
 - **Walks:**
@@ -269,14 +283,17 @@ are not printed), so upstream's query-parser tests stay as they are.
     - at least 2 real letters, at most 4 `?`
     - `*` may cover 3 characters before the anchor, 4 after it, or 7 in total
       when both ends are wildcards
-- **Query parser.** A port of FtsLib's `QueryParser` (`query_parser.rs`):
+- **Query parser.** FtsLib's operators over Otzaria's word rule
+  (`query_parser.rs`; FtsLib's `QueryParser` is the same): a paired
+  reading `(X) [Y]` keeps Y (Otzaria's `keep_second_of_paired_readings`);
   separators split words, `a | b` is one OR slot, `*` `?` wildcard,
   `word~N` fuzzy (N clamped to 2), `%word` / `word%` FtsLib's grammar
-  tables, a plain word of any length (one letter or a digit run included;
-  only a term over 128 bytes is dropped, as FtsLib and Otzaria), digits
-  kept, marks stripped, intra-word quotes kept as `"`, a trailing quote
-  dropped. One addition: on an index that keeps marks, a plain word keeps
-  its typed nikud / te'amim (vocalized search). It only tokenizes and numbers the words; the engine groups them
+  tables. The words of a typed word are cut by the text's rule (`*` and `?`
+  count as word chars), so a query word is normalized exactly as the index
+  term. A literal of 128 bytes or more is `QueryTerm::Unindexed`: no term,
+  one position (see the proximity item). One addition: on an index that
+  keeps marks, a plain word keeps its typed nikud / te'amim (vocalized
+  search). It only tokenizes and numbers the words; the engine groups them
   and applies the options.
 - **Snippet locator.** A step-for-step port of FtsLib's
   `PreparedQueryGroups`, `SnippetWindowLocator` and `SnippetDescriptor`.
@@ -324,8 +341,8 @@ are not printed), so upstream's query-parser tests stay as they are.
     place, from 0, of the word as the user typed it: the query cut on
     space / tab / CR / LF and `|` (`|` is never a word, spaced or not; a
     word the engine drops, e.g. `,`, keeps its place). When
-    FtsLib's separators split a typed word (maqaf, punctuation, a
-    Hebrew/Latin boundary: `abcשלום` → `abc`, `שלום`), its override and
+    the word rule splits a typed word (maqaf, punctuation:
+    two words joined by a maqaf), its override and
     alternatives go to every part, so indexes never shift. The same fields, each optional
     (null = inherit), plus `alternatives` (extra words ORed into that
     word's slot, searched with its options; if the word itself cannot
@@ -374,9 +391,10 @@ are not printed), so upstream's query-parser tests stay as they are.
     ignore-gershayim option; the verification restores exactness.
   - When the index has several segments (after incremental updates) or no
     sidecar, those groups fall back to the walk; merge and rebuild to get
-    it back. A `keep_marks` index whose dictionary has more than 64
-    distinct characters gets no sidecar (FtsLib's 6-bit sort keys); it
-    keeps using the walk.
+    it back. A `keep_marks` index (terms with Hebrew marks) gets no
+    sidecar; it keeps using the walk. Symbol codes are 16-bit and sort keys
+    take the width the alphabet needs (every script being a word char, the
+    dictionary holds about 280 distinct chars), as in FtsLib's `FmIndex`.
   - Measured on the full index (1,755,598 terms): built in 2.4 s, 41 MB;
     `*יצח*` 41 ms against 1.1 s as a walk (FtsLib: 0.26 s).
 - **Partial matching** (Otzaria's wordMatchMode): `min_groups` in the
@@ -436,15 +454,23 @@ are not printed), so upstream's query-parser tests stay as they are.
     pair, dropped words included. A one-letter word or digit run is a
     word: a slot, checked at its own position, exactly as Otzaria
     (`resolve_gaps`). A word the engine drops (no letters or digits, e.g.
-    `,`; or a term over 128 bytes) has no term, so it is cut out and the
-    gaps around it merge: `a x b` with
-    `[g0, g1]` → `g0 + g1` words between `a` and `b`. Any order: Otzaria's
-    window `(n-1)(distance+1)` for its n words, minus one per dropped word
-    (each took one of its positions), sent as `window { max_span }`.
-    Sub-words of one typed word are adjacent (gap 0); an OR slot takes the
-    gap before its first word and after its last. A dropped word inside an
-    OR slot (`a|ו b`) is still counted as a dropped word (Otzaria has no
-    `|`; the Otzaria demo turns `|` into a space).
+    `,`) has no position in the text either, so it is cut out and the gaps
+    around it merge: `a x b` with `[g0, g1]` -> `g0 + g1` words between `a`
+    and `b`. A word of 128 bytes or more keeps its one position, as in the
+    text: it leaves the query (no term) and `a x b` -> `g0 + 1 + g1`.
+    Without a proximity it stays a skipped slot (`GroupSpec::Unindexed`)
+    that counts toward word distance, as FtsLib's skipped wildcard. Any
+    order: Otzaria's window `(n-1)(distance+1)` for its n words, minus one
+    per dropped or too long word (each took one of its positions), sent as
+    `window { max_span }`. Sub-words of one typed word are adjacent (gap 0);
+    an OR slot takes the gap before its first word and after its last. A
+    dropped word inside an OR slot is still counted as a dropped word
+    (Otzaria has no `|`; the Otzaria demo turns `|` into a space).
+  - Hosts that number the query's words themselves (per-word options,
+    per-pair spacing) first reduce the paired readings with the engine's
+    own rule: C ABI `se_reduce_paired_readings`, C#
+    `SeforimIndex.ReducePairedReadings`, Dart
+    `SeforimIndex.reducePairedReadings` (the Dart demo does).
 - **Per-pair spacing** (FtsLib-style request field, positions only): `gaps` in the request (C#
   `SearchRequest.Gaps`, Dart `SearchRequest.gaps`, demo `--spacing 2,5`).
   - `gaps[i]` is the maximum number of words between query word i and i+1.
@@ -527,24 +553,35 @@ analysed before fixing (whose bug is it?):
 After the fixes those 10 queries are identical on both flavours; the full
 58-query rerun is in the comparison report.
 
-Full build (C# demo, .NET 10, 7,080,797 lines, measured 2026-10-21, word
-model = Otzaria's: one-letter words and digit runs indexed):
+Full build (C# demo, .NET 10, 7,080,797 lines, measured 2026-10-21, index
+format `tantivy7`: Otzaria's tokenizer rules):
 
 | Stage | With positions | Without |
 |---|---|---|
-| indexing (read DB, tokenize, write segments, commits) | 5.5 min | 4.1 min |
-| merge into one segment | 2.5 min | 1.1 min |
-| FM-index sidecar | 3.7 s | 2.9 s |
-| total | 8.1 min | 5.2 min |
+| indexing (read DB, tokenize, write segments, commits) | 10.7 min | 7.0 min |
+| merge into one segment | 3.3 min | 2.1 min |
+| FM-index sidecar | 0.1 min | 0.1 min |
+| total | 14.2 min | 9.3 min |
 
-Index size 1,619.9 MB with positions: postings `.idx` 747.2 MB, positions
-`.pos` 722.1 MB, FM sidecar 41.5 MB, term dictionary 40.1 MB, empty doc store
-28.5 MB, fast fields (line id, position, book id) 26.2 MB, field norms 14.2 MB.
-Without positions: 723.7 MB (`.idx` 577.2 MB). Digit runs added +0.2% over
-the previous build (1,616.1 / 722.6 MB). FtsLib's own index (`fts7`, same
-words): 745.2 MB (was 737.7 MB), built in 11.4 min. Parity against the new
-FtsLib, both flavours: queries-diff10 10/10, queries-large 61/61,
-queries-words 14/14 (one-letter words, digits, distances across them).
+The previous build (`tantivy6`) took 8.1 / 5.2 min on a quieter machine; the
+merge, which does no tokenizing, also took 1.3x / 2x longer this time, so
+most of the difference is the machine. The scanner itself, benchmarked
+side by side on the same synthetic text, runs at the old speed (114-141
+MB/s against 127-168 MB/s).
+
+Index size 1,624.0 MB with positions (was 1,619.9): postings `.idx` 749.9
+MB, positions `.pos` 720.2 MB, FM sidecar 43.9 MB, term dictionary 41.4 MB,
+empty doc store 28.5 MB, fast fields (line id, position, book id) 25.8 MB,
+field norms 14.2 MB. Without positions: 731.6 MB (was 723.7; `.idx` 581.1
+MB, `.term` 37.7 MB, `.fmi` 43.9 MB). The dictionary now holds about 280
+distinct chars (every script is a word char), so the FM sidecar uses 16-bit
+codes. FtsLib's own index (`fts8`, same words): 746.0 MB (was 745.2 MB),
+built in 16.2 min (lines 13.8 min, compact 1.0 min, term dictionary 1.4
+min). Parity against the new FtsLib, both flavours: queries-diff10 10/10,
+queries-large 61/61, queries-words 14/14, queries-rules 21/21 (period,
+brackets and bidi chars inside words, Latin and Greek words, trailing
+geresh, typographic quotes, presentation forms, paired readings, a word too
+long to be indexed).
 
 Search (same index, `search_report.py`, 17 parity queries): the engine's
 part (walks + collecting every hit) takes 29–330 ms per query, and the first
@@ -556,8 +593,8 @@ what a page needs.
 ## Differences from FtsLib (known, deliberate)
 - **Quotes:** the index keeps intra-word quotes (רש"י) where FtsLib dropped
   them. Matching ignores them through the "ignore gershayim" option, which the
-  FtsLib facade turns on by default, so results match FtsLib. A quote after
-  the last letter is punctuation and is never part of a term. Walks also
+  FtsLib facade turns on by default, so results match FtsLib. After the
+  last letter a geresh is kept (`'`, Otzaria), a gershayim never. Walks also
   match a term by its quote-free form unless `exact_quotes` is set (Otzaria's
   `QuoteTransparent`); in FtsLib mode that is FtsLib's own behaviour, since
   its index stored only quote-free terms (parity queries רמבם, רשי, זל).
@@ -587,9 +624,3 @@ what a page needs.
   and index open; not profiled yet.
 - Choosing span query vs post-filter for very broad expansions (needs a
   benchmark).
-- Tokenizer rules of Otzaria beyond the word model, not ported (FtsLib's
-  rules kept): `.` `[` `]` and bidi/zero-width chars are transparent in
-  Otzaria (`פ.ב.י` one word), FtsLib splits; Otzaria has no Hebrew/Latin
-  split and treats letters of other scripts as word chars; it keeps a
-  trailing geresh (`תוס'`), folds typographic quotes and presentation forms,
-  and gives paired readings `(X) [Y]` one position.

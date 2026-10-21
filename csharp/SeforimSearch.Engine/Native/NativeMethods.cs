@@ -31,6 +31,9 @@ namespace SeforimSearch.Engine.Native
         public static extern IntPtr se_version();
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_reduce_paired_readings(byte* query, UIntPtr queryLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern void se_buffer_free(SeBuffer buffer);
 
         // ── Index ──

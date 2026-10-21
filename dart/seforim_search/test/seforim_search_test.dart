@@ -132,6 +132,11 @@ void main() {
     s.close();
   });
 
+  test('paired readings keep their second reading', () {
+    expect(SeforimIndex.reducePairedReadings('א (בג) [דה] ו'), 'א  דה  ו');
+    expect(SeforimIndex.reducePairedReadings('(א) ב'), '(א) ב');
+  });
+
   test('errors surface as exceptions', () {
     expect(() => SeforimIndex.open('${tmp.path}/nope'), throwsA(isA<SeforimEngineException>()));
   });

@@ -61,6 +61,12 @@ pub enum GroupSpec {
         #[serde(default)]
         ignore_quotes: bool,
     },
+    /// A literal word too long to be indexed (its term has
+    /// `MAX_TERM_BYTES` bytes or more): it matches no term. It keeps its
+    /// one position: a skipped slot that still counts toward word distance
+    /// (as a rejected wildcard); a proximity rule counts it as one word
+    /// between its neighbours (`SearchOptions` lowers it).
+    Unindexed { word: String },
     /// One slot satisfied by any of its alternatives (FtsLib `a | b`).
     /// Alternatives that cannot search (empty word, rejected wildcard) are
     /// dropped; if none remain, the slot is skipped.
@@ -767,6 +773,7 @@ impl LineIndex {
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
             }
+            GroupSpec::Unindexed { .. } => None,
             GroupSpec::Any { alternatives } => {
                 let mut sources = Vec::new();
                 for a in alternatives {
@@ -887,6 +894,7 @@ impl LineIndex {
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
+            GroupSpec::Unindexed { .. } => None,
             GroupSpec::Any { alternatives } => {
                 let mut parts: Vec<(Occur, Box<dyn Query>)> = Vec::new();
                 for a in alternatives {

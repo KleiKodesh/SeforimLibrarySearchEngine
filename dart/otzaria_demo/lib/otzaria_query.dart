@@ -39,8 +39,11 @@ abstract final class OtzariaOption {
 /// (Otzaria: `|` separates; the engine cuts typed words there too), collapse
 /// spaces; `"` at a word edge separates, between letters it stays (רמב"ם);
 /// `''` → `"`.
+///
+/// Paired readings `(X) [Y]` keep only Y first, by the engine's own rule
+/// (Otzaria's `keep_second_of_paired_readings`).
 List<String> splitQueryWords(String query) {
-  var q = query.replaceAll('״', '"').replaceAll('׳', "'").replaceAll("''", '"').replaceAll(RegExp('[־|-]'), ' ');
+  var q = SeforimIndex.reducePairedReadings(query).replaceAll('״', '"').replaceAll('׳', "'").replaceAll("''", '"').replaceAll(RegExp('[־|-]'), ' ');
   final words = <String>[];
   for (var w in q.split(RegExp(r'\s+'))) {
     w = w.replaceAll(RegExp(r'^"+|"+$'), '').replaceAll(RegExp(r"^'+"), '');

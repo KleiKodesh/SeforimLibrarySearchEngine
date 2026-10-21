@@ -164,7 +164,7 @@ impl Automaton for SetAutomaton {
     fn accept(&self, state: &Option<u32>, byte: u8) -> Option<u32> {
         state.and_then(|node| {
             self.step(node, byte).or({
-                if self.transparent_quotes && byte == b'"' {
+                if self.transparent_quotes && crate::chars::is_term_quote_byte(byte) {
                     Some(node)
                 } else {
                     None

@@ -54,6 +54,22 @@ pub extern "C" fn se_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
 }
 
+/// Otzaria's query sanitizer step `keep_second_of_paired_readings`: every
+/// paired reading `(X) [Y]` (ketiv and qere) in `query` becomes ` Y `, as the
+/// engine's query parser does. A host that numbers the query's words itself
+/// (per-word options, per-pair spacing) runs it first, so its words are the
+/// engine's. Free the result with `se_string_free`; null on error.
+///
+/// # Safety
+/// `query` must be valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn se_reduce_paired_readings(query: *const u8, len: usize) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let q = str_arg(query, len)?;
+        Ok(out_string(seforim_engine::reduce_paired_readings(q).into_owned()))
+    })
+}
+
 unsafe fn str_arg<'a>(ptr: *const u8, len: usize) -> Result<&'a str, String> {
     if ptr.is_null() {
         return if len == 0 { Ok("") } else { Err("null string".into()) };

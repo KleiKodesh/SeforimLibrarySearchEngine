@@ -97,7 +97,7 @@ namespace FtsLib.Fts5
         public const int DefaultContextWords = 8;
 
         /// <summary>Bumped when the indexing pipeline changes; part of the provenance stamp.</summary>
-        public const string IndexFormatVersion = "tantivy6"; // 2: trailing quotes dropped from terms; 3: bare-minimum schema (no line_index/toc_entry_id); 5: one-letter (and 30+ letter) words indexed with positions; 6: FtsLib word model = Otzaria's (digit runs are words, ב5 one word)
+        public const string IndexFormatVersion = "tantivy7"; // 2: trailing quotes dropped from terms; 3: bare-minimum schema (no line_index/toc_entry_id); 5: one-letter (and 30+ letter) words indexed with positions; 6: FtsLib word model = Otzaria's (digit runs are words, ב5 one word); 7: Otzaria's remaining tokenizer rules (. [ ] bidi chars join, no script split, geresh kept as ', trailing geresh, quote and presentation-form folding, paired readings share a position, a term of 128 bytes or more not indexed)
 
         private readonly string _indexPath;
         private readonly Func<SeforimDbFtsCorpus> _openCorpus;

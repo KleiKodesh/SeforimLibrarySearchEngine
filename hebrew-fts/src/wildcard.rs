@@ -174,7 +174,7 @@ impl WildcardPattern {
     /// Parses `pattern` with the quote transparent: quotes in the pattern are
     /// dropped and quotes in indexed terms are skipped.
     pub fn parse_ignoring_quotes(pattern: &str) -> Result<WildcardPattern, WildcardRejected> {
-        let stripped: String = pattern.chars().filter(|&c| c != '"').collect();
+        let stripped: String = pattern.chars().filter(|&c| !crate::chars::is_term_quote(c)).collect();
         let mut parsed = WildcardPattern::parse(&stripped)?;
         parsed.ignore_quotes = true;
         Ok(parsed)
@@ -263,7 +263,14 @@ impl WildcardAutomaton {
             }
             return;
         }
-        let Some(token) = tokens.get(t) else { return };
+        let Some(token) = tokens.get(t) else {
+            // A quote after the whole pattern (a trailing geresh is part of
+            // its word) is zero-width when quotes are transparent.
+            if crate::chars::is_term_quote_byte(byte) && self.pattern.ignore_quotes {
+                self.close_into(config, out);
+            }
+            return;
+        };
         match token {
             Token::Literal(lit) => {
                 if lit[off] == byte {
@@ -272,7 +279,7 @@ impl WildcardAutomaton {
                     } else {
                         self.close_into(pack(v, t, off + 1, used, 0), out);
                     }
-                } else if byte == b'"' && self.pattern.ignore_quotes {
+                } else if crate::chars::is_term_quote_byte(byte) && self.pattern.ignore_quotes {
                     self.close_into(config, out); // zero-width quote inside the literal
                 }
             }
@@ -281,7 +288,7 @@ impl WildcardAutomaton {
                     return; // stray continuation byte
                 }
                 // The canonical quote is not a letter: FtsLib's terms carried none.
-                if byte == b'"' {
+                if crate::chars::is_term_quote_byte(byte) {
                     self.close_into(config, out);
                     return;
                 }
@@ -492,6 +499,14 @@ mod tests {
         assert!(matches_ignoring_quotes("*לום", "שלום"));
         assert!(matches_ignoring_quotes("רמב\"*", "רמבם")); // quote in the pattern dropped
         assert!(!matches_ignoring_quotes("*לום", "שלוםם"));
+    }
+
+    #[test]
+    fn trailing_geresh_is_zero_width_when_quotes_are_ignored() {
+        // a trailing geresh is part of its word's term (Otzaria)
+        assert!(matches_ignoring_quotes("\u{05E9}\u{05DC}\u{05D5}?\u{05DD}", "\u{05E9}\u{05DC}\u{05DD}'"));
+        assert!(matches_ignoring_quotes("*\u{05DC}\u{05D5}\u{05DD}", "\u{05E9}\u{05DC}\u{05D5}\u{05DD}'"));
+        assert!(!matches_ignoring_quotes("\u{05E9}\u{05DC}\u{05D5}?\u{05DD}", "\u{05E9}\u{05DC}\u{05DD}'\u{05D0}"));
     }
 
     #[test]

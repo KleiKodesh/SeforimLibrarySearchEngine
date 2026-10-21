@@ -69,7 +69,7 @@ impl HebrewGrammarQuery {
 
     fn automaton_weight(&self) -> AutomatonWeight<SetAutomaton> {
         let word: String = if self.ignore_quotes {
-            self.word.chars().filter(|&c| c != '"').collect()
+            self.word.chars().filter(|&c| !crate::chars::is_term_quote(c)).collect()
         } else {
             self.word.clone()
         };

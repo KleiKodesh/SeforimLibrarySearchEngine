@@ -19,6 +19,10 @@ pub mod options;
 pub mod search;
 
 pub use fm_index::FmIndex;
+/// Otzaria's `keep_second_of_paired_readings` (its query sanitizer): every
+/// paired reading `(X) [Y]` becomes ` Y `. The query parser runs it; hosts
+/// that number the query's words themselves run it first.
+pub use hebrew_fts::word_rule::keep_second_of_paired_readings as reduce_paired_readings;
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
 pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, WordOptions};
 pub use search::{
@@ -183,6 +187,63 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("positions"), "{err}");
+    }
+
+    /// Otzaria's word rule end to end, on both index flavours: the line ids a
+    /// query finds (hits the locator confirms).
+    #[test]
+    fn otzaria_word_rules_on_both_flavours() {
+        let long = "\u{05D0}".repeat(64); // 128 bytes: not indexed, one position
+        let texts: Vec<String> = vec![
+            "\u{05E4}.\u{05D1}.\u{05D9} \u{05D0}\u{05DE}\u{05E8}".into(),                       // 1: period joins
+            "\u{05D0}[\u{05D1}]\u{05D2} \u{05D4}\u{05D5}".into(),                                // 2: brackets join
+            "\u{05D3}\u{05D4}\u{200F}\u{05D5} \u{05D6}".into(),                                  // 3: bidi mark joins
+            "abc\u{05D3}\u{05D4} Caf\u{00C9}".into(),                                             // 4: no script split
+            "\u{05EA}\u{05D5}\u{05E1}' \u{05DB}\u{05EA}\u{05D1}".into(),                         // 5: trailing geresh
+            "\u{05E8}\u{05E9}\u{201D}\u{05D9} \u{05D0}\u{05DE}\u{05E8}".into(),                  // 6: typographic quote
+            "\u{FB2B}\u{05DC}\u{05D5}\u{05DD} \u{05E2}\u{05DC}\u{05D9}\u{05DB}\u{05DD}".into(),  // 7: presentation form
+            "\u{05D5}\u{05D9}\u{05D0}\u{05DE}\u{05E8} (\u{05D4}\u{05D5}\u{05E6}\u{05D0}) [\u{05D4}\u{05D9}\u{05E6}\u{05D0}] \u{05D0}\u{05D5}\u{05EA}\u{05DD}".into(), // 8: paired reading
+            format!("\u{05DE}\u{05E9}\u{05D4} {long} \u{05EA}\u{05D5}\u{05E8}\u{05D4}"),        // 9: too long word
+        ];
+        let lines: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| line(i as u64 + 1, i as u64, 1, t)).collect();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &lines);
+            let found = |o: SearchOptions| -> Vec<u64> {
+                let mut r = index.search_options(&o).unwrap();
+                let hits: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();
+                hits.into_iter().filter(|&id| r.session.locate(&texts[id as usize - 1]).is_some()).collect()
+            };
+            let q = |s: &str| found(SearchOptions { query: s.into(), ..Default::default() });
+            let ordered = |s: &str, gaps: Vec<u32>| {
+                found(SearchOptions { query: s.into(), proximity: Some(ProximitySpec::Ordered { gaps }), ..Default::default() })
+            };
+            assert_eq!(q("\u{05E4}\u{05D1}\u{05D9}"), [1], "positions={positions}");
+            assert_eq!(q("\u{05E4}.\u{05D1}.\u{05D9}"), [1]);
+            assert_eq!(q("\u{05D0}\u{05D1}\u{05D2}"), [2]);
+            assert_eq!(q("\u{05D3}\u{05D4}\u{05D5}"), [3]);
+            assert_eq!(q("abc\u{05D3}\u{05D4}"), [4]);
+            assert_eq!(q("abc"), Vec::<u64>::new());
+            assert_eq!(q("caf\u{00E9}"), [4]);
+            assert_eq!(q("\u{05EA}\u{05D5}\u{05E1}'"), [5]);
+            assert_eq!(q("\u{05EA}\u{05D5}\u{05E1}"), [5]); // quote-free form
+            assert_eq!(q("\u{05E8}\u{05E9}\"\u{05D9}"), [6]);
+            assert_eq!(q("\u{05E8}\u{05E9}\u{05D9}"), [6]);
+            assert_eq!(q("\u{05E9}\u{05DC}\u{05D5}\u{05DD}"), [7]);
+            // the second reading at the first reading's position
+            assert_eq!(ordered("\u{05D4}\u{05D9}\u{05E6}\u{05D0} \u{05D0}\u{05D5}\u{05EA}\u{05DD}", vec![0]), [8]);
+            assert_eq!(ordered("\u{05D5}\u{05D9}\u{05D0}\u{05DE}\u{05E8} \u{05D4}\u{05D9}\u{05E6}\u{05D0}", vec![0]), [8]);
+            assert_eq!(ordered("\u{05D5}\u{05D9}\u{05D0}\u{05DE}\u{05E8} \u{05D0}\u{05D5}\u{05EA}\u{05DD}", vec![0]), Vec::<u64>::new());
+            // a query paired reading keeps its second reading
+            assert_eq!(ordered("\u{05D5}\u{05D9}\u{05D0}\u{05DE}\u{05E8} (\u{05D4}\u{05D5}\u{05E6}\u{05D0}) [\u{05D4}\u{05D9}\u{05E6}\u{05D0}] \u{05D0}\u{05D5}\u{05EA}\u{05DD}", vec![0, 0]), [8]);
+            // a too long word keeps its one position
+            let three = format!("\u{05DE}\u{05E9}\u{05D4} {long} \u{05EA}\u{05D5}\u{05E8}\u{05D4}");
+            assert_eq!(ordered(&three, vec![0, 0]), [9]);
+            assert_eq!(ordered("\u{05DE}\u{05E9}\u{05D4} \u{05EA}\u{05D5}\u{05E8}\u{05D4}", vec![0]), Vec::<u64>::new());
+            let fts = |s: &str| found(SearchOptions { query: s.into(), max_word_distance: Some(0), ..Default::default() });
+            assert_eq!(fts(&three), [9]);
+            assert_eq!(fts("\u{05DE}\u{05E9}\u{05D4} \u{05EA}\u{05D5}\u{05E8}\u{05D4}"), Vec::<u64>::new());
+        }
     }
 
     #[test]

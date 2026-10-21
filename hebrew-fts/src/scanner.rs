@@ -1,20 +1,20 @@
-//! Port of FtsLib `HtmlWordScanner.cs` + `TokenStream.cs` (KitveiHakodesh, git HEAD).
+//! The text scanner: FtsLib's `HtmlWordScanner.cs` HTML layer with Otzaria's
+//! word rule (`hebrew_tokenizer.rs`), which FtsLib follows too.
 //!
-//! Single-pass HTML-aware word scanner. Handles tag detection, entity skipping,
-//! nikud/cantillation stripping, and word boundary detection. Every complete
+//! Single-pass HTML-aware word scanner. Handles tag detection, entity skipping
+//! and Otzaria's word boundaries, normalization and paired readings. Every
 //! word is reported with its raw source span (byte AND UTF-16 offsets into the
-//! original string) and its normalized form.
+//! original string), its normalized form and its position.
 //!
 //! The C# original indexes strings by UTF-16 code units; this port walks the
-//! UTF-8 bytes carrying both byte and UTF-16 offsets, so the control flow mirrors the
-//! original index-based loop exactly, while emitting byte offsets (natural for
-//! Rust slicing / tantivy) alongside UTF-16 offsets (what the JS frontend and
-//! the C# descriptors use).
+//! UTF-8 bytes carrying both byte and UTF-16 offsets, emitting byte offsets
+//! (natural for Rust slicing / tantivy) alongside UTF-16 offsets (what the JS
+//! frontend and the C# descriptors use). `scanner_reference.rs` computes the
+//! same output with Otzaria's own functions; a property test keeps them equal.
 
-use unicode_general_category::{get_general_category, GeneralCategory};
-
-use crate::chars;
+use crate::chars::{self, is_quote, is_transparent, is_word_char, starts_word};
 use crate::html_tags;
+use crate::word_rule::{is_reading_suffix, Normalized, Normalizer};
 
 /// Maximum number of chars accumulated for a tag name (as in the C# original).
 const TAG_NAME_CAP: usize = 16;
@@ -23,192 +23,400 @@ const TAG_NAME_CAP: usize = 16;
 /// passed separately as `&str`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WordSpan {
-    /// Byte index of the first letter of the word in the original string
-    /// (points into the raw HTML, before any nikud was stripped).
+    /// Byte index of the first char of the word in the original string.
     pub byte_start: usize,
-    /// Byte index just past the separator that ended the word.
+    /// Byte index where the next visible element after the word starts (the
+    /// separator, a quote or transparent char left out of the word, an
+    /// entity's `&`, a block tag's `>`, or the end of the text): inline tags
+    /// right after the word are inside its span.
     pub byte_end: usize,
     /// Same span in UTF-16 code units (C#/JS string indices).
     pub utf16_start: usize,
     /// UTF-16 end, exclusive.
     pub utf16_end: usize,
-    /// Cumulative count of visible characters up to but not including the first
-    /// letter of this word. Used by the snippet window locator to measure
-    /// window length without re-scanning.
+    /// Visible width of the text before the word (chars outside tags in
+    /// UTF-16 units, an entity 1, word marks 0). Used by the snippet window
+    /// locator to measure window length without re-scanning.
     pub visible_start: usize,
-    /// Number of letters and digits in the word (1+). Quotes and kept marks
-    /// in the normalized text are not counted. This is FtsLib's `NormLen`:
-    /// the word's visible width.
+    /// UTF-16 length of the word's quote-free, mark-free term (FtsLib's term,
+    /// its `NormLen`): the word's visible width.
     pub letters: usize,
+    /// UTF-8 bytes of the term before lowercasing, quotes included: what
+    /// Otzaria's `RemoveLongFilter` measures. At [`chars::MAX_TERM_BYTES`]
+    /// or more the word is not indexed (it keeps its position).
+    pub term_bytes: usize,
+    /// The word's position: one per word, except the second reading of a
+    /// paired reading `(X) [Y]`, which takes X's position (Otzaria).
+    pub position: usize,
 }
 
-/// Scans `text` and calls `on_word(normalized, span)` for each complete word,
-/// in order.
-///
-/// Rules (identical to the C# scanner; its word model is Otzaria's):
-/// - A word is a run of letters and ASCII digits, of any length, one letter
-///   included (`ו`, `12`, `ב5`). A word whose term is over
-///   [`MAX_TERM_BYTES`](crate::chars::MAX_TERM_BYTES) is still reported (it
-///   is a word for positions and distances); the index tokenizer leaves it
-///   out of the terms.
-/// - Inline tags (`<b>`, `<i>`, `<span>`, …) are transparent: a word continues
-///   across them. Block tags and `sup`/`sub` end the word.
-/// - Every HTML entity (well-formed or a bare `&`) is a word separator and is
-///   kept outside the word's raw span.
-/// - Maqaf (U+05BE) is a word separator.
-/// - Nikud + cantillation (and any other non-spacing mark) are stripped.
-/// - Letters are Hebrew alef-tav and ASCII (lowercased); a Hebrew↔Latin
-///   transition inside a letter run is a word boundary. Digits belong to no
-///   script (`5ab`, `ב5`).
-/// - Geresh/gershayim and ASCII quotes inside a word are transparent (רש"י → רשי).
-#[allow(unused_assignments)] // the final flush!'s buffer reset is never read
+/// Scans `text` and calls `on_word(normalized, span)` for each word, in order.
 pub fn scan(text: &str, on_word: impl FnMut(&str, WordSpan)) -> usize {
     scan_with(text, false, on_word)
 }
 
-/// Like [`scan`], but when `keep_marks` is true, nikud and te'amim inside a
-/// word are KEPT in the normalized token text (they never count as letters). Use for fields that index vocalized text; the walks
-/// can then optionally treat the marks as transparent.
+/// A quote or transparent char after a word, not yet known to belong to it.
+#[derive(Clone, Copy)]
+struct PendingChar {
+    c: char,
+    byte: usize,
+    utf16: usize,
+}
+
+/// After a word X preceded by `(`: how far the text matches `) [` (Otzaria
+/// `paired_reading_after`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gap {
+    None,
+    /// reading suffix chars, then `)`
+    Suffix,
+    /// whitespace, then `[`
+    Space,
+    /// right after `[`: the next element must start Y
+    Open,
+}
+
+/// Word state of the scanner.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum State {
+    Outside,
+    InWord,
+    /// a word followed by quotes / transparent chars (in `pending`)
+    Pending,
+}
+
+struct Scan<'f, F: FnMut(&str, WordSpan)> {
+    on_word: &'f mut F,
+    normalizer: Normalizer,
+    norm: Normalized,
+    state: State,
+    start_byte: usize,
+    start_utf16: usize,
+    start_visible: usize,
+    pending: Vec<PendingChar>,
+    geresh_n: usize,
+    gershayim_n: usize,
+    first_quote: usize,
+    first_is_geresh: bool,
+    /// char of the last visible element (a break is a space)
+    prev: char,
+    /// the current word follows `(`
+    after_paren: bool,
+    /// the current word follows `) [` of a word in `(`: a second reading
+    second_reading: bool,
+    gap: Gap,
+    /// a second reading waiting for its `]`
+    held: Option<(String, WordSpan)>,
+    words: usize,
+}
+
+impl<F: FnMut(&str, WordSpan)> Scan<'_, F> {
+    /// Feeds a visible element outside any word to the paired-reading checks.
+    #[inline]
+    fn after_word(&mut self, c: char) {
+        if self.held.is_some() {
+            if is_reading_suffix(c) {
+                return;
+            }
+            self.release(c == ']');
+        }
+        self.gap = match (self.gap, c) {
+            (Gap::None, _) => Gap::None,
+            (Gap::Suffix, ')') => Gap::Space,
+            (Gap::Suffix, c) if is_reading_suffix(c) => Gap::Suffix,
+            (Gap::Space, '[') => Gap::Open,
+            (Gap::Space, c) if c.is_whitespace() => Gap::Space,
+            _ => Gap::None,
+        };
+    }
+
+    /// Emits the held second reading: at its first reading's position when
+    /// its `]` came, else at its own.
+    fn release(&mut self, paired: bool) {
+        if let Some((text, mut span)) = self.held.take() {
+            span.position = if paired {
+                self.words - 1
+            } else {
+                self.words += 1;
+                self.words - 1
+            };
+            (self.on_word)(&text, span);
+        }
+    }
+
+    /// An element outside a word: the paired-reading checks, then maybe a new
+    /// word.
+    #[inline]
+    fn outside(&mut self, c: char, byte: usize, utf16: usize, visible: usize) {
+        let open = self.gap == Gap::Open;
+        self.after_word(c);
+        if starts_word(c) {
+            self.state = State::InWord;
+            self.start_byte = byte;
+            self.start_utf16 = utf16;
+            self.start_visible = visible;
+            self.after_paren = self.prev == '(';
+            self.second_reading = open;
+            self.gap = Gap::None;
+            self.norm.text.clear();
+            self.norm.term_bytes = 0;
+            self.norm.letters = 0;
+            self.normalizer.push(&mut self.norm, c);
+        }
+    }
+
+    /// Ends the current word at raw `(byte, utf16)`.
+    fn finish(&mut self, byte: usize, utf16: usize) {
+        self.state = State::Outside;
+        let span = WordSpan {
+            byte_start: self.start_byte,
+            byte_end: byte,
+            utf16_start: self.start_utf16,
+            utf16_end: utf16,
+            visible_start: self.start_visible,
+            letters: self.norm.letters,
+            term_bytes: self.norm.term_bytes,
+            position: 0,
+        };
+        if self.second_reading {
+            self.held = Some((self.norm.text.clone(), span));
+        } else {
+            self.words += 1;
+            (self.on_word)(&self.norm.text, WordSpan { position: self.words - 1, ..span });
+        }
+        self.gap = if self.after_paren { Gap::Suffix } else { Gap::None };
+    }
+
+    /// A non-word element (or the end of the text, `c` = None) after the
+    /// current word: ends it per Otzaria (a trailing geresh is kept).
+    fn end_word(&mut self, at_byte: usize, at_utf16: usize) {
+        match self.state {
+            State::Outside => {}
+            State::InWord => self.finish(at_byte, at_utf16),
+            State::Pending => {
+                let from = if self.first_is_geresh {
+                    let q = self.pending[self.first_quote];
+                    self.normalizer.push(&mut self.norm, q.c);
+                    self.first_quote + 1
+                } else {
+                    0
+                };
+                let (b, u) = self.pending.get(from).map_or((at_byte, at_utf16), |p| (p.byte, p.utf16));
+                self.finish(b, u);
+                self.replay(from);
+            }
+        }
+    }
+
+    /// Feeds the pending chars from `from` on (left out of the word) to the
+    /// paired-reading checks.
+    fn replay(&mut self, from: usize) {
+        for k in from..self.pending.len() {
+            let c = self.pending[k].c;
+            self.after_word(c);
+        }
+    }
+
+    /// One visible char (a break is `' '` with `is_break`).
+    #[inline]
+    fn element(&mut self, c: char, byte: usize, utf16: usize, visible: usize) {
+        match self.state {
+            State::Outside => self.outside(c, byte, utf16, visible),
+            State::InWord => {
+                if is_word_char(c) {
+                    self.normalizer.push(&mut self.norm, c);
+                } else if is_quote(c) || is_transparent(c) {
+                    self.pending.clear();
+                    self.geresh_n = 0;
+                    self.gershayim_n = 0;
+                    self.first_is_geresh = false;
+                    self.state = State::Pending;
+                    self.pend(c, byte, utf16);
+                } else {
+                    self.finish(byte, utf16);
+                    self.outside(c, byte, utf16, visible);
+                }
+            }
+            State::Pending => {
+                if is_quote(c) || is_transparent(c) {
+                    self.pend(c, byte, utf16);
+                } else if is_word_char(c) {
+                    if matches!((self.geresh_n, self.gershayim_n), (0, 0) | (1, 0) | (2, 0) | (0, 1)) {
+                        for k in 0..self.pending.len() {
+                            let p = self.pending[k].c;
+                            self.normalizer.push(&mut self.norm, p);
+                        }
+                        self.normalizer.push(&mut self.norm, c);
+                        self.state = State::InWord;
+                    } else {
+                        let first = self.pending[0];
+                        self.finish(first.byte, first.utf16);
+                        self.replay(0);
+                        self.outside(c, byte, utf16, visible);
+                    }
+                } else {
+                    self.end_word(byte, utf16);
+                    self.outside(c, byte, utf16, visible);
+                }
+            }
+        }
+        self.prev = c;
+    }
+
+    #[inline]
+    fn pend(&mut self, c: char, byte: usize, utf16: usize) {
+        if is_quote(c) {
+            if self.geresh_n + self.gershayim_n == 0 {
+                self.first_quote = self.pending.len();
+                self.first_is_geresh = chars::is_geresh(c);
+            }
+            if chars::is_geresh(c) {
+                self.geresh_n += 1;
+            } else {
+                self.gershayim_n += 1;
+            }
+        }
+        self.pending.push(PendingChar { c, byte, utf16 });
+    }
+}
+
+/// [`scan`], keeping the word marks (nikud, te'amim) in the normalized text
+/// when `keep_marks` (the marked index flavour).
 ///
-/// Returns the text's length in UTF-16 code units (C#'s `string.Length`),
-/// known from the same pass.
-///
-/// Implementation: the C# original is an index loop over UTF-16 units. This
-/// port walks the UTF-8 bytes directly, carrying the current char's byte AND
-/// UTF-16 offsets (`b`, `u`) — every place the C# reads `i` reads one of
-/// them. The control flow (branch order, flush points, entity skip, visible
-/// counting) is the C# loop's, step for step; the pre-optimisation version
-/// that materialised a `(byte, utf16, char)` table per line is kept in
-/// `scanner_reference.rs` and a property test asserts identical output.
-#[allow(unused_assignments)] // the final flush!'s buffer reset is never read
+/// Rules (Otzaria's tokenizer; FtsLib follows it):
+/// - A word starts at a letter or digit of any script (Hebrew, ASCII, and
+///   every other alphanumeric char; no Hebrew/Latin split) and runs over
+///   letters, digits and word marks. It has any length, one letter included.
+/// - Transparent chars (`. [ ] * ~ ^ $ \ +`, backtick, zero-width and bidi
+///   controls) between word chars join them and are dropped. A run of quotes
+///   between word chars joins them when it is one geresh (kept as `'`), two
+///   gereshes or one gershayim (kept as `"`); typographic quotes count as
+///   geresh / gershayim. After a word a geresh is kept (`'`), a gershayim
+///   is not.
+/// - Hebrew presentation forms fold to their letters; marks are dropped
+///   unless kept; the term is lowercased (every script).
+/// - The second reading of `(X) [Y]` takes X's position.
+/// - HTML (FtsLib): inline tags are transparent (a word continues across
+///   them); block tags and `sup`/`sub` end the word; every entity (or a bare
+///   `&`) is a separator kept outside the word's span.
+/// - A word whose term has [`chars::MAX_TERM_BYTES`] bytes or more is still
+///   reported (it is a word for positions and distances); the index
+///   tokenizer leaves it out of the terms.
 pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, WordSpan)) -> usize {
     let bytes = text.as_bytes();
     let n = bytes.len();
     if n == 0 {
         return 0;
     }
+    let mut s = Scan {
+        on_word: &mut on_word,
+        normalizer: Normalizer { keep_marks, wildcards: false },
+        norm: Normalized { text: String::with_capacity(64), ..Normalized::default() },
+        state: State::Outside,
+        start_byte: 0,
+        start_utf16: 0,
+        start_visible: 0,
+        pending: Vec::new(),
+        geresh_n: 0,
+        gershayim_n: 0,
+        first_quote: 0,
+        first_is_geresh: false,
+        prev: ' ',
+        after_paren: false,
+        second_reading: false,
+        gap: Gap::None,
+        held: None,
+        words: 0,
+    };
 
-    // Normalized word buffer — reused across words.
-    let mut buf = String::with_capacity(64);
-    let mut buf_chars = 0usize; // letters + digits in buf (BMP: chars == UTF-16 units)
-    let mut run_latin: Option<bool> = None; // script of the word's letters; None = digits only so far
-    // Byte length of `buf` up to and including its last letter, and whether a
-    // quote was pushed after that letter. Tracked while building so flush!
-    // need not re-scan the word for its last letter (same result: buf only
-    // ever holds letters, kept marks and '"').
-    let mut last_letter_end = 0usize;
-    let mut quote_in_tail = false;
-
-    // Tag name buffer (fixed array: the name is capped at TAG_NAME_CAP chars).
     let mut tag_name = ['\0'; TAG_NAME_CAP];
     let mut tag_len = 0usize;
     let mut in_tag = false;
-    let mut tag_name_done = false; // first space seen — attribute chars must not join the name
-
-    let mut word_start_byte = 0usize;
-    let mut word_start_utf16 = 0usize;
-    let mut word_start_visible = 0usize;
-    let mut visible = 0usize; // cumulative visible chars up to current position
-
-    // Current char position: byte offset and UTF-16 offset.
+    let mut tag_name_done = false;
+    let mut visible = 0usize;
     let mut b = 0usize;
     let mut u = 0usize;
 
-    macro_rules! flush {
-        ($end_b:expr, $end_u:expr) => {{
-            if buf_chars > 0 {
-                // A quote is part of the word only BETWEEN letters (רש"י). One
-                // after the last letter is quotation punctuation (יצחק"): FtsLib
-                // drops it, so it must not become part of the term. The tail
-                // after the last letter holds only kept marks and quotes.
-                if quote_in_tail {
-                    let tail: String = buf[last_letter_end..].chars().filter(|&c| c != '"').collect();
-                    buf.truncate(last_letter_end);
-                    buf.push_str(&tail);
-                }
-                let span = WordSpan {
-                    byte_start: word_start_byte,
-                    byte_end: $end_b,
-                    utf16_start: word_start_utf16,
-                    utf16_end: $end_u,
-                    visible_start: word_start_visible,
-                    letters: buf_chars,
-                };
-                on_word(&buf, span);
-            }
-            buf.clear();
-            buf_chars = 0;
-            run_latin = None;
-            last_letter_end = 0;
-            quote_in_tail = false;
-        }};
-    }
-
     while b < n {
-        // ── FAST PATHS (outside tags) ───────────────────────
-        // The two commonest chars by far, handled before the general decode.
-        // Each does exactly what the general branches below do for that char
-        // (the branches are disjoint, so testing these first changes nothing).
         if !in_tag {
             let x = bytes[b];
-            // Hebrew letter alef..tav = U+05D0..U+05EA = D7 90..D7 AA.
-            if x == 0xD7 && (0x90..=0xAA).contains(&bytes[b + 1]) {
-                // = the WORD BUILDING branch for a non-Latin letter.
-                if run_latin == Some(true) {
-                    flush!(b, u); // script boundary
-                }
-                run_latin = Some(false);
-                if buf_chars == 0 {
-                    word_start_byte = b;
-                    word_start_utf16 = u;
-                    word_start_visible = visible;
-                }
-                buf.push_str(&text[b..b + 2]);
-                buf_chars += 1;
-                last_letter_end = buf.len();
-                quote_in_tail = false;
+            // Fast path: a Hebrew letter (U+05D0..U+05EA) inside a word.
+            if x == 0xD7 && (0x90..=0xAA).contains(&bytes[b + 1]) && s.state == State::InWord {
+                s.norm.text.push_str(&text[b..b + 2]);
+                s.norm.term_bytes += 2;
+                s.norm.letters += 1;
+                s.prev = '\u{05D0}';
                 visible += 1;
                 b += 2;
                 u += 1;
                 continue;
             }
-            // Nikud / te'amim U+0591..U+05BF = D6 91..D6 BF, minus the maqaf
-            // U+05BE (D6 BE) = the strip-or-keep branch. (The few strippable
-            // marks above U+05BF take the general path.)
-            if x == 0xD6 && bytes[b + 1] >= 0x91 && bytes[b + 1] != 0xBE {
-                if keep_marks && buf_chars > 0 {
-                    buf.push_str(&text[b..b + 2]);
-                }
+            // Fast path: a Hebrew letter starting a word, no paired-reading
+            // check open (`outside` with nothing to feed).
+            if x == 0xD7
+                && (0x90..=0xAA).contains(&bytes[b + 1])
+                && s.state == State::Outside
+                && s.gap == Gap::None
+                && s.held.is_none()
+            {
+                s.state = State::InWord;
+                s.start_byte = b;
+                s.start_utf16 = u;
+                s.start_visible = visible;
+                s.after_paren = s.prev == '(';
+                s.second_reading = false;
+                s.norm.text.clear();
+                s.norm.text.push_str(&text[b..b + 2]);
+                s.norm.term_bytes = 2;
+                s.norm.letters = 1;
+                s.prev = '\u{05D0}';
+                visible += 1;
                 b += 2;
                 u += 1;
                 continue;
             }
-            // ASCII space = the final separator branch.
-            if x == b' ' {
-                flush!(b, u);
-                visible += 1;
-                b += 1;
+            // Fast path: a space ending a word, or between words, no
+            // paired-reading check open.
+            if x == b' ' && s.held.is_none() {
+                if s.state == State::InWord && !s.after_paren && !s.second_reading {
+                    s.finish(b, u); // leaves the gap check closed: no '(' before the word
+                }
+                if s.state == State::Outside && s.gap == Gap::None {
+                    s.prev = ' ';
+                    visible += 1;
+                    b += 1;
+                    u += 1;
+                    continue;
+                }
+            }
+            // Fast path: a Hebrew point or ta'am inside a word (U+0591..U+05BD,
+            // U+05BF, U+05C1, U+05C2, U+05C4, U+05C5, U+05C7).
+            if s.state == State::InWord
+                && ((x == 0xD6 && bytes[b + 1] >= 0x91 && bytes[b + 1] != 0xBE)
+                    || (x == 0xD7 && matches!(bytes[b + 1], 0x81 | 0x82 | 0x84 | 0x85 | 0x87)))
+            {
+                if keep_marks {
+                    s.norm.text.push_str(&text[b..b + 2]);
+                    s.norm.term_bytes += 2;
+                }
+                s.prev = '\u{05B0}';
+                b += 2;
                 u += 1;
                 continue;
             }
         }
 
         let (c, clen) = decode_char(bytes, b);
-        // A 4-byte UTF-8 char is a surrogate pair in UTF-16; all others are one unit.
         let ulen = if clen == 4 { 2 } else { 1 };
 
-        // ── HTML TAGS ────────────────────────────────────────
         if in_tag {
             if c == '>' {
                 if html_tags::is_word_break_tag(&tag_name[..tag_len]) {
-                    flush!(b, u);
+                    s.element(' ', b, u, visible);
                 }
                 in_tag = false;
                 tag_len = 0;
             } else if !tag_name_done {
-                // Stop accumulating at the first space — everything after it is
-                // attributes, which must not corrupt the tag name the flush
-                // decision above depends on.
                 if c == ' ' || c == '\t' {
                     tag_name_done = true;
                 } else if tag_len < TAG_NAME_CAP && c != '/' {
@@ -216,9 +424,7 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
                     tag_len += 1;
                 }
             } else {
-                // Attributes: nothing happens until '>'. Jump straight to it
-                // ('>' is ASCII, so it never occurs inside a multi-byte char),
-                // counting the skipped UTF-16 units.
+                // Attributes: nothing matters until the closing '>'.
                 let rest = &bytes[b..];
                 let skip = rest.iter().position(|&x| x == b'>').unwrap_or(rest.len());
                 u += utf16_len(&rest[..skip]);
@@ -231,13 +437,8 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
         }
 
         if c == '<' {
-            // Word building continues ACROSS the tag — no flush here. Inline
-            // formatting (<b>, <i>, <small>, <span>…) interrupts words
-            // mid-letter (emphasised letters, e.g. ורא<b>ה</b>); flushing on
-            // every '<' indexed those words as unfindable fragments. The flush
-            // decision is deferred to '>' above, once the tag name is known:
-            // block tags and sup/sub break the word, everything else is
-            // transparent.
+            // A tag: inline tags are transparent (the word continues across
+            // them); the decision is taken at '>' once the name is known.
             in_tag = true;
             tag_len = 0;
             tag_name_done = false;
@@ -246,99 +447,26 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
             continue;
         }
 
-        // ── HTML ENTITIES ────────────────────────────────────
         if c == '&' {
-            // Every entity — well-formed or a bare '&' — is a word separator.
-            // Flush at the '&' (the entity is the separator, so it is NOT part
-            // of the word's raw span); the whole entity stays outside every
-            // token span.
-            flush!(b, u);
+            // Every entity (or a bare '&') is a separator at its '&'.
+            s.element(' ', b, u, visible);
             skip_entity(bytes, &mut b, &mut u);
-            visible += 1; // the entity renders as one visible char
-            b += 1; // past the '&' (bare) or the ';' (well-formed)
+            visible += 1;
+            b += 1;
             u += 1;
             continue;
         }
 
-        // ── MAQAF ─ word-joining hyphen acts as separator ────
-        if c == '\u{05BE}' {
-            flush!(b, u);
-            visible += 1;
-            b += clen;
-            u += ulen;
-            continue;
-        }
-
-        // ── NIKUD + CANTILLATION: strip or keep ──────────────
-        if chars::is_strippable_mark(c) {
-            if keep_marks && buf_chars > 0 {
-                // Kept in the token text (never counted as a letter).
-                buf.push(c);
-            }
-            b += clen;
-            u += ulen;
-            continue;
-        }
-
-        // The Unicode category lookup is a table search; Hebrew and ASCII letters
-        // (the vast majority of chars) are never non-spacing marks, so skip it
-        // for them. Same result, ~1 lookup per non-letter char instead of per char.
-        if c as u32 > 127 && !chars::is_letter(c) && get_general_category(c) == GeneralCategory::NonspacingMark {
-            b += clen;
-            u += ulen;
-            continue;
-        }
-
-        // ── WORD BUILDING ────────────────────────────────────
-        if chars::is_word_char(c) {
-            let c = chars::to_lower_ascii(c);
-
-            // Script-boundary split: a Hebrew↔Latin transition inside a letter
-            // run is a word boundary. Prevents mixed-script blobs — OCR bleed
-            // (bדה), a Hebrew prefix on a foreign word (הOU), or entity residue
-            // (בשבת&amp) — from being indexed as one unsearchable token.
-            // Digits belong to no script: they never split and join the run.
-            if !chars::is_digit(c) {
-                let latin = chars::is_latin_lower(c);
-                if run_latin.is_some_and(|l| l != latin) {
-                    flush!(b, u); // emits the completed run, resets the buffer
-                }
-                run_latin = Some(latin);
-            }
-
-            if buf_chars == 0 {
-                word_start_byte = b;
-                word_start_utf16 = u;
-                word_start_visible = visible;
-            }
-
-            buf.push(c);
-            buf_chars += 1;
-            last_letter_end = buf.len();
-            quote_in_tail = false;
-            visible += 1;
-        } else if chars::is_intra_word_quote(c) && buf_chars > 0 {
-            // Hebrew geresh/gershayim and ASCII quotes appearing inside a word
-            // (e.g. רשב"א, רש"י) are KEPT in the token, normalized to a
-            // canonical '"' (all four forms: " ' ׳ ״) — the index preserves
-            // them and the walks optionally treat them as transparent
-            // (ignore-gershayim option). They are not letters (buf_chars
-            // counts letters and digits only).
-            buf.push('"');
-            quote_in_tail = true;
-            visible += 1;
-        } else {
-            flush!(b, u);
-            // Non-letter separators (space, punctuation, etc.) count as
-            // visible. The C# original counts UTF-16 units.
+        s.element(c, b, u, visible);
+        if !chars::is_word_mark(c) {
             visible += ulen;
         }
-
         b += clen;
         u += ulen;
     }
 
-    flush!(n, u);
+    s.end_word(n, u);
+    s.release(false);
     u
 }
 
@@ -418,9 +546,10 @@ fn skip_entity(bytes: &[u8], b: &mut usize, u: &mut usize) {
 /// lifetime as the token list.
 #[derive(Debug, Clone, Copy)]
 pub struct TextToken {
-    /// Byte index of the first letter of the word in the original raw string.
+    /// Byte index of the first char of the word in the original raw string.
     pub raw_start: usize,
-    /// Byte index just past the separator that ended the word.
+    /// Byte index of the next visible element after the word
+    /// ([`WordSpan::byte_end`]).
     pub raw_end: usize,
     /// Same span in UTF-16 code units.
     pub utf16_start: usize,
@@ -432,6 +561,8 @@ pub struct TextToken {
     /// Letters in the word (FtsLib `NormLen`): its visible width, excluding
     /// quotes and kept marks.
     pub letters: usize,
+    /// The word's position ([`WordSpan::position`]): the index positions.
+    pub position: usize,
     norm_start: usize,
     norm_len: usize,
 }
@@ -476,6 +607,7 @@ impl TextTokens {
                 utf16_end: span.utf16_end,
                 visible_start: span.visible_start,
                 letters: span.letters,
+                position: span.position,
                 norm_start,
                 norm_len: word.len(),
             });
@@ -517,164 +649,161 @@ mod tests {
         out
     }
 
+    fn positions(text: &str) -> Vec<(String, usize)> {
+        spans(text).into_iter().map(|(w, s)| (w, s.position)).collect()
+    }
+
+    const ALEF: &str = "\u{05D0}";
+    const BET: &str = "\u{05D1}";
+    const GIMEL: &str = "\u{05D2}";
+    const DALET: &str = "\u{05D3}";
+    const HE: &str = "\u{05D4}";
+    const VAV: &str = "\u{05D5}";
+
+    fn heb(parts: &[&str]) -> String {
+        parts.concat()
+    }
+
     #[test]
     fn plain_words() {
-        assert_eq!(words("שלום עולם"), ["שלום", "עולם"]);
+        let a = heb(&[ALEF, BET]);
+        let b = heb(&[GIMEL, DALET]);
+        assert_eq!(words(&format!("{a} {b}")), [a, b]);
     }
 
     #[test]
-    fn nikud_stripped() {
-        // בְּרֵאשִׁית → בראשית
-        assert_eq!(words("בְּרֵאשִׁית בָּרָא"), ["בראשית", "ברא"]);
-    }
-
-    #[test]
-    fn marks_kept_when_requested() {
+    fn nikud_stripped_or_kept() {
+        let text = "\u{05D1}\u{05B0}\u{05BC}\u{05E8}\u{05B5}\u{05D0}\u{05E9}\u{05B4}\u{05C1}\u{05D9}\u{05EA} \u{05D1}\u{05B8}\u{05BC}\u{05E8}\u{05B8}\u{05D0}";
+        assert_eq!(words(text), ["\u{05D1}\u{05E8}\u{05D0}\u{05E9}\u{05D9}\u{05EA}", "\u{05D1}\u{05E8}\u{05D0}"]);
         let mut out = Vec::new();
-        scan_with("בְּרֵאשִׁית בָּרָא", true, |w, _| out.push(w.to_string()));
-        assert_eq!(out, ["בְּרֵאשִׁית", "בָּרָא"]);
-        // a one-letter word keeps its marks too
-        let mut out2 = Vec::new();
-        scan_with("בְּ שם", true, |w, _| out2.push(w.to_string()));
-        assert_eq!(out2, ["בְּ", "שם"]);
+        scan_with(text, true, |w, _| out.push(w.to_string()));
+        assert_eq!(out, ["\u{05D1}\u{05B0}\u{05BC}\u{05E8}\u{05B5}\u{05D0}\u{05E9}\u{05B4}\u{05C1}\u{05D9}\u{05EA}", "\u{05D1}\u{05B8}\u{05BC}\u{05E8}\u{05B8}\u{05D0}"]);
     }
 
     #[test]
-    fn intra_word_quotes_kept_canonical() {
-        // Quotes are kept in the token, normalized to '"'; they don't count
-        // as letters.
-        assert_eq!(words("רש\"י אמר"), ["רש\"י", "אמר"]);
-        assert_eq!(words("רשב\u{05F4}א"), ["רשב\"א"]); // gershayim → '"'
-        assert_eq!(words("ר' עקיבא"), ["ר", "עקיבא"]); // trailing quote is punctuation
-        // a quote AFTER the last letter is punctuation, not part of the word
-        assert_eq!(words("\"יצחק\" אמר"), ["יצחק", "אמר"]);
-        assert_eq!(words("תורה'' שלמה"), ["תורה", "שלמה"]);
-        // its raw span still ends at the separator (FtsLib's rawEnd)
-        let s = spans("יצחק\" אמר");
-        assert_eq!(s[0].1.utf16_end, 5);
+    fn rule1_period_brackets_bidi_join() {
+        // letter.letter.letter: one word
+        assert_eq!(words(&heb(&[ALEF, ".", BET, ".", GIMEL])), [heb(&[ALEF, BET, GIMEL])]);
+        // a period after a word is not part of it
+        let s = spans(&heb(&[ALEF, BET, ". ", GIMEL]));
+        assert_eq!(s[0].0, heb(&[ALEF, BET]));
+        assert_eq!((s[0].1.utf16_end, s[1].0.as_str()), (2, GIMEL));
+        // brackets join (letter[letter]letter)
+        assert_eq!(words(&heb(&[ALEF, "[", BET, "]", GIMEL])), [heb(&[ALEF, BET, GIMEL])]);
+        // bidi and zero-width marks join
+        assert_eq!(words(&heb(&[ALEF, "\u{200F}", BET, "\u{200B}", GIMEL, "\u{202B}", DALET])), [heb(&[ALEF, BET, GIMEL, DALET])]);
+        // other transparent chars: * ~ ^ $ \ + backtick
+        assert_eq!(words(&heb(&[ALEF, "*", BET, "~", GIMEL, "^$\\+`", DALET])), [heb(&[ALEF, BET, GIMEL, DALET])]);
+        // FtsLib separators stay separators
+        assert_eq!(words(&heb(&[ALEF, ",", BET, "-", GIMEL, "\u{05BE}", DALET, "?", HE])), [ALEF, BET, GIMEL, DALET, HE]);
     }
 
     #[test]
-    fn maqaf_splits() {
-        assert_eq!(words("על־פני"), ["על", "פני"]);
+    fn rule2_no_script_split_other_scripts() {
+        assert_eq!(words(&heb(&["abc", DALET, HE])), [heb(&["abc", DALET, HE])]);
+        assert_eq!(words(&heb(&[DALET, HE, "ABC"])), [heb(&[DALET, HE, "abc"])]);
+        // accented Latin, Greek, Cyrillic: word chars, lowercased
+        assert_eq!(words("Caf\u{00C9} \u{0391}\u{03B2} \u{0416}\u{0436}"), ["caf\u{00E9}", "\u{03B1}\u{03B2}", "\u{0436}\u{0436}"]);
+        // a combining accent continues a word but never starts one
+        assert_eq!(words("e\u{0301}x \u{0301}y"), ["ex", "y"]);
+        assert_eq!(words("5ab a5\u{05D1} 3.14"), ["5ab", "a5\u{05D1}", "314"]);
     }
 
     #[test]
-    fn inline_tag_transparent() {
-        assert_eq!(words("ורא<b>ה</b> טוב"), ["וראה", "טוב"]);
+    fn rule3_quotes_and_trailing_geresh() {
+        // inner quotes: one geresh ', two gereshes or one gershayim "
+        assert_eq!(words(&heb(&[ALEF, "'", BET])), [heb(&[ALEF, "'", BET])]);
+        assert_eq!(words(&heb(&[ALEF, "''", BET])), [heb(&[ALEF, "\"", BET])]);
+        assert_eq!(words(&heb(&[ALEF, "\u{05F4}", BET])), [heb(&[ALEF, "\"", BET])]);
+        // a run of other quotes splits
+        assert_eq!(words(&heb(&[ALEF, "'\"", BET])), [ALEF.to_string(), BET.to_string()]);
+        // trailing geresh kept (with its span), trailing gershayim not
+        let s = spans(&heb(&[ALEF, BET, "' ", GIMEL, DALET, "\" ", HE]));
+        assert_eq!(s[0].0, heb(&[ALEF, BET, "'"]));
+        assert_eq!(s[0].1.utf16_end, 3);
+        assert_eq!(s[1].0, heb(&[GIMEL, DALET]));
+        assert_eq!(s[1].1.utf16_end, 6);
+        // only the first geresh of a trailing run, period between allowed
+        assert_eq!(words(&heb(&[ALEF, BET, ".''"])), [heb(&[ALEF, BET, "'"])]);
+        // a leading quote is not part of a word
+        assert_eq!(words(&heb(&["\"", ALEF, BET, "\""])), [heb(&[ALEF, BET])]);
     }
 
     #[test]
-    fn block_tag_splits() {
-        assert_eq!(words("אב<br>גד"), ["אב", "גד"]);
-        assert_eq!(words("אב<div class=\"x\">גד</div>"), ["אב", "גד"]);
+    fn rule4_typographic_quotes_and_presentation_forms() {
+        assert_eq!(words(&heb(&[ALEF, "\u{201D}", BET])), [heb(&[ALEF, "\"", BET])]);
+        assert_eq!(words(&heb(&[ALEF, "\u{201C}", BET])), [heb(&[ALEF, "\"", BET])]);
+        assert_eq!(words(&heb(&[ALEF, "\u{2019}", BET, " ", GIMEL, "\u{2018}"])), [heb(&[ALEF, "'", BET]), heb(&[GIMEL, "'"])]);
+        assert_eq!(words(&heb(&[ALEF, "\u{2019}\u{2019}", BET])), [heb(&[ALEF, "\"", BET])]);
+        // presentation forms fold (marks dropped unless kept)
+        assert_eq!(words("\u{FB2B}\u{05DC}\u{05D5}\u{05DD} \u{FB4F} \u{FB31}"), ["\u{05E9}\u{05DC}\u{05D5}\u{05DD}", "\u{05D0}\u{05DC}", "\u{05D1}"]);
+        let mut out = Vec::new();
+        scan_with("\u{FB31}\u{05D9}", true, |w, _| out.push(w.to_string()));
+        assert_eq!(out, ["\u{05D1}\u{05BC}\u{05D9}"]);
     }
 
     #[test]
-    fn sup_sub_split() {
-        // the footnote number is a word of its own (digits are word chars)
-        assert_eq!(words("אב<sup>1</sup>גד"), ["אב", "1", "גד"]);
+    fn rule5_paired_reading_shares_a_position() {
+        let x = heb(&[ALEF, BET]);
+        let y = heb(&[GIMEL, DALET]);
+        let got = positions(&format!("{HE} ({x}) [{y}] {VAV}"));
+        assert_eq!(got, [(HE.into(), 0), (x.clone(), 1), (y.clone(), 1), (VAV.into(), 2)]);
+        // punctuation inside the brackets, tags around them
+        let got = positions(&format!("({x}.) <b>[{y}:]</b> {VAV}"));
+        assert_eq!(got, [(x.clone(), 0), (y.clone(), 0), (VAV.into(), 1)]);
+        // not a pair: no closing bracket, a word between, no opening paren
+        assert_eq!(positions(&format!("({x}) [{y} {VAV}")), [(x.clone(), 0), (y.clone(), 1), (VAV.into(), 2)]);
+        assert_eq!(positions(&format!("({x}) {VAV} [{y}]")), [(x.clone(), 0), (VAV.into(), 1), (y.clone(), 2)]);
+        assert_eq!(positions(&format!("{x}) [{y}]")), [(x.clone(), 0), (y.clone(), 1)]);
+        // at the end of the text
+        assert_eq!(positions(&format!("({x}) [{y}]")), [(x.clone(), 0), (y.clone(), 0)]);
     }
 
     #[test]
-    fn entity_splits() {
-        assert_eq!(words("אב&nbsp;גד"), ["אב", "גד"]);
-        assert_eq!(words("אב&גד"), ["אב", "גד"]); // bare '&'
+    fn rule6_term_bytes() {
+        let s = spans(&heb(&[ALEF, "\u{05F4}", BET, " ", &"\u{05D0}".repeat(64)]));
+        assert_eq!((s[0].1.term_bytes, s[0].1.letters), (5, 2));
+        assert_eq!(s[1].1.term_bytes, 128);
+        assert!(!chars::is_indexable_len(s[1].1.term_bytes));
     }
 
     #[test]
-    fn script_boundary_splits() {
-        assert_eq!(words("abcדה"), ["abc", "דה"]);
-        assert_eq!(words("דהabc"), ["דה", "abc"]);
+    fn maqaf_and_html() {
+        assert_eq!(words("\u{05E2}\u{05DC}\u{05BE}\u{05E4}\u{05E0}\u{05D9}"), ["\u{05E2}\u{05DC}", "\u{05E4}\u{05E0}\u{05D9}"]);
+        assert_eq!(words(&heb(&[ALEF, BET, "<b>", GIMEL, "</b> ", DALET])), [heb(&[ALEF, BET, GIMEL]), DALET.to_string()]);
+        assert_eq!(words(&heb(&[ALEF, BET, "<br>", GIMEL, DALET])), [heb(&[ALEF, BET]), heb(&[GIMEL, DALET])]);
+        assert_eq!(words(&heb(&[ALEF, BET, "<sup>1</sup>", GIMEL])), [heb(&[ALEF, BET]), "1".into(), GIMEL.into()]);
+        assert_eq!(words(&heb(&[ALEF, BET, "&nbsp;", GIMEL, "&", DALET])), [heb(&[ALEF, BET]), GIMEL.into(), DALET.into()]);
+        let text = heb(&[ALEF, BET, "<b>", GIMEL, "</b> ", DALET]);
+        let s = spans(&text);
+        assert_eq!(&text[s[0].1.byte_start..s[0].1.byte_end], heb(&[ALEF, BET, "<b>", GIMEL, "</b>"]));
     }
 
     #[test]
-    fn ascii_lowercased() {
-        assert_eq!(words("HeLLo"), ["hello"]);
-    }
-
-    #[test]
-    fn every_word_any_length() {
-        // one-letter words are words (Otzaria's word model)
-        assert_eq!(words("ב של"), ["ב", "של"]);
-        // so are long words: the scanner reports them, the index tokenizer
-        // decides on the term
-        let long = "א".repeat(70);
-        assert_eq!(words(&long), [long.clone()]);
-    }
-
-    #[test]
-    fn digits_are_word_chars() {
-        // a digit run is a word; digits join the letters around them
-        assert_eq!(words("סימן 12 ב5 אב3גד"), ["סימן", "12", "ב5", "אב3גד"]);
-        // digits are script-neutral: only letters of the other script split
-        assert_eq!(words("5ab a5ב 3.14"), ["5ab", "a5", "ב", "3", "14"]);
-        // a quote between digits / letters stays inside, a trailing one does not
-        assert_eq!(words("ה'3 12\""), ["ה\"3", "12"]);
-        // the visible width counts digits
-        let s = spans("ב5 אב");
-        assert_eq!((s[0].1.letters, s[1].1.visible_start), (2, 3));
-    }
-
-    #[test]
-    fn raw_spans_point_into_source() {
-        let text = "שָׁלוֹם עולם";
+    fn raw_spans_and_visible_counts() {
+        let text = "\u{05E9}\u{05B8}\u{05C1}\u{05DC}\u{05D5}\u{05B9}\u{05DD} \u{05E2}\u{05D5}\u{05DC}\u{05DD}";
         let s = spans(text);
-        assert_eq!(s.len(), 2);
-        let (w0, sp0) = &s[0];
-        assert_eq!(w0, "שלום");
-        // the raw span covers the pointed word incl. nikud, up to the separator
-        assert_eq!(&text[sp0.byte_start..sp0.byte_end], "שָׁלוֹם");
-        // utf16 offsets: C#/JS indices
-        assert_eq!(sp0.utf16_start, 0);
-        assert_eq!(sp0.utf16_end, 7); // 7 UTF-16 units in שָׁלוֹם
-        let (w1, sp1) = &s[1];
-        assert_eq!(w1, "עולם");
-        assert_eq!(&text[sp1.byte_start..sp1.byte_end], "עולם");
-        assert_eq!(sp1.utf16_end, 12);
-    }
-
-    #[test]
-    fn visible_counts() {
-        // "אב גד": visible chars are letters + separator
-        let s = spans("אבג דהו");
-        assert_eq!(s[0].1.visible_start, 0);
-        assert_eq!(s[1].1.visible_start, 4); // 3 letters + 1 space
-                                             // nikud is invisible
-        let s = spans("אָבָג דהו");
-        assert_eq!(s[1].1.visible_start, 4);
-        // entity counts as one visible char
-        let s = spans("אבג&nbsp;דהו");
-        assert_eq!(s[1].1.visible_start, 4);
-        // intra-word quote is visible but must not shift the word's own start
-        let s = spans("רש\"י דהו");
-        assert_eq!(s[0].1.visible_start, 0);
-        assert_eq!(s[1].1.visible_start, 5); // 3 letters + quote + space
+        assert_eq!(&text[s[0].1.byte_start..s[0].1.byte_end], "\u{05E9}\u{05B8}\u{05C1}\u{05DC}\u{05D5}\u{05B9}\u{05DD}");
+        assert_eq!((s[0].1.utf16_end, s[1].1.utf16_end), (7, 12));
+        // marks have no width; an entity is one
+        assert_eq!(s[1].1.visible_start, 5);
+        let s = spans(&heb(&[ALEF, BET, "&nbsp;", GIMEL]));
+        assert_eq!(s[1].1.visible_start, 3);
     }
 
     #[test]
     fn text_tokens_reuse() {
         let mut tt = TextTokens::default();
-        let toks: Vec<_> = tt.tokenize("רש\"י על־התורה").to_vec();
+        let toks: Vec<_> = tt.tokenize(&heb(&[ALEF, "\"", BET, " ", GIMEL, "\u{05BE}", DALET])).to_vec();
         assert_eq!(toks.len(), 3);
-        assert_eq!(tt.norm_of(&toks[0]), "רש\"י");
-        assert_eq!(tt.norm_of(&toks[1]), "על");
-        assert_eq!(tt.norm_of(&toks[2]), "התורה");
-        let toks2: Vec<_> = tt.tokenize("שלום").to_vec();
-        assert_eq!(toks2.len(), 1);
-        assert_eq!(tt.norm_of(&toks2[0]), "שלום");
+        assert_eq!(tt.norm_of(&toks[0]), heb(&[ALEF, "\"", BET]));
+        assert_eq!(toks[2].position, 2);
+        let toks2: Vec<_> = tt.tokenize(HE).to_vec();
+        assert_eq!(tt.norm_of(&toks2[0]), HE);
     }
 
-    #[test]
-    fn word_continues_across_inline_tag_span() {
-        // raw span of a word interrupted by an inline tag includes the tag
-        let text = "ורא<b>ה</b> טוב";
-        let s = spans(text);
-        assert_eq!(s[0].0, "וראה");
-        assert_eq!(&text[s[0].1.byte_start..s[0].1.byte_end], "ורא<b>ה</b>");
-    }
+    // ---- equality with the reference (Otzaria's own functions) ----
 
-    /// Everything the scanner reports, for comparing two implementations.
     fn scan_all(f: fn(&str, bool, &mut dyn FnMut(&str, WordSpan)) -> usize, text: &str, keep: bool) -> (Vec<(String, WordSpan)>, usize) {
         let mut out = Vec::new();
         let n = f(text, keep, &mut |w, s| out.push((w.to_string(), s)));
@@ -689,24 +818,30 @@ mod tests {
 
     fn assert_same(text: &str) {
         for keep in [false, true] {
-            assert_eq!(scan_all(new_impl, text, keep), scan_all(old_impl, text, keep), "keep_marks={keep} text={text:?}");
+            assert_eq!(
+                scan_all(new_impl, text, keep),
+                scan_all(old_impl, text, keep),
+                "keep_marks={keep} text={}",
+                text.escape_unicode()
+            );
         }
     }
 
     #[test]
     fn matches_reference_on_edge_cases() {
-        let long_heb = "א".repeat(40);
-        let long_lat = "x".repeat(31);
+        let long_heb = "\u{05D0}".repeat(70);
         let cases = [
-            "", "א", "אב", "&", "&;", "&a;", "אב&", "אב&;גד", "<", ">", "<b", "אב<b", "אב<div class=\"x\"",
-            "אב<sup>1</sup>גד", "אב<SUB>x</SUB>גד", "אב</p>גד", "אב<p/>גד", "אב<br />גד", "אב<!-- c -->גד",
-            "אב<span\tstyle='a>b'>גד", "אב<abcdefghijklmnopqrstuvwxyz>גד", "אב<divx>גד", "אב<דיב>גד",
-            "אב&nbsp;גד", "אב&#1234;גד", "אב&abcdefghij;גד", "אב&abcdefghi;גד", "אב&abcdefgh😀;גד",
-            "אב&abcdefgh😀x;גד", "אב&😀;גד", "&&&;;", "על־פני", "רש\"י", "רש\"\"", "יצחק\"", "יצחק\u{05B0}\"\u{05B0}",
-            "ר' עקיבא", "תורה'' שלמה", "רשב\u{05F4}א", "ג\u{05F3}", "\"אב\"", "בְּרֵאשִׁית בָּרָא", "בְּ שם",
-            "אב\u{0300}גד", "אב\u{05C0}גד", "אב\u{05C3}גד", "abcדה", "דהabc", "HeLLo WoRLD", "a\u{05B0}b",
-            "😀אב😀גד😀", "אב\u{10000}", &long_heb, &long_lat, "אב\u{1F600}&nbsp;\u{1F600}גד", "\u{200F}אב\u{200E}",
-            "אב<", "אב<b>", "אב\r\nגד\tהו", "ﬠאב", "אבּגד", "\u{05BE}\u{05BE}אב\u{05BE}",
+            "", "\u{05D0}", "&", "&;", "&a;", "<", ">", "<b", "\u{05D0}<b", "\u{05D0}&;\u{05D1}", "\u{05D0}<br />\u{05D1}",
+            "\u{05D0}<span\tstyle='a>b'>\u{05D1}", "\u{05D0}<!-- c -->\u{05D1}", "\u{05D0}&abcdefghij;\u{05D1}",
+            "\u{05D0}''\u{05D1}", "\u{05D0}'''\u{05D1}", "\u{05D0}'\"\u{05D1}", "\u{05D0}\"\"\u{05D1}", "\u{05D0}.'.\u{05D1}",
+            "\u{05D0}'", "\u{05D0}''", "\u{05D0}.'", "\u{05D0}\"'", "\u{05D0}'<b>'</b>", "\u{05D0}'&amp;", "\u{05D0}'<br>",
+            "(\u{05D0}) [\u{05D1}]", "(\u{05D0}) [\u{05D1}", "(\u{05D0})[\u{05D1}]", "(\u{05D0}'.) \t[\u{05D1}'']", "((\u{05D0})) [[\u{05D1}]]",
+            "(\u{05D0}) [\u{05D1}]\u{05D2}", "(\u{05D0}) [\u{05D1}] (\u{05D2}) [\u{05D3}]", "(\u{05D0}<b>) [</b>\u{05D1}]",
+            "(\u{05D0})&nbsp;[\u{05D1}]", "(\u{05D0})<br>[\u{05D1}]", "(\u{05D0}) [\u{05B0}\u{05D1}]", "(\u{05D0}\u{05B0}) [\u{05D1}\u{05B0}]",
+            "\u{05D0}\u{05B0}'\u{05B0}\u{05D1}", "\u{05B0}\u{05D0}", "a\u{0301}b", "\u{0301}", "\u{FB1E}\u{05D0}\u{FB1E}",
+            "\u{FB2E}\u{FB4F}\u{FB1D}", "\u{0130}stanbul", "\u{212A}elvin", "\u{1D400}\u{1D401}", "x\u{1F600}y", "\u{00B2}\u{00BD}",
+            "\u{200F}\u{05D0}\u{200E}", "\u{05D0}\u{200F}\u{05D1}", "\u{05E2}\u{05DC}\u{05BE}\u{05E4}", "\u{05D0}\u{05C0}\u{05D1}\u{05C3}",
+            "\u{05D0}\r\n\u{05D1}\t\u{05D2}", "\u{05D0}\u{00A0}\u{05D1}\u{3000}\u{05D2}", &long_heb,
         ];
         for c in cases {
             assert_same(c);
@@ -716,12 +851,13 @@ mod tests {
     #[test]
     fn matches_reference_on_generated_strings() {
         let pieces = [
-            "א", "ב", "ג", "ש", "ת", "ך", "ם", "a", "Z", "q", "\u{05B0}", "\u{05B4}", "\u{0591}", "\u{05AF}",
-            "\u{05BC}", "\u{05C1}", "\u{05C7}", "\u{05C0}", "\u{05C3}", "\u{05C6}", "\u{05BE}", "\"", "'", "\u{05F3}",
-            "\u{05F4}", " ", "  ", ",", ".", ":", "1", "<b>", "</b>", "<i>", "<span class=\"x\">", "</span>", "<br>",
-            "<br/>", "<p>", "</p>", "<div id='a'>", "<sup>", "</sup>", "<sub>", "</sub>", "<SUP>", "<small>", "<",
-            ">", "/", "&nbsp;", "&amp;", "&#160;", "&", ";", "&abcdefghijkl;", "&x", "😀", "\u{10FFFF}", "é",
-            "\u{0300}", "\u{200F}", "\t", "\n", "אבגדהוזחטיכלמנסעפצקרשת", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef",
+            "\u{05D0}", "\u{05D1}", "\u{05EA}", "\u{05DA}", "a", "Z", "q", "1", "\u{00C9}", "\u{0436}", "\u{0663}", "\u{1D400}", "\u{0130}",
+            "\u{05B0}", "\u{05B4}", "\u{0591}", "\u{05BC}", "\u{05C1}", "\u{05C7}", "\u{05C0}", "\u{05C3}", "\u{05C6}", "\u{05BE}",
+            "\u{0301}", "\u{FB1E}", "\u{FB2B}", "\u{FB4F}", "\u{FB31}", "\"", "'", "\u{05F3}", "\u{05F4}", "\u{2018}", "\u{2019}",
+            "\u{201C}", "\u{201D}", ".", "[", "]", "(", ")", "*", "~", "^", "\\", "`", "\u{200F}", "\u{200B}", "\u{FEFF}", "\u{202B}",
+            " ", "  ", "\t", "\n", ",", ":", "?", "-", "<b>", "</b>", "<i>", "<br>", "<p>", "</p>", "<sup>", "</sup>", "<span class=\"x\">",
+            "</span>", "<", ">", "&nbsp;", "&amp;", "&#160;", "&", ";", "\u{1F600}", "\u{00A0}",
+            "(\u{05D0}\u{05D1}) [\u{05D2}\u{05D3}]", ") [", "\u{05D0}\u{05D1}\u{05D2}\u{05D3}\u{05D4}\u{05D5}\u{05D6}",
         ];
         let mut state = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = move || {
@@ -730,7 +866,7 @@ mod tests {
             state ^= state << 17;
             state
         };
-        for _ in 0..20_000 {
+        for _ in 0..40_000 {
             let len = (next() % 40) as usize;
             let mut s = String::new();
             for _ in 0..len {

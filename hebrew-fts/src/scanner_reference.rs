@@ -1,118 +1,57 @@
-//! The pre-optimisation scanner, kept verbatim as a test oracle: the
-//! production [`crate::scanner::scan_with`] must produce identical words and
-//! [`WordSpan`]s for every input (see the property test in `scanner.rs`).
+//! Test oracle of the production scanner ([`crate::scanner::scan_with`]): the
+//! same output computed the slow, obvious way, so a property test can check
+//! the single-pass scanner against it on every input.
+//!
+//! 1. FtsLib's HTML layer turns the raw text into visible elements: every
+//!    char outside a tag, a break for each entity (at its `&`) and for each
+//!    word-breaking tag (at its `>`). Inline tags vanish.
+//! 2. The elements become a plain string (a break is a space) and Otzaria's
+//!    own functions, verbatim ([`crate::word_rule`]), cut it into words,
+//!    find the paired readings and normalize each word.
+//! 3. Offsets map back to the raw text: a word's raw end is where the
+//!    element after its last char starts (trailing inline tags included).
 #![cfg(test)]
-
-use unicode_general_category::{get_general_category, GeneralCategory};
 
 use crate::chars;
 use crate::html_tags;
 use crate::scanner::WordSpan;
+use crate::word_rule::{next_token_boundaries, paired_reading_after, Normalizer};
 
 const TAG_NAME_CAP: usize = 16;
 
-#[allow(unused_assignments)] // the final flush!'s buffer reset is never read
-pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, WordSpan)) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
+/// One visible element: its char (a break is `' '`), raw byte and UTF-16
+/// offsets, and visible width.
+struct Elem {
+    c: char,
+    byte: usize,
+    utf16: usize,
+    width: usize,
+}
 
-    // (byte offset, utf16 offset, char) for every char — lets the main loop use
-    // plain indices and arbitrary forward jumps, exactly like the C# for-loop.
-    // The table is reused per thread: allocating ~24 bytes per char for every
-    // line (e.g. 33 KB for a 2.2 KB line) was a large share of the scan cost.
-    thread_local! {
-        static CHAR_TABLE: std::cell::RefCell<Vec<(usize, usize, char)>> =
-            const { std::cell::RefCell::new(Vec::new()) };
+fn elements(text: &str) -> (Vec<Elem>, usize) {
+    let mut table: Vec<(usize, usize, char)> = Vec::new();
+    let mut u = 0usize;
+    for (b, c) in text.char_indices() {
+        table.push((b, u, c));
+        u += c.len_utf16();
     }
-    let mut char_table: Vec<(usize, usize, char)> = CHAR_TABLE.with(|t| std::mem::take(&mut *t.borrow_mut()));
-    char_table.clear();
-    char_table.reserve(text.len());
-    let mut u16_pos = 0usize;
-    for (byte_pos, c) in text.char_indices() {
-        char_table.push((byte_pos, u16_pos, c));
-        u16_pos += c.len_utf16();
-    }
-    // Hand the table back to the thread when the scan ends (also on early return).
-    struct GiveBack(Vec<(usize, usize, char)>);
-    impl Drop for GiveBack {
-        fn drop(&mut self) {
-            let v = std::mem::take(&mut self.0);
-            CHAR_TABLE.with(|t| *t.borrow_mut() = v);
-        }
-    }
-    let table_guard = GiveBack(char_table);
-    let char_table = &table_guard.0;
-    let total_bytes = text.len();
-    let total_utf16 = u16_pos;
-    let len = char_table.len();
-    let byte_at = |i: usize| if i < len { char_table[i].0 } else { total_bytes };
-    let utf16_at = |i: usize| if i < len { char_table[i].1 } else { total_utf16 };
-
-    // Normalized word buffer — reused across words.
-    let mut buf = String::with_capacity(64);
-    let mut buf_chars = 0usize; // chars in buf (letters are BMP: chars == UTF-16 units)
-    let mut run_latin: Option<bool> = None; // script of the word's letters; None = digits only so far
-
-    // Tag name buffer.
-    let mut tag_name: Vec<char> = Vec::with_capacity(TAG_NAME_CAP);
+    let total_utf16 = u;
+    let len = table.len();
+    let mut out = Vec::new();
+    let mut tag_name: Vec<char> = Vec::new();
     let mut in_tag = false;
-    let mut tag_name_done = false; // first space seen — attribute chars must not join the name
-
-    let mut word_start_byte = 0usize;
-    let mut word_start_utf16 = 0usize;
-    let mut word_start_visible = 0usize;
-    let mut visible = 0usize; // cumulative visible chars up to current position
-
-    macro_rules! flush {
-        ($i:expr) => {{
-            if buf_chars > 0 {
-                // A quote is part of the word only BETWEEN letters (רש"י). One
-                // after the last letter is quotation punctuation (יצחק"): FtsLib
-                // drops it, so it must not become part of the term.
-                let last_letter_end = buf
-                    .char_indices()
-                    .filter(|&(_, c)| chars::is_word_char(c))
-                    .last()
-                    .map(|(i, c)| i + c.len_utf8())
-                    .unwrap_or(0);
-                if buf[last_letter_end..].contains('"') {
-                    let tail: String = buf[last_letter_end..].chars().filter(|&c| c != '"').collect();
-                    buf.truncate(last_letter_end);
-                    buf.push_str(&tail);
-                }
-                let span = WordSpan {
-                    byte_start: word_start_byte,
-                    byte_end: byte_at($i),
-                    utf16_start: word_start_utf16,
-                    utf16_end: utf16_at($i),
-                    visible_start: word_start_visible,
-                    letters: buf_chars,
-                };
-                on_word(&buf, span);
-            }
-            buf.clear();
-            buf_chars = 0;
-            run_latin = None;
-        }};
-    }
-
+    let mut tag_name_done = false;
     let mut i = 0usize;
     while i < len {
-        let c = char_table[i].2;
-
-        // ── HTML TAGS ────────────────────────────────────────
+        let (b, u, c) = table[i];
         if in_tag {
             if c == '>' {
                 if html_tags::is_word_break_tag(&tag_name) {
-                    flush!(i);
+                    out.push(Elem { c: ' ', byte: b, utf16: u, width: 0 });
                 }
                 in_tag = false;
                 tag_name.clear();
             } else if !tag_name_done {
-                // Stop accumulating at the first space — everything after it is
-                // attributes, which must not corrupt the tag name the flush
-                // decision above depends on.
                 if c == ' ' || c == '\t' {
                     tag_name_done = true;
                 } else if tag_name.len() < TAG_NAME_CAP && c != '/' {
@@ -122,106 +61,73 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
             i += 1;
             continue;
         }
-
         if c == '<' {
-            // Word building continues ACROSS the tag — no flush here. Inline
-            // formatting (<b>, <i>, <small>, <span>…) interrupts words
-            // mid-letter (emphasised letters, e.g. ורא<b>ה</b>); flushing on
-            // every '<' indexed those words as unfindable fragments. The flush
-            // decision is deferred to '>' above, once the tag name is known:
-            // block tags and sup/sub break the word, everything else is
-            // transparent.
             in_tag = true;
             tag_name.clear();
             tag_name_done = false;
             i += 1;
             continue;
         }
-
-        // ── HTML ENTITIES ────────────────────────────────────
         if c == '&' {
-            // Every entity — well-formed or a bare '&' — is a word separator.
-            // Flush at the '&' (the entity is the separator, so it is NOT part
-            // of the word's raw span); the whole entity stays outside every
-            // token span.
-            flush!(i);
-            html_tags::skip_entity(&char_table, len, &mut i);
-            visible += 1; // the entity renders as one visible char
+            out.push(Elem { c: ' ', byte: b, utf16: u, width: 1 });
+            html_tags::skip_entity(&table, len, &mut i);
             i += 1;
             continue;
         }
-
-        // ── MAQAF ─ word-joining hyphen acts as separator ────
-        if c == '\u{05BE}' {
-            flush!(i);
-            visible += 1;
-            i += 1;
-            continue;
-        }
-
-        // ── NIKUD + CANTILLATION: strip or keep ──────────────
-        if chars::is_strippable_mark(c) {
-            if keep_marks && buf_chars > 0 {
-                // Kept in the token text (never counted as a letter).
-                buf.push(c);
-            }
-            i += 1;
-            continue;
-        }
-
-        // The Unicode category lookup is a table search; Hebrew and ASCII letters
-        // (the vast majority of chars) are never non-spacing marks, so skip it
-        // for them. Same result, ~1 lookup per non-letter char instead of per char.
-        if c as u32 > 127 && !chars::is_letter(c) && get_general_category(c) == GeneralCategory::NonspacingMark {
-            i += 1;
-            continue;
-        }
-
-        // ── WORD BUILDING ────────────────────────────────────
-        if chars::is_word_char(c) {
-            let c = chars::to_lower_ascii(c);
-
-            // Script-boundary split: a Hebrew↔Latin transition inside a letter
-            // run is a word boundary. Prevents mixed-script blobs — OCR bleed
-            // (bדה), a Hebrew prefix on a foreign word (הOU), or entity residue
-            // (בשבת&amp) — from being indexed as one unsearchable token.
-            // Digits belong to no script: they never split and join the run.
-            if !chars::is_digit(c) {
-                let latin = chars::is_latin_lower(c);
-                if run_latin.is_some_and(|l| l != latin) {
-                    flush!(i); // emits the completed run, resets the buffer
-                }
-                run_latin = Some(latin);
-            }
-
-            if buf_chars == 0 {
-                word_start_byte = char_table[i].0;
-                word_start_utf16 = char_table[i].1;
-                word_start_visible = visible;
-            }
-
-            buf.push(c);
-            buf_chars += 1;
-            visible += 1;
-        } else if chars::is_intra_word_quote(c) && buf_chars > 0 {
-            // Hebrew geresh/gershayim and ASCII quotes appearing inside a word
-            // (e.g. רשב"א, רש"י) are KEPT in the token, normalized to a
-            // canonical '"' (all four forms: " ' ׳ ״) — the index preserves
-            // them and the walks optionally treat them as transparent
-            // (ignore-gershayim option). They are not letters (buf_chars
-            // counts letters and digits only).
-            buf.push('"');
-            visible += 1;
-        } else {
-            flush!(i);
-            // Non-letter separators (space, punctuation, etc.) count as
-            // visible. The C# original counts UTF-16 units.
-            visible += c.len_utf16();
-        }
-
+        let width = if chars::is_word_mark(c) { 0 } else { c.len_utf16() };
+        out.push(Elem { c, byte: b, utf16: u, width });
         i += 1;
     }
+    (out, total_utf16)
+}
 
-    flush!(len);
+pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, WordSpan)) -> usize {
+    let (elems, total_utf16) = elements(text);
+    // the visible string and, per element, its byte offset in it
+    let mut s = String::new();
+    let mut s_byte = Vec::with_capacity(elems.len() + 1);
+    let mut visible_before = Vec::with_capacity(elems.len() + 1);
+    let mut v = 0usize;
+    for e in &elems {
+        s_byte.push(s.len());
+        visible_before.push(v);
+        s.push(e.c);
+        v += e.width;
+    }
+    s_byte.push(s.len());
+    visible_before.push(v);
+    let elem_at = |byte: usize| s_byte.binary_search(&byte).expect("element boundary");
+    let raw_byte = |k: usize| if k < elems.len() { elems[k].byte } else { text.len() };
+    let raw_utf16 = |k: usize| if k < elems.len() { elems[k].utf16 } else { total_utf16 };
+
+    let normalizer = Normalizer { keep_marks, wildcards: false };
+    let mut pos = 0usize;
+    let mut token_count = 0usize;
+    let mut share_next = false;
+    while let Some((start, end)) = next_token_boundaries(&s, pos, false) {
+        let w = normalizer.normalize(&s[start..end]);
+        let position = if share_next {
+            token_count - 1
+        } else {
+            token_count += 1;
+            token_count - 1
+        };
+        share_next = paired_reading_after(&s, start, end).is_some();
+        let (ks, ke) = (elem_at(start), elem_at(end));
+        on_word(
+            &w.text,
+            WordSpan {
+                byte_start: raw_byte(ks),
+                byte_end: raw_byte(ke),
+                utf16_start: raw_utf16(ks),
+                utf16_end: raw_utf16(ke),
+                visible_start: visible_before[ks],
+                letters: w.letters,
+                term_bytes: w.term_bytes,
+                position,
+            },
+        );
+        pos = end;
+    }
     total_utf16
 }

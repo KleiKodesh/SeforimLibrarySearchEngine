@@ -38,7 +38,9 @@ const SAFETY_CEILING: usize = 4000;
 const NO_TERM: u32 = u32::MAX;
 
 /// Otzaria's word proximity, checked on the line's tokens (the index's word
-/// positions: both come from the same scanner, one position per token).
+/// positions: both come from the same scanner, one position per token,
+/// except a paired reading's second reading, which shares its first
+/// reading's position).
 ///
 /// - `Ordered { gaps }`: groups in query order at positions
 ///   `p0 < p1 < ...`, with `p[i+1] - p[i] - 1 <= gaps[i]` (words BETWEEN
@@ -389,7 +391,9 @@ impl SnippetWindowLocator {
         } else {
             all_groups
         };
-        let word_dist = (i_right - i_left).saturating_sub(denominator - 1);
+        // Words between the ends, by position (a paired reading's second
+        // reading shares its first reading's position).
+        let word_dist = (tokens[i_right].position - tokens[i_left].position).saturating_sub(denominator - 1);
 
         let is_match = partial
             || !(require_ordered && all_groups > 1 && !has_ordered_match(ordinals, prepared));
@@ -455,7 +459,7 @@ impl SnippetWindowLocator {
         SnippetDescriptor {
             is_match: true,
             score,
-            word_distance: (i_right - i_left).saturating_sub(k.saturating_sub(1)),
+            word_distance: (tokens[i_right].position - tokens[i_left].position).saturating_sub(k.saturating_sub(1)),
             window_word_count: e_idx - s_idx + 1,
             snap_start,
             snap_end,
@@ -573,7 +577,7 @@ fn ordered_window(
             if !in_group(ordinals, prepared, t, g) {
                 continue;
             }
-            while j < chain.len() && chain[j].0 < t {
+            while j < chain.len() && tokens[chain[j].0].position < tokens[t].position {
                 let e = chain[j];
                 while deque.back().is_some_and(|b| b.1 <= e.1) {
                     deque.pop_back();
@@ -581,7 +585,7 @@ fn ordered_window(
                 deque.push_back(e);
                 j += 1;
             }
-            while deque.front().is_some_and(|f| f.0.saturating_add(reach) < t) {
+            while deque.front().is_some_and(|f| tokens[f.0].position.saturating_add(reach) < tokens[t].position) {
                 deque.pop_front();
             }
             if let Some(&(_, start)) = deque.front() {
@@ -631,7 +635,7 @@ fn any_order_window(
             continue; // a window never needs to end on a non-term token
         }
         scratch.add(r, gs, false, &mut w);
-        while r - l > max_span {
+        while tokens[r].position - tokens[l].position > max_span {
             scratch.remove_front(l, groups_of(l), &mut w);
             l += 1;
         }
@@ -893,6 +897,22 @@ mod tests {
         assert_eq!(loc.locate(text, &p, false, 0).word_distance, 2);
         // a third (skipped-wildcard) slot counted in the denominator
         assert_eq!(loc.locate(text, &p, false, 3).word_distance, 1);
+    }
+
+    #[test]
+    fn paired_reading_counts_one_position() {
+        // (X) [Y] Z: Y shares X's position, so Y..Z and X..Z are adjacent.
+        let text = "\u{05D0}\u{05D1} (\u{05D2}\u{05D3}) [\u{05D4}\u{05D5}] \u{05D6}\u{05D7}";
+        let mut loc = SnippetWindowLocator::new(0);
+        let p = PreparedQueryGroups::from_groups(&[vec!["\u{05D0}\u{05D1}"], vec!["\u{05D6}\u{05D7}"]]);
+        assert_eq!(loc.locate(text, &p, false, 0).word_distance, 1);
+        let ordered = Proximity::Ordered { gaps: vec![0] };
+        assert!(prox_lines(text, &[&["\u{05D4}\u{05D5}"], &["\u{05D6}\u{05D7}"]], &ordered).is_some());
+        assert!(prox_lines(text, &[&["\u{05D2}\u{05D3}"], &["\u{05D6}\u{05D7}"]], &ordered).is_some());
+        assert!(prox_lines(text, &[&["\u{05D0}\u{05D1}"], &["\u{05D4}\u{05D5}"]], &ordered).is_some());
+        assert!(prox_lines(text, &[&["\u{05D0}\u{05D1}"], &["\u{05D6}\u{05D7}"]], &ordered).is_none());
+        let window = Proximity::AnyOrder { max_span: 1 };
+        assert!(prox_lines(text, &[&["\u{05D6}\u{05D7}"], &["\u{05D4}\u{05D5}"]], &window).is_some());
     }
 
     #[test]

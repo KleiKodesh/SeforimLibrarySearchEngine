@@ -41,6 +41,7 @@ w.delete(lineId); w.commit('payload'); w.rollback(); w.mergeAndClose(); w.close(
 index.buildFmSidecar();  // after mergeAndClose: FM-index for leading-* and fuzzy (index.hasFmSidecar)
 index.info();                                   // IndexInfo(numLines, positions, keepMarks, payload)
 SeforimIndex.exists(dir); SeforimIndex.open(dir); SeforimIndex.nativeVersion;
+SeforimIndex.reducePairedReadings(query);        // (X) [Y] -> Y, the engine's own rule, before numbering words
 
 // The public API: the query string (FtsLib syntax * ? % ~N | stays in it),
 // options for every word, and per-word overrides (null = inherit).

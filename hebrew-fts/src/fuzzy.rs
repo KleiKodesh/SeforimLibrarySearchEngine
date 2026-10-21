@@ -35,8 +35,8 @@ impl LevenshteinDfa {
     /// The edit distance of `term` from the query word (`AtLeast` for
     /// non-matches), quotes skipped when they are transparent.
     pub fn distance(&self, term: &[u8]) -> Distance {
-        if self.transparent_quotes && term.contains(&b'"') {
-            let stripped: Vec<u8> = term.iter().copied().filter(|&b| b != b'"').collect();
+        if self.transparent_quotes && term.iter().any(|&b| crate::chars::is_term_quote_byte(b)) {
+            let stripped: Vec<u8> = term.iter().copied().filter(|&b| !crate::chars::is_term_quote_byte(b)).collect();
             self.dfa.eval(stripped)
         } else {
             self.dfa.eval(term)
@@ -63,7 +63,7 @@ impl Automaton for LevenshteinDfa {
     }
 
     fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
-        if self.transparent_quotes && byte == b'"' {
+        if self.transparent_quotes && crate::chars::is_term_quote_byte(byte) {
             return *state;
         }
         self.dfa.transition(*state, byte)
@@ -146,7 +146,7 @@ impl HebrewFuzzyQuery {
         let builder = BUILDERS[self.distance as usize]
             .get_or_init(|| LevenshteinAutomatonBuilder::new(self.distance, false));
         let word: String = if self.ignore_quotes {
-            self.word.chars().filter(|&c| c != '"').collect()
+            self.word.chars().filter(|&c| !crate::chars::is_term_quote(c)).collect()
         } else {
             self.word.clone()
         };

@@ -22,7 +22,7 @@ pub fn sidecar_path(dir: &Path, segment: SegmentId) -> PathBuf {
 /// carried none). Candidates found through it are verified against the real
 /// term, so this only widens the candidate set, never the result.
 pub fn text_form(term: &str) -> String {
-    term.chars().filter(|&c| c != '"').collect()
+    term.chars().filter(|&c| !hebrew_fts::chars::is_term_quote(c)).collect()
 }
 
 /// True when `path` holds a sidecar built over `num_terms` terms.
@@ -38,8 +38,8 @@ fn sidecar_matches(path: &Path, num_terms: usize) -> bool {
 /// Returns true when a sidecar is in place; false (nothing built, searches
 /// use the walk) when the index has several segments, has no terms, or its
 /// dictionary cannot be FM-indexed (a `keep_marks` index: terms with nikud
-/// or te'amim, which the FM candidate search does not model; or more than
-/// 128 distinct characters). Err only on I/O failure.
+/// or te'amim, which the FM candidate search does not model; or a char
+/// outside the BMP). Err only on I/O failure.
 pub fn build(index: &Index, text: Field, dir: &Path) -> Result<bool> {
     let reader = index.reader()?;
     let searcher = reader.searcher();
@@ -61,7 +61,7 @@ pub fn build(index: &Index, text: Field, dir: &Path) -> Result<bool> {
     let mut stream = dict.stream()?;
     while stream.advance() {
         let Ok(term) = std::str::from_utf8(stream.key()) else { return Ok(false) };
-        if term.chars().any(hebrew_fts::chars::is_strippable_mark) {
+        if term.chars().any(hebrew_fts::chars::is_attached_mark) {
             return Ok(false); // a vocalized dictionary: searches use the walk
         }
         forms.push(text_form(term));

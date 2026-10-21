@@ -29,6 +29,7 @@ pub mod tokenizer;
 pub mod variants;
 pub mod walk;
 pub mod wildcard;
+pub mod word_rule;
 
 pub use wildcard::{HebrewWildcardQuery, WildcardPattern, WildcardRejected};
 

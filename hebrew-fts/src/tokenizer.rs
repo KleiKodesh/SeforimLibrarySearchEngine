@@ -1,15 +1,17 @@
-//! Tantivy [`Tokenizer`] built on the FtsLib-compatible scanner.
+//! Tantivy [`Tokenizer`] built on the scanner ([`crate::scanner`]: FtsLib's
+//! HTML layer, Otzaria's word rule).
 //!
-//! Registering this tokenizer on a text field indexes: nikud stripped, ASCII
-//! lowercased, intra-word quotes kept and normalized to '"' (רש״י → רש"י; the
-//! walks can optionally treat them as transparent), inline HTML tags
-//! transparent, block tags / entities / maqaf as separators. Every word (a
-//! run of letters and digits, one letter included: FtsLib's word model, which
-//! is Otzaria's) is indexed with its position; a word whose normalized form
-//! is over [`MAX_TERM_BYTES`] bytes is not a term but keeps its position
-//! (Otzaria's `RemoveLongFilter`, FtsLib's `Tokenizer.OnWord`).
+//! Registering this tokenizer on a text field indexes every word with its
+//! position: marks stripped (kept by `hebrew_marked`), lowercased, quotes
+//! normalized (`'` for a geresh, `"` for a gershayim or two gereshes; the
+//! walks can treat them as transparent), presentation forms folded, inline
+//! HTML tags transparent, block tags / entities / maqaf as separators. The
+//! second reading of `(X) [Y]` shares X's position. A word whose term has
+//! [`MAX_TERM_BYTES`](crate::chars::MAX_TERM_BYTES) bytes or more is not a
+//! term but keeps its position (Otzaria's `RemoveLongFilter`, FtsLib's
+//! `Tokenizer.OnWord`).
 
-use crate::chars::MAX_TERM_BYTES;
+use crate::chars::is_indexable_len;
 use crate::scanner;
 use tantivy::tokenizer::{TextAnalyzer, Token, TokenStream, Tokenizer, TokenizerManager};
 
@@ -50,20 +52,19 @@ impl Tokenizer for HebrewTokenizer {
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> HebrewTokenStream {
         let mut tokens = Vec::new();
-        let mut position = 0;
         scanner::scan_with(text, self.keep_marks, |word, span| {
-            if word.len() > MAX_TERM_BYTES {
-                position += 1; // not a term, but it holds its place
+            // A word whose term is too long is not a term but keeps its
+            // position (Otzaria's RemoveLongFilter after its tokenizer).
+            if !is_indexable_len(span.term_bytes) {
                 return;
             }
             tokens.push(Token {
                 offset_from: span.byte_start,
                 offset_to: span.byte_end,
-                position,
+                position: span.position,
                 text: word.to_string(),
                 position_length: 1,
             });
-            position += 1;
         });
         HebrewTokenStream {
             tokens: tokens.into_iter(),
@@ -131,13 +132,23 @@ mod tests {
 
     #[test]
     fn one_letter_and_long_words_take_positions() {
-        let long = "א".repeat(64); // 128 bytes: still a term
-        let too_long = "ב".repeat(65); // 130 bytes: no term, keeps its position
-        let toks = tokens(&format!("משה ו ה' {long} {too_long} 12 ב5 תורה"));
+        let long = "\u{05D0}".repeat(63); // 126 bytes: indexed
+        let too_long = "\u{05D1}".repeat(64); // 128 bytes: not indexed
+        let toks = tokens(&format!("\u{05DE} \u{05D5} \u{05D4}' {long} {too_long} 12 \u{05D1}5 (\u{05D0}) [\u{05D1}] \u{05EA}"));
         let got: Vec<(&str, usize)> = toks.iter().map(|t| (t.text.as_str(), t.position)).collect();
         assert_eq!(
             got,
-            [("משה", 0), ("ו", 1), ("ה", 2), (long.as_str(), 3), ("12", 5), ("ב5", 6), ("תורה", 7)]
+            [
+                ("\u{05DE}", 0),
+                ("\u{05D5}", 1),
+                ("\u{05D4}'", 2),
+                (long.as_str(), 3),
+                ("12", 5),
+                ("\u{05D1}5", 6),
+                ("\u{05D0}", 7),
+                ("\u{05D1}", 7),
+                ("\u{05EA}", 8)
+            ]
         );
     }
 

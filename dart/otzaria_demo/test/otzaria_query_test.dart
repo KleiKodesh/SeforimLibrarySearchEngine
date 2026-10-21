@@ -19,6 +19,15 @@ void main() {
     });
   });
 
+  test('a paired reading keeps its second reading (engine rule)', () {
+    final s = OtzariaSearch(query: '(אב) [גד] הו', distance: 0).toOptions().toJson();
+    expect(s['query'], 'גד הו');
+    expect(s['proximity'], {
+      'mode': 'ordered',
+      'gaps': [0]
+    });
+  });
+
   test('exact mode sends no word match', () {
     final s = OtzariaSearch(query: 'משה תורה', mode: SearchMode.exact).toOptions().toJson();
     expect(s.containsKey('word_match'), isFalse);

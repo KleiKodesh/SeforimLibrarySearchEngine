@@ -18,9 +18,9 @@ def load(path):
     header = json.loads(lines[0])
     hits = [json.loads(l) for l in lines[1:]]
     # Our index keeps intra-word quotes (רש"י); FtsLib stored רשי. Compare the
-    # marked term strings quote-free; offsets are compared exactly.
+    # marked term strings quote-free (' and "); offsets are compared exactly.
     for h in hits:
-        h["marks"] = [[s, l, t.replace('"', "")] for s, l, t in h["marks"]]
+        h["marks"] = [[s, l, t.replace('"', "").replace("'", "")] for s, l, t in h["marks"]]
     return header, hits
 
 

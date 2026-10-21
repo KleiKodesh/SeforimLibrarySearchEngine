@@ -29,7 +29,7 @@ use crate::Result;
 pub fn fm_wildcard_shape(pattern: &str, ignore_quotes: bool) -> Option<(String, bool)> {
     let stripped: String;
     let pattern = if ignore_quotes {
-        stripped = pattern.chars().filter(|&c| c != '"').collect();
+        stripped = pattern.chars().filter(|&c| !hebrew_fts::chars::is_term_quote(c)).collect();
         stripped.as_str()
     } else {
         pattern
@@ -40,7 +40,7 @@ pub fn fm_wildcard_shape(pattern: &str, ignore_quotes: bool) -> Option<(String, 
     let core = pattern.trim_matches('*');
     if core.chars().count() < hebrew_fts::wildcard::MIN_ANCHOR_LENGTH
         || core.contains('*')
-        || core.contains('"')
+        || core.contains(['"', '\''])
     {
         return None;
     }

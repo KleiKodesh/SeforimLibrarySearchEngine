@@ -47,17 +47,22 @@ use std::collections::BinaryHeap;
 
 /// 'FMI3'
 pub const MAGIC: u32 = 0x3349_4D46;
-const END_CODE: u8 = 0;
-const SEPARATOR_CODE: u8 = 1;
+/// A symbol code: END, SEP, then the alphabet's chars (16 bits: the
+/// dictionary's alphabet passes 255 chars once every script is a word char).
+type Code = u16;
+const END_CODE: Code = 0;
+const SEPARATOR_CODE: Code = 1;
 const HEADER_BYTES: usize = 40;
 const NODE_BYTES: usize = 24;
 const RANK_BLOCK_BYTES: usize = 64;
 const RANK_BLOCK_DATA_BITS: usize = (RANK_BLOCK_BYTES - 4) * 8; // 480
-// 7 bits each → 63 bits (FtsLib `FmIndex`). Sigma up to 128: letters, digits,
-// the quote and the 2 stops pass 64 since digits became word characters. The
-// key only speeds up the build sort; the order is the same at any key width.
-const SORT_KEY_BITS: usize = 7;
-const CODES_PER_SORT_KEY: usize = 9;
+// Sort keys pack as many codes as fit in 64 bits at the width the alphabet
+// needs (FtsLib `FmIndex`): 7 bits x 9 codes up to 128 symbols, 9 bits x 7
+// codes up to 512. The key only speeds up the build sort; the order is the
+// same at any key width.
+fn sort_key_bits(sigma: usize) -> usize {
+    (usize::BITS - (sigma.max(2) - 1).leading_zeros()) as usize
+}
 const FLAG_ROWID_IS_RANK_PLUS_ONE: u32 = 1;
 
 /// Why an FM-index could not be built for a dictionary.
@@ -73,8 +78,7 @@ impl std::fmt::Display for FmBuildError {
 // ── Build ─────────────────────────────────────────────────────────────
 
 /// Builds the index bytes over `terms` (the text forms, in dictionary order;
-/// term i has rowid i + 1). Every term must be non-empty BMP text; at most
-/// 64 distinct chars (6-bit sort keys), as in FtsLib.
+/// term i has rowid i + 1). Every term must be non-empty BMP text.
 pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, FmBuildError> {
     let terms: Vec<&str> = terms.into_iter().collect();
 
@@ -92,21 +96,15 @@ pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, Fm
             present[u as usize] = true;
         }
     }
-    let mut code_of = vec![0u8; 65536];
+    let mut code_of = vec![0 as Code; 65536];
     let mut char_of: Vec<u16> = vec![0, 0];
     for ch in 0..65536usize {
         if present[ch] {
-            if char_of.len() >= 256 {
-                return Err(FmBuildError("sigma > 255".into()));
-            }
-            code_of[ch] = char_of.len() as u8;
+            code_of[ch] = char_of.len() as Code;
             char_of.push(ch as u16);
         }
     }
     let sigma = char_of.len();
-    if sigma > 1 << SORT_KEY_BITS {
-        return Err(FmBuildError(format!("sigma {sigma} > {} ({SORT_KEY_BITS}-bit sort keys)", 1 << SORT_KEY_BITS)));
-    }
 
     // Text, plus the rowid of the term each position belongs to. A SEP
     // carries the FOLLOWING term's rowid (never read: every match range
@@ -119,7 +117,7 @@ pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, Fm
         return Err(FmBuildError("text too long".into()));
     }
     let n = text_len;
-    let mut text = vec![0u8; n];
+    let mut text = vec![0 as Code; n];
     let mut rowid_at = vec![0u32; n];
     let mut max_rowid = 0u32;
     let mut w = 0usize;
@@ -139,9 +137,9 @@ pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, Fm
     w += 1;
     text[w] = END_CODE;
 
-    let suffix_array = build_suffix_array(&text);
+    let suffix_array = build_suffix_array(&text, sort_key_bits(sigma));
 
-    let mut bwt = vec![0u8; n];
+    let mut bwt = vec![0 as Code; n];
     for (row, &p) in suffix_array.iter().enumerate() {
         bwt[row] = text[if p == 0 { n - 1 } else { p - 1 }];
     }
@@ -382,7 +380,8 @@ impl HuffmanTree {
 /// Sorts all suffixes under the "compare up to the first stop, then by
 /// position" order. Terms are short, so a packed 10-code key settles almost
 /// every comparison; equal-key runs are finished with a direct comparison.
-fn build_suffix_array(text: &[u8]) -> Vec<usize> {
+fn build_suffix_array(text: &[Code], key_bits: usize) -> Vec<usize> {
+    let codes_per_key = 64 / key_bits;
     let n = text.len();
     let mut distance_to_stop = vec![0usize; n]; // codes from i up to and including the first SEP/END
     for i in (0..n).rev() {
@@ -395,10 +394,10 @@ fn build_suffix_array(text: &[u8]) -> Vec<usize> {
 
     let mut keyed: Vec<(u64, usize)> = Vec::with_capacity(n);
     for i in 0..n {
-        let len = distance_to_stop[i].min(CODES_PER_SORT_KEY);
+        let len = distance_to_stop[i].min(codes_per_key);
         let mut key = 0u64;
         for k in 0..len {
-            key |= (text[i + k] as u64) << (SORT_KEY_BITS * (CODES_PER_SORT_KEY - 1 - k));
+            key |= (text[i + k] as u64) << (key_bits * (codes_per_key - 1 - k));
         }
         keyed.push((key, i));
     }
@@ -410,7 +409,7 @@ fn build_suffix_array(text: &[u8]) -> Vec<usize> {
     let tail = |a: &usize, b: &usize| -> std::cmp::Ordering {
         let (la, lb) = (distance_to_stop[*a], distance_to_stop[*b]);
         let common = la.min(lb);
-        for k in CODES_PER_SORT_KEY..common {
+        for k in codes_per_key..common {
             match text[a + k].cmp(&text[b + k]) {
                 std::cmp::Ordering::Equal => {}
                 other => return other,
@@ -430,7 +429,7 @@ fn build_suffix_array(text: &[u8]) -> Vec<usize> {
             run_end += 1;
         }
         if run_end - run_start > 1 {
-            let stop_inside_key = distance_to_stop[suffix_array[run_start]] <= CODES_PER_SORT_KEY;
+            let stop_inside_key = distance_to_stop[suffix_array[run_start]] <= codes_per_key;
             let run = &mut suffix_array[run_start..run_end];
             if stop_inside_key {
                 run.sort_unstable();
@@ -452,7 +451,7 @@ pub struct FmIndex {
     term_count: u32,
     rowid_bits: usize,
     c: Vec<u32>,
-    code_of: Vec<u8>, // 65536 entries; 0 = char not in alphabet
+    code_of: Vec<Code>, // 65536 entries; 0 = char not in alphabet
     left: Vec<i32>,
     right: Vec<i32>,
     root: usize,
@@ -486,7 +485,7 @@ impl FmIndex {
             + 2 * sigma as u64
             + 4 * (sigma as u64 + 1)
             + NODE_BYTES as u64 * internal_nodes as u64;
-        if !(2..=256).contains(&sigma)
+        if !(2..=65536).contains(&sigma)
             || internal_nodes + 1 != sigma
             || !(1..=32).contains(&rowid_bits)
             || tables + bitvector_bytes > bytes.len() as u64
@@ -495,11 +494,11 @@ impl FmIndex {
         }
 
         let mut pos = HEADER_BYTES;
-        let mut code_of = vec![0u8; 65536];
+        let mut code_of = vec![0 as Code; 65536];
         for code in 0..sigma {
             let ch = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap());
-            if code as u8 > SEPARATOR_CODE {
-                code_of[ch as usize] = code as u8;
+            if code as Code > SEPARATOR_CODE {
+                code_of[ch as usize] = code as Code;
             }
             pos += 2;
         }
@@ -602,7 +601,7 @@ impl FmIndex {
     }
 
     /// Occurrences of `code` in BWT[0, row): one rank per code bit.
-    fn occ(&self, code: u8, mut row: usize) -> usize {
+    fn occ(&self, code: Code, mut row: usize) -> usize {
         let nodes = &self.path_nodes[code as usize];
         let bits = &self.path_bits[code as usize];
         for d in 0..nodes.len() {
@@ -676,7 +675,7 @@ impl FmIndex {
     pub fn find_fuzzy(&self, query: &str, max_distance: usize) -> Vec<(u32, u32)> {
         let qchars: Vec<char> = query.chars().collect();
         let m = qchars.len();
-        let reversed: Vec<u8> = (0..m)
+        let reversed: Vec<Code> = (0..m)
             .map(|j| {
                 let ch = qchars[m - 1 - j] as u32;
                 let code = if ch < 65536 { self.code_of[ch as usize] } else { 0 };
@@ -707,14 +706,14 @@ impl FmIndex {
 
 struct FuzzySearch<'a> {
     fm: &'a FmIndex,
-    query: Vec<u8>,
+    query: Vec<Code>,
     max_distance: usize,
     m: usize,
     results: Vec<(u32, u32)>,
     // Per-depth scratch, reused across siblings: child symbols with their Occ
     // ranges, and the DP rows handed down to each child. Depth never exceeds
     // m + max_distance: row[0] == depth, so deeper rows are pruned.
-    children: Vec<Vec<(u8, usize, usize)>>,
+    children: Vec<Vec<(Code, usize, usize)>>,
     rows: Vec<Vec<usize>>,
 }
 
@@ -784,7 +783,7 @@ impl FuzzySearch<'_> {
     }
 
     /// Distinct symbols in BWT[lo, hi) with their Occ at lo and hi.
-    fn enumerate_symbols(&self, node: usize, lo: usize, hi: usize, into: &mut Vec<(u8, usize, usize)>) {
+    fn enumerate_symbols(&self, node: usize, lo: usize, hi: usize, into: &mut Vec<(Code, usize, usize)>) {
         let ones_lo = self.fm.rank1(node, lo);
         let ones_hi = self.fm.rank1(node, hi);
         let zeros_lo = lo - ones_lo;
@@ -797,9 +796,9 @@ impl FuzzySearch<'_> {
         }
     }
 
-    fn descend(&self, child: i32, lo: usize, hi: usize, into: &mut Vec<(u8, usize, usize)>) {
+    fn descend(&self, child: i32, lo: usize, hi: usize, into: &mut Vec<(Code, usize, usize)>) {
         if child < 0 {
-            into.push(((-child - 1) as u8, lo, hi));
+            into.push(((-child - 1) as Code, lo, hi));
         } else {
             self.enumerate_symbols(child as usize, lo, hi, into);
         }
@@ -867,6 +866,30 @@ mod tests {
         }
         let ids = fm.find_row_ids("אבגדהוזחטיכל", false);
         assert!(!ids.is_empty());
+    }
+
+    #[test]
+    fn alphabet_over_255_chars() {
+        // every script is a word char: the alphabet passes 255 symbols (16-bit
+        // codes, 9-bit sort keys)
+        let terms: Vec<String> = (0..400u32)
+            .map(|i| {
+                let a = char::from_u32(0x0400 + i).unwrap();
+                let b = char::from_u32(0x0400 + (i * 7) % 400).unwrap();
+                format!("{a}{b}{a}x{i}")
+            })
+            .collect();
+        let refs: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
+        let fm = FmIndex::open(Box::new(build(refs.iter().copied()).unwrap())).unwrap();
+        for (i, t) in refs.iter().enumerate() {
+            let ids = fm.find_row_ids(t, true);
+            assert_eq!(ids, vec![i as u32 + 1], "term {i}");
+            let infix: String = t.chars().skip(1).take(2).collect();
+            let want: Vec<u32> = refs.iter().enumerate().filter(|(_, r)| r.contains(infix.as_str())).map(|(k, _)| k as u32 + 1).collect();
+            let mut got = fm.find_row_ids(&infix, false);
+            got.sort();
+            assert_eq!(got, want, "infix of {i}");
+        }
     }
 }
 

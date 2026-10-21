@@ -48,6 +48,11 @@ in one or two lines. Remove entries that turn out to be wrong.
 - **Time units in reports: ms below one second, minutes otherwise, never seconds**
   (e.g. 830 ms, 7.1 min). Search comparisons come with charts: each stage and the
   total, per query and per engine.
+- **`FTS-SPECS-AND-COMPARISONS.md` (repo root) stays up to date** (user's rule): feature specs,
+  index builds, FtsLib parity, speed comparison with charts (ours both flavours, FtsLib,
+  Otzaria) and the Otzaria hit-count comparison. Regenerate it with
+  `python -I -X utf8 tools/report/specs_report.py <scratchpad>` after every build, parity or
+  speed run, and update its specs table with every feature change, in the same commit.
 - **Every build and search run is reported in full.** An index build reports total
   time, the time of each stage (indexing, merge, FM sidecar) and the index size
   (total and per file type): the C# `build` command prints all of it. Search runs go

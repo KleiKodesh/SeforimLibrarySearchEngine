@@ -1,0 +1,17 @@
+# Word-model parity set: one-letter words, digit runs and word distances
+# across them (FtsLib's word model = Otzaria's). One query per line;
+# optional TAB + max word distance. FtsLib syntax.
+ה' אלהים
+ר' עקיבא	0
+אמר ר	0
+ב ג
+משה אהרן	1
+משה ו אהרן	0
+פרק 1
+סימן 12
+דף 2 עמוד	1
+ב5
+12*
+א~1
+אמר ה	2
+ס"ק 3	0

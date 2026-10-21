@@ -15,7 +15,6 @@ use unicode_general_category::{get_general_category, GeneralCategory};
 
 use crate::chars;
 use crate::html_tags;
-use crate::word_model::WordModel;
 
 /// Maximum number of chars accumulated for a tag name (as in the C# original).
 const TAG_NAME_CAP: usize = 16;
@@ -37,17 +36,21 @@ pub struct WordSpan {
     /// letter of this word. Used by the snippet window locator to measure
     /// window length without re-scanning.
     pub visible_start: usize,
-    /// Number of letters in the word (2..=29 in FtsLib's word model, 1+ in
-    /// Otzaria's: see [`scan_words`]). Quotes and kept marks in the
-    /// normalized text are not counted. This is FtsLib's `NormLen`: the
-    /// word's visible width.
+    /// Number of letters and digits in the word (1+). Quotes and kept marks
+    /// in the normalized text are not counted. This is FtsLib's `NormLen`:
+    /// the word's visible width.
     pub letters: usize,
 }
 
-/// Scans `text` and calls `on_word(normalized, span)` for each complete word
-/// of normalized length 2..=29, in order.
+/// Scans `text` and calls `on_word(normalized, span)` for each complete word,
+/// in order.
 ///
-/// Rules (identical to the C# scanner):
+/// Rules (identical to the C# scanner; its word model is Otzaria's):
+/// - A word is a run of letters and ASCII digits, of any length, one letter
+///   included (`ו`, `12`, `ב5`). A word whose term is over
+///   [`MAX_TERM_BYTES`](crate::chars::MAX_TERM_BYTES) is still reported (it
+///   is a word for positions and distances); the index tokenizer leaves it
+///   out of the terms.
 /// - Inline tags (`<b>`, `<i>`, `<span>`, …) are transparent: a word continues
 ///   across them. Block tags and `sup`/`sub` end the word.
 /// - Every HTML entity (well-formed or a bare `&`) is a word separator and is
@@ -55,7 +58,8 @@ pub struct WordSpan {
 /// - Maqaf (U+05BE) is a word separator.
 /// - Nikud + cantillation (and any other non-spacing mark) are stripped.
 /// - Letters are Hebrew alef-tav and ASCII (lowercased); a Hebrew↔Latin
-///   transition inside a letter run is a word boundary.
+///   transition inside a letter run is a word boundary. Digits belong to no
+///   script (`5ab`, `ב5`).
 /// - Geresh/gershayim and ASCII quotes inside a word are transparent (רש"י → רשי).
 #[allow(unused_assignments)] // the final flush!'s buffer reset is never read
 pub fn scan(text: &str, on_word: impl FnMut(&str, WordSpan)) -> usize {
@@ -63,8 +67,7 @@ pub fn scan(text: &str, on_word: impl FnMut(&str, WordSpan)) -> usize {
 }
 
 /// Like [`scan`], but when `keep_marks` is true, nikud and te'amim inside a
-/// word are KEPT in the normalized token text (they never count toward the
-/// 2..=29 letter rule). Use for fields that index vocalized text; the walks
+/// word are KEPT in the normalized token text (they never count as letters). Use for fields that index vocalized text; the walks
 /// can then optionally treat the marks as transparent.
 ///
 /// Returns the text's length in UTF-16 code units (C#'s `string.Length`),
@@ -77,29 +80,8 @@ pub fn scan(text: &str, on_word: impl FnMut(&str, WordSpan)) -> usize {
 /// counting) is the C# loop's, step for step; the pre-optimisation version
 /// that materialised a `(byte, utf16, char)` table per line is kept in
 /// `scanner_reference.rs` and a property test asserts identical output.
-pub fn scan_with(text: &str, keep_marks: bool, on_word: impl FnMut(&str, WordSpan)) -> usize {
-    scan_bounded(text, keep_marks, 2, 29, on_word)
-}
-
-/// Like [`scan_with`], with the words of `model`: FtsLib's 2..=29 letters
-/// (exactly [`scan_with`]) or Otzaria's every word of 1+ letters, at any
-/// length (the index tokenizer leaves a word over
-/// [`MAX_TERM_BYTES`](crate::word_model::MAX_TERM_BYTES) out of the terms
-/// but keeps its position).
-pub fn scan_words(text: &str, keep_marks: bool, model: WordModel, on_word: impl FnMut(&str, WordSpan)) -> usize {
-    let (min, max) = model.letter_bounds();
-    scan_bounded(text, keep_marks, min, max, on_word)
-}
-
 #[allow(unused_assignments)] // the final flush!'s buffer reset is never read
-#[inline(always)]
-fn scan_bounded(
-    text: &str,
-    keep_marks: bool,
-    min_letters: usize,
-    max_letters: usize,
-    mut on_word: impl FnMut(&str, WordSpan),
-) -> usize {
+pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, WordSpan)) -> usize {
     let bytes = text.as_bytes();
     let n = bytes.len();
     if n == 0 {
@@ -108,8 +90,8 @@ fn scan_bounded(
 
     // Normalized word buffer — reused across words.
     let mut buf = String::with_capacity(64);
-    let mut buf_chars = 0usize; // letters in buf (letters are BMP: chars == UTF-16 units)
-    let mut buf_first_latin = false; // is_latin_lower(buf[0])
+    let mut buf_chars = 0usize; // letters + digits in buf (BMP: chars == UTF-16 units)
+    let mut run_latin: Option<bool> = None; // script of the word's letters; None = digits only so far
     // Byte length of `buf` up to and including its last letter, and whether a
     // quote was pushed after that letter. Tracked while building so flush!
     // need not re-scan the word for its last letter (same result: buf only
@@ -134,7 +116,7 @@ fn scan_bounded(
 
     macro_rules! flush {
         ($end_b:expr, $end_u:expr) => {{
-            if buf_chars >= min_letters && buf_chars <= max_letters {
+            if buf_chars > 0 {
                 // A quote is part of the word only BETWEEN letters (רש"י). One
                 // after the last letter is quotation punctuation (יצחק"): FtsLib
                 // drops it, so it must not become part of the term. The tail
@@ -156,6 +138,7 @@ fn scan_bounded(
             }
             buf.clear();
             buf_chars = 0;
+            run_latin = None;
             last_letter_end = 0;
             quote_in_tail = false;
         }};
@@ -171,14 +154,14 @@ fn scan_bounded(
             // Hebrew letter alef..tav = U+05D0..U+05EA = D7 90..D7 AA.
             if x == 0xD7 && (0x90..=0xAA).contains(&bytes[b + 1]) {
                 // = the WORD BUILDING branch for a non-Latin letter.
-                if buf_chars > 0 && buf_first_latin {
+                if run_latin == Some(true) {
                     flush!(b, u); // script boundary
                 }
+                run_latin = Some(false);
                 if buf_chars == 0 {
                     word_start_byte = b;
                     word_start_utf16 = u;
                     word_start_visible = visible;
-                    buf_first_latin = false;
                 }
                 buf.push_str(&text[b..b + 2]);
                 buf_chars += 1;
@@ -307,22 +290,26 @@ fn scan_bounded(
         }
 
         // ── WORD BUILDING ────────────────────────────────────
-        if chars::is_letter(c) {
+        if chars::is_word_char(c) {
             let c = chars::to_lower_ascii(c);
 
             // Script-boundary split: a Hebrew↔Latin transition inside a letter
             // run is a word boundary. Prevents mixed-script blobs — OCR bleed
             // (bדה), a Hebrew prefix on a foreign word (הOU), or entity residue
             // (בשבת&amp) — from being indexed as one unsearchable token.
-            if buf_chars > 0 && chars::is_latin_lower(c) != buf_first_latin {
-                flush!(b, u); // emits the completed run (if len 2..29), resets the buffer
+            // Digits belong to no script: they never split and join the run.
+            if !chars::is_digit(c) {
+                let latin = chars::is_latin_lower(c);
+                if run_latin.is_some_and(|l| l != latin) {
+                    flush!(b, u); // emits the completed run, resets the buffer
+                }
+                run_latin = Some(latin);
             }
 
             if buf_chars == 0 {
                 word_start_byte = b;
                 word_start_utf16 = u;
                 word_start_visible = visible;
-                buf_first_latin = chars::is_latin_lower(c);
             }
 
             buf.push(c);
@@ -335,8 +322,8 @@ fn scan_bounded(
             // (e.g. רשב"א, רש"י) are KEPT in the token, normalized to a
             // canonical '"' (all four forms: " ' ׳ ״) — the index preserves
             // them and the walks optionally treat them as transparent
-            // (ignore-gershayim option). They do not count toward the 2..29
-            // letter length rule (buf_chars counts letters only).
+            // (ignore-gershayim option). They are not letters (buf_chars
+            // counts letters and digits only).
             buf.push('"');
             quote_in_tail = true;
             visible += 1;
@@ -459,7 +446,6 @@ pub struct TextTokens {
     norm: String,
     tokens: Vec<TextToken>,
     keep_marks: bool,
-    model: WordModel,
     raw_utf16_len: usize,
 }
 
@@ -473,15 +459,6 @@ impl TextTokens {
         }
     }
 
-    /// A tokenizer for the words of `model` (see [`scan_words`]).
-    pub fn new(keep_marks: bool, model: WordModel) -> TextTokens {
-        TextTokens {
-            keep_marks,
-            model,
-            ..TextTokens::default()
-        }
-    }
-
     /// Tokenizes `text`. The tokens AND every token's normalized view are
     /// reused on the next call — copy what you keep.
     pub fn tokenize(&mut self, text: &str) -> &[TextToken] {
@@ -489,7 +466,7 @@ impl TextTokens {
         self.tokens.clear();
         let norm = &mut self.norm;
         let tokens = &mut self.tokens;
-        self.raw_utf16_len = scan_words(text, self.keep_marks, self.model, |word, span| {
+        self.raw_utf16_len = scan_with(text, self.keep_marks, |word, span| {
             let norm_start = norm.len();
             norm.push_str(word);
             tokens.push(TextToken {
@@ -556,19 +533,19 @@ mod tests {
         let mut out = Vec::new();
         scan_with("בְּרֵאשִׁית בָּרָא", true, |w, _| out.push(w.to_string()));
         assert_eq!(out, ["בְּרֵאשִׁית", "בָּרָא"]);
-        // letters-only length rule: בּ (1 letter + marks) is still dropped
+        // a one-letter word keeps its marks too
         let mut out2 = Vec::new();
         scan_with("בְּ שם", true, |w, _| out2.push(w.to_string()));
-        assert_eq!(out2, ["שם"]);
+        assert_eq!(out2, ["בְּ", "שם"]);
     }
 
     #[test]
     fn intra_word_quotes_kept_canonical() {
         // Quotes are kept in the token, normalized to '"'; they don't count
-        // toward the 2..29 letter rule.
+        // as letters.
         assert_eq!(words("רש\"י אמר"), ["רש\"י", "אמר"]);
         assert_eq!(words("רשב\u{05F4}א"), ["רשב\"א"]); // gershayim → '"'
-        assert_eq!(words("ר' עקיבא"), ["עקיבא"]); // ר' is 1 letter → dropped
+        assert_eq!(words("ר' עקיבא"), ["ר", "עקיבא"]); // trailing quote is punctuation
         // a quote AFTER the last letter is punctuation, not part of the word
         assert_eq!(words("\"יצחק\" אמר"), ["יצחק", "אמר"]);
         assert_eq!(words("תורה'' שלמה"), ["תורה", "שלמה"]);
@@ -595,7 +572,8 @@ mod tests {
 
     #[test]
     fn sup_sub_split() {
-        assert_eq!(words("אב<sup>1</sup>גד"), ["אב", "גד"]);
+        // the footnote number is a word of its own (digits are word chars)
+        assert_eq!(words("אב<sup>1</sup>גד"), ["אב", "1", "גד"]);
     }
 
     #[test]
@@ -616,14 +594,26 @@ mod tests {
     }
 
     #[test]
-    fn length_filter() {
-        // 1-letter words dropped
-        assert_eq!(words("ב של"), ["של"]);
-        // 30+ letter words dropped
-        let long = "א".repeat(30);
-        assert_eq!(words(&long), Vec::<String>::new());
-        let ok = "א".repeat(29);
-        assert_eq!(words(&ok), [ok.clone()]);
+    fn every_word_any_length() {
+        // one-letter words are words (Otzaria's word model)
+        assert_eq!(words("ב של"), ["ב", "של"]);
+        // so are long words: the scanner reports them, the index tokenizer
+        // decides on the term
+        let long = "א".repeat(70);
+        assert_eq!(words(&long), [long.clone()]);
+    }
+
+    #[test]
+    fn digits_are_word_chars() {
+        // a digit run is a word; digits join the letters around them
+        assert_eq!(words("סימן 12 ב5 אב3גד"), ["סימן", "12", "ב5", "אב3גד"]);
+        // digits are script-neutral: only letters of the other script split
+        assert_eq!(words("5ab a5ב 3.14"), ["5ab", "a5", "ב", "3", "14"]);
+        // a quote between digits / letters stays inside, a trailing one does not
+        assert_eq!(words("ה'3 12\""), ["ה\"3", "12"]);
+        // the visible width counts digits
+        let s = spans("ב5 אב");
+        assert_eq!((s[0].1.letters, s[1].1.visible_start), (2, 3));
     }
 
     #[test]

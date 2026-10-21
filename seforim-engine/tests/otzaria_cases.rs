@@ -8,8 +8,8 @@
 //! Every case runs on an index WITH positions and WITHOUT. A failing case is
 //! not assumed to be our bug or theirs: it is analysed first.
 //!
-//! Every search uses Otzaria's word model (`WordModelSpec::Otzaria`): one-
-//! letter words are words, as in Otzaria's index.
+//! Words are Otzaria's (FtsLib's word model is Otzaria's): one-letter words
+//! and digit runs are words, as in Otzaria's index.
 //!
 //! Word distance goes through the engine's own Otzaria rule,
 //! `SearchRequest::proximity` (`ProximitySpec`): ordered with per-pair gaps,
@@ -18,7 +18,7 @@
 
 use seforim_engine::{
     ExcludeSpec, GroupSpec, IndexOptions, LineDoc, LineIndex, ProximitySpec, SearchOptions, SearchRequest,
-    SearchResult, TypoModeSpec, WalkOptionsSpec, WordModelSpec, WordOptions,
+    SearchResult, TypoModeSpec, WalkOptionsSpec, WordOptions,
 };
 
 fn w(word: &str) -> GroupSpec {
@@ -38,17 +38,11 @@ fn matches(lines: &[&str], positions: bool, req: &SearchRequest) -> Vec<usize> {
 
 /// Matching lines with their located window `(start, end)`.
 fn located(lines: &[&str], positions: bool, req: &SearchRequest) -> Vec<(usize, (usize, usize))> {
-    let req = SearchRequest { word_model: WordModelSpec::Otzaria, ..req.clone() };
-    located_with(lines, positions, |index| index.search(&req).unwrap())
+    located_with(lines, positions, |index| index.search(req).unwrap())
 }
 
-/// Matching lines for the public [`SearchOptions`] API (Otzaria's word model).
+/// Matching lines for the public [`SearchOptions`] API.
 fn matches_options(lines: &[&str], positions: bool, options: &SearchOptions) -> Vec<usize> {
-    matches_options_as(lines, positions, &SearchOptions { word_model: WordModelSpec::Otzaria, ..options.clone() })
-}
-
-/// Matching lines for `options` as given (its own word model).
-fn matches_options_as(lines: &[&str], positions: bool, options: &SearchOptions) -> Vec<usize> {
     located_with(lines, positions, |index| index.search_options(options).unwrap())
         .into_iter()
         .map(|(line, _)| line)
@@ -442,7 +436,7 @@ fn proximity_positions_equal_text_validation() {
 
 /// One-letter words are words (Otzaria): `a x b` checks `x` at its own
 /// position, a wrong one-letter word does not match, and distances count
-/// it, on both index flavours. FtsLib's model drops it and merges its gaps.
+/// it, on both index flavours.
 #[test]
 fn one_letter_word_is_matched_at_its_position() {
     let lines: &[&str] = &[
@@ -462,14 +456,11 @@ fn one_letter_word_is_matched_at_its_position() {
         // no distance rule: still every word, ו included
         o.proximity = None;
         assert_eq!(matches_options(lines, positions, &o), vec![1, 2, 3, 4], "AND positions={positions}");
-        // FtsLib's word model: ו is no word; its gaps merge (1 + 1)
-        let ftslib = SearchOptions { proximity: Some(ProximitySpec::Ordered { gaps: vec![1, 1] }), ..o.clone() };
-        assert_eq!(matches_options_as(lines, positions, &ftslib), vec![1, 2, 3, 5, 6], "ftslib positions={positions}");
     }
 }
 
-/// A typed word with no letters is still dropped in Otzaria's model and its
-/// gaps merge; the one-letter words of the text count in the distance.
+/// A typed word with no letters or digits is dropped and its gaps merge;
+/// the one-letter words of the text count in the distance.
 #[test]
 fn no_letter_word_merges_its_gaps() {
     let lines: &[&str] = &["משה תורה", "משה ו תורה", "משה אמר ו תורה"];
@@ -483,18 +474,44 @@ fn no_letter_word_merges_its_gaps() {
     }
 }
 
-/// FtsLib's distance never counts one-letter words, on either flavour, and
-/// its expansions never reach one-letter index terms.
+/// One-letter words count in FtsLib's word distance too, and expansions
+/// reach one-letter index terms.
 #[test]
-fn ftslib_model_ignores_one_letter_words() {
+fn one_letter_words_count_and_expand() {
     let lines: &[&str] = &["משה ו תורה", "א ג", "משה אמר תורה"];
     let near = SearchOptions { query: "משה תורה".into(), max_word_distance: Some(0), ..Default::default() };
     let fuzzy = SearchOptions { query: "אב~1".into(), ..Default::default() };
     for positions in [true, false] {
-        assert_eq!(matches_options_as(lines, positions, &near), vec![1], "positions={positions}");
-        assert!(matches_options_as(lines, positions, &fuzzy).is_empty(), "positions={positions}");
-        // Otzaria's model counts ו and finds the one-letter forms
         assert!(matches_options(lines, positions, &near).is_empty(), "positions={positions}");
         assert_eq!(matches_options(lines, positions, &fuzzy), vec![2], "positions={positions}");
+    }
+}
+
+/// Digit runs are words (Otzaria's tokenizer): searched, matched at their
+/// position, and counted in distances; digits join the letters around them.
+#[test]
+fn digit_runs_are_words() {
+    let lines: &[&str] = &[
+        "סימן 12 סעיף ב",
+        "סימן ב5 סעיף",
+        "סימן סעיף",
+        "סימן 3 4 סעיף",
+    ];
+    let q = |query: &str, distance: Option<usize>| SearchOptions {
+        query: query.into(),
+        max_word_distance: distance,
+        ..Default::default()
+    };
+    for positions in [true, false] {
+        assert_eq!(matches_options(lines, positions, &q("12", None)), vec![1], "positions={positions}");
+        assert_eq!(matches_options(lines, positions, &q("ב5", None)), vec![2], "positions={positions}");
+        assert_eq!(matches_options(lines, positions, &q("סימן סעיף", Some(0))), vec![3], "positions={positions}");
+        assert_eq!(matches_options(lines, positions, &q("סימן סעיף", Some(1))), vec![1, 2, 3], "positions={positions}");
+        let ordered = SearchOptions {
+            query: "סימן 12 סעיף".into(),
+            proximity: Some(ProximitySpec::Ordered { gaps: vec![0, 0] }),
+            ..Default::default()
+        };
+        assert_eq!(matches_options(lines, positions, &ordered), vec![1], "ordered positions={positions}");
     }
 }

@@ -52,7 +52,7 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
     // Normalized word buffer — reused across words.
     let mut buf = String::with_capacity(64);
     let mut buf_chars = 0usize; // chars in buf (letters are BMP: chars == UTF-16 units)
-    let mut buf_first_latin = false; // is_latin_lower(buf[0])
+    let mut run_latin: Option<bool> = None; // script of the word's letters; None = digits only so far
 
     // Tag name buffer.
     let mut tag_name: Vec<char> = Vec::with_capacity(TAG_NAME_CAP);
@@ -66,13 +66,13 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
 
     macro_rules! flush {
         ($i:expr) => {{
-            if buf_chars > 1 && buf_chars < 30 {
+            if buf_chars > 0 {
                 // A quote is part of the word only BETWEEN letters (רש"י). One
                 // after the last letter is quotation punctuation (יצחק"): FtsLib
                 // drops it, so it must not become part of the term.
                 let last_letter_end = buf
                     .char_indices()
-                    .filter(|&(_, c)| chars::is_letter(c))
+                    .filter(|&(_, c)| chars::is_word_char(c))
                     .last()
                     .map(|(i, c)| i + c.len_utf8())
                     .unwrap_or(0);
@@ -93,6 +93,7 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
             }
             buf.clear();
             buf_chars = 0;
+            run_latin = None;
         }};
     }
 
@@ -177,22 +178,26 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
         }
 
         // ── WORD BUILDING ────────────────────────────────────
-        if chars::is_letter(c) {
+        if chars::is_word_char(c) {
             let c = chars::to_lower_ascii(c);
 
             // Script-boundary split: a Hebrew↔Latin transition inside a letter
             // run is a word boundary. Prevents mixed-script blobs — OCR bleed
             // (bדה), a Hebrew prefix on a foreign word (הOU), or entity residue
             // (בשבת&amp) — from being indexed as one unsearchable token.
-            if buf_chars > 0 && chars::is_latin_lower(c) != buf_first_latin {
-                flush!(i); // emits the completed run (if len 2..29), resets the buffer
+            // Digits belong to no script: they never split and join the run.
+            if !chars::is_digit(c) {
+                let latin = chars::is_latin_lower(c);
+                if run_latin.is_some_and(|l| l != latin) {
+                    flush!(i); // emits the completed run, resets the buffer
+                }
+                run_latin = Some(latin);
             }
 
             if buf_chars == 0 {
                 word_start_byte = char_table[i].0;
                 word_start_utf16 = char_table[i].1;
                 word_start_visible = visible;
-                buf_first_latin = chars::is_latin_lower(c);
             }
 
             buf.push(c);
@@ -203,8 +208,8 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
             // (e.g. רשב"א, רש"י) are KEPT in the token, normalized to a
             // canonical '"' (all four forms: " ' ׳ ״) — the index preserves
             // them and the walks optionally treat them as transparent
-            // (ignore-gershayim option). They do not count toward the 2..29
-            // letter length rule (buf_chars counts letters only).
+            // (ignore-gershayim option). They are not letters (buf_chars
+            // counts letters and digits only).
             buf.push('"');
             visible += 1;
         } else {

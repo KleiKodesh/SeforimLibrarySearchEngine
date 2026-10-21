@@ -37,8 +37,9 @@ fn sidecar_matches(path: &Path, num_terms: usize) -> bool {
 /// Idempotent: a sidecar that already matches the segment is kept as is.
 /// Returns true when a sidecar is in place; false (nothing built, searches
 /// use the walk) when the index has several segments, has no terms, or its
-/// dictionary cannot be FM-indexed (more than 64 distinct characters, as in
-/// a `keep_marks` index with nikud and te'amim). Err only on I/O failure.
+/// dictionary cannot be FM-indexed (a `keep_marks` index: terms with nikud
+/// or te'amim, which the FM candidate search does not model; or more than
+/// 128 distinct characters). Err only on I/O failure.
 pub fn build(index: &Index, text: Field, dir: &Path) -> Result<bool> {
     let reader = index.reader()?;
     let searcher = reader.searcher();
@@ -60,6 +61,9 @@ pub fn build(index: &Index, text: Field, dir: &Path) -> Result<bool> {
     let mut stream = dict.stream()?;
     while stream.advance() {
         let Ok(term) = std::str::from_utf8(stream.key()) else { return Ok(false) };
+        if term.chars().any(hebrew_fts::chars::is_strippable_mark) {
+            return Ok(false); // a vocalized dictionary: searches use the walk
+        }
         forms.push(text_form(term));
     }
     let Ok(bytes) = fm_index::build(forms.iter().map(|s| s.as_str())) else {

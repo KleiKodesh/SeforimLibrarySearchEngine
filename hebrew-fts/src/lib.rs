@@ -29,7 +29,6 @@ pub mod tokenizer;
 pub mod variants;
 pub mod walk;
 pub mod wildcard;
-pub mod word_model;
 
 pub use wildcard::{HebrewWildcardQuery, WildcardPattern, WildcardRejected};
 
@@ -37,10 +36,9 @@ pub use exact_terms::ExactTermsQuery;
 pub use fuzzy::HebrewFuzzyQuery;
 pub use grammar_query::HebrewGrammarQuery;
 pub use prepared::{PreparedQueryGroups, PreparedTerm};
-pub use query_parser::{tokenize_query, tokenize_query_with, QueryTerm, QueryToken, MAX_FUZZY_DISTANCE};
-pub use scanner::{scan, scan_with, scan_words, TextToken, TextTokens, WordSpan};
+pub use query_parser::{tokenize_query, QueryTerm, QueryToken, MAX_FUZZY_DISTANCE};
+pub use scanner::{scan, scan_with, TextToken, TextTokens, WordSpan};
 pub use snippet::{Proximity, SnippetDescriptor, SnippetWindowLocator, DEFAULT_CONTEXT_WORDS, MARK_STRIDE};
 pub use set_automaton::SetAutomaton;
 pub use tokenizer::{register_hebrew_tokenizer, HebrewTokenizer, HEBREW_TOKENIZER_NAME};
 pub use walk::{HebrewWalkAutomaton, HebrewWalkQuery, TypoMode, WalkOptions};
-pub use word_model::{WordBounds, WordModel};

@@ -23,7 +23,7 @@ pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
 pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, WordOptions};
 pub use search::{
     ExcludeSpec, GroupSpec, PlacedHit, ProximitySpec, SearchRequest, SearchResult, Snippet, SnippetSession,
-    TypoModeSpec, WalkOptionsSpec, WordModelSpec, SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,
+    TypoModeSpec, WalkOptionsSpec, SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,
 };
 
 /// Engine errors.
@@ -455,11 +455,7 @@ mod tests {
 
     #[test]
     fn phrase_alternatives_or_with_main_query() {
-        for (positions, word_model) in [
-            (true, WordModelSpec::Otzaria),
-            (true, WordModelSpec::FtsLib),
-            (false, WordModelSpec::Otzaria),
-        ] {
+        for positions in [true, false] {
             let dir = tempfile::tempdir().unwrap();
             let index = build(
                 dir.path(),
@@ -479,17 +475,14 @@ mod tests {
                         options: WalkOptionsSpec::default(),
                     }],
                     phrase_alternatives: vec![phrase(&["רבי", "משה", "בן", "מיימון"])],
-                    word_model,
                     ..Default::default()
                 })
                 .unwrap();
             let ids: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();
-            if positions && word_model == WordModelSpec::Otzaria {
+            if positions {
                 assert_eq!(ids, vec![1, 2], "span phrase");
             } else {
-                // without positions (or with FtsLib's words, which the index
-                // positions do not count) line 3 is a candidate; the text
-                // check drops it
+                // without positions line 3 is a candidate; the text check drops it
                 assert_eq!(ids, vec![1, 2, 3]);
             }
             assert!(r.session.locate("כתב רמב\"ם בהלכות").is_some());

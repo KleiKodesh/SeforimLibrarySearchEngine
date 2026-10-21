@@ -13,6 +13,26 @@ pub fn is_letter(c: char) -> bool {
     c.is_ascii_lowercase() || c.is_ascii_uppercase() || ('\u{05D0}'..='\u{05EA}').contains(&c)
 }
 
+/// ASCII digit 0-9. Digits are word characters (FtsLib = Otzaria's word
+/// model: a digit run is a word, digits join the letters around them, `ב5`),
+/// script-neutral.
+#[inline(always)]
+pub fn is_digit(c: char) -> bool {
+    c.is_ascii_digit()
+}
+
+/// A character that builds a word: a letter ([`is_letter`]) or a digit.
+#[inline(always)]
+pub fn is_word_char(c: char) -> bool {
+    is_letter(c) || is_digit(c)
+}
+
+/// Otzaria's `MAX_TOKEN_BYTES` (FtsLib `HebrewChars.MaxTermBytes`): a word
+/// whose normalized term is longer is not indexed and is dropped from a
+/// query, but it is still a word (it takes its position / place in word
+/// distances).
+pub const MAX_TERM_BYTES: usize = 128;
+
 /// ASCII lowercase (Hebrew and other chars pass through unchanged).
 #[inline(always)]
 pub fn to_lower_ascii(c: char) -> char {

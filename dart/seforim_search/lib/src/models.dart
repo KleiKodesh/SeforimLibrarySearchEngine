@@ -66,18 +66,6 @@ enum TypoMode {
   fullEdit1,
 }
 
-/// Which words are words (the engine's `word_model`).
-enum WordModel {
-  /// FtsLib's words of 2..29 letters: one-letter (and 30+ letter) query
-  /// words are dropped, expansions reach only such index terms, distances
-  /// count only such words. Byte-identical with FtsLib.
-  ftslib,
-
-  /// Otzaria's: every word of 1+ letters is a word, matched at its own
-  /// position and counted in distances.
-  otzaria,
-}
-
 /// Hebrew walk options for a word (Otzaria's search options).
 class WalkOptions {
   const WalkOptions({
@@ -289,7 +277,6 @@ class SearchRequest {
       this.requireOrdered = false,
       this.contextWords = 8,
       this.gaps,
-      this.wordModel = WordModel.ftslib,
       this.minGroups,
       this.proximity,
       this.exclude,
@@ -323,9 +310,6 @@ class SearchRequest {
   /// entry per consecutive pair. Null = not used.
   List<int>? gaps;
 
-  /// Which words are words (see [WordModel]).
-  WordModel wordModel;
-
   /// Otzaria's word proximity. When set it is the main query's distance rule:
   /// [maxWordDistance], [requireOrdered] and [gaps] are ignored for it (they
   /// are FtsLib's rule). [minGroups] below the group count wins over it.
@@ -349,7 +333,6 @@ class SearchRequest {
         'require_ordered': requireOrdered,
         'context_words': contextWords,
         if (gaps != null) 'gaps': [for (final g in gaps!) g < 0 ? 0 : g],
-        if (wordModel == WordModel.otzaria) 'word_model': 'otzaria',
         if (minGroups != null) 'min_groups': minGroups,
         if (proximity != null) 'proximity': proximity!.toJson(),
         if (exclude != null) 'exclude': exclude!.toJson(),
@@ -506,7 +489,6 @@ class SearchOptions {
     this.partOfWordMaxLetters,
     this.grammarPrefixMaxLetters,
     Map<int, WordOptions>? words,
-    this.wordModel = WordModel.ftslib,
     this.maxWordDistance,
     this.requireOrdered = false,
     this.minGroups,
@@ -538,11 +520,6 @@ class SearchOptions {
   /// (maqaf, punctuation, Hebrew/Latin) gives its override to every part.
   final Map<int, WordOptions> words;
 
-  /// Which words are words: FtsLib's 2..29 letters (default) or Otzaria's
-  /// every word, one-letter words included. Applies to the query, the
-  /// negative query and the phrase alternatives.
-  WordModel wordModel;
-
   /// FtsLib's word distance. Null = no limit.
   int? maxWordDistance;
 
@@ -562,8 +539,7 @@ class SearchOptions {
 
   /// Otzaria's proximity, per TYPED word (gaps[i] between typed words i and
   /// i+1, words the engine drops included: it cuts them out and merges the
-  /// gaps around them; with [WordModel.otzaria] a one-letter word is a word,
-  /// only words with no letters are dropped). When set, [maxWordDistance] / [requireOrdered] are
+  /// gaps around them). When set, [maxWordDistance] / [requireOrdered] are
   /// not used.
   Proximity? proximity;
 
@@ -583,7 +559,6 @@ class SearchOptions {
             ignoreNikud, ignoreTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,
             grammarPrefixMaxLetters),
         if (words.isNotEmpty) 'words': {for (final e in words.entries) '${e.key}': e.value.toJson()},
-        if (wordModel == WordModel.otzaria) 'word_model': 'otzaria',
         if (maxWordDistance != null) 'max_word_distance': maxWordDistance,
         if (requireOrdered) 'require_ordered': true,
         if (minGroups != null) 'min_groups': minGroups,

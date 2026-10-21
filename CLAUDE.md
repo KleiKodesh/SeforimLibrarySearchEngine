@@ -146,11 +146,14 @@ seforim.db knowledge).
   text by the locator. Snippet = ONE best window per hit (tightest span, strict-< tie
   = earliest), marks = every query-term token in the window.
 - Offsets are UTF-16 (.NET/JS indices) everywhere the page reads them.
-- Word lengths: FtsLib indexes only 2..29 LETTERS (quotes and marks don't count). Our
-  index holds EVERY word of 1+ letters (Otzaria; >128 bytes = no term, keeps its
-  position). `word_model` ftslib restricts walks to 2..29 inside the walk
-  (`WordBounds`, before the cap) + the 2..29 locator scanner; otzaria counts all.
-  User's rule: a dropped one-letter word is a bug in Otzaria mode (a x b checks x).
+- Word model (user: "fix fts lib, make it match otzaria", 2026-10-21): FtsLib's words =
+  Otzaria's: runs of letters AND ASCII digits, any length, one letter included (`ב5`
+  one word; digits script-neutral); a term over 128 UTF-8 bytes (inner quote = 1 byte)
+  is not indexed / dropped from queries but keeps its position. FtsLib index `fts7`,
+  our scanner = FtsLib's, so there is ONE model (the old `word_model` option is gone).
+  A dropped one-letter word is a bug (a x b checks x).
+- FM index sort keys are 7-bit (sigma <= 128) in both FtsLib and ours: digits pushed the
+  alphabet past 64. The FM sidecar refuses a vocalized (keep_marks) dictionary.
 - FtsLib wildcard budgets: anchor ≥2, ≤4 `?`, leading `*` ≤3, trailing/internal ≤4,
   both ≤7. Cap 2000, shortest first, then doc count.
 

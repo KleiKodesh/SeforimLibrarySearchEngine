@@ -14,7 +14,6 @@ use std::cmp::Reverse;
 use hebrew_fts::fuzzy::{Distance, LevenshteinDfa};
 use hebrew_fts::wildcard::WildcardAutomaton;
 use hebrew_fts::walk::ZERO_WIDTH_BYTES;
-use hebrew_fts::WordModel;
 use tantivy::termdict::TermDictionary;
 
 use crate::fm_index::FmIndex;
@@ -99,12 +98,11 @@ pub fn expand_wildcard(
     core: &str,
     suffix_only: bool,
     cap: usize,
-    model: WordModel,
 ) -> Result<Vec<Vec<u8>>> {
     let mut buf = Vec::new();
     let mut kept = Vec::new();
     for rowid in fm.find_row_ids(core, suffix_only) {
-        if term_of(dict, rowid, &mut buf)? && model.admits_term(&buf) && automaton.accepts(&buf) {
+        if term_of(dict, rowid, &mut buf)? && automaton.accepts(&buf) {
             kept.push((0u32, buf.clone()));
         }
     }
@@ -124,12 +122,11 @@ pub fn expand_fuzzy(
     word: &str,
     max_distance: u8,
     cap: usize,
-    model: WordModel,
 ) -> Result<Vec<Vec<u8>>> {
     let mut buf = Vec::new();
     let mut kept = Vec::new();
     for (rowid, _) in fm.find_fuzzy(&text_form(word), max_distance as usize) {
-        if !term_of(dict, rowid, &mut buf)? || !model.admits_term(&buf) {
+        if !term_of(dict, rowid, &mut buf)? {
             continue;
         }
         if let Distance::Exact(d) = dfa.distance(&buf) {
@@ -175,13 +172,12 @@ pub fn expand_fuzzy_quote_free(
     word: &str,
     max_distance: u8,
     cap: usize,
-    model: WordModel,
 ) -> Result<Vec<Vec<u8>>> {
     let query: Vec<char> = text_form(word).chars().collect();
     let mut buf = Vec::new();
     let mut kept = Vec::new();
     for (rowid, _) in fm.find_fuzzy(&text_form(word), max_distance as usize) {
-        if !term_of(dict, rowid, &mut buf)? || !model.admits_term(&buf) {
+        if !term_of(dict, rowid, &mut buf)? {
             continue;
         }
         let Ok(term) = std::str::from_utf8(&buf) else { continue };

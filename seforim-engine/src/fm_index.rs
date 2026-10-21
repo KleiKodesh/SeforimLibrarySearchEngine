@@ -53,7 +53,11 @@ const HEADER_BYTES: usize = 40;
 const NODE_BYTES: usize = 24;
 const RANK_BLOCK_BYTES: usize = 64;
 const RANK_BLOCK_DATA_BITS: usize = (RANK_BLOCK_BYTES - 4) * 8; // 480
-const CODES_PER_SORT_KEY: usize = 10; // 6 bits each → 60 bits
+// 7 bits each → 63 bits (FtsLib `FmIndex`). Sigma up to 128: letters, digits,
+// the quote and the 2 stops pass 64 since digits became word characters. The
+// key only speeds up the build sort; the order is the same at any key width.
+const SORT_KEY_BITS: usize = 7;
+const CODES_PER_SORT_KEY: usize = 9;
 const FLAG_ROWID_IS_RANK_PLUS_ONE: u32 = 1;
 
 /// Why an FM-index could not be built for a dictionary.
@@ -100,8 +104,8 @@ pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, Fm
         }
     }
     let sigma = char_of.len();
-    if sigma > 64 {
-        return Err(FmBuildError(format!("sigma {sigma} > 64 (6-bit sort keys)")));
+    if sigma > 1 << SORT_KEY_BITS {
+        return Err(FmBuildError(format!("sigma {sigma} > {} ({SORT_KEY_BITS}-bit sort keys)", 1 << SORT_KEY_BITS)));
     }
 
     // Text, plus the rowid of the term each position belongs to. A SEP
@@ -394,7 +398,7 @@ fn build_suffix_array(text: &[u8]) -> Vec<usize> {
         let len = distance_to_stop[i].min(CODES_PER_SORT_KEY);
         let mut key = 0u64;
         for k in 0..len {
-            key |= (text[i + k] as u64) << (6 * (CODES_PER_SORT_KEY - 1 - k));
+            key |= (text[i + k] as u64) << (SORT_KEY_BITS * (CODES_PER_SORT_KEY - 1 - k));
         }
         keyed.push((key, i));
     }

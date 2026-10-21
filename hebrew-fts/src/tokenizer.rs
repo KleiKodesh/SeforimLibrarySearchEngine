@@ -3,15 +3,14 @@
 //! Registering this tokenizer on a text field indexes: nikud stripped, ASCII
 //! lowercased, intra-word quotes kept and normalized to '"' (רש״י → רש"י; the
 //! walks can optionally treat them as transparent), inline HTML tags
-//! transparent, block tags / entities / maqaf as separators. Every word of
-//! one letter or more is indexed with its position (Otzaria's word model, see
-//! [`crate::word_model`]); a word whose normalized form is over
-//! [`MAX_TERM_BYTES`] bytes is not a term but keeps its position (Otzaria's
-//! `RemoveLongFilter`). FtsLib's 2..=29-letter words are a subset the
-//! FtsLib-model searches restrict themselves to.
+//! transparent, block tags / entities / maqaf as separators. Every word (a
+//! run of letters and digits, one letter included: FtsLib's word model, which
+//! is Otzaria's) is indexed with its position; a word whose normalized form
+//! is over [`MAX_TERM_BYTES`] bytes is not a term but keeps its position
+//! (Otzaria's `RemoveLongFilter`, FtsLib's `Tokenizer.OnWord`).
 
+use crate::chars::MAX_TERM_BYTES;
 use crate::scanner;
-use crate::word_model::{WordModel, MAX_TERM_BYTES};
 use tantivy::tokenizer::{TextAnalyzer, Token, TokenStream, Tokenizer, TokenizerManager};
 
 /// Name under which [`register_hebrew_tokenizer`] registers the
@@ -52,7 +51,7 @@ impl Tokenizer for HebrewTokenizer {
     fn token_stream<'a>(&'a mut self, text: &'a str) -> HebrewTokenStream {
         let mut tokens = Vec::new();
         let mut position = 0;
-        scanner::scan_words(text, self.keep_marks, WordModel::Otzaria, |word, span| {
+        scanner::scan_with(text, self.keep_marks, |word, span| {
             if word.len() > MAX_TERM_BYTES {
                 position += 1; // not a term, but it holds its place
                 return;
@@ -134,9 +133,12 @@ mod tests {
     fn one_letter_and_long_words_take_positions() {
         let long = "א".repeat(64); // 128 bytes: still a term
         let too_long = "ב".repeat(65); // 130 bytes: no term, keeps its position
-        let toks = tokens(&format!("משה ו ה' {long} {too_long} תורה"));
+        let toks = tokens(&format!("משה ו ה' {long} {too_long} 12 ב5 תורה"));
         let got: Vec<(&str, usize)> = toks.iter().map(|t| (t.text.as_str(), t.position)).collect();
-        assert_eq!(got, [("משה", 0), ("ו", 1), ("ה", 2), (long.as_str(), 3), ("תורה", 5)]);
+        assert_eq!(
+            got,
+            [("משה", 0), ("ו", 1), ("ה", 2), (long.as_str(), 3), ("12", 5), ("ב5", 6), ("תורה", 7)]
+        );
     }
 
     #[test]

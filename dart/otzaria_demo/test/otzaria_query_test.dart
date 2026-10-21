@@ -3,8 +3,8 @@ import 'package:test/test.dart';
 
 void main() {
   test('settings pass through: one-letter words are words', () {
-    // Otzaria's word model: the one-letter word is a slot of its own, with
-    // its own gaps, and the engine counts it for wordMatch
+    // the one-letter word is a slot of its own, with its own gaps, and the
+    // engine counts it for wordMatch
     final s = OtzariaSearch(
       query: 'משה ו תורה',
       distance: 2,
@@ -12,7 +12,6 @@ void main() {
       customSpacing: {0: 1},
     ).toOptions().toJson();
     expect(s['query'], 'משה ו תורה');
-    expect(s['word_model'], 'otzaria');
     expect(s['word_match'], {'mode': 'most_words'});
     expect(s['proximity'], {
       'mode': 'ordered',

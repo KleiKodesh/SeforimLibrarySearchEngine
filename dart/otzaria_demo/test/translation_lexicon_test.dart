@@ -52,9 +52,9 @@ void main() {
   test('option adds the translations as word alternatives', () {
     final req = OtzariaSearch(query: 'הכא', globalOptions: {OtzariaOption.aramaicTranslation: true},
             translations: TranslationLexicon.parse('{"d": [ { "הכא": "כאן" } ]}'))
-        .toRequest();
+        .toOptions();
     final json = req.toJson().toString();
-    expect(json, contains('any'));
+    expect(json, contains('alternatives'));
     expect(json, contains('כאן'));
   });
 }

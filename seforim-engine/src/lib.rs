@@ -5,18 +5,22 @@
 //!   lines, commit with a host payload (resume watermark, provenance)
 //!   stored atomically with the documents. Positions are optional
 //!   ([`IndexOptions`]).
-//! - [`LineIndex::search`]: every matching line in catalog order, plus a
-//!   [`SnippetSession`] that locates FtsLib snippets in the texts the host
+//! - [`LineIndex::search_options`]: THE search API, one [`SearchOptions`]
+//!   (query string + word options, per-word overrides). [`LineIndex::search`]
+//!   takes the low-level [`SearchRequest`] it lowers to. Either returns
+//!   every matching line in catalog order, plus a [`SnippetSession`] that locates FtsLib snippets in the texts the host
 //!   fetches, applying the word-distance / order filters.
 
 pub mod fm_expand;
 pub mod fm_index;
 pub mod fm_sidecar;
 pub mod index;
+pub mod options;
 pub mod search;
 
 pub use fm_index::FmIndex;
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
+pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordOptions};
 pub use search::{
     ExcludeSpec, GroupSpec, PlacedHit, ProximitySpec, SearchRequest, SearchResult, Snippet, SnippetSession,
     TypoModeSpec, WalkOptionsSpec, SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,

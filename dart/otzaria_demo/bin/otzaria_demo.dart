@@ -213,7 +213,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
         ? null
         : {for (final (i, g) in o['spacing']!.split(',').indexed) i: int.parse(g.trim())},
   );
-  final request = req.toRequest(contextWords: contextWords);
+  final request = req.toOptions(contextWords: contextWords);
   final bookFilter = o['book'] == null ? null : db.booksMatching(o['book']!);
   // filtered search by book: done by the engine (book_id is in the index)
   if (bookFilter != null) request.books = bookFilter.toList();
@@ -229,12 +229,12 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   // one search per negative word → line ids → sections via SQLite →
   // intersect → drop positive hits in those sections. A hit without a
   // section is never dropped.
-  final sectionWords = req.sectionNegativeWords();
+  final sectionSearches = req.sectionNegativeSearches(books: request.books);
   var hits = session.allHits().toList();
-  if (sectionWords.isNotEmpty) {
+  if (sectionSearches.isNotEmpty) {
     final perWord = <Set<int>>[];
-    for (final w in sectionWords) {
-      final s = index.search(SearchRequest(groups: [w], books: request.books));
+    for (final w in sectionSearches) {
+      final s = index.search(w);
       perWord.add(db.sectionsOf(s.allHits().map((h) => h.lineId)).values.toSet());
       s.close();
     }
@@ -300,7 +300,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   final refs = db.heRefs(results.map((r) => r.$1.lineId));
   final terms = session.takeNewTerms();
 
-  stdout.writeln('Query groups: ${request.groups.length}, matching lines: ${session.hitCount}'
+  stdout.writeln('Query: ${request.query}, matching lines: ${session.hitCount}'
       '${hits.length != session.hitCount ? ' (${hits.length} after section exclusion)' : ''}, search ${searchMs}ms, '
       'page ${sw.elapsedMilliseconds}ms');
   stdout.writeln('Matched words: ${terms.take(30).join(', ')}${terms.length > 30 ? ' …' : ''}');
@@ -323,7 +323,7 @@ void _grouped(
   SeforimDb db,
   SearchSession session,
   List<PlacedHit> all,
-  SearchRequest request,
+  SearchOptions request,
   Map<String, String?> o,
   Grouping grouping,
   Map<int, String> titles,
@@ -386,7 +386,7 @@ void _grouped(
       ...c.$1.members.where((m) => m != c.$2).take(mergedSiblingsCap).map((m) => m.lineId)
     ]
   ]);
-  stdout.writeln('Query groups: ${request.groups.length}, matching lines: ${session.hitCount}, '
+  stdout.writeln('Query: ${request.query}, matching lines: ${session.hitCount}, '
       'groups: ${groups.length}${truncated ? '+' : ''} (${grouping.name}), search ${searchMs}ms, '
       'page ${sw.elapsedMilliseconds}ms');
   var n = offset;

@@ -260,6 +260,14 @@ are not printed), so upstream's query-parser tests stay as they are.
     - at least 2 real letters, at most 4 `?`
     - `*` may cover 3 characters before the anchor, 4 after it, or 7 in total
       when both ends are wildcards
+- **Query parser.** A port of FtsLib's `QueryParser` (`query_parser.rs`):
+  separators split words, `a | b` is one OR slot, `*` `?` wildcard,
+  `word~N` fuzzy (N clamped to 2), `%word` / `word%` FtsLib's grammar
+  tables, 2..29 letters for a plain word, marks stripped, intra-word quotes
+  kept as `"`, a trailing quote dropped. One addition: on an index that
+  keeps marks, a plain word keeps its typed nikud / te'amim (vocalized
+  search). It only tokenizes and numbers the words; the engine groups them
+  and applies the options.
 - **Snippet locator.** A step-for-step port of FtsLib's
   `PreparedQueryGroups`, `SnippetWindowLocator` and `SnippetDescriptor`.
   Offsets are UTF-16 (.NET/JS string indices).
@@ -282,8 +290,37 @@ are not printed), so upstream's query-parser tests stay as they are.
     window is the host's job: join the line with its neighbours and locate
     that text (no neighbour or DB logic in the engine).
   - It keeps the term table.
-- **Query groups:** word (with options), wildcard, grammar (`%`), fuzzy
-  (distance 1–3, FtsLib's range), and OR of alternatives.
+- **Search API: one `SearchOptions` object** (Rust `LineIndex::search_options`,
+  C ABI `se_search` with a JSON that has `"query"`, C# `SeforimIndex.Search(SearchOptions)`,
+  Dart `SeforimIndex.search(SearchOptions)`; same field names in each
+  language's casing). Callers never build walks or slot kinds: the engine
+  parses the query and builds one walk per word with all its options.
+  - `query`: FtsLib syntax (`*` `?` `%` `~N` `|` stay in the string).
+  - Word options, for every word: `grammar_prefixes`, `grammar_suffixes`,
+    `aramaic_prefixes`, `aramaic_suffixes`, `ktiv_male_haser`,
+    `part_of_word`, `advanced_prefixes`, `advanced_suffixes`,
+    `ignore_quotes`, `exact_quotes`, `spelling_errors`, `ignore_nikud`,
+    `ignore_teamim`, `typo_mode`, `prefix_max_letters`,
+    `suffix_max_letters`, `part_of_word_max_letters`,
+    `grammar_prefix_max_letters`. Wildcard, fuzzy and `%` words take only
+    `ignore_quotes` (as FtsLib's parser).
+  - `words`: per-word overrides by word index (the n-th word token of the
+    query, from 0; `|` is not a word): the same fields, each optional
+    (null = inherit), plus `alternatives` (extra words ORed into that
+    word's slot, searched with its options; if the word itself cannot
+    search, e.g. one letter, its alternatives stand in for it). This is Otzaria's
+    `wordOptions` / `alternativeWords`.
+  - Query level: `max_word_distance`, `require_ordered`, `min_groups`,
+    `context_words`, `proximity`, `exclude` (`{query, max_word_distance,
+    require_ordered, proximity}`; its words use the global options),
+    `books`, `phrase_alternatives` (`[{query, ignore_quotes}]`).
+  - JSON: `{"query":"משה תורה","grammar_prefixes":true,
+    "words":{"1":{"grammar_prefixes":false,"alternatives":["אורייתא"]}}}`.
+  - The low-level `SearchRequest` (slots built by the caller) stays, for
+    tests and special hosts; `SearchOptions` lowers to it.
+- **Query groups** (the low-level slots): word (with options), wildcard,
+  grammar (`%`), fuzzy (distance 1–3, FtsLib's range), and OR of
+  alternatives.
 - **Fuzzy** is hebrew-fts's own `HebrewFuzzyQuery` (the Levenshtein DFA
   tantivy uses, built here because tantivy's wrapper cannot be built from
   outside): plain Levenshtein edits (a transposition is two, as FtsLib's
@@ -387,7 +424,8 @@ are not printed), so upstream's query-parser tests stay as they are.
   - corpus reads, and `SeforimDbFtsSearcher` (batch plan, neighbour widening,
     seeded line texts)
 - **FtsLib facade with the same names:** `FtsDocumentPlacement`,
-  `SearchResult`, `SnippetDescriptor`, `QueryParser` (`%` `~` `*` `?` `|`), and
+  `SearchResult`, `SnippetDescriptor` (the query string goes to the engine
+  as `SearchOptions`; FtsLib's `QueryParser` is ported in hebrew-fts), and
   `TantivySeforimIndex` (`Search`, `LocateSnippetWindow`,
   `LocateSnippetWindowOverNeighbourLines`, resumable `BuildLines`,
   `GetResumeState`).

@@ -53,7 +53,7 @@ void main() {
   });
 
   test('word with grammar prefixes, snippet offsets are Dart indices', () {
-    final s = index.search(SearchRequest(groups: [
+    final s = index.searchRequest(SearchRequest(groups: [
       const QueryGroup.word('תורה', WalkOptions(grammarPrefixes: true)),
     ]));
     expect(s.hitCount, 1);
@@ -70,20 +70,20 @@ void main() {
   });
 
   test('catalog order and AND of groups', () {
-    final s = index.search(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')]));
+    final s = index.searchRequest(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')]));
     expect(s.allHits().map((h) => h.lineId).toList(), [8]);
     expect(s.hits(0, 1).single.bookId, 2);
     s.close();
-    final inBook1 = index.search(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')], books: [1]));
+    final inBook1 = index.searchRequest(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')], books: [1]));
     expect(inBook1.hitCount, 0);
     inBook1.close();
-    final inBook2 = index.search(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')], books: [2, 5]));
+    final inBook2 = index.searchRequest(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')], books: [2, 5]));
     expect(inBook2.allHits().map((h) => h.lineId).toList(), [8]);
     inBook2.close();
-    final noBooks = index.search(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')], books: []));
+    final noBooks = index.searchRequest(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')], books: []));
     expect(noBooks.hitCount, 0);
     noBooks.close();
-    final none = index.search(SearchRequest(groups: [
+    final none = index.searchRequest(SearchRequest(groups: [
       const QueryGroup.word('בראשית'),
       const QueryGroup.word('למשה'),
     ]));
@@ -92,7 +92,7 @@ void main() {
   });
 
   test('distance filter drops far matches in locate', () {
-    final s = index.search(SearchRequest(
+    final s = index.searchRequest(SearchRequest(
       groups: [const QueryGroup.word('בראשית'), const QueryGroup.word('הארץ')],
       maxWordDistance: 1,
     ));
@@ -102,7 +102,7 @@ void main() {
   });
 
   test('any + fuzzy + a host-joined longer text', () {
-    final s = index.search(SearchRequest(groups: [
+    final s = index.searchRequest(SearchRequest(groups: [
       const QueryGroup.any([QueryGroup.word('משה'), QueryGroup.fuzzy('למשא', 1)]),
     ]));
     expect(s.hitCount, 1);
@@ -110,6 +110,25 @@ void main() {
     final wide = s.locate('לפני $text אחרי');
     expect(wide, isNotNull);
     expect(wide!.windowWordCount, greaterThan(own.windowWordCount));
+    s.close();
+  });
+
+  test('SearchOptions: query string, global options, per-word overrides', () {
+    // global grammar prefixes reach והתורה
+    var s = index.search(SearchOptions('תורה', grammarPrefixes: true));
+    expect(s.hitCount, 1);
+    expect(s.locate(text), isNotNull);
+    s.close();
+    // word 0 overrides the global option
+    s = index.search(SearchOptions('תורה', grammarPrefixes: true, words: {0: WordOptions(grammarPrefixes: false)}));
+    expect(s.hitCount, 0);
+    s.close();
+    // FtsLib syntax in the string; a per-word alternative joins the slot
+    s = index.search(SearchOptions('ברא* ספר', words: {1: WordOptions(alternatives: ['הארץ'])}));
+    expect(s.hits(0, 10).map((h) => h.lineId), [8]);
+    s.close();
+    s = index.search(SearchOptions('בראשית הארץ', maxWordDistance: 1));
+    expect(s.locateBatch([text2]).single, isNull);
     s.close();
   });
 

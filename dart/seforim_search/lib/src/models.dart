@@ -444,3 +444,221 @@ class Snippet {
     return (s, at + 7 + markCount * 3);
   }
 }
+
+/// THE search API: the query string (FtsLib syntax: words AND-ed, `a | b`
+/// one slot, `*` `?` wildcard, `word~N` fuzzy, `%word` / `word%` FtsLib's
+/// grammar tables) and the word options, which apply to every word unless
+/// [words] overrides them for one word (Otzaria's wordOptions /
+/// alternativeWords). The engine builds one walk per word with all its
+/// options. [SearchRequest] is the low-level form it lowers to.
+class SearchOptions {
+  SearchOptions(
+    this.query, {
+    this.grammarPrefixes = false,
+    this.grammarSuffixes = false,
+    this.aramaicPrefixes = false,
+    this.aramaicSuffixes = false,
+    this.ktivMaleHaser = false,
+    this.partOfWord = false,
+    this.advancedPrefixes = false,
+    this.advancedSuffixes = false,
+    this.ignoreQuotes = false,
+    this.exactQuotes = false,
+    this.spellingErrors = false,
+    this.ignoreNikud = false,
+    this.ignoreTeamim = false,
+    this.typoMode = TypoMode.otzaria,
+    this.prefixMaxLetters,
+    this.suffixMaxLetters,
+    this.partOfWordMaxLetters,
+    this.grammarPrefixMaxLetters,
+    Map<int, WordOptions>? words,
+    this.maxWordDistance,
+    this.requireOrdered = false,
+    this.minGroups,
+    this.contextWords = 8,
+    this.proximity,
+    this.exclude,
+    this.books,
+    List<PhraseOptions>? phraseAlternatives,
+  })  : words = words ?? {},
+        phraseAlternatives = phraseAlternatives ?? [];
+
+  String query;
+
+  // Word options: every word, unless [words] overrides (see [WalkOptions]
+  // for each one's meaning).
+  bool grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes;
+  bool ktivMaleHaser, partOfWord, advancedPrefixes, advancedSuffixes;
+
+  /// התעלם מגרשיים (also for wildcard / fuzzy / `%` words).
+  bool ignoreQuotes;
+  bool exactQuotes, spellingErrors, ignoreNikud, ignoreTeamim;
+  TypoMode typoMode;
+  int? prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters, grammarPrefixMaxLetters;
+
+  /// Per-word overrides by word index (the n-th word of [query], from 0;
+  /// `|` is not a word).
+  final Map<int, WordOptions> words;
+
+  /// FtsLib's word distance. Null = no limit.
+  int? maxWordDistance;
+
+  /// FtsLib: the words in query order.
+  bool requireOrdered;
+
+  /// Partial matching (Otzaria's wordMatchMode): slots a line needs. Null = all.
+  int? minGroups;
+
+  /// Words of context per side of the snippet.
+  int contextWords;
+
+  /// Otzaria's proximity; when set, [maxWordDistance] / [requireOrdered] are not used.
+  Proximity? proximity;
+
+  /// Otzaria's negative query (its words use the global word options).
+  ExcludeOptions? exclude;
+
+  /// Filtered search: only these book ids. Null = every book.
+  List<int>? books;
+
+  /// Whole phrases ORed with the query (Otzaria's acronym expansion).
+  final List<PhraseOptions> phraseAlternatives;
+
+  Map<String, Object?> toJson() => {
+        'query': query,
+        ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
+            partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
+            ignoreNikud, ignoreTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,
+            grammarPrefixMaxLetters),
+        if (words.isNotEmpty) 'words': {for (final e in words.entries) '${e.key}': e.value.toJson()},
+        if (maxWordDistance != null) 'max_word_distance': maxWordDistance,
+        if (requireOrdered) 'require_ordered': true,
+        if (minGroups != null) 'min_groups': minGroups,
+        'context_words': contextWords,
+        if (proximity != null) 'proximity': proximity!.toJson(),
+        if (exclude != null) 'exclude': exclude!.toJson(),
+        if (books != null) 'books': books,
+        if (phraseAlternatives.isNotEmpty) 'phrase_alternatives': [for (final p in phraseAlternatives) p.toJson()],
+      };
+}
+
+Map<String, Object?> _wordFields(
+    bool? grammarPrefixes,
+    bool? grammarSuffixes,
+    bool? aramaicPrefixes,
+    bool? aramaicSuffixes,
+    bool? ktivMaleHaser,
+    bool? partOfWord,
+    bool? advancedPrefixes,
+    bool? advancedSuffixes,
+    bool? ignoreQuotes,
+    bool? exactQuotes,
+    bool? spellingErrors,
+    bool? ignoreNikud,
+    bool? ignoreTeamim,
+    TypoMode? typoMode,
+    int? prefixMaxLetters,
+    int? suffixMaxLetters,
+    int? partOfWordMaxLetters,
+    int? grammarPrefixMaxLetters) {
+  final m = <String, Object?>{};
+  void flag(String k, bool? v) {
+    if (v != null) m[k] = v;
+  }
+
+  void limit(String k, int? v) {
+    if (v != null) m[k] = v < 0 ? 0 : v;
+  }
+
+  flag('grammar_prefixes', grammarPrefixes);
+  flag('grammar_suffixes', grammarSuffixes);
+  flag('aramaic_prefixes', aramaicPrefixes);
+  flag('aramaic_suffixes', aramaicSuffixes);
+  flag('ktiv_male_haser', ktivMaleHaser);
+  flag('part_of_word', partOfWord);
+  flag('advanced_prefixes', advancedPrefixes);
+  flag('advanced_suffixes', advancedSuffixes);
+  flag('ignore_quotes', ignoreQuotes);
+  flag('exact_quotes', exactQuotes);
+  flag('spelling_errors', spellingErrors);
+  flag('ignore_nikud', ignoreNikud);
+  flag('ignore_teamim', ignoreTeamim);
+  if (typoMode != null) m['typo_mode'] = typoMode == TypoMode.fullEdit1 ? 'full_edit1' : 'otzaria';
+  limit('prefix_max_letters', prefixMaxLetters);
+  limit('suffix_max_letters', suffixMaxLetters);
+  limit('part_of_word_max_letters', partOfWordMaxLetters);
+  limit('grammar_prefix_max_letters', grammarPrefixMaxLetters);
+  return m;
+}
+
+/// One word's overrides: the same fields as [SearchOptions]' word options,
+/// null = inherit, plus extra words for the word's slot.
+class WordOptions {
+  WordOptions({
+    this.grammarPrefixes,
+    this.grammarSuffixes,
+    this.aramaicPrefixes,
+    this.aramaicSuffixes,
+    this.ktivMaleHaser,
+    this.partOfWord,
+    this.advancedPrefixes,
+    this.advancedSuffixes,
+    this.ignoreQuotes,
+    this.exactQuotes,
+    this.spellingErrors,
+    this.ignoreNikud,
+    this.ignoreTeamim,
+    this.typoMode,
+    this.prefixMaxLetters,
+    this.suffixMaxLetters,
+    this.partOfWordMaxLetters,
+    this.grammarPrefixMaxLetters,
+    List<String>? alternatives,
+  }) : alternatives = alternatives ?? [];
+
+  bool? grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes;
+  bool? ktivMaleHaser, partOfWord, advancedPrefixes, advancedSuffixes;
+  bool? ignoreQuotes, exactQuotes, spellingErrors, ignoreNikud, ignoreTeamim;
+  TypoMode? typoMode;
+  int? prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters, grammarPrefixMaxLetters;
+
+  /// Extra words for this word's slot (Otzaria's alternativeWords), in query
+  /// syntax, searched with this word's options.
+  final List<String> alternatives;
+
+  Map<String, Object?> toJson() => {
+        if (alternatives.isNotEmpty) 'alternatives': alternatives,
+        ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
+            partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
+            ignoreNikud, ignoreTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,
+            grammarPrefixMaxLetters),
+      };
+}
+
+/// The negative query of [SearchOptions]: its words (all required, together)
+/// use the global word options.
+class ExcludeOptions {
+  ExcludeOptions(this.query, {this.maxWordDistance, this.requireOrdered = false, this.proximity});
+  String query;
+  int? maxWordDistance;
+  bool requireOrdered;
+  Proximity? proximity;
+
+  Map<String, Object?> toJson() => {
+        'query': query,
+        if (maxWordDistance != null) 'max_word_distance': maxWordDistance,
+        if (requireOrdered) 'require_ordered': true,
+        if (proximity != null) 'proximity': proximity!.toJson(),
+      };
+}
+
+/// A whole-phrase alternative: words adjacent, in order, all required,
+/// matched as written (plus the quote option).
+class PhraseOptions {
+  const PhraseOptions(this.query, {this.ignoreQuotes = false});
+  final String query;
+  final bool ignoreQuotes;
+
+  Map<String, Object?> toJson() => {'query': query, 'ignore_quotes': ignoreQuotes};
+}

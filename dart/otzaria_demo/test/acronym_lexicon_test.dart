@@ -48,12 +48,12 @@ void main() {
 
   test('option sends phrase alternatives both ways', () {
     final json = OtzariaSearch(query: 'רמב"ם', globalOptions: {OtzariaOption.acronyms: true}, acronymLexicon: lex)
-        .toRequest()
+        .toOptions()
         .toJson();
     expect(json['phrase_alternatives'].toString(), contains('מיימון'));
     final back = OtzariaSearch(
             query: 'רבי משה בן מיימון', globalOptions: {OtzariaOption.acronyms: true}, acronymLexicon: lex)
-        .toRequest()
+        .toOptions()
         .toJson();
     expect(back['phrase_alternatives'].toString(), contains('רמבם'));
   });

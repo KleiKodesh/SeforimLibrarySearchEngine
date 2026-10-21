@@ -42,14 +42,13 @@ index.buildFmSidecar();  // after mergeAndClose: FM-index for leading-* and fuzz
 index.info();                                   // IndexInfo(numLines, positions, keepMarks, payload)
 SeforimIndex.exists(dir); SeforimIndex.open(dir); SeforimIndex.nativeVersion;
 
-final s = index.search(SearchRequest(
-  groups: [
-    QueryGroup.word('תורה', WalkOptions(grammarPrefixes: true, prefixMaxLetters: 4)),
-    QueryGroup.wildcard('שלו*'),
-    QueryGroup.fuzzy('שבת', 1),
-    QueryGroup.any([QueryGroup.word('משה'), QueryGroup.word('אהרן')]),
-  ],
-  maxWordDistance: 5, requireOrdered: false, contextWords: 8));
+// The public API: the query string (FtsLib syntax * ? % ~N | stays in it),
+// options for every word, and per-word overrides (null = inherit).
+final s = index.search(SearchOptions('תורה שלו* שבת~1 משה | אהרן',
+    grammarPrefixes: true, prefixMaxLetters: 4,
+    words: {0: WordOptions(ktivMaleHaser: true, alternatives: ['אורייתא'])},
+    maxWordDistance: 5, requireOrdered: false, contextWords: 8));
+// low-level form (slots built by hand): index.searchRequest(SearchRequest(groups: [...]))
 s.hitCount; s.hits(offset, count); s.allHits();          // PlacedHit(position, lineId, bookId), catalog order
 s.locateBatch(texts); s.locate(text);                    // Snippet? (null = filtered out)
 s.takeNewTerms();                                        // term table, indexed by SnippetMark.termId
@@ -69,9 +68,10 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 |---|---|
 | `SearchMode.exact` | Only the 5 exact-mode options are kept: grammatical prefixes/suffixes, prefixes, suffixes, ktiv. |
 | `SearchMode.advanced` | All options, plus alternatives. |
-| `SearchMode.fuzzy` | `QueryGroup.fuzzy(word, 1..2)`. |
-| `negativeQuery` / `negativeScope` | `SearchRequest.exclude` (`ExcludeSpec`): the negative words as their own all-words query with the positive distance and order (as Otzaria passes `negativeDistance: distance`, `negativeScope: proximityScope`); scope paragraph = whole line without limits, scope section is host-side (the index holds no sections): one search per negative word, line ids → sections via SQLite `line_toc` (`SeforimDb.sectionsOf`), sets intersected (`blockedSections`), positive hits in those sections dropped (a hit without a section never), as Otzaria's `scoped_words_query`. Demo: `--exclude "words" [--exclude-scope distance|paragraph|section]`, global options only. |
-| `wordMatchMode` / `wordMatchCount` | `SearchRequest.minGroups` = Otzaria's `min_words` (anyWord 1, mostWords n/2+1, atLeast N); distance, order and spacing are then not applied, as in Otzaria. Advanced mode only. |
+| global options / `wordOptions` | The global options become `SearchOptions`' own fields; a word whose options differ gets only the differing fields in `SearchOptions.words[i]` (`WordOptions`, null = inherit). The query goes as one string; the engine parses it with FtsLib's rules. |
+| `SearchMode.fuzzy` | Each word sent as `word~N` (N 1..2) in the query string. |
+| `negativeQuery` / `negativeScope` | `SearchOptions.exclude` (`ExcludeOptions`): the negative words as their own all-words query with the positive distance and order (as Otzaria passes `negativeDistance: distance`, `negativeScope: proximityScope`); scope paragraph = whole line without limits, scope section is host-side (the index holds no sections): one search per negative word, line ids → sections via SQLite `line_toc` (`SeforimDb.sectionsOf`), sets intersected (`blockedSections`), positive hits in those sections dropped (a hit without a section never), as Otzaria's `scoped_words_query`. Demo: `--exclude "words" [--exclude-scope distance|paragraph|section]`, global options only. |
+| `wordMatchMode` / `wordMatchCount` | `SearchOptions.minGroups` = Otzaria's `min_words` (anyWord 1, mostWords n/2+1, atLeast N); distance, order and spacing are then not applied, as in Otzaria. Advanced mode only. |
 | קידומות דקדוקיות / סיומות דקדוקיות | `grammarPrefixes` / `grammarSuffixes`. Prefixes are Otzaria's three slots (ו מ דא כש כ ב ש ל ה ד, then כש כ ב ש ל ה ד, then ה). As in Otzaria, a root under 3 letters takes none unless it is an acronym (has `"`): the engine's walk rule, per form. Suffixes are Otzaria's table, with final letter → base form (מלך → מלכים) and final ה → ת/ות (תורה → תורתו). |
 | קידומות / סיומות | `advancedPrefixes` / `advancedSuffixes`, plus `prefixMaxLetters` / `suffixMaxLetters`. |
 | כתיב מלא/חסר | `ktivMaleHaser` (Otzaria's י/ו rules: אותו ↛ אות, שבת ↛ שבות, מצות ↔ מצוות) |
@@ -80,16 +80,16 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 | קידומות / סיומות ארמיות | `aramaicPrefixes` / `aramaicSuffixes` |
 | התעלם מגרשיים | `ignoreQuotes`. Without it a word typed with no quote still finds the quoted form (רמבם → רמב"ם), as Otzaria's quote-free twin, done in the walk; `exactQuotes` turns that off. |
 | `grouping` sameSection / identicalText | Host-side (`lib/grouping.dart`), as Otzaria's `GroupCollector`: groups over the raw hits, section = `line_toc.tocEntryId` read from SQLite by line id (`SeforimDb.sectionsOf`; none = alone), identical text = Otzaria's `line_dedup_hash` (letters and digits, at least 12 Hebrew letters, else alone); groups in order of their first member, a page counts groups, up to 10 siblings per card; the representative is the first member whose snippet passes. Identical text reads up to `--group-scan` hits (default 20000) and marks counts as a lower bound past that. Demo: `--group section\|identical`. |
-| ראשי תיבות | Host-side port of Otzaria's `AcronymLexicon` (`lib/acronym_lexicon.dart`) over `assets/Acronyms.json`, with its rule from `acronym_alternatives`: only when the whole query is one acronym (→ its multi-word expansions) or one known expansion (→ its acronyms). Sent as `SearchRequest.phraseAlternatives`. A decoded acronym gets ignore-gershayim (Otzaria's index has a quote-free twin token; ours keeps the quote). Demo: `--acronym --acronyms path`. Measured: רבי משה בן נחמן 557 → 16,781 lines. |
-| תרגום ארמי | Host-side port of Otzaria's `TranslationLexicon` (`lib/translation_lexicon.dart`) over the app's `assets/dictionary.json`: both directions, single-word glosses only, cap 16, appended to the word's alternatives (an `any` group), as Otzaria's `translation_alternatives`. Demo: `--translation --dictionary path`. |
+| ראשי תיבות | Host-side port of Otzaria's `AcronymLexicon` (`lib/acronym_lexicon.dart`) over `assets/Acronyms.json`, with its rule from `acronym_alternatives`: only when the whole query is one acronym (→ its multi-word expansions) or one known expansion (→ its acronyms). Sent as `SearchOptions.phraseAlternatives` (`PhraseOptions`). A decoded acronym gets ignore-gershayim (Otzaria's index has a quote-free twin token; ours keeps the quote). Demo: `--acronym --acronyms path`. Measured: רבי משה בן נחמן 557 → 16,781 lines. |
+| תרגום ארמי | Host-side port of Otzaria's `TranslationLexicon` (`lib/translation_lexicon.dart`) over the app's `assets/dictionary.json`: both directions, single-word glosses only, cap 16, appended to the word's `WordOptions.alternatives`, as Otzaria's `translation_alternatives`. Demo: `--translation --dictionary path`. |
 | ניקוד / טעמים (match the typed marks) | Needs an index built with `--keep-marks`. Without the option, the demo sets `ignoreNikud` / `ignoreTeamim` on such an index. |
-| `distance` (gap), default scope "in order" | `SearchRequest.proximity = Proximity.ordered([distance, ...])`: the engine's own Otzaria proximity (each pair at most `distance` words apart, in order); positions index = span query, no-positions index = validated on the text by the locator, same lines. |
+| `distance` (gap), default scope "in order" | `SearchOptions.proximity = Proximity.ordered([distance, ...])`: the engine's own Otzaria proximity (each pair at most `distance` words apart, in order); positions index = span query, no-positions index = validated on the text by the locator, same lines. |
 | `customSpacing` | `Proximity.ordered(gaps)`, gap i = `customSpacing[i]`, a missing pair = the largest custom value (Otzaria's `resolve_gaps`); any order is ignored with it, as in Otzaria. |
 | `anyOrder` | `Proximity.anyOrder(distance)`: all words inside one window of (k-1)(distance+1) positions, each at its own word (Otzaria's `Proximity::any_order`). |
-| `alternativeWords[i]` | `QueryGroup.any([...])`. In the CLI, write `a,b`. |
+| `alternativeWords[i]` | `SearchOptions.words[i].alternatives`. In the CLI, write `a,b`. |
 | scope `sameParagraph` | Leave out `--distance` limits. A line is the paragraph unit. |
 | `order: catalogue` | This is the only order. Positions come from the catalog-tree walk at build time. |
-| book/category facets | `--book TEXT`: the book ids whose title or an ancestor category title (`category_closure`) matches go to the engine as `SearchRequest.books` (filtered search on the indexed `book_id`). |
+| book/category facets | `--book TEXT`: the book ids whose title or an ancestor category title (`category_closure`) matches go to the engine as `SearchOptions.books` (filtered search on the indexed `book_id`). |
 | `limit` / `offset` | Counted over results that pass the snippet filters, as Otzaria's pages are. |
 | query sanitizing | Same rules: ״→", ׳→', maqaf and `-` → space, an edge `"` is dropped, `''`→". |
 | result `title` / `reference` / snippet | Book title, `line.heRef`, and the snippet with `⟦marks⟧`. Short windows (`isShort`) are located again over the line joined with ±2 neighbour lines, by the demo, which reads the hit's lineIndex from SQLite (`lineIndexesOf`; seforim.db knowledge stays out of the engine). |

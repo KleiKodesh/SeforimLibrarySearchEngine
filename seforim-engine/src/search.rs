@@ -20,6 +20,7 @@ use tantivy::{DocId, Score, SegmentOrdinal, SegmentReader};
 use crate::fm_expand;
 use crate::fm_index::FmIndex;
 use crate::index::LineIndex;
+use crate::options::SearchOptions;
 use crate::{Error, Result};
 
 /// One AND slot of a query.
@@ -968,6 +969,13 @@ impl LineIndex {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Runs a search given as [`SearchOptions`] (the public API): the query
+    /// string is parsed by FtsLib's rules and each word becomes one walk with
+    /// its options (global, overridden per word).
+    pub fn search_options(&self, options: &SearchOptions) -> Result<SearchResult> {
+        self.search(&options.to_request(self.options.keep_marks))
     }
 
     /// Runs `request`. Every matching line comes back in catalog order;

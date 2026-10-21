@@ -6,7 +6,7 @@ namespace SeforimSearch.Engine
 {
     /// <summary>
     /// A line index on disk. Thread safety: searches may run concurrently from
-    /// several threads (each <see cref="Search"/> returns its own session);
+    /// several threads (each <see cref="Search(SearchOptions)"/> returns its own session);
     /// one writer at a time.
     /// </summary>
     public sealed unsafe class SeforimIndex : IDisposable
@@ -94,6 +94,17 @@ namespace SeforimSearch.Engine
             fixed (byte* j = json)
                 return new SearchSession(Interop.Check(NativeMethods.se_search(_handle, j, (UIntPtr)json.Length)),
                                          request.ContextWords);
+        }
+
+        /// <summary>Runs a search given as <see cref="SearchOptions"/> (the public API):
+        /// the query string is parsed by FtsLib's rules and each word becomes one walk
+        /// with its options.</summary>
+        public SearchSession Search(SearchOptions options)
+        {
+            byte[] json = Interop.ToUtf8(options.ToJson());
+            fixed (byte* j = json)
+                return new SearchSession(Interop.Check(NativeMethods.se_search(_handle, j, (UIntPtr)json.Length)),
+                                         options.ContextWords);
         }
 
         public void Dispose() => _handle.Dispose();

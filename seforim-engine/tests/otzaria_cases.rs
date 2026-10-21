@@ -14,8 +14,8 @@
 //! without, the snippet locator validates it on the text.
 
 use seforim_engine::{
-    ExcludeSpec, GroupSpec, IndexOptions, LineDoc, LineIndex, ProximitySpec, SearchRequest,
-    TypoModeSpec, WalkOptionsSpec,
+    ExcludeSpec, GroupSpec, IndexOptions, LineDoc, LineIndex, ProximitySpec, SearchOptions, SearchRequest,
+    SearchResult, TypoModeSpec, WalkOptionsSpec, WordOptions,
 };
 
 fn w(word: &str) -> GroupSpec {
@@ -35,6 +35,22 @@ fn matches(lines: &[&str], positions: bool, req: &SearchRequest) -> Vec<usize> {
 
 /// Matching lines with their located window `(start, end)`.
 fn located(lines: &[&str], positions: bool, req: &SearchRequest) -> Vec<(usize, (usize, usize))> {
+    located_with(lines, positions, |index| index.search(req).unwrap())
+}
+
+/// Matching lines for the public [`SearchOptions`] API.
+fn matches_options(lines: &[&str], positions: bool, options: &SearchOptions) -> Vec<usize> {
+    located_with(lines, positions, |index| index.search_options(options).unwrap())
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+fn located_with(
+    lines: &[&str],
+    positions: bool,
+    search: impl Fn(&LineIndex) -> SearchResult,
+) -> Vec<(usize, (usize, usize))> {
     let dir = tempfile::tempdir().unwrap();
     let index = LineIndex::create(dir.path(), IndexOptions { positions, keep_marks: false }).unwrap();
     let mut wr = index.writer(30_000_000, 1).unwrap();
@@ -43,7 +59,7 @@ fn located(lines: &[&str], positions: bool, req: &SearchRequest) -> Vec<(usize, 
             .unwrap();
     }
     wr.commit(None).unwrap();
-    let mut r = index.search(req).unwrap();
+    let mut r = search(&index);
     let mut out = Vec::new();
     for h in r.hits.clone() {
         let text = lines[h.line_id as usize - 1];
@@ -305,6 +321,59 @@ fn otzaria_cases() {
     }
     eprintln!("{} of {ran} case runs pass", ran - failures.len());
     assert!(failures.is_empty(), "{} Otzaria case runs fail (see FAIL lines)", failures.len());
+}
+
+/// Otzaria's per-word options (`wordOptions` / `alternativeWords`) through
+/// the public API: global options with one word overriding them, and an
+/// alternative word for a slot. Same lines as the hand-built slots.
+#[test]
+fn per_word_overrides_through_search_options() {
+    let lines: &[&str] = &["הספר מלכא", "ספר דמלכא", "הספר דמלכא", "ספר שר", "מטבע מלך"];
+    let mut options = SearchOptions {
+        query: "ספר מלכה".into(),
+        grammar_prefixes: true, // every word...
+        ..Default::default()
+    };
+    options.words.insert(
+        1,
+        WordOptions {
+            grammar_prefixes: Some(false), // ...but word 1: Aramaic affixes instead
+            aramaic_prefixes: Some(true),
+            aramaic_suffixes: Some(true),
+            ..Default::default()
+        },
+    );
+    let by_hand = SearchRequest {
+        groups: vec![
+            wo("ספר", |o| o.grammar_prefixes = true),
+            wo("מלכה", |o| {
+                o.aramaic_prefixes = true;
+                o.aramaic_suffixes = true;
+            }),
+        ],
+        ..Default::default()
+    };
+    // alternatives: word 1 of "ספר שר" may also be מלך (its slot ORs them)
+    let mut alts = SearchOptions { query: "מטבע שר".into(), ..Default::default() };
+    alts.words.insert(1, WordOptions { alternatives: vec!["מלך".into()], ..Default::default() });
+    for positions in [true, false] {
+        let got = matches_options(lines, positions, &options);
+        assert_eq!(got, vec![1, 2, 3], "positions={positions}");
+        assert_eq!(got, matches(lines, positions, &by_hand), "positions={positions}");
+        assert_eq!(matches_options(lines, positions, &alts), vec![5], "positions={positions}");
+        // without the override, word 1 has only grammar prefixes: no Aramaic forms
+        options.words.clear();
+        assert!(matches_options(lines, positions, &options).is_empty(), "positions={positions}");
+        options.words.insert(
+            1,
+            WordOptions {
+                grammar_prefixes: Some(false),
+                aramaic_prefixes: Some(true),
+                aramaic_suffixes: Some(true),
+                ..Default::default()
+            },
+        );
+    }
 }
 
 /// The rule evaluated on positions (span query) and validated on the text

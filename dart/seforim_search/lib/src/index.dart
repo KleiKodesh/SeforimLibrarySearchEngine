@@ -79,12 +79,19 @@ final class SeforimIndex implements Finalizable {
     return IndexWriter._(this, _n.checkPtr(_n.writerOpen(handle, heapBytes, threads)));
   }
 
-  /// Runs a search: every matching line in catalog order, plus the snippet session.
-  SearchSession search(SearchRequest request) {
+  /// Runs a search (the public API): the query string is parsed by FtsLib's
+  /// rules and each word becomes one walk with its options. Every matching
+  /// line in catalog order, plus the snippet session.
+  SearchSession search(SearchOptions options) => _search(options.toJson(), options.contextWords);
+
+  /// The low-level form: slots built by the caller ([SearchRequest]).
+  SearchSession searchRequest(SearchRequest request) => _search(request.toJson(), request.contextWords);
+
+  SearchSession _search(Map<String, Object?> json, int contextWords) {
     return using((a) {
-      final (j, jl) = utf8Native(jsonEncode(request.toJson()), a);
+      final (j, jl) = utf8Native(jsonEncode(json), a);
       final h = _n.checkPtr(_n.search(handle, j, jl));
-      return SearchSession.internal(this, h, request.contextWords);
+      return SearchSession.internal(this, h, contextWords);
     });
   }
 

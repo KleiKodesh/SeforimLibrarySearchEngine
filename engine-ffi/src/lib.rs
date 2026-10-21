@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::ptr;
 
 use seforim_engine::{
-    IndexOptions, LineDoc, LineIndex, LineWriter, SearchRequest, SearchResult, Snippet,
+    IndexOptions, LineDoc, LineIndex, LineWriter, SearchOptions, SearchRequest, SearchResult, Snippet,
 };
 
 thread_local! {
@@ -332,7 +332,15 @@ pub unsafe extern "C" fn se_writer_close(writer: *mut LineWriter) {
 
 // ── Search ──────────────────────────────────────────────────────────────
 
-/// Runs a search. `request_json` (all fields optional except groups):
+/// Runs a search. `request_json` is the public [`SearchOptions`] object
+/// (recognised by its `"query"` key; every other field optional):
+/// ```json
+/// {"query":"משה תורה|ספר","grammar_prefixes":true,
+///  "words":{"1":{"grammar_prefixes":false,"alternatives":["אורייתא"]}},
+///  "proximity":{"mode":"any_order","distance":3},"context_words":8}
+/// ```
+/// or, without `"query"`, the low-level [`SearchRequest`] (slots built by
+/// the caller):
 /// ```json
 /// {"groups":[{"kind":"word","word":"תורה","options":{"grammar_prefixes":true}},
 ///            {"kind":"wildcard","pattern":"שלו*"}],
@@ -351,9 +359,15 @@ pub unsafe extern "C" fn se_search(
 ) -> *mut SearchResult {
     guard(ptr::null_mut(), || {
         let index = index.as_ref().ok_or("null index")?;
-        let request: SearchRequest =
+        let json: serde_json::Value =
             serde_json::from_str(str_arg(request_json, request_len)?).map_err(err)?;
-        let result = index.search(&request).map_err(err)?;
+        let result = if json.get("query").is_some() {
+            let options: SearchOptions = serde_json::from_value(json).map_err(err)?;
+            index.search_options(&options).map_err(err)?
+        } else {
+            let request: SearchRequest = serde_json::from_value(json).map_err(err)?;
+            index.search(&request).map_err(err)?
+        };
         Ok(Box::into_raw(Box::new(result)))
     })
 }
@@ -580,6 +594,18 @@ mod tests {
             assert_eq!(CStr::from_ptr(terms).to_str().unwrap(), r#"["והתורה"]"#);
             se_string_free(terms);
             se_search_close(search);
+
+            // the public SearchOptions object: per-word override wins
+            for (json, hits) in [
+                (r#"{"query":"תורה","grammar_prefixes":true}"#, 1),
+                (r#"{"query":"תורה","grammar_prefixes":true,"words":{"0":{"grammar_prefixes":false}}}"#, 0),
+                (r#"{"query":"ספר","words":{"0":{"alternatives":["%תורה"]}}}"#, 1),
+            ] {
+                let search = se_search(index, json.as_ptr(), json.len());
+                assert!(!search.is_null(), "{:?}", CStr::from_ptr(se_last_error()));
+                assert_eq!(se_search_hit_count(search), hits, "{json}");
+                se_search_close(search);
+            }
             se_index_close(index);
         }
         let _ = std::fs::remove_dir_all(dir);

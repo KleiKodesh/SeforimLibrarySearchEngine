@@ -135,7 +135,7 @@ class OtzariaSearch {
 
   /// Otzaria acronym_alternatives: when any word has the option, the whole
   /// query's phrase alternatives (advanced mode only).
-  List<List<QueryGroup>> _phraseAlternatives(List<String> words) {
+  List<PhraseOptions> _phraseAlternatives(List<String> words) {
     if (mode != SearchMode.advanced) return const [];
     // Otzaria: no acronym alternatives in vocalized (nikud/te'amim) search
     if (globalOptions[OtzariaOption.nikud] == true || globalOptions[OtzariaOption.teamim] == true) return const [];
@@ -153,10 +153,7 @@ class OtzariaSearch {
     // alternative is a quote-free acronym (רמבן): Otzaria's index carries a
     // quote-free twin token, ours keeps רמב"ן, so the quote is made
     // transparent instead.
-    return [
-      for (final p in lex.alternativesFor(words))
-        [for (final w in p) p.length == 1 ? QueryGroup.word(w, const WalkOptions(ignoreQuotes: true)) : QueryGroup.word(w)]
-    ];
+    return [for (final p in lex.alternativesFor(words)) PhraseOptions(p.join(' '), ignoreQuotes: p.length == 1)];
   }
 
   /// Otzaria's negativeScope (its proximityScope).
@@ -164,6 +161,14 @@ class OtzariaSearch {
 
   /// Warnings about options the engine cannot honour.
   final List<String> warnings = [];
+
+  /// The options every word gets (`expandGlobalOptionsToWords`), filtered by mode.
+  Set<String> _globalSet() {
+    final s = {...globalOptions.entries.where((e) => e.value).map((e) => e.key)};
+    if (mode == SearchMode.exact) s.retainAll(OtzariaOption.exactAllowed);
+    if (mode == SearchMode.fuzzy) s.clear();
+    return s;
+  }
 
   Set<String> _optionsFor(int i) {
     final s = {
@@ -178,48 +183,76 @@ class OtzariaSearch {
     return s;
   }
 
-  QueryGroup _wordGroup(String w, Set<String> o) {
-    if (w.contains('*') || w.contains('?')) return QueryGroup.wildcard(w);
-    if (mode == SearchMode.fuzzy) return QueryGroup.fuzzy(w, fuzzyDistance);
+  /// A word as the engine's query syntax: the fuzzy mode is `word~N`
+  /// (wildcards stay wildcards).
+  String _queryWord(String w) {
+    if (w.contains('*') || w.contains('?')) return w;
+    if (mode == SearchMode.fuzzy) return '$w~$fuzzyDistance';
+    return w;
+  }
+
+  /// [o] (Otzaria option keys) as the engine's global word options.
+  SearchOptions _withOptions(SearchOptions s, Set<String> o) {
     // Otzaria's 3-letter root floor for grammatical affixes (acronyms exempt)
     // is the engine's walk rule; nothing to do here.
-    return QueryGroup.word(
-      w,
-      WalkOptions(
-        grammarPrefixes: o.contains(OtzariaOption.grammaticalPrefixes),
-        grammarSuffixes: o.contains(OtzariaOption.grammaticalSuffixes),
-        advancedPrefixes: o.contains(OtzariaOption.prefixes),
-        advancedSuffixes: o.contains(OtzariaOption.suffixes),
-        ktivMaleHaser: o.contains(OtzariaOption.fullOrDefective),
-        partOfWord: o.contains(OtzariaOption.partial),
-        spellingErrors: o.contains(OtzariaOption.typoTolerance),
-        aramaicPrefixes: o.contains(OtzariaOption.aramaicPrefixes),
-        aramaicSuffixes: o.contains(OtzariaOption.aramaicSuffixes),
-        ignoreQuotes: o.contains(OtzariaOption.ignoreGershayim),
-        // Otzaria's ניקוד/טעמים REQUIRE the typed marks; on a keep-marks index
-        // that is the default (no ignore flags). Without them, ignore marks.
-        ignoreNikud: marksIndex && !o.contains(OtzariaOption.nikud),
-        ignoreTeamim: marksIndex && !o.contains(OtzariaOption.teamim),
-        prefixMaxLetters: prefixMaxLetters,
-        suffixMaxLetters: suffixMaxLetters,
-        partOfWordMaxLetters: partOfWordMaxLetters,
-        grammarPrefixMaxLetters: grammarPrefixMaxLetters,
-      ),
+    s
+      ..grammarPrefixes = o.contains(OtzariaOption.grammaticalPrefixes)
+      ..grammarSuffixes = o.contains(OtzariaOption.grammaticalSuffixes)
+      ..advancedPrefixes = o.contains(OtzariaOption.prefixes)
+      ..advancedSuffixes = o.contains(OtzariaOption.suffixes)
+      ..ktivMaleHaser = o.contains(OtzariaOption.fullOrDefective)
+      ..partOfWord = o.contains(OtzariaOption.partial)
+      ..spellingErrors = o.contains(OtzariaOption.typoTolerance)
+      ..aramaicPrefixes = o.contains(OtzariaOption.aramaicPrefixes)
+      ..aramaicSuffixes = o.contains(OtzariaOption.aramaicSuffixes)
+      ..ignoreQuotes = o.contains(OtzariaOption.ignoreGershayim)
+      // Otzaria's ניקוד/טעמים REQUIRE the typed marks; on a keep-marks index
+      // that is the default (no ignore flags). Without them, ignore marks.
+      ..ignoreNikud = marksIndex && !o.contains(OtzariaOption.nikud)
+      ..ignoreTeamim = marksIndex && !o.contains(OtzariaOption.teamim)
+      ..prefixMaxLetters = prefixMaxLetters
+      ..suffixMaxLetters = suffixMaxLetters
+      ..partOfWordMaxLetters = partOfWordMaxLetters
+      ..grammarPrefixMaxLetters = grammarPrefixMaxLetters;
+    return s;
+  }
+
+  /// Word [i]'s overrides of the global options ([own] vs [global]) and its
+  /// alternatives; null when it has neither.
+  WordOptions? _wordOverride(Set<String> own, Set<String> global, List<String> alternatives) {
+    bool? d(String k) => own.contains(k) == global.contains(k) ? null : own.contains(k);
+    bool? marks(String k) => marksIndex && d(k) != null ? !own.contains(k) : null;
+    final w = WordOptions(
+      grammarPrefixes: d(OtzariaOption.grammaticalPrefixes),
+      grammarSuffixes: d(OtzariaOption.grammaticalSuffixes),
+      advancedPrefixes: d(OtzariaOption.prefixes),
+      advancedSuffixes: d(OtzariaOption.suffixes),
+      ktivMaleHaser: d(OtzariaOption.fullOrDefective),
+      partOfWord: d(OtzariaOption.partial),
+      spellingErrors: d(OtzariaOption.typoTolerance),
+      aramaicPrefixes: d(OtzariaOption.aramaicPrefixes),
+      aramaicSuffixes: d(OtzariaOption.aramaicSuffixes),
+      ignoreQuotes: d(OtzariaOption.ignoreGershayim),
+      ignoreNikud: marks(OtzariaOption.nikud),
+      ignoreTeamim: marks(OtzariaOption.teamim),
+      alternatives: [for (final a in alternatives) _queryWord(a)],
     );
+    return w.toJson().isEmpty ? null : w;
   }
 
   /// Otzaria's apply_advanced_negative_query: the negative words as a query
   /// of their own, always "all words", with the positive distance and order.
-  ExcludeSpec? _exclude() {
-    if (negativeScope == NegativeScope.sameSection) return null; // host-side, see sectionNegativeWords
-    final groups = _negativeGroups();
-    if (groups.isEmpty) return null;
+  /// The engine gives them the global word options.
+  ExcludeOptions? _exclude() {
+    if (negativeScope == NegativeScope.sameSection) return null; // host-side, see sectionNegativeSearches
+    final words = _negativeWords();
+    if (words.isEmpty) return null;
     // proximityScope: wordDistance → distance/order; sameParagraph → the
     // whole line, no limits.
-    final limits = negativeScope == NegativeScope.wordDistance && groups.length > 1;
+    final limits = negativeScope == NegativeScope.wordDistance && words.length > 1;
     // the demo has no separate negative spacing (Otzaria's
     // negativeCustomSpacing): the positive distance and order
-    return ExcludeSpec(groups: groups, proximity: limits ? _proximity(groups.length, null) : null);
+    return ExcludeOptions(words.join(' '), proximity: limits ? _proximity(words.length, null) : null);
   }
 
   /// Otzaria's `resolve_gaps` + `resolve_proximity` (hebrew_query.rs) for
@@ -237,29 +270,31 @@ class OtzariaSearch {
     return Proximity.ordered([for (var i = 0; i < wordCount - 1; i++) spacing[i] ?? maxCustom]);
   }
 
-  /// The negative words as engine groups (advanced mode only).
-  List<QueryGroup> _negativeGroups() {
-    if (mode != SearchMode.advanced) return const [];
-    final words = splitQueryWords(negativeQuery);
-    // the global options only (Otzaria keeps separate negative options; the
-    // CLI has none), without re-reporting the unsupported-option warnings
-    final o = {...globalOptions.entries.where((e) => e.value).map((e) => e.key)}
-      ..removeAll(OtzariaOption.unsupported);
-    return [for (final w in words) _wordGroup(w, o)];
-  }
+  /// The negative words (advanced mode only).
+  List<String> _negativeWords() =>
+      mode == SearchMode.advanced ? [for (final w in splitQueryWords(negativeQuery)) _queryWord(w)] : const [];
 
   /// Negative scope sameSection (Otzaria's scoped_words_query) is the HOST's
-  /// job, since the index holds no sections: run each of these words as its
-  /// own search (line ids), map them to sections with SQLite (`line_toc`),
-  /// intersect the per-word section sets ([blockedSections]) and drop the
-  /// positive hits in them. Empty unless the scope is sameSection.
-  List<QueryGroup> sectionNegativeWords() =>
-      negativeScope == NegativeScope.sameSection ? _negativeGroups() : const [];
+  /// job, since the index holds no sections: run each of these searches (one
+  /// per negative word, global options) for its line ids, map them to
+  /// sections with SQLite (`line_toc`), intersect the per-word section sets
+  /// ([blockedSections]) and drop the positive hits in them. Empty unless the
+  /// scope is sameSection.
+  List<SearchOptions> sectionNegativeSearches({List<int>? books}) => negativeScope == NegativeScope.sameSection
+      ? [for (final w in _negativeWords()) _withOptions(SearchOptions(w, books: books), _globalSet())]
+      : const [];
 
-  /// The engine request.
-  SearchRequest toRequest({int contextWords = 8}) {
-    final words = splitQueryWords(query);
-    final groups = <QueryGroup>[];
+  /// The engine search: the query string with the global options, and per
+  /// word only what differs (Otzaria's wordOptions) plus its alternatives.
+  SearchOptions toOptions({int contextWords = 8}) {
+    // `|` and `%` are FtsLib syntax in the engine's query string: an Otzaria
+    // word is literal, so they are dropped from it.
+    final words = [
+      for (final w in splitQueryWords(query))
+        if (w.replaceAll(RegExp('[|%]'), '').isNotEmpty) w.replaceAll(RegExp('[|%]'), '')
+    ];
+    final global = _globalSet();
+    final perWord = <int, WordOptions>{};
     for (var i = 0; i < words.length; i++) {
       final o = _optionsFor(i);
       final alts = <String>[
@@ -271,25 +306,34 @@ class OtzariaSearch {
       if (mode == SearchMode.advanced && o.contains(OtzariaOption.aramaicTranslation) && translations == null) {
         warnings.add('option "${OtzariaOption.aramaicTranslation}" needs --dictionary (Otzaria assets/dictionary.json)');
       }
-      final main = _wordGroup(words[i], o);
-      groups.add(alts.isEmpty ? main : QueryGroup.any([main, for (final a in alts) _wordGroup(a, o)]));
+      final w = _wordOverride(o, global, alts);
+      if (w != null) perWord[i] = w;
     }
-    final exclude = _exclude();
-    final phrases = _phraseAlternatives(words);
+    final s = _withOptions(
+      SearchOptions(
+        [for (final w in words) _queryWord(w)].join(' '),
+        words: perWord,
+        contextWords: contextWords,
+        exclude: _exclude(),
+        phraseAlternatives: _phraseAlternatives(words),
+      ),
+      global,
+    );
     // Partial matching: at least minWords of the words; order, distance and
     // spacing do not apply (Otzaria: the match is at line resolution).
-    final min = mode == SearchMode.advanced ? minWords(groups.length) : groups.length;
-    if (min < groups.length) {
-      return SearchRequest(
-          groups: groups, minGroups: min, contextWords: contextWords, exclude: exclude, phraseAlternatives: phrases);
+    // the engine drops words of under 2 or 30+ letters (no such terms in the
+    // index): count the slots it keeps
+    final n = words.where((w) {
+      final l = RegExp('[a-zA-Zא-ת]').allMatches(w).length;
+      return l >= 2 && l < 30;
+    }).length;
+    final min = mode == SearchMode.advanced ? minWords(n) : n;
+    if (min < n) {
+      s.minGroups = min;
+    } else if (n > 1 && n == words.length) {
+      s.proximity = _proximity(n, customSpacing);
     }
-    return SearchRequest(
-      groups: groups,
-      proximity: groups.length > 1 ? _proximity(groups.length, customSpacing) : null,
-      contextWords: contextWords,
-      exclude: exclude,
-      phraseAlternatives: phrases,
-    );
+    return s;
   }
 }
 

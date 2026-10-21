@@ -480,6 +480,246 @@ namespace SeforimSearch.Engine
         }
     }
 
+    /// <summary>
+    /// THE search API: the query string (FtsLib syntax: words AND-ed, <c>a | b</c> one
+    /// slot, <c>*</c> <c>?</c> wildcard, <c>word~N</c> fuzzy, <c>%word</c> / <c>word%</c>
+    /// FtsLib's grammar tables) and the word options, which apply to every word unless
+    /// <see cref="Words"/> overrides them for one word (Otzaria's wordOptions /
+    /// alternativeWords). The engine builds one walk per word with all its options.
+    /// <see cref="SearchRequest"/> is the low-level form it lowers to.
+    /// </summary>
+    public sealed class SearchOptions
+    {
+        public SearchOptions() { }
+        public SearchOptions(string query) { Query = query; }
+
+        public string Query { get; set; } = "";
+
+        // word options (every word)
+        /// <summary>grammar prefixes (קידומות דקדוקיות).</summary>
+        public bool GrammarPrefixes { get; set; }
+        /// <summary>סיומות דקדוקיות.</summary>
+        public bool GrammarSuffixes { get; set; }
+        /// <summary>קידומות ארמיות.</summary>
+        public bool AramaicPrefixes { get; set; }
+        /// <summary>סיומות ארמיות.</summary>
+        public bool AramaicSuffixes { get; set; }
+        /// <summary>כתיב מלא/חסר.</summary>
+        public bool KtivMaleHaser { get; set; }
+        /// <summary>חלק ממילה.</summary>
+        public bool PartOfWord { get; set; }
+        /// <summary>קידומות (any letters before).</summary>
+        public bool AdvancedPrefixes { get; set; }
+        /// <summary>סיומות (any letters after).</summary>
+        public bool AdvancedSuffixes { get; set; }
+        /// <summary>התעלם מגרשיים (also for wildcard / fuzzy / % words).</summary>
+        public bool IgnoreQuotes { get; set; }
+        /// <summary>Index terms must match as written (off: also by their quote-free form).</summary>
+        public bool ExactQuotes { get; set; }
+        /// <summary>שגיאות כתיב, expanded per <see cref="TypoMode"/>.</summary>
+        public bool SpellingErrors { get; set; }
+        /// <summary>Ignore nikud (on a KeepMarks index).</summary>
+        public bool IgnoreNikud { get; set; }
+        /// <summary>Ignore te'amim (on a KeepMarks index).</summary>
+        public bool IgnoreTeamim { get; set; }
+        public TypoMode TypoMode { get; set; }
+        /// <summary>Limits (Otzaria). Null = the walk's defaults.</summary>
+        public int? PrefixMaxLetters { get; set; }
+        public int? SuffixMaxLetters { get; set; }
+        public int? PartOfWordMaxLetters { get; set; }
+        public int? GrammarPrefixMaxLetters { get; set; }
+
+        /// <summary>Per-word overrides by word index (the n-th word of <see cref="Query"/>,
+        /// from 0; <c>|</c> is not a word).</summary>
+        public Dictionary<int, WordOptions> Words { get; } = new Dictionary<int, WordOptions>();
+
+        // query level
+        /// <summary>FtsLib's word distance. Null = no limit.</summary>
+        public int? MaxWordDistance { get; set; }
+        /// <summary>FtsLib: the words in query order.</summary>
+        public bool RequireOrdered { get; set; }
+        /// <summary>Partial matching (Otzaria's wordMatchMode): slots a line needs. Null = all.</summary>
+        public int? MinGroups { get; set; }
+        /// <summary>Words of context per side of the snippet.</summary>
+        public int ContextWords { get; set; } = 8;
+        /// <summary>Otzaria's proximity; when set, MaxWordDistance / RequireOrdered are not used.</summary>
+        public Proximity? Proximity { get; set; }
+        /// <summary>Otzaria's negative query (its words use the global word options).</summary>
+        public ExcludeOptions? Exclude { get; set; }
+        /// <summary>Filtered search: only these book ids. Null = every book.</summary>
+        public List<long>? Books { get; set; }
+        /// <summary>Whole phrases ORed with the query (Otzaria's acronym expansion).</summary>
+        public List<PhraseOptions> PhraseAlternatives { get; } = new List<PhraseOptions>();
+
+        internal string ToJson()
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var sb = new StringBuilder("{\"query\":");
+            Json.WriteString(sb, Query ?? "");
+            WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes, KtivMaleHaser,
+                PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes, SpellingErrors,
+                IgnoreNikud, IgnoreTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters, PartOfWordMaxLetters,
+                GrammarPrefixMaxLetters);
+            if (Words.Count > 0)
+            {
+                sb.Append(",\"words\":{");
+                bool first = true;
+                foreach (var kv in Words)
+                {
+                    if (!first) sb.Append(',');
+                    first = false;
+                    sb.Append('"').Append(kv.Key.ToString(inv)).Append("\":");
+                    kv.Value.WriteJson(sb);
+                }
+                sb.Append('}');
+            }
+            if (MaxWordDistance.HasValue) sb.Append(",\"max_word_distance\":").Append(MaxWordDistance.Value.ToString(inv));
+            if (RequireOrdered) sb.Append(",\"require_ordered\":true");
+            if (MinGroups.HasValue) sb.Append(",\"min_groups\":").Append(MinGroups.Value.ToString(inv));
+            sb.Append(",\"context_words\":").Append(ContextWords.ToString(inv));
+            if (Proximity != null) { sb.Append(",\"proximity\":"); Proximity.WriteJson(sb); }
+            if (Exclude != null) { sb.Append(",\"exclude\":"); Exclude.WriteJson(sb); }
+            if (Books != null)
+            {
+                sb.Append(",\"books\":[");
+                for (int i = 0; i < Books.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append(Books[i].ToString(inv));
+                }
+                sb.Append(']');
+            }
+            if (PhraseAlternatives.Count > 0)
+            {
+                sb.Append(",\"phrase_alternatives\":[");
+                for (int i = 0; i < PhraseAlternatives.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    PhraseAlternatives[i].WriteJson(sb);
+                }
+                sb.Append(']');
+            }
+            sb.Append('}');
+            return sb.ToString();
+        }
+
+        /// <summary>Writes the word-option fields (",name":value), skipping nulls.</summary>
+        internal static void WordFields(StringBuilder sb, bool? grammarPrefixes, bool? grammarSuffixes,
+            bool? aramaicPrefixes, bool? aramaicSuffixes, bool? ktivMaleHaser, bool? partOfWord,
+            bool? advancedPrefixes, bool? advancedSuffixes, bool? ignoreQuotes, bool? exactQuotes,
+            bool? spellingErrors, bool? ignoreNikud, bool? ignoreTeamim, TypoMode? typoMode,
+            int? prefixMaxLetters, int? suffixMaxLetters, int? partOfWordMaxLetters, int? grammarPrefixMaxLetters)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            void Flag(string name, bool? v)
+            {
+                if (v.HasValue) sb.Append(",\"").Append(name).Append("\":").Append(v.Value ? "true" : "false");
+            }
+            void Limit(string name, int? v)
+            {
+                if (v.HasValue) sb.Append(",\"").Append(name).Append("\":").Append(Math.Max(0, v.Value).ToString(inv));
+            }
+            Flag("grammar_prefixes", grammarPrefixes);
+            Flag("grammar_suffixes", grammarSuffixes);
+            Flag("aramaic_prefixes", aramaicPrefixes);
+            Flag("aramaic_suffixes", aramaicSuffixes);
+            Flag("ktiv_male_haser", ktivMaleHaser);
+            Flag("part_of_word", partOfWord);
+            Flag("advanced_prefixes", advancedPrefixes);
+            Flag("advanced_suffixes", advancedSuffixes);
+            Flag("ignore_quotes", ignoreQuotes);
+            Flag("exact_quotes", exactQuotes);
+            Flag("spelling_errors", spellingErrors);
+            Flag("ignore_nikud", ignoreNikud);
+            Flag("ignore_teamim", ignoreTeamim);
+            if (typoMode.HasValue)
+                sb.Append(",\"typo_mode\":").Append(typoMode.Value == TypoMode.FullEdit1 ? "\"full_edit1\"" : "\"otzaria\"");
+            Limit("prefix_max_letters", prefixMaxLetters);
+            Limit("suffix_max_letters", suffixMaxLetters);
+            Limit("part_of_word_max_letters", partOfWordMaxLetters);
+            Limit("grammar_prefix_max_letters", grammarPrefixMaxLetters);
+        }
+    }
+
+    /// <summary>One word's overrides: the same fields as <see cref="SearchOptions"/>'
+    /// word options, null = inherit, plus extra words for the word's slot.</summary>
+    public sealed class WordOptions
+    {
+        public bool? GrammarPrefixes { get; set; }
+        public bool? GrammarSuffixes { get; set; }
+        public bool? AramaicPrefixes { get; set; }
+        public bool? AramaicSuffixes { get; set; }
+        public bool? KtivMaleHaser { get; set; }
+        public bool? PartOfWord { get; set; }
+        public bool? AdvancedPrefixes { get; set; }
+        public bool? AdvancedSuffixes { get; set; }
+        public bool? IgnoreQuotes { get; set; }
+        public bool? ExactQuotes { get; set; }
+        public bool? SpellingErrors { get; set; }
+        public bool? IgnoreNikud { get; set; }
+        public bool? IgnoreTeamim { get; set; }
+        public TypoMode? TypoMode { get; set; }
+        public int? PrefixMaxLetters { get; set; }
+        public int? SuffixMaxLetters { get; set; }
+        public int? PartOfWordMaxLetters { get; set; }
+        public int? GrammarPrefixMaxLetters { get; set; }
+        /// <summary>Extra words for this word's slot (Otzaria's alternativeWords), in
+        /// query syntax, searched with this word's options.</summary>
+        public List<string> Alternatives { get; } = new List<string>();
+
+        internal void WriteJson(StringBuilder sb)
+        {
+            sb.Append("{\"alternatives\":[");
+            for (int i = 0; i < Alternatives.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                Json.WriteString(sb, Alternatives[i]);
+            }
+            sb.Append(']');
+            SearchOptions.WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes,
+                KtivMaleHaser, PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes,
+                SpellingErrors, IgnoreNikud, IgnoreTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters,
+                PartOfWordMaxLetters, GrammarPrefixMaxLetters);
+            sb.Append('}');
+        }
+    }
+
+    /// <summary>The negative query of <see cref="SearchOptions"/>: its words (all
+    /// required, together) use the global word options.</summary>
+    public sealed class ExcludeOptions
+    {
+        public string Query { get; set; } = "";
+        public int? MaxWordDistance { get; set; }
+        public bool RequireOrdered { get; set; }
+        public Proximity? Proximity { get; set; }
+
+        internal void WriteJson(StringBuilder sb)
+        {
+            sb.Append("{\"query\":");
+            Json.WriteString(sb, Query ?? "");
+            if (MaxWordDistance.HasValue)
+                sb.Append(",\"max_word_distance\":").Append(MaxWordDistance.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (RequireOrdered) sb.Append(",\"require_ordered\":true");
+            if (Proximity != null) { sb.Append(",\"proximity\":"); Proximity.WriteJson(sb); }
+            sb.Append('}');
+        }
+    }
+
+    /// <summary>A whole-phrase alternative: words adjacent, in order, all required,
+    /// matched as written (plus the quote option).</summary>
+    public sealed class PhraseOptions
+    {
+        public string Query { get; set; } = "";
+        public bool IgnoreQuotes { get; set; }
+
+        internal void WriteJson(StringBuilder sb)
+        {
+            sb.Append("{\"query\":");
+            Json.WriteString(sb, Query ?? "");
+            sb.Append(",\"ignore_quotes\":").Append(IgnoreQuotes ? "true" : "false").Append('}');
+        }
+    }
+
     /// <summary>A matching line, in catalog order: only the ids the index keeps. Any
     /// other placement (line index, section) comes from SQLite by line id.</summary>
     public readonly struct PlacedHit

@@ -133,14 +133,34 @@ namespace FtsLib.Fts5
         {
             if (!SeforimIndex.Exists(_indexPath)) yield break;
             options ??= new TantivySearchOptions();
-            var request = new SearchRequest
+            if (string.IsNullOrWhiteSpace(query)) yield break;
+            // The engine parses the query (FtsLib's QueryParser rules) and builds
+            // one walk per word with these options.
+            var w = options.WordOptions ?? new WalkOptions();
+            var request = new SearchOptions(query)
             {
+                GrammarPrefixes = w.GrammarPrefixes,
+                GrammarSuffixes = w.GrammarSuffixes,
+                AramaicPrefixes = w.AramaicPrefixes,
+                AramaicSuffixes = w.AramaicSuffixes,
+                KtivMaleHaser = w.KtivMaleHaser,
+                PartOfWord = w.PartOfWord,
+                AdvancedPrefixes = w.AdvancedPrefixes,
+                AdvancedSuffixes = w.AdvancedSuffixes,
+                IgnoreQuotes = w.IgnoreQuotes,
+                ExactQuotes = w.ExactQuotes,
+                SpellingErrors = w.SpellingErrors,
+                TypoMode = w.TypoMode,
+                IgnoreNikud = w.IgnoreNikud,
+                IgnoreTeamim = w.IgnoreTeamim,
+                PrefixMaxLetters = w.PrefixMaxLetters,
+                SuffixMaxLetters = w.SuffixMaxLetters,
+                PartOfWordMaxLetters = w.PartOfWordMaxLetters,
+                GrammarPrefixMaxLetters = w.GrammarPrefixMaxLetters,
                 MaxWordDistance = options.MaxWordDistance,
                 RequireOrdered = options.RequireOrdered,
                 ContextWords = options.ContextWords,
             };
-            request.Groups.AddRange(Search_.QueryParser.Parse(query, options.WordOptions));
-            if (request.Groups.Count == 0) yield break;
 
             onStage?.Invoke("search");
             // NOT disposed with the enumeration: results outlive it (Core snippets the
@@ -481,15 +501,5 @@ namespace FtsLib.Fts5
     public sealed class IndexNoLongerMatchesCorpusException : Exception
     {
         public IndexNoLongerMatchesCorpusException(string message) : base(message) { }
-    }
-}
-
-namespace FtsLib.Search_
-{
-    // alias so TantivySeforimIndex can reach the parser without a using cycle
-    internal static class QueryParser
-    {
-        public static List<SeforimSearch.Engine.QueryGroup> Parse(string q, SeforimSearch.Engine.WalkOptions o)
-            => FtsLib.Search.QueryParser.Parse(q, o);
     }
 }

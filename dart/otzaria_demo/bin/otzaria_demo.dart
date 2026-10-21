@@ -33,6 +33,7 @@ search options (Otzaria names):
   --group-scan N      identical: hits read for signatures (default 20000)
   --limit N (100) --offset N (0)  --context N (8)
   --count             exact totals: all lines passing every filter, and per book
+  --order catalog|relevance  results order (Otzaria's sortBy; default catalog)
   word alternatives: write a,b in the query (Otzaria sets them per word in the UI)
   library paths: --native path (seforim_search_native), --zstd path (libzstd)
 ''';
@@ -42,7 +43,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
   const valued = {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
     'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd', 'spacing', 'match',
-    'match-count', 'exclude', 'exclude-scope', 'dictionary', 'acronyms', 'group', 'group-scan',
+    'match-count', 'exclude', 'exclude-scope', 'dictionary', 'acronyms', 'group', 'group-scan', 'order',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -218,6 +219,13 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   final bookFilter = o['book'] == null ? null : db.booksMatching(o['book']!);
   // filtered search by book: done by the engine (book_id is in the index)
   if (bookFilter != null) request.books = bookFilter.toList();
+  // Otzaria's sortBy. Its generation order needs the app's per-book
+  // generationOrder (chronologicalOrderForBook), which this demo does not port.
+  request.order = switch (o['order'] ?? 'catalog') {
+    'relevance' => ResultsOrder.relevance,
+    'catalog' || 'catalogue' => ResultsOrder.catalog,
+    final other => throw ArgumentError('--order: catalog or relevance, not "$other"'),
+  };
   req.warnings.toSet().forEach((w) => stderr.writeln('warning: $w'));
 
   final limit = _int(o, 'limit') ?? 100, offset = _int(o, 'offset') ?? 0;
@@ -275,7 +283,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     return;
   }
 
-  // Page through hits in catalog order, locate snippets per batch, keep the
+  // Page through hits in hit order (--order), locate snippets per batch, keep the
   // ones that pass the filters, until offset+limit results exist.
   final results = <(PlacedHit, String, Snippet)>[];
   var passed = 0;
@@ -317,7 +325,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
 
 /// Exact totals (Otzaria's count / countByBook) from the engine: when no
 /// text-level check applies the hit list is the answer, otherwise the texts
-/// are fed in catalog order and the engine validates them. Before any
+/// are fed in hit order and the engine validates them. Before any
 /// host-side section exclusion.
 void _printCounts(SeforimDb db, SearchSession session, Map<int, String> titles) {
   final sw = Stopwatch()..start();
@@ -340,7 +348,7 @@ void _printCounts(SeforimDb db, SearchSession session, Map<int, String> titles) 
 
 /// Otzaria's grouped results (see lib/grouping.dart). Groups are formed over
 /// the raw hits, as Otzaria's GroupCollector does. A card's representative is
-/// its first member, in catalog order, whose snippet passes the filters; a
+/// its first member, in hit order, whose snippet passes the filters; a
 /// group with none is not shown. Counts are raw members (Otzaria's "found X
 /// results in range"); for identical text only the first --group-scan hits are
 /// read, so counts may be a lower bound (shown with +), as Otzaria's truncated.

@@ -124,7 +124,7 @@ final class SeforimIndex implements Finalizable {
 
   /// Runs a search (the public API): the query string is parsed by FtsLib's
   /// rules and each word becomes one walk with its options. Every matching
-  /// line in catalog order, plus the snippet session.
+  /// line in the search's order (catalog by default), plus the snippet session.
   ///
   /// With [cancel], [SearchCancelToken.cancel] stops the search (checked
   /// before the walks, per segment and every 4096 collected docs) and every

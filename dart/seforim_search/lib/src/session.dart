@@ -7,7 +7,7 @@ import 'index.dart';
 import 'models.dart';
 import 'native.dart';
 
-/// One search: every matching line (catalog order) and the snippet state
+/// One search: every matching line (catalog order unless [SearchOptions.order]) and the snippet state
 /// (prepared groups, distance/order filters, term table). Not thread-safe.
 final class SearchSession implements Finalizable {
   SearchSession.internal(this._index, this._handle, this.contextWords, [this._cancel]) {
@@ -35,7 +35,7 @@ final class SearchSession implements Finalizable {
     return _handle;
   }
 
-  /// Hits [offset, offset+count), catalog order.
+  /// Hits [offset, offset+count), in the search's order ([SearchOptions.order]; catalog by default).
   List<PlacedHit> hits(int offset, int count) {
     if (count <= 0 || offset >= hitCount) return const [];
     if (count > hitCount - offset) count = hitCount - offset;
@@ -51,7 +51,7 @@ final class SearchSession implements Finalizable {
     }
   }
 
-  /// Every hit, catalog order, paged.
+  /// Every hit, in the search's order, paged.
   Iterable<PlacedHit> allHits({int pageSize = 4096}) sync* {
     for (var o = 0; o < hitCount; o += pageSize) {
       yield* hits(o, pageSize);
@@ -99,7 +99,7 @@ final class SearchSession implements Finalizable {
     return r != 0;
   }
 
-  /// Counts the next `texts.length` hits (catalog order, continuing from the
+  /// Counts the next `texts.length` hits (hit order, continuing from the
   /// previous call) from their texts, across all cores: the lines that pass
   /// every filter are added to the exact totals. Returns how many passed.
   int countBatch(List<String> texts) {

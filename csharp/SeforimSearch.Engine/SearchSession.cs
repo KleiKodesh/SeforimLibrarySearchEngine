@@ -38,7 +38,7 @@ namespace SeforimSearch.Engine
         /// <summary>Number of matching lines (before the snippet filters).</summary>
         public long HitCount { get; }
 
-        /// <summary>Hits [<paramref name="offset"/>, offset+count), catalog order.</summary>
+        /// <summary>Hits [<paramref name="offset"/>, offset+count), in the search's order (SearchOptions.Order; catalog by default).</summary>
         public PlacedHit[] GetHits(long offset, int count)
         {
             if (count <= 0 || offset >= HitCount) return Array.Empty<PlacedHit>();
@@ -56,7 +56,7 @@ namespace SeforimSearch.Engine
             return hits;
         }
 
-        /// <summary>Every hit, catalog order.</summary>
+        /// <summary>Every hit, in the search's order.</summary>
         public IEnumerable<PlacedHit> AllHits(int pageSize = 4096)
         {
             for (long offset = 0; offset < HitCount; offset += pageSize)
@@ -132,7 +132,7 @@ namespace SeforimSearch.Engine
         }
 
         /// <summary>
-        /// Counts the next <c>texts.Count</c> hits (catalog order, continuing
+        /// Counts the next <c>texts.Count</c> hits (hit order, continuing
         /// from the previous call) from their texts, across all cores: the
         /// lines that pass every filter are added to the exact totals. Returns
         /// how many passed.

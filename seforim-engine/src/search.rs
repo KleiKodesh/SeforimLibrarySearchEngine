@@ -1,5 +1,5 @@
 //! Search: one tantivy BooleanQuery of per-group walks, every matching line
-//! with its placement in catalog order, and a [`SnippetSession`] holding the
+//! with its placement in catalog order (or the requested order), and a [`SnippetSession`] holding the
 //! groups' matched words (from the sinks) for FtsLib snippet location over
 //! the texts the host fetches.
 
@@ -21,6 +21,7 @@ use crate::fm_expand;
 use crate::fm_index::FmIndex;
 use crate::index::LineIndex;
 use crate::options::SearchOptions;
+use crate::relevance::{self, ResultsOrder};
 use crate::{Error, Result};
 
 /// Cancels a running search from another thread (Otzaria's
@@ -305,6 +306,12 @@ pub struct SearchRequest {
     /// applies to the main query, the phrase alternatives and the negative
     /// query alike.
     pub books: Option<Vec<u64>>,
+    /// The order of the hits: catalog (default, costs nothing), Otzaria's
+    /// relevance, or Otzaria's generation order (see `relevance`).
+    pub order: ResultsOrder,
+    /// For the generation order: `(book_id, generation_order)` per book,
+    /// from the host (Otzaria's `generationOrder`); books absent come last.
+    pub book_generations: Vec<(u64, u32)>,
 }
 
 impl Default for SearchRequest {
@@ -320,6 +327,8 @@ impl Default for SearchRequest {
             exclude: None,
             phrase_alternatives: Vec::new(),
             books: None,
+            order: ResultsOrder::Catalog,
+            book_generations: Vec::new(),
         }
     }
 }
@@ -359,7 +368,7 @@ pub struct ExcludeSpec {
     pub proximity: Option<ProximitySpec>,
 }
 
-/// One matching line, in catalog order: only the ids the index keeps. The
+/// One matching line (hits come in the requested order, catalog by default): only the ids the index keeps. The
 /// host fetches its text (and any placement: line index, section) from
 /// SQLite by `line_id` and locates the snippet through the session.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -723,13 +732,15 @@ impl SnippetSession {
     }
 }
 
-/// What a search returns: every matching line in catalog order, and the
-/// session to locate their snippets.
+/// What a search returns: every matching line in the requested order
+/// (catalog order by default), and the session to locate their snippets.
 pub struct SearchResult {
     pub hits: Vec<PlacedHit>,
     pub session: SnippetSession,
     /// Text validation progress for the exact count (see `count_batch`).
     tally: CountTally,
+    /// Relevance order only: each hit's score, aligned with `hits`.
+    scores: Option<Vec<Score>>,
 }
 
 /// Exact totals of a search: the lines that pass every filter (including
@@ -741,7 +752,7 @@ pub struct HitCounts {
     pub total: u64,
     /// `(book_id, lines)`, ascending book id; books with no line absent.
     pub books: Vec<(u64, u64)>,
-    /// Hits counted so far (from the first, in catalog order).
+    /// Hits counted so far (from the first, in hit order).
     pub validated: u64,
     /// True when every hit is counted: `total` and `books` are final.
     pub exact: bool,
@@ -756,17 +767,23 @@ struct CountTally {
 
 impl SearchResult {
     fn new(hits: Vec<PlacedHit>, session: SnippetSession) -> SearchResult {
-        SearchResult { hits, session, tally: CountTally::default() }
+        SearchResult { hits, session, tally: CountTally::default(), scores: None }
+    }
+
+    /// The relevance score of each hit (aligned with `hits`), when the
+    /// search was ordered by relevance.
+    pub fn scores(&self) -> Option<&[Score]> {
+        self.scores.as_deref()
     }
 
     /// True when the exact count needs the hits' texts: feed them in
-    /// catalog order with [`count_batch`](Self::count_batch). False: every
+    /// hit order with [`count_batch`](Self::count_batch). False: every
     /// hit passes and [`counts`](Self::counts) is exact at once.
     pub fn count_needs_text(&self) -> bool {
         self.session.count_needs_text && !self.hits.is_empty()
     }
 
-    /// Validates the texts of the next `texts.len()` hits (catalog order,
+    /// Validates the texts of the next `texts.len()` hits (hit order,
     /// continuing from the previous batch) across all cores and adds the
     /// passing ones to the counts. Returns how many passed. The test is
     /// exactly [`SnippetSession::locate`]'s. When no text is needed the
@@ -830,12 +847,16 @@ impl SearchResult {
 struct PlacedCollector {
     /// Book filter (see `SearchRequest::books`).
     books: Option<Arc<std::collections::HashSet<u64>>>,
+    /// Keep each hit's doc id (relevance order scores them after the search).
+    keep_docs: bool,
 }
 
 struct PlacedSegmentCollector {
     columns: [Column<u64>; 3],
     books: Option<Arc<std::collections::HashSet<u64>>>,
     out: Vec<PlacedHit>,
+    /// Relevance order only: each kept hit's doc id (aligned with `out`).
+    docs: Option<Vec<DocId>>,
 }
 
 impl Collector for PlacedCollector {
@@ -856,6 +877,7 @@ impl Collector for PlacedCollector {
             ],
             books: self.books.clone(),
             out: Vec::new(),
+            docs: self.keep_docs.then(Vec::new),
         })
     }
 
@@ -882,10 +904,20 @@ impl SegmentCollector for PlacedSegmentCollector {
             line_id: get(&self.columns[1]),
             book_id,
         });
+        if let Some(docs) = &mut self.docs {
+            docs.push(doc);
+        }
     }
 
     fn harvest(self) -> Vec<PlacedHit> {
         self.out
+    }
+}
+
+impl PlacedSegmentCollector {
+    /// The doc ids kept (relevance order), aligned with the hits.
+    fn take_docs(&mut self) -> Vec<DocId> {
+        self.docs.take().unwrap_or_default()
     }
 }
 
@@ -1203,7 +1235,8 @@ impl LineIndex {
         self.search(&options.to_request(self.options.keep_marks)?)
     }
 
-    /// Runs `request`. Every matching line comes back in catalog order;
+    /// Runs `request`. Every matching line comes back in `request.order`
+    /// (catalog order by default);
     /// the host fetches texts (in its own batches) and locates snippets
     /// through the returned session, which applies the word-distance and
     /// order filters.
@@ -1278,6 +1311,10 @@ impl LineIndex {
         let fm = self.fm_sidecar_for(&searcher);
         let fm = fm.as_deref();
         let mut sinks = Vec::new();
+        let relevance = request.order == ResultsOrder::Relevance;
+        // The request groups the main sinks belong to, when not all of them
+        // (the plain AND skips the slots that cannot search).
+        let mut main_slot_ids: Option<Vec<usize>> = None;
 
         let main_query: Option<Box<dyn Query>> = if let Some(prox) = &proximity {
             if self.options.positions && request.groups.len() > 1 {
@@ -1316,13 +1353,16 @@ impl LineIndex {
             // One query + one sink per searchable slot. Rejected wildcards skip
             // their slot (it still counts in original_group_count).
             let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-            for group in &request.groups {
+            let mut searched = Vec::new();
+            for (gi, group) in request.groups.iter().enumerate() {
                 let sink = MatchedTermsSink::new();
                 if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
                     clauses.push((Occur::Must, q));
                     sinks.push(sink);
+                    searched.push(gi);
                 }
             }
+            main_slot_ids = Some(searched);
             if clauses.is_empty() {
                 None
             } else {
@@ -1341,6 +1381,7 @@ impl LineIndex {
         // Phrase alternatives (Otzaria's acronym expansions): each an
         // adjacent, ordered, all-words phrase, ORed with the main query.
         let mut alternatives: Vec<(Vec<MatchedTermsSink>, Box<dyn Query>)> = Vec::new();
+        let mut alternative_groups: Vec<&[GroupSpec]> = Vec::new();
         for phrase in &request.phrase_alternatives {
             if phrase.is_empty() {
                 continue;
@@ -1366,8 +1407,34 @@ impl LineIndex {
             };
             if let Some(q) = q {
                 alternatives.push((alt_sinks, q));
+                alternative_groups.push(phrase.as_slice());
             }
         }
+        // Relevance order: the main query's slots, the shape of its score,
+        // and a copy of it to tell its hits from the phrases' (the score adds
+        // the main query's part only to its own hits).
+        let main_slots: Vec<&GroupSpec> = match &main_slot_ids {
+            Some(ids) => ids.iter().map(|&i| &request.groups[i]).collect(),
+            None => request.groups.iter().collect(),
+        };
+        let shape = relevance::Shape::of(
+            main_slots.len(),
+            partial,
+            proximity.as_ref(),
+            request.gaps.as_deref(),
+            request.require_ordered,
+        );
+        let main_membership: Option<Box<dyn Query>> = if relevance {
+            relevance::check_positions(
+                self.options.positions,
+                !keep_marks,
+                main_query.is_some().then_some((shape, main_slots.as_slice())),
+                &alternative_groups,
+            )?;
+            if alternatives.is_empty() { None } else { main_query.as_ref().map(|q| q.box_clone()) }
+        } else {
+            None
+        };
         let query: Box<dyn Query> = match (main_query, alternatives.is_empty()) {
             (None, true) => return Ok(SearchResult::new(Vec::new(), session)),
             (Some(q), true) => q,
@@ -1448,8 +1515,11 @@ impl LineIndex {
         }
         let t = std::time::Instant::now();
         let mut hits = Vec::new();
+        // Relevance order only: each hit's (segment, doc), aligned with `hits`.
+        let mut keys: Vec<(u32, DocId)> = Vec::new();
         let collector = PlacedCollector {
             books: request.books.as_ref().map(|b| Arc::new(b.iter().copied().collect())),
+            keep_docs: relevance,
         };
         for (ord, segment) in searcher.segment_readers().iter().enumerate() {
             CancelToken::check(cancel.as_ref())?;
@@ -1470,6 +1540,7 @@ impl LineIndex {
                     }
                     doc = scorer.advance();
                 }
+                keys.extend(child.take_docs().into_iter().map(|doc| (ord as u32, doc)));
                 hits.extend(child.harvest());
                 continue;
             }
@@ -1491,12 +1562,17 @@ impl LineIndex {
                     }
                 })?,
             }
+            keys.extend(child.take_docs().into_iter().map(|doc| (ord as u32, doc)));
             hits.extend(child.harvest());
         }
         if timing {
             eprintln!("  [timing] collect {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);
         }
-        hits.sort_unstable_by_key(|h| h.position);
+        // Relevance keeps the collection order (aligned with `keys`) until
+        // the hits are scored, below.
+        if !relevance {
+            relevance::sort_hits(&mut hits, request.order, &request.book_generations);
+        }
         if let Some((max_word_distance, require_ordered, proximity)) = text_level_negative {
             let negative_terms: Vec<Vec<String>> = negative_sinks.iter().map(|s| s.take_strings()).collect();
             // a word with no indexed form can never be present: no exclusion
@@ -1512,6 +1588,8 @@ impl LineIndex {
 
         // The main query's matcher, if it can match at all.
         let mut group_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
+        // every slot's terms, empty ones included (aligned with `main_slots`)
+        let main_terms = relevance.then(|| group_terms.clone());
         let main_ok = if group_terms.is_empty() {
             false
         } else if let Some(min) = partial_min {
@@ -1534,9 +1612,13 @@ impl LineIndex {
                 proximity: proximity.clone(),
             });
         }
-        for (alt_sinks, _) in &alternatives {
+        let mut phrase_plans: Vec<(&[GroupSpec], Vec<Vec<String>>)> = Vec::new();
+        for ((alt_sinks, _), groups) in alternatives.iter().zip(&alternative_groups) {
             let terms: Vec<Vec<String>> = alt_sinks.iter().map(|s| s.take_strings()).collect();
             if terms.iter().all(|g| !g.is_empty()) {
+                if relevance {
+                    phrase_plans.push((groups, terms.clone()));
+                }
                 session.matchers.push(Matcher {
                     original_group_count: terms.len(),
                     prepared: PreparedQueryGroups::from_groups(&terms),
@@ -1565,6 +1647,34 @@ impl LineIndex {
         session.count_needs_text = main_needs_text || phrase_needs_text || session.negative.is_some();
         if session.matchers.is_empty() {
             return Ok(SearchResult::new(Vec::new(), session));
+        }
+        if let Some(main_terms) = main_terms {
+            CancelToken::check(cancel.as_ref())?;
+            let t = std::time::Instant::now();
+            let main_slots_len = main_slots.len();
+            let plan = relevance::ScorePlan {
+                field: self.fields.text,
+                keep_marks,
+                main: (main_ok && main_terms.len() == main_slots.len()).then(|| relevance::MainPlan {
+                    shape,
+                    slots: main_slots,
+                    terms: main_terms,
+                }),
+                main_membership: match &main_membership {
+                    Some(q) => Some(q.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?),
+                    None => None,
+                },
+                phrases_as_count: relevance::phrases_as_count(shape, main_slots_len),
+                phrases: phrase_plans,
+            };
+            let scores = relevance::scores(&searcher, &plan, &keys, cancel.as_ref())?;
+            let (hits, scores) = relevance::sort_by_score(hits, scores);
+            if timing {
+                eprintln!("  [timing] relevance {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);
+            }
+            let mut result = SearchResult::new(hits, session);
+            result.scores = Some(scores);
+            return Ok(result);
         }
         Ok(SearchResult::new(hits, session))
     }

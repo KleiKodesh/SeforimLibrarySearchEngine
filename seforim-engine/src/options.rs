@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use hebrew_fts::{tokenize_query, QueryTerm, QueryToken, DEFAULT_CONTEXT_WORDS};
 use serde::{Deserialize, Serialize};
 
+use crate::relevance::ResultsOrder;
 use crate::search::{ExcludeSpec, GroupSpec, ProximitySpec, SearchRequest, TypoModeSpec, WalkOptionsSpec};
 use crate::{Error, Result};
 
@@ -97,6 +98,12 @@ pub struct SearchOptions {
     /// `hebrew_fts::user_regex`). Off (the default, FtsLib's behaviour): the
     /// query is plain text whatever its slashes.
     pub user_regex: bool,
+    /// The order of the hits (Otzaria's `ResultsOrder`): `"catalog"`
+    /// (default, costs nothing), `"relevance"` or `"generation"`.
+    pub order: ResultsOrder,
+    /// For `"generation"`: `[[book_id, generation_order], ...]` from the
+    /// host (Otzaria's per-book `generationOrder`); books absent come last.
+    pub book_generations: Vec<(u64, u32)>,
 }
 
 impl Default for SearchOptions {
@@ -132,6 +139,8 @@ impl Default for SearchOptions {
             books: None,
             phrase_alternatives: Vec::new(),
             user_regex: false,
+            order: ResultsOrder::Catalog,
+            book_generations: Vec::new(),
         }
     }
 }
@@ -229,6 +238,8 @@ impl SearchOptions {
                         context_words: self.context_words,
                         proximity: (n > 1).then(|| ProximitySpec::Ordered { gaps: vec![0; n - 1] }),
                         books: self.books.clone(),
+                        order: self.order,
+                        book_generations: self.book_generations.clone(),
                         ..Default::default()
                     });
                 }
@@ -291,6 +302,8 @@ impl SearchOptions {
             phrase_alternatives,
             proximity,
             books: self.books.clone(),
+            order: self.order,
+            book_generations: self.book_generations.clone(),
         })
     }
 }

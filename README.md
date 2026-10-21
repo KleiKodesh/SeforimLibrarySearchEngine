@@ -191,7 +191,9 @@ is clean, and CHANGELOG.md has the entry.
 
 Also small: `get_match_term_infos` honours the cap and the sink, and
 `RegexPhraseWeight` is reachable crate-internally so SpanQuery can reuse its
-positioned union. `FuzzyTermQuery`'s Debug text is unchanged (the new fields
+positioned union. `PhraseScorer` is public (its constructor already was), so
+the relevance order scores a phrase with tantivy's own BM25 over a union of
+the matched terms per position. `FuzzyTermQuery`'s Debug text is unchanged (the new fields
 are not printed), so upstream's query-parser tests stay as they are.
 
 ### hebrew-fts
@@ -382,7 +384,7 @@ are not printed), so upstream's query-parser tests stay as they are.
     proximity or phrases already ran as span queries on positions, no
     text-level negative; or a one-word query), the hit list IS the answer: counted from the
     `book_id` fast column, no text read.
-  - Otherwise the host feeds the hits' texts in catalog order (any batch
+  - Otherwise the host feeds the hits' texts in hit order (any batch
     size); the engine validates each batch across all cores with exactly
     the snippet locator's test (no snippet, no term table) and adds the
     passing lines. `exact` turns true when every hit is counted. This is
@@ -410,7 +412,8 @@ are not printed), so upstream's query-parser tests stay as they are.
     locates or counts them batch by batch, each batch cancellable. The
     walks themselves run inside tantivy's scorer creation and are not
     interrupted (they are capped).
-- **Search:** every matching line in catalog order, plus a snippet session.
+- **Search:** every matching line in catalog order (or by relevance /
+  generation, see the result order item), plus a snippet session.
   - The session locates snippets for a whole batch across all cores.
   - It applies the word-distance and order filters. Widening a short
     window is the host's job: join the line with its neighbours and locate
@@ -448,7 +451,10 @@ are not printed), so upstream's query-parser tests stay as they are.
     `min_groups`), `context_words`, `proximity` (per TYPED word, see the
     proximity item), `exclude` (`{query, max_word_distance,
     require_ordered, proximity}`; its words use the global options),
-    `books`, `phrase_alternatives` (`[{query, ignore_quotes}]`).
+    `books`, `phrase_alternatives` (`[{query, ignore_quotes}]`), `order`
+    (`"catalog"` default, `"relevance"`, `"generation"`) and
+    `book_generations` (`[[book_id, generation_order], ...]`), see the
+    result order item.
   - JSON: `{"query":"משה תורה","grammar_prefixes":true,
     "words":{"1":{"grammar_prefixes":false,"alternatives":["אורייתא"]}}}`.
   - The low-level `SearchRequest` (slots built by the caller) stays, for
@@ -574,6 +580,79 @@ are not printed), so upstream's query-parser tests stay as they are.
     the engine returns a clear error. The positions count every word
     (one-letter words and digit runs too).
   - Measured on the full index, בית המקדש adjacent: 15,218 lines in 29 ms.
+- **Result order** (Otzaria's `ResultsOrder`; `order` in `SearchOptions`,
+  C# `SearchOptions.Order` / `BookGenerations`, Dart `order` /
+  `bookGenerations`, Otzaria demo `--order catalog|relevance`;
+  `seforim-engine/src/relevance.rs`). Catalog order stays the default and
+  costs nothing: no score, no doc id kept.
+  - `generation`: Otzaria's `OrderKind::Generation`: books by the
+    generation order the host gives per book (Otzaria's app pushes its
+    `generationOrder`; the engine keeps no generation), then catalog order.
+    A book without one comes last.
+  - `relevance`: Otzaria's `order_by_score()` over the query Otzaria builds
+    for the same search, computed after the search for the hits only, from
+    the terms the walks matched (sinks); ties in catalog order (Otzaria:
+    ascending doc address). Per shape:
+    - one slot: Otzaria's tiers (`match_tier`, ported verbatim: the typed
+      form or an alternative 0, inside a longer word 1, a ktiv male/haser
+      variant 2, the rest 3), a line scores the sum of 1000 / 100 / 10 / 1
+      over the tiers it holds. A keep-marks index is Otzaria's vocalized
+      field, which it never tiers: 1 per line.
+    - a fuzzy slot (`word~N`, Otzaria's fuzzy mode, its plain builder):
+      1000 + BM25 of the exact word (its spellings: the word and the terms
+      that are the word with quotes inserted, frequencies summed, doc counts
+      shared), the same for the word without its quotes, + 1 for the fuzzy
+      match; several fuzzy words: + 2000 when they stand within one word of
+      each other.
+    - several slots, ordered proximity or per-pair `gaps`: BM25 of the
+      phrase with tantivy's own `PhraseScorer`, slop = the sum of the gaps
+      (Otzaria's `RegexPhraseQuery` + `GapVerifiedPhraseQuery`). Tested equal
+      to tantivy's `PhraseQuery` scores.
+    - several slots in any order: the slot count + 1 / (1 + the tightest
+      span), every slot at its own position (`TermListPhraseQuery`).
+    - several slots, words anywhere in the line (FtsLib's AND, Otzaria's
+      paragraph scope) or partial matching: 1 per slot the line holds
+      (Otzaria's per-word `TermSetQuery`s); a fuzzy slot scores as above.
+    - per-pair `gaps` in either order (`require_ordered` false; no Otzaria
+      counterpart): as any order.
+    - each phrase alternative (acronyms): its phrase BM25 (1 for one word);
+      when the main query is several words anywhere, 1 per word, all
+      required (Otzaria builds the alternative in the main query's
+      paragraph scope; no positions needed then). Added to the main
+      query's score only for lines the main query matches too (a copy of
+      the main query is run for that, its walks again: relevance with
+      alternatives only).
+  - Index data: none added. Tiers and counts need only the postings (both
+    flavours); fuzzy BM25 uses term frequencies and field norms (without
+    positions there are no frequencies: every frequency reads as 1, as for
+    Otzaria's own frequency-less terms); phrases, spans and the fuzzy
+    adjacency need positions, so on an index without positions those shapes
+    return an error (adding only frequencies would not serve them: about
+    +170 MB, the `.idx` difference of the two full builds).
+  - Deviations (named): the phrase IDF is taken from the slots' typed words
+    (Otzaria's from its regex pattern strings, which equal the word for a
+    plain word): a constant factor per query, the order inside a query is
+    the same. Otzaria's flat-scored degrade path (phrases whose expansions
+    pass its ceiling) is not ported: our walks cap instead of failing, so
+    every phrase is scored. Otzaria's fuzzy mode with its magic dictionary
+    (`build_lexical_fuzzy_query`, the lexical tier 30) is not ported: the
+    engine has no lexical forms; ours is its plain builder. On a keep-marks
+    index fuzzy words score 1 (Otzaria's vocalized fuzzy is unranked), and a
+    fuzzy word at distance 0 scores 1 (Otzaria adds its quote-free
+    spelling's BM25). A repeated word is a slot of its own in the count
+    (Otzaria merges duplicate words). A one-word query's multi-word
+    alternative scores as a phrase (Otzaria's default word-distance scope).
+    FtsLib's `max_word_distance` /
+    `require_ordered` without a proximity keep the count score (Otzaria
+    would build a phrase from its distance). The book filter adds nothing to the score
+    (Otzaria's facet clause adds its own BM25). A generation-ordered book
+    without a generation follows the catalog order (Otzaria: its book
+    number).
+  - Cost (full index, release, median of 3 after a warm-up; engine search
+    only): word with prefixes, 493,948 hits: 107 ms catalog / 203 ms
+    relevance (no positions 104 / 262 ms); phrase gap 0, 15,228 hits: 32 /
+    38 ms; any order: 32 / 47 ms; `word~1`, 599,323 hits: 95 / 243 ms; two
+    words anywhere: 22 / 30 ms.
 - **C ABI conventions:** objects are opaque handles; strings cross as UTF-8
   pointer + length; errors are `0/-1` status codes with a per-thread
   `se_last_error`; hot paths are binary (no JSON).
@@ -702,7 +781,8 @@ what a page needs.
   suffixes). The Otzaria prefix/suffix options are separate walk options.
 - **Ketiv/qere expansion** (`expandKetiv`) is replaced by the Otzaria walk
   options.
-- **Order and distance:** results are in catalog order, as FtsLib. Word
+- **Order and distance:** results are in catalog order, as FtsLib (the
+  default; Otzaria's relevance and generation orders are options). Word
   distance is checked from the line text, so an index without positions works.
 
 ## Open

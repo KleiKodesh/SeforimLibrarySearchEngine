@@ -16,6 +16,7 @@ pub mod fm_index;
 pub mod fm_sidecar;
 pub mod index;
 pub mod options;
+pub mod relevance;
 pub mod search;
 
 pub use fm_index::FmIndex;
@@ -27,6 +28,7 @@ pub use hebrew_fts::word_rule::keep_second_of_paired_readings as reduce_paired_r
 pub use hebrew_fts::user_regex::classify as user_regex_kind;
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
 pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, WordOptions};
+pub use relevance::ResultsOrder;
 pub use search::{
     CancelToken, ExcludeSpec, GroupSpec, HitCounts, PlacedHit, ProximitySpec, SearchRequest, SearchResult, Snippet, SnippetSession,
     TypoModeSpec, WalkOptionsSpec, SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,

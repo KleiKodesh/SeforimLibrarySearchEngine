@@ -50,7 +50,7 @@ final s = index.search(SearchOptions('תורה שלו* שבת~1 משה | אהר�
     words: {0: WordOptions(ktivMaleHaser: true, alternatives: ['אורייתא'])},
     maxWordDistance: 5, requireOrdered: false, contextWords: 8));
 // low-level form (slots built by hand): index.searchRequest(SearchRequest(groups: [...]))
-s.hitCount; s.hits(offset, count); s.allHits();          // PlacedHit(position, lineId, bookId), catalog order
+s.hitCount; s.hits(offset, count); s.allHits();          // PlacedHit(position, lineId, bookId), in SearchOptions.order (catalog by default)
 s.locateBatch(texts); s.locate(text);                    // Snippet? (null = filtered out)
 s.countNeedsText; s.countBatch(texts); s.counts();       // exact totals: HitCounts(total, byBook, validated, exact)
 index.search(options, cancel: t);                       // t = SearchCancelToken(); t.cancel() -> SearchCancelledException
@@ -92,7 +92,7 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 | `anyOrder` | `Proximity.anyOrder(distance)`: all words inside one window of (k-1)(distance+1) positions, each at its own word (Otzaria's `Proximity::any_order`). |
 | `alternativeWords[i]` | `SearchOptions.words[i].alternatives`. In the CLI, write `a,b`. |
 | scope `sameParagraph` | Leave out `--distance` limits. A line is the paragraph unit. |
-| `order: catalogue` | This is the only order. Positions come from the catalog-tree walk at build time. |
+| `sortBy` (`ResultsOrder`) | `SearchOptions.order`: `ResultsOrder.catalog` (default; positions come from the catalog-tree walk at build time), `.relevance` (Otzaria's score, computed by the engine; phrase / proximity / multi-word fuzzy need a positions index), `.generation` with `SearchOptions.bookGenerations` (book id to Otzaria's per-book `generationOrder`, which the app computes; the demo does not port that, so its `--order` takes `catalog` or `relevance`). |
 | book/category facets | `--book TEXT`: the book ids whose title or an ancestor category title (`category_closure`) matches go to the engine as `SearchOptions.books` (filtered search on the indexed `book_id`). |
 | `limit` / `offset` | Counted over results that pass the snippet filters, as Otzaria's pages are. |
 | query sanitizing | Same rules: ״→", ׳→', maqaf and `-` → space, an edge `"` is dropped, `''`→". |
@@ -101,7 +101,6 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 ### Gaps: what Otzaria does that the engine/demo can't (yet)
 
 - **Scope `sameSection` for the positive query** (all words under one heading, spread over lines).
-- **Relevance ordering.** Results come in catalog order only.
 - **Regex queries** (`/…/`), the semantic and smart query modes.
 - **Totals.** `hitCount` counts lines *before* the distance/order filter. The exact total and per-book counts
   come from `counts()`: exact at once when no text-level check applies (`countNeedsText` false), else after

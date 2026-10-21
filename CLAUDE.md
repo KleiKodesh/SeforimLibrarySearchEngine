@@ -253,7 +253,7 @@ seforim.db knowledge).
 ## Open decisions / next
 
 - **User's goal: every search feature Otzaria's current engine has that we lack gets
-  added** (from the feature matrix of otzaria_search_engine v5.0.0): relevance (and generation) ordering, positive sameSection scope and
+  added** (from the feature matrix of otzaria_search_engine v5.0.0): positive sameSection scope and
   cross-line phrases (both ON HOLD: anything matching across lines is designed with
   the user first), separate
   negative options, vocalized matching without a keep-marks index. Semantic search:
@@ -269,14 +269,18 @@ seforim.db knowledge).
 
 - Benchmark span query vs FtsLib-style post-filter for very broad expansions.
 - Profile the C# search path (1.0 s net10 / 1.5 s net48 vs 0.38 s pure Rust).
-- Otzaria gaps still open: the positive query's sameSection scope, relevance
-  ordering.
+- Otzaria gaps still open: the positive query's sameSection scope.
+- Relevance / generation order (`relevance.rs`) is scored AFTER the search, for the hits
+  only, from the sinks' terms: the walks run inside scorer creation, so the terms exist
+  only after collection. Otzaria's score depends on its query shape (tiers, phrase BM25,
+  span bonus, fuzzy floors); phrases use tantivy's own `PhraseScorer` (made public).
   **Otzaria app checkout: `C:/Users/Public/Documents/otzaria`** (KleiKodesh/otzaria; pins
   otzaria_search_engine v5.0.0, same as the scratchpad copy): use it for parity checks.
   Otzaria's sources: `github.com/Otzaria/otzaria` (Dart) and
   `github.com/Otzaria/otzaria_search_engine` v5.0.0 (Rust `hebrew_query.rs`,
   `api/search_engine.rs`, `lexicons.rs`); clone them into the scratchpad to port.
-- Done: exact totals + per-book counts (`SearchResult::counts` / `count_batch`);
+- Done: result order option (catalog / Otzaria relevance / generation, `relevance.rs`);
+  exact totals + per-book counts (`SearchResult::counts` / `count_batch`);
   cancellation (`CancelToken`, pull-based streaming); user regex `/.../` term kinds
   (Word, Sequence; Otzaria's Line kind still open); Dart binding; full-DB side-by-side parity (16/17); FM sidecar; wordMatchMode;
   negative query (`ExcludeSpec`); תרגום ארמי as a HOST lexicon (Dart demo

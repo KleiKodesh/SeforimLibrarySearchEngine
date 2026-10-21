@@ -45,7 +45,7 @@ class LineDocument {
   });
   final int lineId;
 
-  /// Rank in the library's catalog order: results are returned in it.
+  /// Rank in the library's catalog order: results are returned in it by default.
   final int position;
   final int bookId;
 
@@ -64,6 +64,20 @@ enum TypoMode {
   /// Edit distance 1 for every 4+-letter word in every combination
   /// (confusions only for 3 letters, nothing for 2 or fewer).
   fullEdit1,
+}
+
+/// The order of the hits (Otzaria's ResultsOrder).
+enum ResultsOrder {
+  /// Catalog order, as FtsLib (the default; costs nothing).
+  catalog,
+
+  /// Otzaria's relevance: best score first, ties in catalog order. Phrase,
+  /// proximity and multi-word fuzzy queries need an index with positions.
+  relevance,
+
+  /// Otzaria's generation order: by each book's generation order
+  /// ([SearchOptions.bookGenerations]), then catalog order.
+  generation,
 }
 
 /// Hebrew walk options for a word (Otzaria's search options).
@@ -393,7 +407,7 @@ class HitCounts {
   /// Lines per book id (books with none absent).
   final Map<int, int> byBook;
 
-  /// Hits counted so far, from the first in catalog order.
+  /// Hits counted so far, from the first in hit order.
   final int validated;
 
   /// True when every hit is counted: the numbers are final.
@@ -407,7 +421,7 @@ class HitCounts {
       );
 }
 
-/// A matching line, in catalog order: only the ids the index keeps. Any
+/// A matching line (in the search's order, catalog by default): only the ids the index keeps. Any
 /// other placement (line index, section) comes from SQLite by line id.
 class PlacedHit {
   const PlacedHit(this.position, this.lineId, this.bookId);
@@ -524,8 +538,11 @@ class SearchOptions {
     this.books,
     List<PhraseOptions>? phraseAlternatives,
     this.userRegex = false,
+    this.order = ResultsOrder.catalog,
+    Map<int, int>? bookGenerations,
   })  : words = words ?? {},
-        phraseAlternatives = phraseAlternatives ?? [];
+        phraseAlternatives = phraseAlternatives ?? [],
+        bookGenerations = bookGenerations ?? {};
 
   String query;
 
@@ -582,6 +599,14 @@ class SearchOptions {
   /// Whole phrases ORed with the query (Otzaria's acronym expansion).
   final List<PhraseOptions> phraseAlternatives;
 
+  /// The order of the hits. Catalog by default.
+  ResultsOrder order;
+
+  /// For [ResultsOrder.generation]: book id to its generation order
+  /// (Otzaria's generationOrder, from the host). Books absent come last;
+  /// negative ids (no such book) are not sent.
+  final Map<int, int> bookGenerations;
+
   Map<String, Object?> toJson() => {
         'query': query,
         if (userRegex) 'user_regex': true,
@@ -599,6 +624,12 @@ class SearchOptions {
         if (exclude != null) 'exclude': exclude!.toJson(),
         if (books != null) 'books': books,
         if (phraseAlternatives.isNotEmpty) 'phrase_alternatives': [for (final p in phraseAlternatives) p.toJson()],
+        if (order != ResultsOrder.catalog) 'order': order.name,
+        if (bookGenerations.isNotEmpty)
+          'book_generations': [
+            for (final e in bookGenerations.entries)
+              if (e.key >= 0) [e.key, e.value.clamp(0, 0xFFFFFFFF)]
+          ],
       };
 }
 

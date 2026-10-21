@@ -382,7 +382,7 @@ pub unsafe extern "C" fn se_writer_close(writer: *mut LineWriter) {
 ///            {"kind":"wildcard","pattern":"שלו*"}],
 ///  "max_word_distance":5,"require_ordered":false,"context_words":8}
 /// ```
-/// Returns a search object holding every matching line (catalog order) and
+/// Returns a search object holding every matching line (in the requested order, catalog by default) and
 /// the snippet session.
 ///
 /// # Safety
@@ -642,7 +642,7 @@ pub unsafe extern "C" fn se_search_locate_batch(
     })
 }
 
-/// True (1) when the exact count needs the hits' texts (fed in catalog
+/// True (1) when the exact count needs the hits' texts (fed in hit
 /// order with `se_search_count_batch`), 0 when every hit passes and
 /// `se_search_counts` is exact at once; -1 on error.
 ///
@@ -653,7 +653,7 @@ pub unsafe extern "C" fn se_search_count_needs_text(search: *const SearchResult)
     guard(-1, || Ok(search.as_ref().ok_or("null search")?.count_needs_text() as i32))
 }
 
-/// Counts the next `count` hits (catalog order, continuing from the
+/// Counts the next `count` hits (hit order, continuing from the
 /// previous call) given their texts, as `se_search_locate_batch` takes
 /// them: the passing lines are added to the exact totals. Returns how many
 /// passed, or -1 on error (more texts than hits left).

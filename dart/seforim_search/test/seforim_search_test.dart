@@ -183,4 +183,28 @@ void main() {
   test('errors surface as exceptions', () {
     expect(() => SeforimIndex.open('${tmp.path}/nope'), throwsA(isA<SeforimEngineException>()));
   });
+
+  test('results order: catalog, relevance, generation', () {
+    // line 7 holds the first word as typed (tier 0), line 8 the second with a prefix (tier 1)
+    const q = 'ניתנה | ראשית';
+    List<int> ids(SearchOptions o) {
+      final s = index.search(o);
+      final r = s.allHits().map((h) => h.lineId).toList();
+      s.close();
+      return r;
+    }
+
+    expect(ids(SearchOptions(q, grammarPrefixes: true)), [8, 7]);
+    expect(ids(SearchOptions(q, grammarPrefixes: true, order: ResultsOrder.relevance)), [7, 8]);
+    expect(
+        ids(SearchOptions(q,
+            grammarPrefixes: true, order: ResultsOrder.generation, bookGenerations: {1: 0, 2: 1})),
+        [7, 8]);
+    final json = SearchOptions(q, order: ResultsOrder.generation, bookGenerations: {2: 3}).toJson();
+    expect(json['order'], 'generation');
+    expect(json['book_generations'], [
+      [2, 3]
+    ]);
+    expect(SearchOptions(q).toJson().containsKey('order'), isFalse);
+  });
 }

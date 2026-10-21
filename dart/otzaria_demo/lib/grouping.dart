@@ -6,8 +6,8 @@
 /// - identicalText: lines whose text signature ([lineDedupHash]) is equal
 ///   merge, across books. A line too short to sign never merges.
 ///
-/// As in Otzaria, groups are ordered by their best member (catalog order
-/// here), a page counts groups, and a card lists at most [mergedSiblingsCap]
+/// As in Otzaria, groups are ordered by their best member (hit
+/// order here), a page counts groups, and a card lists at most [mergedSiblingsCap]
 /// siblings besides its representative.
 enum Grouping { sameSection, identicalText }
 
@@ -80,14 +80,14 @@ List<int> _utf8(int r) {
   return [0xF0 | (r >> 18), 0x80 | ((r >> 12) & 0x3F), 0x80 | ((r >> 6) & 0x3F), 0x80 | (r & 0x3F)];
 }
 
-/// One card: the hits of a group, in catalog order.
+/// One card: the hits of a group, in hit order.
 class HitGroup<T> {
   HitGroup(this.key);
   final (int, int) key;
   final List<T> members = [];
 }
 
-/// Groups `items` (already in catalog order) by `keyOf`, keeping first-seen
+/// Groups `items` (already in hit order) by `keyOf`, keeping first-seen
 /// order: a group's first member is its best one, so groups come out sorted
 /// by their representative, as Otzaria's `finalize_grouped`.
 List<HitGroup<T>> groupInOrder<T>(Iterable<T> items, (int, int) Function(T) keyOf) {

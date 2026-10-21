@@ -109,7 +109,7 @@ namespace SeforimSearch.Engine
                 NativeMethods.se_writer_open(_handle, (UIntPtr)(ulong)heapBytes, (UIntPtr)(uint)threads)));
         }
 
-        /// <summary>Runs a search: every matching line in catalog order, plus the
+        /// <summary>Runs a search: every matching line in the search's order (catalog by default), plus the
         /// snippet session for locating their snippets.</summary>
         public SearchSession Search(SearchRequest request)
         {

@@ -83,6 +83,9 @@ namespace FtsLib.Fts5
         public bool UserRegex { get; set; }
 
         public int ContextWords { get; set; } = TantivySeforimIndex.DefaultContextWords;
+
+        /// <summary>Result order (Otzaria's). Catalog, as FtsLib, by default.</summary>
+        public ResultsOrder Order { get; set; }
     }
 
     /// <summary>
@@ -204,6 +207,7 @@ namespace FtsLib.Fts5
                 RequireOrdered = options.RequireOrdered,
                 ContextWords = options.ContextWords,
                 UserRegex = options.UserRegex,
+                Order = options.Order,
             };
         }
 
@@ -216,9 +220,16 @@ namespace FtsLib.Fts5
         /// </summary>
         public HitCounts CountByBook(string query, TantivySearchOptions? options = null,
                                      CancellationToken ct = default, int batchSize = 4096)
+            => CountByBook(query, options, ct, batchSize, out _);
+
+        /// <summary><see cref="CountByBook(string, TantivySearchOptions?, CancellationToken, int)"/>,
+        /// also returning how the search was served (notices).</summary>
+        public HitCounts CountByBook(string query, TantivySearchOptions? options, CancellationToken ct,
+                                     int batchSize, out SearchInfo info)
         {
             options ??= new TantivySearchOptions();
             using var session = Engine().Search(ToRequest(query, options), ct);
+            info = session.GetInfo();
             if (!session.CountNeedsText) return session.GetCounts();
             using var corpus = _openCorpus();
             for (long offset = 0; offset < session.HitCount;)

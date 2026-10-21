@@ -689,6 +689,21 @@ pub unsafe extern "C" fn se_search_counts(search: *const SearchResult) -> *mut c
     })
 }
 
+/// How the search was served, as JSON: `{"notices":["..."]}`. `notices`
+/// are not errors: `"relevance_needs_positions"` = relevance order was asked
+/// for a phrase / proximity / multi-word fuzzy query on an index without
+/// positions, so the hits are in catalog order. Free with `se_string_free`.
+///
+/// # Safety
+/// `search` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_info(search: *const SearchResult) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let search = search.as_ref().ok_or("null search")?;
+        Ok(out_string(serde_json::to_string(&search.info()).map_err(err)?))
+    })
+}
+
 /// Terms added to the search's term table since the previous call, as a
 /// JSON array of strings in id order (ids continue from the previous call).
 ///

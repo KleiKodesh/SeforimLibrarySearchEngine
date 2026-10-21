@@ -125,6 +125,9 @@ namespace SeforimSearch.Engine.Native
         public static extern IntPtr se_search_counts(SearchHandle search);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_search_info(SearchHandle search);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern void se_search_close(IntPtr search);
     }
 }

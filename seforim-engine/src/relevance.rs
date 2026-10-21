@@ -45,8 +45,10 @@
 //! Index data: the tiers and the counts need only the postings (both index
 //! flavours); fuzzy BM25 uses the term frequencies and field norms (an index
 //! without positions has no frequencies: tantivy reads every one as 1, as
-//! for Otzaria's own frequency-less terms); phrases and spans need positions,
-//! so those shapes return an error on an index without positions.
+//! for Otzaria's own frequency-less terms); phrases and spans need positions.
+//! On an index without positions those shapes do not fail: the search comes
+//! back in catalog order with the notice [`NOTICE_RELEVANCE_NEEDS_POSITIONS`]
+//! (`SearchResult::notices`).
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -186,32 +188,33 @@ fn all_fuzzy(slots: &[&GroupSpec]) -> bool {
     slots.iter().all(|g| matches!(g, GroupSpec::Fuzzy { .. }))
 }
 
-/// Errors when a part of the relevance score needs positions the index
-/// lacks: a phrase or span (main query or phrase alternative), or fuzzy
-/// mode's adjacency boost. Checked before the search runs.
-pub(crate) fn check_positions(
+/// The notice a search carries when relevance order was asked for a shape
+/// whose score needs positions the index lacks: the hits come back in catalog
+/// order instead (see [`lacks_positions`]).
+pub const NOTICE_RELEVANCE_NEEDS_POSITIONS: &str = "relevance_needs_positions";
+
+/// True when a part of the relevance score needs positions the index lacks:
+/// a phrase or span (main query or phrase alternative), or fuzzy mode's
+/// adjacency boost. Checked before the search runs; the search then keeps
+/// the catalog order and reports [`NOTICE_RELEVANCE_NEEDS_POSITIONS`]
+/// rather than failing.
+pub(crate) fn lacks_positions(
     positions: bool,
     ranked: bool,
     main: Option<(Shape, &[&GroupSpec])>,
     phrases: &[&[GroupSpec]],
-) -> Result<()> {
-    let phrases_as_count = main.is_some_and(|(shape, slots)| phrases_as_count(shape, slots.len()));
+) -> bool {
     if positions {
-        return Ok(());
+        return false;
     }
+    let phrases_as_count = main.is_some_and(|(shape, slots)| phrases_as_count(shape, slots.len()));
     let main = main.is_some_and(|(shape, slots)| match shape {
         Shape::Phrase { .. } | Shape::AnyOrder => true,
         Shape::Count { partial: false } => ranked && slots.len() > 1 && all_fuzzy(slots),
         _ => false,
     });
     let phrase = !phrases_as_count && phrases.iter().any(|groups| groups.len() > 1);
-    if main || phrase {
-        return Err(Error::Tantivy(tantivy::TantivyError::InvalidArgument(
-            "relevance order of a multi-word phrase, proximity or fuzzy query needs an index built with positions"
-                .into(),
-        )));
-    }
-    Ok(())
+    main || phrase
 }
 
 /// The typed words of a slot (its roots for the tiers).
@@ -1180,14 +1183,33 @@ mod tests {
 
     #[test]
     fn positions_needed_for_phrases_on_a_flat_index() {
-        let (_d, flat) = build(IndexOptions { positions: false, keep_marks: false }, &[(1, &format!("{A} {B}"))]);
+        let texts = [format!("{B} {C}"), format!("{A} {B}"), format!("{A} {C} {B}")];
+        let texts: Vec<(u64, &str)> = texts.iter().map(|t| (1, t.as_str())).collect();
+        let (_d, flat) = build(IndexOptions { positions: false, keep_marks: false }, &texts);
         let mut req = relevance(vec![word(A), word(B)]);
         req.proximity = Some(ProximitySpec::Ordered { gaps: vec![0] });
-        let err = flat.search(&req).err().expect("needs positions");
-        assert!(err.to_string().contains("positions"), "{err}");
-        // the same query in catalog order is fine
+        // no error: catalog order, no scores, and the notice
+        let r = flat.search(&req).unwrap();
+        assert_eq!(r.hits.iter().map(|h| h.position).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(r.scores().is_none());
+        assert_eq!(r.notices(), &[NOTICE_RELEVANCE_NEEDS_POSITIONS.to_string()]);
+        // the same query in catalog order: no notice
         req.order = ResultsOrder::Catalog;
-        assert_eq!(flat.search(&req).unwrap().hits.len(), 1);
+        let r = flat.search(&req).unwrap();
+        assert_eq!(r.hits.len(), 2);
+        assert!(r.notices().is_empty());
+        // a shape that needs no positions keeps its relevance order, no notice
+        let req = relevance(vec![word(A), word(B)]);
+        let r = flat.search(&req).unwrap();
+        assert!(r.scores().is_some());
+        assert!(r.notices().is_empty());
+        // with positions the phrase is scored, no notice
+        let (_d2, index) = build(IndexOptions::default(), &texts);
+        let mut req = relevance(vec![word(A), word(B)]);
+        req.proximity = Some(ProximitySpec::Ordered { gaps: vec![0] });
+        let r = index.search(&req).unwrap();
+        assert!(r.scores().is_some());
+        assert!(r.notices().is_empty());
     }
 
     #[test]

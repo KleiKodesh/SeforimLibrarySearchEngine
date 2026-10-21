@@ -238,4 +238,24 @@ void main() {
     ]);
     expect(SearchOptions(q).toJson().containsKey('order'), isFalse);
   });
+
+  test('relevance of a phrase without positions: catalog order + notice', () {
+    final dir = Directory.systemTemp.createTempSync('se_dart_flat_');
+    final flat = SeforimIndex.create(dir.path, const IndexOptions(positions: false));
+    final w = flat.openWriter(heapBytes: 30000000, threads: 1);
+    w.add(const LineDocument(lineId: 1, position: 1, bookId: 1, text: 'alpha beta'));
+    w.add(const LineDocument(lineId: 2, position: 0, bookId: 1, text: 'alpha gamma beta'));
+    w.commit();
+    w.close();
+    final s = flat.search(SearchOptions('alpha beta',
+        proximity: const Proximity.ordered([0]), order: ResultsOrder.relevance));
+    expect(s.allHits().map((h) => h.lineId).toList(), [2, 1]);
+    expect(s.info().notices, [SearchInfo.relevanceNeedsPositions]);
+    s.close();
+    final c = flat.search(SearchOptions('alpha beta', proximity: const Proximity.ordered([0])));
+    expect(c.info().notices, isEmpty);
+    c.close();
+    flat.close();
+    dir.deleteSync(recursive: true);
+  });
 }

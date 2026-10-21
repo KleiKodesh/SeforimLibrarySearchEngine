@@ -74,7 +74,9 @@ enum ResultsOrder {
   catalog,
 
   /// Otzaria's relevance: best score first, ties in catalog order. Phrase,
-  /// proximity and multi-word fuzzy queries need an index with positions.
+  /// proximity and multi-word fuzzy queries need an index with positions;
+  /// without, they come back in catalog order with the notice
+  /// [SearchInfo.relevanceNeedsPositions] ([SearchSession.info]).
   relevance,
 
   /// Otzaria's generation order: by each book's generation order

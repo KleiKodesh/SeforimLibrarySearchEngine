@@ -529,7 +529,9 @@ namespace SeforimSearch.Engine
         /// <summary>Catalog order, as FtsLib (the default; costs nothing).</summary>
         Catalog = 0,
         /// <summary>Otzaria's relevance: best score first, ties in catalog order. Phrase,
-        /// proximity and multi-word fuzzy queries need an index with positions.</summary>
+        /// proximity and multi-word fuzzy queries need an index with positions; without,
+        /// they come back in catalog order with the notice
+        /// <see cref="SearchInfo.RelevanceNeedsPositions"/> (<see cref="SearchSession.GetInfo"/>).</summary>
         Relevance = 1,
         /// <summary>Otzaria's generation order: by each book's generation order
         /// (<see cref="SearchOptions.BookGenerations"/>), then catalog order.</summary>

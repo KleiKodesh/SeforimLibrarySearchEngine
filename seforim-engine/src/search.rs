@@ -772,6 +772,15 @@ pub struct SearchResult {
     tally: CountTally,
     /// Relevance order only: each hit's score, aligned with `hits`.
     scores: Option<Vec<Score>>,
+    /// Notices about how the search was served (see [`notices`](Self::notices)).
+    notices: Vec<String>,
+}
+
+/// How a search was served (see [`SearchResult::info`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchInfo {
+    /// See [`SearchResult::notices`].
+    pub notices: Vec<String>,
 }
 
 /// Exact totals of a search: the lines that pass every filter (including
@@ -798,7 +807,25 @@ struct CountTally {
 
 impl SearchResult {
     fn new(hits: Vec<PlacedHit>, session: SnippetSession) -> SearchResult {
-        SearchResult { hits, session, tally: CountTally::default(), scores: None }
+        SearchResult { hits, session, tally: CountTally::default(), scores: None, notices: Vec::new() }
+    }
+
+    fn with_notices(mut self, notices: Vec<String>) -> SearchResult {
+        self.notices = notices;
+        self
+    }
+
+    /// Notices about how the search was served, not errors. Today one:
+    /// [`NOTICE_RELEVANCE_NEEDS_POSITIONS`](crate::relevance::NOTICE_RELEVANCE_NEEDS_POSITIONS)
+    /// (relevance order asked for a phrase / proximity / multi-word fuzzy
+    /// query on an index without positions: the hits are in catalog order).
+    pub fn notices(&self) -> &[String] {
+        &self.notices
+    }
+
+    /// How the search was served (the C ABI's `se_search_info`).
+    pub fn info(&self) -> SearchInfo {
+        SearchInfo { notices: self.notices.clone() }
     }
 
     /// The relevance score of each hit (aligned with `hits`), when the
@@ -1399,7 +1426,7 @@ impl LineIndex {
         let fm = self.fm_sidecar_for(&searcher);
         let fm = fm.as_deref();
         let mut sinks = Vec::new();
-        let relevance = request.order == ResultsOrder::Relevance;
+        let mut relevance = request.order == ResultsOrder::Relevance;
         // The request groups the main sinks belong to, when not all of them
         // (the plain AND skips the slots that cannot search).
         let mut main_slot_ids: Option<Vec<usize>> = None;
@@ -1512,19 +1539,27 @@ impl LineIndex {
             request.gaps.as_deref(),
             request.require_ordered,
         );
-        let main_membership: Option<Box<dyn Query>> = if relevance {
-            relevance::check_positions(
+        // A relevance score that needs positions the index lacks: the hits
+        // come back in catalog order, with a notice (not an error).
+        let mut notices: Vec<String> = Vec::new();
+        if relevance
+            && relevance::lacks_positions(
                 self.options.positions,
                 !request.vocalized,
                 main_query.is_some().then_some((shape, main_slots.as_slice())),
                 &alternative_groups,
-            )?;
-            if alternatives.is_empty() { None } else { main_query.as_ref().map(|q| q.box_clone()) }
+            )
+        {
+            relevance = false;
+            notices.push(relevance::NOTICE_RELEVANCE_NEEDS_POSITIONS.to_string());
+        }
+        let main_membership: Option<Box<dyn Query>> = if relevance && !alternatives.is_empty() {
+            main_query.as_ref().map(|q| q.box_clone())
         } else {
             None
         };
         let query: Box<dyn Query> = match (main_query, alternatives.is_empty()) {
-            (None, true) => return Ok(SearchResult::new(Vec::new(), session)),
+            (None, true) => return Ok(SearchResult::new(Vec::new(), session).with_notices(notices)),
             (Some(q), true) => q,
             (main, false) => {
                 let mut should: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -1724,7 +1759,9 @@ impl LineIndex {
         // Relevance keeps the collection order (aligned with `keys`) until
         // the hits are scored, below.
         if !relevance {
-            relevance::sort_hits(&mut hits, request.order, &request.book_generations);
+            // (relevance turned off for want of positions sorts by catalog order)
+            let order = if request.order == ResultsOrder::Relevance { ResultsOrder::Catalog } else { request.order };
+            relevance::sort_hits(&mut hits, order, &request.book_generations);
         }
         for (sinks, max_word_distance, require_ordered, proximity) in text_negatives {
             let negative_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
@@ -1800,7 +1837,7 @@ impl LineIndex {
             !self.options.positions && request.phrase_alternatives.iter().any(|p| p.len() > 1);
         session.count_needs_text = main_needs_text || phrase_needs_text || !session.negative.is_empty();
         if session.matchers.is_empty() {
-            return Ok(SearchResult::new(Vec::new(), session));
+            return Ok(SearchResult::new(Vec::new(), session).with_notices(notices));
         }
         if let Some(main_terms) = main_terms {
             CancelToken::check(cancel.as_ref())?;
@@ -1827,10 +1864,10 @@ impl LineIndex {
             if timing {
                 eprintln!("  [timing] relevance {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);
             }
-            let mut result = SearchResult::new(hits, session);
+            let mut result = SearchResult::new(hits, session).with_notices(notices);
             result.scores = Some(scores);
             return Ok(result);
         }
-        Ok(SearchResult::new(hits, session))
+        Ok(SearchResult::new(hits, session).with_notices(notices))
     }
 }

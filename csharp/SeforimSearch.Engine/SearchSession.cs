@@ -160,6 +160,16 @@ namespace SeforimSearch.Engine
             return new HitCounts((long)(double)o["total"]!, books, (long)(double)o["validated"]!, (bool)o["exact"]!);
         }
 
+        /// <summary>How the search was served: its <see cref="SearchInfo.Notices"/>
+        /// (not errors; e.g. <see cref="SearchInfo.RelevanceNeedsPositions"/>).</summary>
+        public SearchInfo GetInfo()
+        {
+            var o = (Dictionary<string, object?>)Json.Parse(Interop.TakeString(NativeMethods.se_search_info(_handle)))!;
+            var notices = new List<string>();
+            foreach (var n in (List<object?>)o["notices"]!) notices.Add((string)n!);
+            return new SearchInfo(notices);
+        }
+
         /// <summary>Locates one matched line's snippet (see <see cref="LocateBatch"/>).</summary>
         public Snippet? Locate(string text) => LocateBatch(new[] { text })[0];
 
@@ -180,5 +190,22 @@ namespace SeforimSearch.Engine
             _registration.Dispose();   // waits for a running cancel callback
             _cancel?.Dispose();
         }
+    }
+
+    /// <summary>How a search was served (<see cref="SearchSession.GetInfo"/>).</summary>
+    public sealed class SearchInfo
+    {
+        /// <summary>Notice: relevance order was asked for a phrase / proximity /
+        /// multi-word fuzzy query on an index without positions; the hits are in
+        /// catalog order.</summary>
+        public const string RelevanceNeedsPositions = "relevance_needs_positions";
+
+        public SearchInfo(IReadOnlyList<string> notices)
+        {
+            Notices = notices;
+        }
+
+        /// <summary>Notices about the search (not errors), e.g. <see cref="RelevanceNeedsPositions"/>.</summary>
+        public IReadOnlyList<string> Notices { get; }
     }
 }

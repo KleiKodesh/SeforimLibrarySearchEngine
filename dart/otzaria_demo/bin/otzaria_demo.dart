@@ -255,6 +255,10 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   final sw = Stopwatch()..start();
   final session = index.search(request);
   final searchMs = sw.elapsedMilliseconds;
+  final searchInfo = session.info();
+  for (final n in searchInfo.notices) {
+    stderr.writeln('notice: $n');
+  }
 
   // Negative scope sameSection, host-side (the index holds no sections):
   // one search per negative word → line ids → sections via SQLite →

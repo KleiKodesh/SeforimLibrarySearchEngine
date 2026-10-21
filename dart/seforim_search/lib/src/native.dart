@@ -100,6 +100,8 @@ final class SeforimNative {
             int Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int)>('se_search_count_batch'),
         searchCounts = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_search_counts'),
+        searchInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Void>)>('se_search_info'),
         indexCloseFinalizer = NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_index_close').cast()),
         writerCloseFinalizer = NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_writer_close').cast()),
         searchCloseFinalizer = NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_search_close').cast()),
@@ -139,6 +141,7 @@ final class SeforimNative {
   final int Function(Pointer<Void>) countNeedsText;
   final int Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) countBatch;
   final Pointer<Utf8> Function(Pointer<Void>) searchCounts;
+  final Pointer<Utf8> Function(Pointer<Void>) searchInfo;
   final NativeFinalizer indexCloseFinalizer;
   final NativeFinalizer writerCloseFinalizer;
   final NativeFinalizer searchCloseFinalizer;

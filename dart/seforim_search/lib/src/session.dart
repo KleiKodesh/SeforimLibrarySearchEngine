@@ -113,6 +113,11 @@ final class SearchSession implements Finalizable {
   HitCounts counts() =>
       HitCounts.fromJson(jsonDecode(_n.takeString(_n.searchCounts(_h))) as Map<String, dynamic>);
 
+  /// How the search was served: its [SearchInfo.notices] (not errors; e.g.
+  /// [SearchInfo.relevanceNeedsPositions]).
+  SearchInfo info() =>
+      SearchInfo.fromJson(jsonDecode(_n.takeString(_n.searchInfo(_h))) as Map<String, dynamic>);
+
   /// One line's snippet.
   Snippet? locate(String text) => locateBatch([text])[0];
 
@@ -127,4 +132,18 @@ final class SearchSession implements Finalizable {
     _n.searchClose(_handle);
     _handle = nullptr;
   }
+}
+
+/// How a search was served ([SearchSession.info]).
+class SearchInfo {
+  const SearchInfo(this.notices);
+
+  /// Notice: relevance order was asked for a phrase / proximity / multi-word
+  /// fuzzy query on an index without positions; the hits are in catalog order.
+  static const relevanceNeedsPositions = 'relevance_needs_positions';
+
+  /// Notices about the search (not errors), e.g. [relevanceNeedsPositions].
+  final List<String> notices;
+
+  static SearchInfo fromJson(Map<String, dynamic> j) => SearchInfo((j['notices'] as List).cast<String>());
 }

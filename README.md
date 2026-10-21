@@ -700,9 +700,16 @@ are not printed), so upstream's query-parser tests stay as they are.
     flavours); fuzzy BM25 uses term frequencies and field norms (without
     positions there are no frequencies: every frequency reads as 1, as for
     Otzaria's own frequency-less terms); phrases, spans and the fuzzy
-    adjacency need positions, so on an index without positions those shapes
-    return an error (adding only frequencies would not serve them: about
-    +170 MB, the `.idx` difference of the two full builds).
+    adjacency need positions (adding only frequencies would not serve them:
+    about +170 MB, the `.idx` difference of the two full builds). On an
+    index without positions those shapes do not fail: the search comes
+    back in catalog order (no scores) with the notice
+    `relevance_needs_positions` (Rust `SearchResult::notices` / `info`, C
+    ABI `se_search_info` JSON `{"notices":[...]}`, C#
+    `SearchSession.GetInfo().Notices` /
+    `SearchInfo.RelevanceNeedsPositions`, Dart `session.info().notices` /
+    `SearchInfo.relevanceNeedsPositions`; the C# demo `count --order
+    relevance` and the Otzaria demo print it).
   - Deviations (named): the phrase IDF is taken from the slots' typed words
     (Otzaria's from its regex pattern strings, which equal the word for a
     plain word): a constant factor per query, the order inside a query is

@@ -65,6 +65,23 @@ namespace SeforimSearch.Engine
             var results = new Snippet?[n];
             if (n == 0) return results;
 
+            uint[] data = WithTexts(texts, (p, l) =>
+                Interop.TakeBuffer(NativeMethods.se_search_locate_batch(_handle, p, l, (UIntPtr)n)));
+            int at = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (data[at++] == 0) continue;
+                results[i] = Snippet.Read(data, ref at);
+            }
+            return results;
+        }
+
+        private delegate T TextsCall<T>(IntPtr* texts, UIntPtr* lens);
+
+        /// <summary>Pins the texts as UTF-8 and passes them as pointer + length arrays.</summary>
+        private static T WithTexts<T>(IReadOnlyList<string> texts, TextsCall<T> call)
+        {
+            int n = texts.Count;
             var pins = new GCHandle[n];
             var ptrs = new IntPtr[n];
             var lens = new UIntPtr[n];
@@ -77,24 +94,60 @@ namespace SeforimSearch.Engine
                     ptrs[i] = pins[i].AddrOfPinnedObject();
                     lens[i] = (UIntPtr)bytes.Length;
                 }
-                uint[] data;
                 fixed (IntPtr* p = ptrs)
                 fixed (UIntPtr* l = lens)
-                    data = Interop.TakeBuffer(NativeMethods.se_search_locate_batch(_handle, p, l, (UIntPtr)n));
-
-                int at = 0;
-                for (int i = 0; i < n; i++)
-                {
-                    if (data[at++] == 0) continue;
-                    results[i] = Snippet.Read(data, ref at);
-                }
-                return results;
+                    return call(p, l);
             }
             finally
             {
                 foreach (var pin in pins)
                     if (pin.IsAllocated) pin.Free();
             }
+        }
+
+        /// <summary>
+        /// True when the exact count needs the hits' texts (FtsLib's distance /
+        /// order, proximity on an index without positions, the text-level
+        /// negative): feed them with <see cref="CountBatch"/>. False: every hit
+        /// passes and <see cref="GetCounts"/> is exact at once, no text read.
+        /// </summary>
+        public bool CountNeedsText
+        {
+            get
+            {
+                int r = NativeMethods.se_search_count_needs_text(_handle);
+                if (r < 0) throw new SeforimEngineException(Interop.LastError());
+                return r != 0;
+            }
+        }
+
+        /// <summary>
+        /// Counts the next <c>texts.Count</c> hits (catalog order, continuing
+        /// from the previous call) from their texts, across all cores: the
+        /// lines that pass every filter are added to the exact totals. Returns
+        /// how many passed.
+        /// </summary>
+        public long CountBatch(IReadOnlyList<string> texts)
+        {
+            long passed = WithTexts(texts, (p, l) =>
+                NativeMethods.se_search_count_batch(_handle, p, l, (UIntPtr)texts.Count));
+            if (passed < 0) throw new SeforimEngineException(Interop.LastError());
+            return passed;
+        }
+
+        /// <summary>The exact totals so far: all lines and per book id
+        /// (Otzaria's count / countByBook). <see cref="HitCounts.Exact"/> once
+        /// every hit is counted.</summary>
+        public HitCounts GetCounts()
+        {
+            var o = (Dictionary<string, object?>)Json.Parse(Interop.TakeString(NativeMethods.se_search_counts(_handle)))!;
+            var books = new Dictionary<long, long>();
+            foreach (var e in (List<object?>)o["books"]!)
+            {
+                var pair = (List<object?>)e!;
+                books[(long)(double)pair[0]!] = (long)(double)pair[1]!;
+            }
+            return new HitCounts((long)(double)o["total"]!, books, (long)(double)o["validated"]!, (bool)o["exact"]!);
         }
 
         /// <summary>Locates one matched line's snippet (see <see cref="LocateBatch"/>).</summary>

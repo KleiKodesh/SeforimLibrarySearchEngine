@@ -760,6 +760,26 @@ namespace SeforimSearch.Engine
 
     /// <summary>A matching line, in catalog order: only the ids the index keeps. Any
     /// other placement (line index, section) comes from SQLite by line id.</summary>
+    /// <summary>
+    /// Exact totals of a search (Otzaria's count / countByBook): the lines that
+    /// pass every filter, in all and per book id.
+    /// </summary>
+    public sealed class HitCounts
+    {
+        public HitCounts(long total, IReadOnlyDictionary<long, long> byBook, long validated, bool exact)
+        {
+            Total = total; ByBook = byBook; Validated = validated; Exact = exact;
+        }
+        /// <summary>Lines that passed, among the hits counted so far.</summary>
+        public long Total { get; }
+        /// <summary>Lines per book id (books with none absent).</summary>
+        public IReadOnlyDictionary<long, long> ByBook { get; }
+        /// <summary>Hits counted so far, from the first in catalog order.</summary>
+        public long Validated { get; }
+        /// <summary>True when every hit is counted: the numbers are final.</summary>
+        public bool Exact { get; }
+    }
+
     public readonly struct PlacedHit
     {
         public PlacedHit(long position, long lineId, long bookId)

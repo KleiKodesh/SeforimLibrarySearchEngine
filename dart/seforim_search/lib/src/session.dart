@@ -61,16 +61,7 @@ final class SearchSession implements Finalizable {
     final n = texts.length;
     final out = List<Snippet?>.filled(n, null);
     if (n == 0) return out;
-    final data = using((a) {
-      final ptrs = a<Pointer<Uint8>>(n);
-      final lens = a<Size>(n);
-      for (var i = 0; i < n; i++) {
-        final (p, l) = utf8Native(texts[i], a);
-        ptrs[i] = p;
-        lens[i] = l;
-      }
-      return _n.takeBuffer(_n.locateBatch(_h, ptrs, lens, n));
-    });
+    final data = _withTexts(texts, (ptrs, lens) => _n.takeBuffer(_n.locateBatch(_h, ptrs, lens, n)));
     var at = 0;
     for (var i = 0; i < n; i++) {
       if (data[at++] == 0) continue;
@@ -80,6 +71,44 @@ final class SearchSession implements Finalizable {
     }
     return out;
   }
+
+  /// Passes [texts] as UTF-8 pointer + length arrays.
+  static T _withTexts<T>(List<String> texts, T Function(Pointer<Pointer<Uint8>>, Pointer<Size>) call) =>
+      using((a) {
+        final n = texts.length;
+        final ptrs = a<Pointer<Uint8>>(n == 0 ? 1 : n);
+        final lens = a<Size>(n == 0 ? 1 : n);
+        for (var i = 0; i < n; i++) {
+          final (p, l) = utf8Native(texts[i], a);
+          ptrs[i] = p;
+          lens[i] = l;
+        }
+        return call(ptrs, lens);
+      });
+
+  /// True when the exact count needs the hits' texts (FtsLib's distance /
+  /// order, proximity on an index without positions, the text-level
+  /// negative): feed them with [countBatch]. False: every hit passes and
+  /// [counts] is exact at once, no text read.
+  bool get countNeedsText {
+    final r = _n.countNeedsText(_h);
+    if (r < 0) throw _n.error();
+    return r != 0;
+  }
+
+  /// Counts the next `texts.length` hits (catalog order, continuing from the
+  /// previous call) from their texts, across all cores: the lines that pass
+  /// every filter are added to the exact totals. Returns how many passed.
+  int countBatch(List<String> texts) {
+    final passed = _withTexts(texts, (ptrs, lens) => _n.countBatch(_h, ptrs, lens, texts.length));
+    if (passed < 0) throw _n.error();
+    return passed;
+  }
+
+  /// The exact totals so far: all lines and per book id (Otzaria's count /
+  /// countByBook). [HitCounts.exact] once every hit is counted.
+  HitCounts counts() =>
+      HitCounts.fromJson(jsonDecode(_n.takeString(_n.searchCounts(_h))) as Map<String, dynamic>);
 
   /// One line's snippet.
   Snippet? locate(String text) => locateBatch([text])[0];

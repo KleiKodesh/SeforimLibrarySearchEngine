@@ -136,31 +136,7 @@ namespace FtsLib.Fts5
             if (string.IsNullOrWhiteSpace(query)) yield break;
             // The engine parses the query (FtsLib's QueryParser rules) and builds
             // one walk per word with these options.
-            var w = options.WordOptions ?? new WalkOptions();
-            var request = new SearchOptions(query)
-            {
-                GrammarPrefixes = w.GrammarPrefixes,
-                GrammarSuffixes = w.GrammarSuffixes,
-                AramaicPrefixes = w.AramaicPrefixes,
-                AramaicSuffixes = w.AramaicSuffixes,
-                KtivMaleHaser = w.KtivMaleHaser,
-                PartOfWord = w.PartOfWord,
-                AdvancedPrefixes = w.AdvancedPrefixes,
-                AdvancedSuffixes = w.AdvancedSuffixes,
-                IgnoreQuotes = w.IgnoreQuotes,
-                ExactQuotes = w.ExactQuotes,
-                SpellingErrors = w.SpellingErrors,
-                TypoMode = w.TypoMode,
-                IgnoreNikud = w.IgnoreNikud,
-                IgnoreTeamim = w.IgnoreTeamim,
-                PrefixMaxLetters = w.PrefixMaxLetters,
-                SuffixMaxLetters = w.SuffixMaxLetters,
-                PartOfWordMaxLetters = w.PartOfWordMaxLetters,
-                GrammarPrefixMaxLetters = w.GrammarPrefixMaxLetters,
-                MaxWordDistance = options.MaxWordDistance,
-                RequireOrdered = options.RequireOrdered,
-                ContextWords = options.ContextWords,
-            };
+            var request = ToRequest(query, options);
 
             onStage?.Invoke("search");
             // NOT disposed with the enumeration: results outlive it (Core snippets the
@@ -195,6 +171,67 @@ namespace FtsLib.Fts5
                     yield return new SearchResult(id, row.Text, row.Placement, session);
                 }
             }
+        }
+
+        /// <summary>The engine request for a query and this facade's options.</summary>
+        private static SearchOptions ToRequest(string query, TantivySearchOptions options)
+        {
+            var w = options.WordOptions ?? new WalkOptions();
+            return new SearchOptions(query)
+            {
+                GrammarPrefixes = w.GrammarPrefixes,
+                GrammarSuffixes = w.GrammarSuffixes,
+                AramaicPrefixes = w.AramaicPrefixes,
+                AramaicSuffixes = w.AramaicSuffixes,
+                KtivMaleHaser = w.KtivMaleHaser,
+                PartOfWord = w.PartOfWord,
+                AdvancedPrefixes = w.AdvancedPrefixes,
+                AdvancedSuffixes = w.AdvancedSuffixes,
+                IgnoreQuotes = w.IgnoreQuotes,
+                ExactQuotes = w.ExactQuotes,
+                SpellingErrors = w.SpellingErrors,
+                TypoMode = w.TypoMode,
+                IgnoreNikud = w.IgnoreNikud,
+                IgnoreTeamim = w.IgnoreTeamim,
+                PrefixMaxLetters = w.PrefixMaxLetters,
+                SuffixMaxLetters = w.SuffixMaxLetters,
+                PartOfWordMaxLetters = w.PartOfWordMaxLetters,
+                GrammarPrefixMaxLetters = w.GrammarPrefixMaxLetters,
+                MaxWordDistance = options.MaxWordDistance,
+                RequireOrdered = options.RequireOrdered,
+                ContextWords = options.ContextWords,
+            };
+        }
+
+        /// <summary>
+        /// Exact totals (Otzaria's count / countByBook): the lines passing every
+        /// filter, in all and per book id. When the engine says no text is needed
+        /// (no text-level check) the hit list is the answer and no text is read;
+        /// otherwise the texts are fetched in catalog order and validated by the
+        /// engine, multi-core, batch by batch. A line gone from the DB is not counted.
+        /// </summary>
+        public HitCounts CountByBook(string query, TantivySearchOptions? options = null,
+                                     CancellationToken ct = default, int batchSize = 4096)
+        {
+            options ??= new TantivySearchOptions();
+            using var session = Engine().Search(ToRequest(query, options));
+            if (!session.CountNeedsText) return session.GetCounts();
+            using var corpus = _openCorpus();
+            for (long offset = 0; offset < session.HitCount;)
+            {
+                ct.ThrowIfCancellationRequested();
+                PlacedHit[] hits = session.GetHits(offset, batchSize);
+                if (hits.Length == 0) break;
+                offset += hits.Length;
+                var ids = new int[hits.Length];
+                for (int i = 0; i < hits.Length; i++) ids[i] = (int)hits[i].LineId;
+                var byId = new Dictionary<int, string>(hits.Length);
+                foreach (var (id, text, _) in corpus.FetchPlacedDocuments(ids)) byId[id] = text;
+                var texts = new string[hits.Length];
+                for (int i = 0; i < ids.Length; i++) texts[i] = byId.TryGetValue(ids[i], out var t) ? t : string.Empty;
+                session.CountBatch(texts);
+            }
+            return session.GetCounts();
         }
 
         // ── Snippet windows ───────────────────────────────────────────

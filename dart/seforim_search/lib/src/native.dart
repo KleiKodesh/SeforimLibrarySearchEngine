@@ -76,6 +76,13 @@ final class SeforimNative {
             SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int)>('se_search_locate_batch'),
         takeNewTerms = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_search_take_new_terms'),
+        countNeedsText = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
+            'se_search_count_needs_text'),
+        countBatch = lib.lookupFunction<
+            Int64 Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Size),
+            int Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int)>('se_search_count_batch'),
+        searchCounts = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Void>)>('se_search_counts'),
         indexCloseFinalizer = NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_index_close').cast()),
         writerCloseFinalizer = NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_writer_close').cast()),
         searchCloseFinalizer = NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_search_close').cast()),
@@ -106,6 +113,9 @@ final class SeforimNative {
   final int Function(Pointer<Void>, int, int, Pointer<Uint64>) searchCopyHits;
   final SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) locateBatch;
   final Pointer<Utf8> Function(Pointer<Void>) takeNewTerms;
+  final int Function(Pointer<Void>) countNeedsText;
+  final int Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) countBatch;
+  final Pointer<Utf8> Function(Pointer<Void>) searchCounts;
   final NativeFinalizer indexCloseFinalizer;
   final NativeFinalizer writerCloseFinalizer;
   final NativeFinalizer searchCloseFinalizer;

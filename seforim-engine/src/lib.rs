@@ -26,7 +26,7 @@ pub use hebrew_fts::word_rule::keep_second_of_paired_readings as reduce_paired_r
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
 pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, WordOptions};
 pub use search::{
-    ExcludeSpec, GroupSpec, PlacedHit, ProximitySpec, SearchRequest, SearchResult, Snippet, SnippetSession,
+    ExcludeSpec, GroupSpec, HitCounts, PlacedHit, ProximitySpec, SearchRequest, SearchResult, Snippet, SnippetSession,
     TypoModeSpec, WalkOptionsSpec, SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,
 };
 
@@ -825,5 +825,85 @@ mod tests {
         w.merge_all().unwrap();
         assert!(index.build_fm_sidecar().unwrap());
         assert!(index.has_fm_sidecar());
+    }
+
+    #[test]
+    fn exact_counts_total_and_by_book() {
+        // moshe, torah, and filler words (escapes keep the source ASCII)
+        const A: &str = "\u{05de}\u{05e9}\u{05d4}";
+        const B: &str = "\u{05ea}\u{05d5}\u{05e8}\u{05d4}";
+        const X: &str = "\u{05d0}\u{05de}\u{05e8}";
+        let texts = [
+            format!("{A} {B}"),
+            format!("{A} {X} {X} {X} {B}"),
+            format!("{B} {A}"),
+            format!("{A} {X} {B}"),
+            format!("{B} {X}"),
+        ];
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let lines: Vec<LineDoc> = texts
+                .iter()
+                .enumerate()
+                .map(|(i, t)| line(i as u64, i as u64, 10 + (i as u64 % 2), t))
+                .collect();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &lines);
+            let two = || vec![word(A, false), word(B, false)];
+            let cases: Vec<(SearchRequest, u64)> = vec![
+                (SearchRequest { groups: two(), ..Default::default() }, 4),
+                (SearchRequest { groups: two(), max_word_distance: Some(1), ..Default::default() }, 3),
+                (SearchRequest { groups: two(), require_ordered: true, ..Default::default() }, 3),
+                (
+                    SearchRequest {
+                        groups: two(),
+                        proximity: Some(ProximitySpec::Ordered { gaps: vec![0] }),
+                        ..Default::default()
+                    },
+                    1,
+                ),
+                (
+                    SearchRequest {
+                        groups: two(),
+                        exclude: Some(ExcludeSpec {
+                            groups: vec![word(B, false), word(A, false)],
+                            require_ordered: true,
+                            max_word_distance: Some(0),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    3,
+                ),
+                (SearchRequest { groups: vec![word(B, false)], ..Default::default() }, 5),
+            ];
+            for (req, want) in cases {
+                let mut r = index.search(&req).unwrap();
+                // the reference: every hit located one by one
+                let mut by_book = std::collections::BTreeMap::<u64, u64>::new();
+                for h in &r.hits {
+                    if r.session.locate(&texts[h.line_id as usize]).is_some() {
+                        *by_book.entry(h.book_id).or_default() += 1;
+                    }
+                }
+                let reference: u64 = by_book.values().sum();
+                assert_eq!(reference, want, "positions={positions} {req:?}");
+                let hit_texts: Vec<&str> = r.hits.iter().map(|h| texts[h.line_id as usize].as_str()).collect();
+                if r.count_needs_text() {
+                    assert!(!r.counts().exact);
+                    // two batches, continuing in catalog order
+                    let (a, b) = hit_texts.split_at(hit_texts.len() / 2);
+                    r.count_batch(a).unwrap();
+                    r.count_batch(b).unwrap();
+                    assert!(r.count_batch(&[""]).is_err(), "past the last hit");
+                } else {
+                    // no text-level check: the hit list itself is exact
+                    assert_eq!(r.hits.len() as u64, want, "positions={positions} {req:?}");
+                }
+                let c = r.counts();
+                assert!(c.exact);
+                assert_eq!(c.total, want, "positions={positions} {req:?}");
+                assert_eq!(c.books, by_book.into_iter().collect::<Vec<_>>());
+            }
+        }
     }
 }

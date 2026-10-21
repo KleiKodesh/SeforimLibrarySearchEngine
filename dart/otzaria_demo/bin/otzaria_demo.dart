@@ -32,6 +32,7 @@ search options (Otzaria names):
   --group section|identical  (Otzaria's grouping; limit/offset then count groups)
   --group-scan N      identical: hits read for signatures (default 20000)
   --limit N (100) --offset N (0)  --context N (8)
+  --count             exact totals: all lines passing every filter, and per book
   word alternatives: write a,b in the query (Otzaria sets them per word in the UI)
   library paths: --native path (seforim_search_native), --zstd path (libzstd)
 ''';
@@ -304,6 +305,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
       '${hits.length != session.hitCount ? ' (${hits.length} after section exclusion)' : ''}, search ${searchMs}ms, '
       'page ${sw.elapsedMilliseconds}ms');
   stdout.writeln('Matched words: ${terms.take(30).join(', ')}${terms.length > 30 ? ' …' : ''}');
+  if (o.containsKey('count')) _printCounts(db, session, titles);
   var n = offset;
   for (final (h, text, s) in results) {
     stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})');
@@ -311,6 +313,28 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   }
   session.close();
   index.close();
+}
+
+/// Exact totals (Otzaria's count / countByBook) from the engine: when no
+/// text-level check applies the hit list is the answer, otherwise the texts
+/// are fed in catalog order and the engine validates them. Before any
+/// host-side section exclusion.
+void _printCounts(SeforimDb db, SearchSession session, Map<int, String> titles) {
+  final sw = Stopwatch()..start();
+  if (session.countNeedsText) {
+    for (var o = 0; o < session.hitCount; o += 4096) {
+      final batch = session.hits(o, 4096);
+      final texts = db.lineTexts(batch.map((h) => h.lineId));
+      session.countBatch([for (final h in batch) texts[h.lineId] ?? '']);
+    }
+  }
+  final c = session.counts();
+  stdout.writeln('Exact count: ${c.total} lines in ${c.byBook.length} books '
+      '(${session.countNeedsText ? 'texts validated' : 'no text needed'}, ${sw.elapsedMilliseconds}ms)');
+  final top = c.byBook.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+  for (final e in top.take(5)) {
+    stdout.writeln('  ${titles[e.key] ?? e.key}: ${e.value}');
+  }
 }
 
 /// Otzaria's grouped results (see lib/grouping.dart). Groups are formed over

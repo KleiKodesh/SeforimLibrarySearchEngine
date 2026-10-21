@@ -101,6 +101,30 @@ void main() {
     s.close();
   });
 
+  test('exact counts: with and without a text-level filter', () {
+    const bereshit = 'בראשית';
+    const haaretz = 'הארץ';
+    final far = index.searchRequest(SearchRequest(
+      groups: [const QueryGroup.word(bereshit), const QueryGroup.word(haaretz)],
+      maxWordDistance: 1,
+    ));
+    expect(far.countNeedsText, isTrue);
+    expect(far.counts().exact, isFalse);
+    expect(far.countBatch([text2]), 0);
+    final c = far.counts();
+    expect(c.exact, isTrue);
+    expect(c.total, 0);
+    expect(c.byBook, isEmpty);
+    expect(() => far.countBatch([text2]), throwsA(isA<SeforimEngineException>()));
+    far.close();
+    final plain = index.searchRequest(SearchRequest(groups: [const QueryGroup.word(bereshit)]));
+    expect(plain.countNeedsText, isFalse);
+    final p = plain.counts();
+    expect([p.total, p.validated, p.exact], [1, 1, true]);
+    expect(p.byBook, {2: 1});
+    plain.close();
+  });
+
   test('any + fuzzy + a host-joined longer text', () {
     final s = index.searchRequest(SearchRequest(groups: [
       const QueryGroup.any([QueryGroup.word('משה'), QueryGroup.fuzzy('למשא', 1)]),

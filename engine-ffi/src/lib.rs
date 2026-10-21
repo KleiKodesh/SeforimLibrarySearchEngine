@@ -472,6 +472,37 @@ pub unsafe extern "C" fn se_buffer_free(buffer: SeBuffer) {
     }
 }
 
+/// `count` texts given as parallel pointer and length arrays. Texts are NOT
+/// re-validated: the contract is that the host passes UTF-8 it just encoded
+/// (C# Encoding.UTF8, Dart utf8.encode). Re-validating 1.8 GB of text cost
+/// 3.8 s on an 800k-hit search. Null pointers are still rejected.
+unsafe fn text_args<'a>(
+    texts: *const *const u8,
+    lens: *const usize,
+    count: usize,
+) -> std::result::Result<Vec<&'a str>, String> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if texts.is_null() || lens.is_null() {
+        return Err("null text array".into());
+    }
+    let texts = std::slice::from_raw_parts(texts, count);
+    let lens = std::slice::from_raw_parts(lens, count);
+    let mut strs = Vec::with_capacity(count);
+    for i in 0..count {
+        if texts[i].is_null() {
+            if lens[i] != 0 {
+                return Err("null text".into());
+            }
+            strs.push("");
+        } else {
+            strs.push(std::str::from_utf8_unchecked(std::slice::from_raw_parts(texts[i], lens[i])));
+        }
+    }
+    Ok(strs)
+}
+
 /// Locates the snippets of a batch of matched lines. `texts` is `count`
 /// UTF-8 strings given as parallel pointer and length arrays. Output, per
 /// text: `[0]` when the line does not pass (filters), else `[1]` followed by
@@ -497,23 +528,8 @@ pub unsafe extern "C" fn se_search_locate_batch(
         let search = search.as_mut().ok_or("null search")?;
         let timing = std::env::var_os("SEFORIM_ENGINE_TIMING").is_some();
         let t0 = std::time::Instant::now();
-        let texts = std::slice::from_raw_parts(texts, count);
+        let strs = text_args(texts, lens, count)?;
         let lens = std::slice::from_raw_parts(lens, count);
-        // Texts are NOT re-validated: the contract (see the function docs) is
-        // that the host passes UTF-8 it just encoded (C# Encoding.UTF8, Dart
-        // utf8.encode). Re-validating 1.8 GB of text cost 3.8 s on an 800k-hit
-        // search. Null pointers are still rejected.
-        let mut strs = Vec::with_capacity(count);
-        for i in 0..count {
-            if texts[i].is_null() {
-                if lens[i] != 0 {
-                    return Err("null text".into());
-                }
-                strs.push("");
-            } else {
-                strs.push(std::str::from_utf8_unchecked(std::slice::from_raw_parts(texts[i], lens[i])));
-            }
-        }
         let t1 = std::time::Instant::now();
         let located = search.session.locate_many(&strs);
         let t2 = std::time::Instant::now();
@@ -537,6 +553,53 @@ pub unsafe extern "C" fn se_search_locate_batch(
             );
         }
         Ok(SeBuffer::from_vec(out))
+    })
+}
+
+/// True (1) when the exact count needs the hits' texts (fed in catalog
+/// order with `se_search_count_batch`), 0 when every hit passes and
+/// `se_search_counts` is exact at once; -1 on error.
+///
+/// # Safety
+/// `search` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_count_needs_text(search: *const SearchResult) -> i32 {
+    guard(-1, || Ok(search.as_ref().ok_or("null search")?.count_needs_text() as i32))
+}
+
+/// Counts the next `count` hits (catalog order, continuing from the
+/// previous call) given their texts, as `se_search_locate_batch` takes
+/// them: the passing lines are added to the exact totals. Returns how many
+/// passed, or -1 on error (more texts than hits left).
+///
+/// # Safety
+/// As `se_search_locate_batch`.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_count_batch(
+    search: *mut SearchResult,
+    texts: *const *const u8,
+    lens: *const usize,
+    count: usize,
+) -> i64 {
+    guard(-1, || {
+        let search = search.as_mut().ok_or("null search")?;
+        let strs = text_args(texts, lens, count)?;
+        Ok(search.count_batch(&strs).map_err(err)? as i64)
+    })
+}
+
+/// The exact totals so far as JSON:
+/// `{"total":N,"books":[[book_id,lines],...],"validated":K,"exact":true}`
+/// (books ascending; `exact` once every hit is counted). Free with
+/// `se_string_free`.
+///
+/// # Safety
+/// `search` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_counts(search: *const SearchResult) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let search = search.as_ref().ok_or("null search")?;
+        Ok(out_string(serde_json::to_string(&search.counts()).map_err(err)?))
     })
 }
 
@@ -609,6 +672,17 @@ mod tests {
             let terms = se_search_take_new_terms(search);
             assert_eq!(CStr::from_ptr(terms).to_str().unwrap(), r#"["והתורה"]"#);
             se_string_free(terms);
+
+            // exact counts: no text-level filter, so exact without texts
+            assert_eq!(se_search_count_needs_text(search), 0);
+            let c = se_search_counts(search);
+            assert_eq!(
+                CStr::from_ptr(c).to_str().unwrap(),
+                r#"{"total":1,"books":[[1,1]],"validated":1,"exact":true}"#
+            );
+            se_string_free(c);
+            assert_eq!(se_search_count_batch(search, ptrs.as_ptr(), lens.as_ptr(), 1), 1);
+            assert_eq!(se_search_count_batch(search, ptrs.as_ptr(), lens.as_ptr(), 1), -1);
             se_search_close(search);
 
             // the public SearchOptions object: per-word override wins

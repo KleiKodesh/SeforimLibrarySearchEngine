@@ -317,6 +317,25 @@ are not printed), so upstream's query-parser tests stay as they are.
   come back (an empty set = no hits). Checked per doc on the `book_id` fast
   column during collection, so it covers the main query, phrase
   alternatives and exclusion alike.
+- **Exact totals and per-book counts** (Otzaria's `count` /
+  `count_by_book`): the number of lines that pass EVERY filter (distance,
+  order, proximity, phrase alternatives, negative query), in all and per
+  `book_id`. Rust `SearchResult::counts` / `count_batch`, C ABI
+  `se_search_count_needs_text` / `se_search_count_batch` /
+  `se_search_counts` (JSON `{total, books:[[book_id,lines]], validated,
+  exact}`), C# `SearchSession.CountNeedsText` / `CountBatch` / `GetCounts`
+  (demo: `TantivySeforimIndex.CountByBook`, command `count`), Dart
+  `countNeedsText` / `countBatch` / `counts()` (demo `--count`).
+  - When no check is left for the text (no FtsLib distance/order, the
+    proximity or phrases already ran as span queries on positions, no
+    text-level negative), the hit list IS the answer: counted from the
+    `book_id` fast column, no text read.
+  - Otherwise the host feeds the hits' texts in catalog order (any batch
+    size); the engine validates each batch across all cores with exactly
+    the snippet locator's test (no snippet, no term table) and adds the
+    passing lines. `exact` turns true when every hit is counted. This is
+    the no-positions flavour's path, and FtsLib's text-based distance on
+    either flavour.
 - **Search:** every matching line in catalog order, plus a snippet session.
   - The session locates snippets for a whole batch across all cores.
   - It applies the word-distance and order filters. Widening a short

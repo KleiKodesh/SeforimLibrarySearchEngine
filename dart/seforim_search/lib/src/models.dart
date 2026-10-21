@@ -384,6 +384,31 @@ class ExcludeSpec {
 
 /// A matching line, in catalog order: only the ids the index keeps. Any
 /// other placement (line index, section) comes from SQLite by line id.
+/// Exact totals of a search (Otzaria's count / countByBook): the lines that
+/// pass every filter, in all and per book id.
+class HitCounts {
+  const HitCounts(this.total, this.byBook, this.validated, this.exact);
+
+  /// Lines that passed, among the hits counted so far.
+  final int total;
+
+  /// Lines per book id (books with none absent).
+  final Map<int, int> byBook;
+
+  /// Hits counted so far, from the first in catalog order.
+  final int validated;
+
+  /// True when every hit is counted: the numbers are final.
+  final bool exact;
+
+  static HitCounts fromJson(Map<String, dynamic> j) => HitCounts(
+        j['total'] as int,
+        {for (final p in (j['books'] as List)) (p as List)[0] as int: p[1] as int},
+        j['validated'] as int,
+        j['exact'] as bool,
+      );
+}
+
 class PlacedHit {
   const PlacedHit(this.position, this.lineId, this.bookId);
   final int position;

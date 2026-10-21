@@ -404,6 +404,11 @@ pub struct SnippetSession {
     locator: SnippetWindowLocator,
     /// One locator per `locate_many` worker, kept across batches.
     pool: Vec<SnippetWindowLocator>,
+    /// True when some hits may fail the text-level checks (FtsLib's
+    /// distance / order, proximity without positions, a looser phrase
+    /// alternative, the text-level negative): an exact count then needs
+    /// the lines' texts. False: every hit passes, the hit list is exact.
+    count_needs_text: bool,
 }
 
 /// One way a line can match: prepared terms plus the filters to apply.
@@ -500,17 +505,55 @@ impl SnippetSession {
         if self.matchers.is_empty() {
             return vec![None; texts.len()];
         }
+        // Snippets with marks still holding the query's term ORDINALS.
+        let located = self.run_many(texts, locate_with);
+        // Ordinals -> search-wide term ids, in document order (deterministic).
+        located
+            .into_iter()
+            .map(|r| {
+                r.map(|(i, mut s)| {
+                    let prepared = &self.matchers[i].prepared;
+                    for m in s.marks.chunks_exact_mut(3) {
+                        m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
+                    }
+                    s
+                })
+            })
+            .collect()
+    }
+
+    /// Whether each text passes (the same test as [`locate`](Self::locate)
+    /// returning Some), across all cores; the term table is not touched.
+    pub fn passes_many(&mut self, texts: &[&str]) -> Vec<bool> {
+        if self.matchers.is_empty() {
+            return vec![false; texts.len()];
+        }
+        self.run_many(texts, |m, n, l, t| locate_with(m, n, l, t).is_some())
+    }
+
+    /// True when an exact count needs the hits' texts (see
+    /// [`SearchResult::count_batch`]); false when every hit passes.
+    pub fn count_needs_text(&self) -> bool {
+        self.count_needs_text
+    }
+
+    /// Runs `f` on every text, in parallel for large batches (one locator
+    /// per worker, kept across calls), results in input order.
+    fn run_many<T: Send>(
+        &mut self,
+        texts: &[&str],
+        f: impl Fn(&[Matcher], Option<&NegativeFilter>, &mut SnippetWindowLocator, &str) -> T + Sync,
+    ) -> Vec<T> {
         let matchers = &self.matchers;
         let negative = self.negative.as_ref();
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
             .min(texts.len().max(1));
-        // Snippets with marks still holding the query's term ORDINALS.
-        let mut located: Vec<Option<(usize, Snippet)>> = Vec::with_capacity(texts.len());
+        let mut located: Vec<T> = Vec::with_capacity(texts.len());
         if threads <= 1 || texts.len() < 32 {
             for t in texts {
-                located.push(locate_with(matchers, negative, &mut self.locator, t));
+                located.push(f(matchers, negative, &mut self.locator, t));
             }
         } else {
             // Work is split by BYTES, not by text count: locate cost is linear
@@ -544,7 +587,8 @@ impl SnippetSession {
                     SnippetWindowLocator::new(context)
                 });
             }
-            let mut parts: Vec<Option<Vec<Option<(usize, Snippet)>>>> = vec![None; chunks];
+            let mut parts: Vec<Option<Vec<T>>> = (0..chunks).map(|_| None).collect();
+            let f = &f;
             std::thread::scope(|scope| {
                 let (bounds, next) = (&bounds, &next);
                 let handles: Vec<_> = self.pool[..threads]
@@ -559,7 +603,7 @@ impl SnippetSession {
                                 }
                                 let part = &texts[bounds[c]..bounds[c + 1]];
                                 let res: Vec<_> =
-                                    part.iter().map(|t| locate_with(matchers, negative, locator, t)).collect();
+                                    part.iter().map(|t| f(matchers, negative, locator, t)).collect();
                                 done.push((c, res));
                             }
                             done
@@ -576,19 +620,7 @@ impl SnippetSession {
                 located.extend(p.expect("every chunk is located"));
             }
         }
-        // Ordinals → search-wide term ids, in document order (deterministic).
         located
-            .into_iter()
-            .map(|r| {
-                r.map(|(i, mut s)| {
-                    let prepared = &self.matchers[i].prepared;
-                    for m in s.marks.chunks_exact_mut(3) {
-                        m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
-                    }
-                    s
-                })
-            })
-            .collect()
     }
 
     /// A passing descriptor as a Snippet whose marks carry term ordinals.
@@ -641,6 +673,100 @@ impl SnippetSession {
 pub struct SearchResult {
     pub hits: Vec<PlacedHit>,
     pub session: SnippetSession,
+    /// Text validation progress for the exact count (see `count_batch`).
+    tally: CountTally,
+}
+
+/// Exact totals of a search: the lines that pass every filter (including
+/// the distance / order / proximity / negative checks), in all and per
+/// book (Otzaria's `count` / `count_by_book`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HitCounts {
+    /// Lines that passed, among the hits counted so far.
+    pub total: u64,
+    /// `(book_id, lines)`, ascending book id; books with no line absent.
+    pub books: Vec<(u64, u64)>,
+    /// Hits counted so far (from the first, in catalog order).
+    pub validated: u64,
+    /// True when every hit is counted: `total` and `books` are final.
+    pub exact: bool,
+}
+
+#[derive(Debug, Default)]
+struct CountTally {
+    validated: usize,
+    books: std::collections::BTreeMap<u64, u64>,
+    total: u64,
+}
+
+impl SearchResult {
+    fn new(hits: Vec<PlacedHit>, session: SnippetSession) -> SearchResult {
+        SearchResult { hits, session, tally: CountTally::default() }
+    }
+
+    /// True when the exact count needs the hits' texts: feed them in
+    /// catalog order with [`count_batch`](Self::count_batch). False: every
+    /// hit passes and [`counts`](Self::counts) is exact at once.
+    pub fn count_needs_text(&self) -> bool {
+        self.session.count_needs_text && !self.hits.is_empty()
+    }
+
+    /// Validates the texts of the next `texts.len()` hits (catalog order,
+    /// continuing from the previous batch) across all cores and adds the
+    /// passing ones to the counts. Returns how many passed. The test is
+    /// exactly [`SnippetSession::locate`]'s. When no text is needed the
+    /// texts are not read (every hit passes).
+    pub fn count_batch(&mut self, texts: &[&str]) -> Result<usize> {
+        let start = self.tally.validated;
+        let end = start + texts.len();
+        if end > self.hits.len() {
+            return Err(Error::Unsupported(format!(
+                "count_batch: {} texts past the last hit ({} of {} counted)",
+                texts.len(),
+                start,
+                self.hits.len()
+            )));
+        }
+        let pass = if self.session.count_needs_text {
+            self.session.passes_many(texts)
+        } else {
+            vec![true; texts.len()]
+        };
+        let mut passed = 0;
+        for (hit, ok) in self.hits[start..end].iter().zip(pass) {
+            if ok {
+                *self.tally.books.entry(hit.book_id).or_default() += 1;
+                passed += 1;
+            }
+        }
+        self.tally.total += passed as u64;
+        self.tally.validated = end;
+        Ok(passed)
+    }
+
+    /// The counts so far. Exact at once when no text is needed (every hit
+    /// passes: counted from the hits' book ids, no text read); otherwise
+    /// exact once [`count_batch`](Self::count_batch) has seen every hit.
+    pub fn counts(&self) -> HitCounts {
+        if !self.count_needs_text() {
+            let mut books = std::collections::BTreeMap::<u64, u64>::new();
+            for h in &self.hits {
+                *books.entry(h.book_id).or_default() += 1;
+            }
+            return HitCounts {
+                total: self.hits.len() as u64,
+                books: books.into_iter().collect(),
+                validated: self.hits.len() as u64,
+                exact: true,
+            };
+        }
+        HitCounts {
+            total: self.tally.total,
+            books: self.tally.books.iter().map(|(&b, &n)| (b, n)).collect(),
+            validated: self.tally.validated as u64,
+            exact: self.tally.validated == self.hits.len(),
+        }
+    }
 }
 
 // ── Collector: every matching doc with its placement, from fast fields ───
@@ -1042,6 +1168,7 @@ impl LineIndex {
             terms: TermTable::default(),
             locator,
             pool: Vec::new(),
+            count_needs_text: false,
         };
 
         let reader = self.index.reader()?;
@@ -1140,7 +1267,7 @@ impl LineIndex {
             }
         }
         let query: Box<dyn Query> = match (main_query, alternatives.is_empty()) {
-            (None, true) => return Ok(SearchResult { hits: Vec::new(), session }),
+            (None, true) => return Ok(SearchResult::new(Vec::new(), session)),
             (Some(q), true) => q,
             (main, false) => {
                 let mut should: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -1297,9 +1424,23 @@ impl LineIndex {
                 });
             }
         }
+        // Which hits the locator can still reject (see `count_needs_text`).
+        let main_needs_text = main_ok
+            && match &proximity {
+                // the span query already checked the rule on the positions
+                Some(_) => !(self.options.positions && request.groups.len() > 1),
+                None => {
+                    !partial
+                        && (request.max_word_distance.is_some()
+                            || (request.require_ordered && request.gaps.is_none()))
+                }
+            };
+        let phrase_needs_text =
+            !self.options.positions && request.phrase_alternatives.iter().any(|p| p.len() > 1);
+        session.count_needs_text = main_needs_text || phrase_needs_text || session.negative.is_some();
         if session.matchers.is_empty() {
-            return Ok(SearchResult { hits: Vec::new(), session });
+            return Ok(SearchResult::new(Vec::new(), session));
         }
-        Ok(SearchResult { hits, session })
+        Ok(SearchResult::new(hits, session))
     }
 }

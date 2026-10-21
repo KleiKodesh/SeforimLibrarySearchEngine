@@ -12,6 +12,7 @@ namespace SeforimSearch.Demo
     /// Demo console:
     ///   build  [--db path] [--index dir] [--max-lines N] [--no-positions]
     ///   search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] query...
+    ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] query...
     /// The seforim.db path defaults to KitveiHakodesh's resolution order
     /// (registry choice, then Otzaria, then Zayit).
     /// </summary>
@@ -39,6 +40,7 @@ namespace SeforimSearch.Demo
             if (command == "build") return Build(engine, args);
             if (command == "search") return Search(engine, args);
             if (command == "dump") return Dump(engine, args);
+            if (command == "count") return Count(engine, args);
             Console.Error.WriteLine("unknown command " + command);
             return 2;
         }
@@ -112,6 +114,34 @@ namespace SeforimSearch.Demo
             if (FtsLib.Fts5.HostTiming.Enabled) Console.Error.WriteLine(FtsLib.Fts5.HostTiming.Report());
             Console.Error.WriteLine($"search: {total:N0} hits in {sw.Elapsed.TotalMilliseconds:F0} ms " +
                                     $"(first batch {first?.TotalMilliseconds:F0} ms); terms: {string.Join(", ", terms.All())}");
+            return 0;
+        }
+
+        /// <summary>Exact totals (all lines and per book) for one query, timed.</summary>
+        private static int Count(SeforimDbFtsEngine engine, string[] args)
+        {
+            var words = args.Skip(1).Where((a, i) => !a.StartsWith("--", StringComparison.Ordinal)
+                && (i == 0 || !new[] { "--db", "--index", "--distance" }.Contains(args[i]))).ToArray();
+            string query = string.Join(" ", words);
+            int distance = int.TryParse(Option(args, "--distance"), out var d) ? d : int.MaxValue;
+            var options = new FtsLib.Fts5.TantivySearchOptions
+            {
+                WordOptions = new WalkOptions
+                {
+                    IgnoreQuotes = !args.Contains("--exact-quotes"),
+                    ExactQuotes = args.Contains("--exact-quotes"),
+                    GrammarPrefixes = args.Contains("--prefixes"),
+                    GrammarSuffixes = args.Contains("--suffixes"),
+                },
+                MaxWordDistance = distance >= int.MaxValue ? (int?)null : distance,
+                RequireOrdered = args.Contains("--ordered"),
+            };
+            var sw = Stopwatch.StartNew();
+            var counts = engine.Index.CountByBook(query, options);
+            Console.Error.WriteLine($"count: {counts.Total:N0} lines in {counts.ByBook.Count:N0} books " +
+                                    $"(hits validated {counts.Validated:N0}, exact={counts.Exact}) in {sw.Elapsed.TotalMilliseconds:F0} ms");
+            foreach (var kv in counts.ByBook.OrderByDescending(kv => kv.Value).Take(5))
+                Console.WriteLine($"book {kv.Key}: {kv.Value:N0}");
             return 0;
         }
 

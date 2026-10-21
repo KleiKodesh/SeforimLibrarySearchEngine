@@ -268,6 +268,8 @@ seforim.db knowledge).
 - Profile the C# search path (1.0 s net10 / 1.5 s net48 vs 0.38 s pure Rust).
 - Otzaria gaps still open: the positive query's sameSection scope, relevance
   ordering.
+  **Otzaria app checkout: `C:/Users/Public/Documents/otzaria`** (KleiKodesh/otzaria; pins
+  otzaria_search_engine v5.0.0, same as the scratchpad copy): use it for parity checks.
   Otzaria's sources: `github.com/Otzaria/otzaria` (Dart) and
   `github.com/Otzaria/otzaria_search_engine` v5.0.0 (Rust `hebrew_query.rs`,
   `api/search_engine.rs`, `lexicons.rs`); clone them into the scratchpad to port.

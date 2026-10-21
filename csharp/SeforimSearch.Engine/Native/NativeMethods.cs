@@ -98,6 +98,15 @@ namespace SeforimSearch.Engine.Native
         public static extern IntPtr se_search_take_new_terms(SearchHandle search);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_search_count_needs_text(SearchHandle search);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern long se_search_count_batch(SearchHandle search, IntPtr* texts, UIntPtr* lens, UIntPtr count);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_search_counts(SearchHandle search);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern void se_search_close(IntPtr search);
     }
 }

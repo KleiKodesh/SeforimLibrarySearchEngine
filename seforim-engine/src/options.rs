@@ -441,16 +441,69 @@ fn phrases(list: &[PhraseOptions], keep_marks: bool) -> Vec<Vec<GroupSpec>> {
 }
 
 /// One slot for a parsed term with its word's options. Wildcard, fuzzy and
-/// `%` words take only the quote option (as FtsLib's parser).
+/// `%` words take only the quote option (as FtsLib's parser), plus ktiv:
+/// with `ktiv_male_haser` on, a wildcard's literal core (only leading /
+/// trailing `*`, no `?`) and a `%` word also search their spelling
+/// variants, ORed in the slot (FtsLib, KitveiHakodesh `71162c83`: else
+/// `*word*` would match fewer lines than `word`). The variants are the ktiv
+/// walk's (Otzaria's rules), which replace FtsLib's `KetivExpander` here.
 fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
     let ignore_quotes = o.ignore_quotes;
     match term {
         QueryTerm::Word(word) => GroupSpec::Word { word, options: o },
         QueryTerm::Unindexed(word) => GroupSpec::Unindexed { word },
-        QueryTerm::Wildcard(pattern) => GroupSpec::Wildcard { pattern, ignore_quotes },
+        QueryTerm::Wildcard(pattern) => {
+            let variants: Vec<GroupSpec> = match (o.ktiv_male_haser, star_core(&pattern)) {
+                (true, Some((lead, core, trail))) => ktiv_variants(core)
+                    .into_iter()
+                    .map(|v| GroupSpec::Wildcard { pattern: format!("{lead}{v}{trail}"), ignore_quotes })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            with_variants(GroupSpec::Wildcard { pattern, ignore_quotes }, variants)
+        }
         QueryTerm::Fuzzy { word, distance } => GroupSpec::Fuzzy { word, distance, ignore_quotes },
-        QueryTerm::Grammar { word, prefixes, suffixes } => GroupSpec::Grammar { word, prefixes, suffixes, ignore_quotes },
+        QueryTerm::Grammar { word, prefixes, suffixes } => {
+            let variants: Vec<GroupSpec> = if o.ktiv_male_haser {
+                ktiv_variants(&word)
+                    .into_iter()
+                    .map(|v| GroupSpec::Grammar { word: v, prefixes, suffixes, ignore_quotes })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            with_variants(GroupSpec::Grammar { word, prefixes, suffixes, ignore_quotes }, variants)
+        }
     }
+}
+
+/// FtsLib's `TrySplitStarCore`: a wildcard whose only wildcards are leading
+/// / trailing `*` runs (no `?`, no inner `*`), split into (lead, core, trail).
+fn star_core(pattern: &str) -> Option<(&str, &str, &str)> {
+    if pattern.contains('?') {
+        return None;
+    }
+    let core = pattern.trim_matches('*');
+    if core.is_empty() || core.contains('*') {
+        return None;
+    }
+    let start = pattern.len() - pattern.trim_start_matches('*').len();
+    Some((&pattern[..start], core, &pattern[start + core.len()..]))
+}
+
+/// The ktiv male / haser variants of `word`, the word itself left out.
+fn ktiv_variants(word: &str) -> Vec<String> {
+    hebrew_fts::variants::ktiv_male_haser_variants(word).into_iter().filter(|v| v != word).collect()
+}
+
+/// `base`, or an OR slot of `base` and its variants.
+fn with_variants(base: GroupSpec, variants: Vec<GroupSpec>) -> GroupSpec {
+    if variants.is_empty() {
+        return base;
+    }
+    let mut alternatives = vec![base];
+    alternatives.extend(variants);
+    GroupSpec::Any { alternatives }
 }
 
 /// True for a slot of words too long to be indexed only
@@ -628,6 +681,34 @@ fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptions
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FtsLib 71162c83: with ktiv on, a star-only wildcard core and a `%`
+    /// word take their spelling variants (ORed); off, the slot is unchanged.
+    #[test]
+    fn ktiv_varies_wildcard_cores_and_grammar_words() {
+        // shin lamed vav final-mem: a haser variant exists (vav dropped)
+        let word = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
+        let lower = |q: String, ktiv: bool| {
+            let o = SearchOptions { query: q, ktiv_male_haser: ktiv, ..Default::default() };
+            o.to_request(false).unwrap().groups
+        };
+        let g = lower(format!("*{word}*"), true);
+        match &g[0] {
+            GroupSpec::Any { alternatives } => {
+                assert!(alternatives.len() > 1);
+                assert!(matches!(&alternatives[0], GroupSpec::Wildcard { pattern, .. } if *pattern == format!("*{word}*")));
+                assert!(alternatives[1..].iter().all(|a| matches!(a, GroupSpec::Wildcard { pattern, .. } if pattern.starts_with('*') && pattern.ends_with('*'))));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(&lower(format!("*{word}*"), false)[0], GroupSpec::Wildcard { .. }));
+        // a `?` pattern is not a star-only core: unchanged
+        assert!(matches!(&lower(format!("{word}?"), true)[0], GroupSpec::Wildcard { .. }));
+        assert!(matches!(&lower(format!("%{word}"), true)[0], GroupSpec::Any { .. }));
+        assert!(matches!(&lower(format!("%{word}"), false)[0], GroupSpec::Grammar { .. }));
+        assert_eq!(star_core("**ab*"), Some(("**", "ab", "*")));
+        assert_eq!(star_core("a*b"), None);
+    }
 
     fn word_of(g: &GroupSpec) -> (&str, WalkOptionsSpec) {
         match g {

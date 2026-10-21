@@ -573,7 +573,9 @@ are not printed), so upstream's query-parser tests stay as they are.
     `match_teamim`, `typo_mode`, `prefix_max_letters`,
     `suffix_max_letters`, `part_of_word_max_letters`,
     `grammar_prefix_max_letters`. Wildcard, fuzzy and `%` words take only
-    `ignore_quotes` (as FtsLib's parser).
+    `ignore_quotes` (as FtsLib's parser), and `ktiv_male_haser` for a
+    star-only wildcard core or a `%` word (their spelling variants ORed
+    in, as FtsLib's ketiv).
   - `words`: per-word overrides by word index. **Word index rule:** the
     place, from 0, of the word as the user typed it: the query cut on
     space / tab / CR / LF and `|` (`|` is never a word, spaced or not; a
@@ -999,7 +1001,13 @@ what a page needs.
 - **`%word`** uses FtsLib's GrammarExpander tables (34 prefixes / 32
   suffixes). The Otzaria prefix/suffix options are separate walk options.
 - **Ketiv/qere expansion** (`expandKetiv`) is replaced by the Otzaria walk
-  options.
+  options (`ktiv_male_haser`). As FtsLib since KitveiHakodesh `71162c83`,
+  ketiv also varies a wildcard's literal core (only leading / trailing
+  `*`, no `?`) and a `%` word: each variant is expanded like the typed
+  pattern and ORed in its slot. The variants are Otzaria's ktiv rules, not
+  FtsLib's `KetivExpander`, so with ketiv on the matched words differ from
+  FtsLib's for plain, wildcard and `%` words alike (same deviation as
+  before; ketiv off, the FtsLib default, is unchanged).
 - **Order and distance:** results are in catalog order, as FtsLib (the
   default; Otzaria's relevance and generation orders are options). Word
   distance is checked from the line text, so an index without positions works.

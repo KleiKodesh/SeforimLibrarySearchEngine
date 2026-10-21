@@ -263,14 +263,18 @@ void main() {
     final dir = Directory.systemTemp.createTempSync('se_dart_line_');
     final idx = SeforimIndex.create(dir.path);
     final w = idx.openWriter(heapBytes: 30000000, threads: 1);
-    const texts = ['alpha beta gamma', 'alpha gamma', 'a c'];
+    // Hebrew words (Latin letters fold to [Aa] classes under the
+    // case-insensitive parse, as in Otzaria, and make no fragments);
+    // same lengths as alpha / beta / gamma.
+    const alpha = '\u05d0\u05dc\u05e4\u05d4\u05d0', beta = '\u05d1\u05d9\u05ea\u05d0', gamma = '\u05d2\u05de\u05dc\u05d4\u05d0';
+    const texts = ['$alpha $beta $gamma', '$alpha $gamma', 'a c'];
     for (var i = 0; i < texts.length; i++) {
       w.add(LineDocument(lineId: 10 + i, position: i, bookId: 1, text: texts[i]));
     }
     w.commit();
     w.close();
-    expect(SeforimIndex.userRegexKind('/alpha .* gamma/'), 'line');
-    final s = idx.search(SearchOptions('/alpha .* gamma/', userRegex: true));
+    expect(SeforimIndex.userRegexKind('/$alpha .* $gamma/'), 'line');
+    final s = idx.search(SearchOptions('/$alpha .* $gamma/', userRegex: true));
     final st = s.lineRegex()!;
     expect(st.fullScan, isFalse);
     final hits = s.allHits().toList();

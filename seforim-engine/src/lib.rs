@@ -417,6 +417,9 @@ mod tests {
         let lines: Vec<LineDoc> = words.chunks(10).enumerate().map(|(i, w)| line(i as u64, i as u64, 1, &w.join(" "))).collect();
         let dir = tempfile::tempdir().unwrap();
         let index = build(dir.path(), IndexOptions::default(), &lines);
+        // the cap is per segment: merge to one (build indexes on two threads)
+        let w = index.writer(50_000_000, 1).unwrap();
+        w.merge_all().unwrap();
         let q = |s: &str| index.search_options(&SearchOptions { query: s.into(), ..Default::default() }).unwrap();
         let r = q("ab*");
         assert!(r.truncated());
@@ -424,8 +427,6 @@ mod tests {
         assert!(!q("abaa*").truncated());
         assert!(!q("abaaa").truncated());
         // the FM sidecar path (leading star) reports it too
-        let w = index.writer(50_000_000, 1).unwrap();
-        w.merge_all().unwrap();
         index.build_fm_sidecar().unwrap();
         assert!(q("*ab*").truncated());
         assert!(!q("*abaa").truncated());
@@ -1286,11 +1287,14 @@ mod tests {
             assert_eq!(found("/AB[CD]/"), vec![4]);
             // a sequence: adjacent, in order
             assert_eq!(found("/\u{05e9}\u{05dc}\u{05d5}?\u{05dd} \u{05e2}\u{05d5}\u{05dc}\u{05dd}/"), vec![0], "positions={positions}");
-            // an invalid pattern is plain text (no hit here), the line kind an error
+            // an invalid pattern is plain text (no hit here); a pattern spanning
+            // a space is the Line kind (line_search), no longer an error
             assert_eq!(found("/a(b/"), Vec::<u64>::new());
             assert!(index
                 .search_options(&SearchOptions { query: "/a[ ,]b/".into(), user_regex: true, ..Default::default() })
-                .is_err());
+                .unwrap()
+                .line_regex()
+                .is_some());
             // off (FtsLib's default): the slashes are plain text, no regex
             let plain = SearchOptions { query: "/AB[CD]/".into(), ..Default::default() };
             assert!(index.search_options(&plain).unwrap().hits.is_empty());
@@ -1312,7 +1316,6 @@ mod tests {
     }
 
     // ── Cross-line matching and the same-section scope ──────────────────
-    // (written, not yet run: see the pending list in the report)
 
     const XA: &str = "\u{05d0}\u{05d1}\u{05d2}";
     const XB: &str = "\u{05d3}\u{05d4}\u{05d5}";
@@ -1376,9 +1379,10 @@ mod tests {
             };
             let got = passing(&index, &ordered, &texts);
             assert_eq!(got, vec![(0, true), (2, true), (4, false)], "positions={positions}");
-            // any order: line 10 + 11 crosses too
+            // any order: line 10 + 11 crosses too (C F | A B spans 3
+            // positions, F between: distance 1 = a window of 4)
             let any = SearchOptions {
-                proximity: Some(ProximitySpec::AnyOrder { distance: 0 }),
+                proximity: Some(ProximitySpec::AnyOrder { distance: 1 }),
                 ..ordered.clone()
             };
             let got_any = passing(&index, &any, &texts);

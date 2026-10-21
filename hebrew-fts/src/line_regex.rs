@@ -415,22 +415,26 @@ mod tests {
 
     #[test]
     fn plan_clauses_and_matching() {
+        // Hebrew letters: Latin ones fold to [Aa] classes under the
+        // case-insensitive parse (as in Otzaria), so they are no fragments.
+        const AB: &str = "\u{05d0}\u{05d1}";
+        const CD: &str = "\u{05d2}\u{05d3}";
         // "ab .* cd": two whole fixed words, matched across the space
-        let plan = parse_line("/ab .* cd/").unwrap();
+        let plan = parse_line(&format!("/{AB} .* {CD}/")).unwrap();
         assert_eq!(
             plan.clauses,
             vec![
-                vec![Fragment { text: "ab".into(), whole: true }],
-                vec![Fragment { text: "cd".into(), whole: true }]
+                vec![Fragment { text: AB.into(), whole: true }],
+                vec![Fragment { text: CD.into(), whole: true }]
             ]
         );
         let mut view = LineView::default();
-        assert_eq!(plan.match_ranges("x ab y z cd w", &mut view), vec![(2, 11)]);
-        assert!(plan.match_ranges("xab y cd", &mut view).is_empty()); // implied word boundary
+        assert_eq!(plan.match_ranges(&format!("x {AB} y z {CD} w"), &mut view), vec![(2, 11)]);
+        assert!(plan.match_ranges(&format!("x{AB} y {CD}"), &mut view).is_empty()); // implied word boundary
         // a fragment touching a wildcard is only contained in a term
-        let plan = parse_line("/ab\\w+[ ,]cd/").unwrap();
-        assert_eq!(plan.clauses[0], vec![Fragment { text: "ab".into(), whole: false }]);
-        assert_eq!(classify("/ab .* cd/"), "line");
+        let plan = parse_line(&format!("/{AB}\\w+[ ,]{CD}/")).unwrap();
+        assert_eq!(plan.clauses[0], vec![Fragment { text: AB.into(), whole: false }]);
+        assert_eq!(classify(&format!("/{AB} .* {CD}/")), "line");
     }
 
     #[test]

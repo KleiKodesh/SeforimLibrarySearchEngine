@@ -528,7 +528,9 @@ pub struct HebrewWalkAutomaton {
 /// mark U+0300..U+036F). The word keeps its letters and quotes, its marks
 /// in canonical order.
 pub fn required_marks_form(word: &str, match_nikud: bool, match_teamim: bool) -> String {
-    word.chars()
+    // the index keeps marks in canonical order; typed input may not be
+    crate::chars::canonical_marks(word)
+        .chars()
         .filter(|&c| {
             !crate::chars::is_term_mark(c)
                 || (match_nikud && crate::chars::is_nikud(c))

@@ -10,7 +10,7 @@ namespace SeforimSearch.Demo
 {
     /// <summary>
     /// Demo console:
-    ///   build  [--db path] [--index dir] [--max-lines N] [--no-positions]
+    ///   build  [--db path] [--index dir] [--max-lines N] [--no-positions] [--keep-marks]
     ///   search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] query...
     ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] [--regex] [--order catalog|relevance|generation] [--cancel-after MS] query...
     /// The seforim.db path defaults to KitveiHakodesh's resolution order
@@ -48,7 +48,7 @@ namespace SeforimSearch.Demo
         private static int Build(SeforimDbFtsEngine engine, string[] args)
         {
             long maxLines = long.TryParse(Option(args, "--max-lines"), out var m) ? m : 0;
-            var options = new IndexOptions { Positions = !args.Contains("--no-positions") };
+            var options = new IndexOptions { Positions = !args.Contains("--no-positions"), KeepMarks = args.Contains("--keep-marks") };
             var sw = Stopwatch.StartNew();
             long lastShown = 0;
             var stages = new List<(string Name, TimeSpan Time)>();

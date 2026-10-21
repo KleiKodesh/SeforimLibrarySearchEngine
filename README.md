@@ -108,7 +108,7 @@ results match what KitveiHakodesh shows today.
 cargo build --release -p engine-ffi                  # native library
 dotnet build csharp/SeforimSearch.Demo -c Release    # both net10.0 and net48
 
-SeforimSearch.Demo build  [--db path] [--index dir] [--max-lines N] [--no-positions]
+SeforimSearch.Demo build  [--db path] [--index dir] [--max-lines N] [--no-positions] [--keep-marks]
 SeforimSearch.Demo search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] <query>
 ```
 
@@ -481,6 +481,11 @@ are not printed), so upstream's query-parser tests stay as they are.
     without positions, and for FtsLib's distance / order, the host's two
     texts are checked by the locator over the joined text. Both flavours
     give the same hits.
+  - The host feeds the per-line data at indexing with
+    `se_writer_add_line` (flags `SE_LINE_NO_CROSS` = 1 for a heading,
+    `SE_LINE_HAS_SECTION` = 2 when `section_id` is set).
+  - In a vocalized search only lines carrying a mark take part (both L and
+    L + 1), as in-line.
   - A cross-line hit is reported on L with `next_line_id` (C ABI
     `se_search_copy_next_lines`, `u64::MAX` = none; C# / Dart
     `PlacedHit.NextLineId` / `nextLineId`). The host locates it with both

@@ -410,11 +410,24 @@ mod tests {
 
     #[test]
     fn candidates_then_text_matching() {
-        let texts = [(1, "alpha beta gamma"), (1, "alpha gamma"), (2, "beta <b>alpha</b> x gamma"), (2, "delta")];
+        // Hebrew words (Latin letters fold to [Aa] classes under the
+        // case-insensitive parse, as in Otzaria, and make no fragments);
+        // same lengths as alpha / beta / gamma / delta.
+        const ALPHA: &str = "\u{05d0}\u{05dc}\u{05e4}\u{05d4}\u{05d0}";
+        const BETA: &str = "\u{05d1}\u{05d9}\u{05ea}\u{05d0}";
+        const GAMMA: &str = "\u{05d2}\u{05de}\u{05dc}\u{05d4}\u{05d0}";
+        const DELTA: &str = "\u{05d3}\u{05dc}\u{05ea}\u{05d0}\u{05d4}";
+        let owned = [
+            (1, format!("{ALPHA} {BETA} {GAMMA}")),
+            (1, format!("{ALPHA} {GAMMA}")),
+            (2, format!("{BETA} <b>{ALPHA}</b> x {GAMMA}")),
+            (2, DELTA.to_string()),
+        ];
+        let texts: Vec<(u64, &str)> = owned.iter().map(|(b, t)| (*b, t.as_str())).collect();
         for positions in [true, false] {
             let (_d, index) = build(positions, &texts);
             // two whole fixed words: candidates are lines holding both
-            let mut r = index.search_options(&regex("/alpha .* gamma/")).unwrap();
+            let mut r = index.search_options(&regex(&format!("/{ALPHA} .* {GAMMA}/"))).unwrap();
             let status = r.line_regex().unwrap();
             assert!(!status.full_scan);
             let ids: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();

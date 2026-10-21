@@ -303,11 +303,21 @@ impl<F: FnMut(&str, WordSpan)> Scan<'_, F> {
 /// - A word whose term has [`chars::MAX_TERM_BYTES`] bytes or more is still
 ///   reported (it is a word for positions and distances); the index
 ///   tokenizer leaves it out of the terms.
-pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, WordSpan)) -> usize {
+pub fn scan_with(text: &str, keep_marks: bool, on_word: impl FnMut(&str, WordSpan)) -> usize {
+    scan_counted(text, keep_marks, on_word).0
+}
+
+/// [`scan_with`], also returning the text's visible length (the count
+/// `visible_start` runs on).
+fn scan_counted(
+    text: &str,
+    keep_marks: bool,
+    mut on_word: impl FnMut(&str, WordSpan),
+) -> (usize, usize) {
     let bytes = text.as_bytes();
     let n = bytes.len();
     if n == 0 {
-        return 0;
+        return (0, 0);
     }
     let mut s = Scan {
         on_word: &mut on_word,
@@ -471,7 +481,7 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
 
     s.end_word(n, u);
     s.release(false);
-    u
+    (u, visible)
 }
 
 /// Decodes the char starting at byte `b` of valid UTF-8, with its byte length.
@@ -611,6 +621,9 @@ pub struct TextTokens {
     tokens: Vec<TextToken>,
     keep_marks: bool,
     raw_utf16_len: usize,
+    /// Visible length of the text last tokenized (`tokenize_pair` shifts
+    /// the right line's `visible_start` past it).
+    visible_len: usize,
 }
 
 impl TextTokens {
@@ -630,21 +643,22 @@ impl TextTokens {
         self.tokens.clear();
         let norm = &mut self.norm;
         let tokens = &mut self.tokens;
-        self.raw_utf16_len = scan_with(text, self.keep_marks, |word, span| {
-            let norm_start = norm.len();
-            norm.push_str(word);
-            tokens.push(TextToken {
-                raw_start: span.byte_start,
-                raw_end: span.byte_end,
-                utf16_start: span.utf16_start,
-                utf16_end: span.utf16_end,
-                visible_start: span.visible_start,
-                letters: span.letters,
-                position: span.position,
-                norm_start,
-                norm_len: word.len(),
+        (self.raw_utf16_len, self.visible_len) =
+            scan_counted(text, self.keep_marks, |word, span| {
+                let norm_start = norm.len();
+                norm.push_str(word);
+                tokens.push(TextToken {
+                    raw_start: span.byte_start,
+                    raw_end: span.byte_end,
+                    utf16_start: span.utf16_start,
+                    utf16_end: span.utf16_end,
+                    visible_start: span.visible_start,
+                    letters: span.letters,
+                    position: span.position,
+                    norm_start,
+                    norm_len: word.len(),
+                });
             });
-        });
         &self.tokens
     }
 
@@ -659,11 +673,13 @@ impl TextTokens {
         self.tokenize(left);
         let split = self.tokens.len();
         let words = self.tokens.last().map_or(0, |t| t.position + 1);
-        let visible = self.tokens.last().map_or(0, |t| t.visible_start + t.letters) + 1;
+        // the left line's whole visible length (text after its last word
+        // included), then the break
+        let visible = self.visible_len + 1;
         let (bytes, utf16) = (left.len() + 1, self.raw_utf16_len + 1);
         let norm = &mut self.norm;
         let tokens = &mut self.tokens;
-        let right_len = scan_with(right, self.keep_marks, |word, span| {
+        let (right_len, right_visible) = scan_counted(right, self.keep_marks, |word, span| {
             let norm_start = norm.len();
             norm.push_str(word);
             tokens.push(TextToken {
@@ -679,6 +695,7 @@ impl TextTokens {
             });
         });
         self.raw_utf16_len = utf16 + right_len;
+        self.visible_len = visible + right_visible;
         split
     }
 

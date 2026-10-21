@@ -1700,6 +1700,8 @@ impl LineIndex {
             for (gi, group) in request.groups.iter().enumerate() {
                 let sink = MatchedTermsSink::new();
                 if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                    // a vocalized search: a word counts only on a marked line
+                    let q = if request.vocalized { self.marked_lines_only(q)? } else { q };
                     let w = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
                     per_word.push(section_scope::docs_of(w.as_ref(), &searcher, cancel.as_ref())?);
                     sinks.push(sink);
@@ -1896,11 +1898,14 @@ impl LineIndex {
             section_scope::require(self)?;
             let columns: Vec<SectionColumns> =
                 searcher.segment_readers().iter().map(SectionColumns::open).collect::<Result<_>>()?;
+            let section_sinks = std::cell::RefCell::new(Vec::new());
             let sections_all = |groups: &[GroupSpec]| -> Result<std::collections::HashSet<SectionKey>> {
                 let mut per_word = Vec::new();
                 for group in groups {
                     let sink = MatchedTermsSink::new();
                     if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                        section_sinks.borrow_mut().push(sink.clone());
+                        let q = if ex.vocalized { self.marked_lines_only(q)? } else { q };
                         let w = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
                         let docs = section_scope::docs_of(w.as_ref(), &searcher, cancel.as_ref())?;
                         per_word.push(section_scope::sections_of(&docs, &columns));
@@ -1913,6 +1918,7 @@ impl LineIndex {
             for phrase in &ex.phrase_alternatives {
                 blocked.extend(sections_all(phrase)?);
             }
+            watched.extend(section_sinks.into_inner());
             if !blocked.is_empty() {
                 drop_sections = Some(Arc::new(blocked));
             }
@@ -2014,10 +2020,14 @@ impl LineIndex {
         // The query-level negatives, for the cross-line pass (applied to its line L).
         let negative_union: Option<Box<dyn Query>> = match query_negatives.len() {
             0 => None,
-            1 if cross => Some(query_negatives[0].box_clone()),
-            _ if cross => Some(Box::new(BooleanQuery::new(
-                query_negatives.iter().map(|q| (Occur::Should, q.box_clone())).collect(),
-            ))),
+            _ if cross => {
+                let mut should: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                for q in &query_negatives {
+                    let q = if negative_vocalized { self.marked_lines_only(q.box_clone())? } else { q.box_clone() };
+                    should.push((Occur::Should, q));
+                }
+                Some(Box::new(BooleanQuery::new(should)))
+            }
             _ => None,
         };
         let query: Box<dyn Query> = if query_negatives.is_empty() {
@@ -2236,6 +2246,11 @@ impl LineIndex {
                     books: books.as_deref(),
                     negative: negative_weight.as_deref(),
                     drop_sections: drop_sections.as_deref(),
+                    marked: if request.vocalized {
+                        Some(self.marked_field()?)
+                    } else {
+                        None
+                    },
                     cancel: cancel.as_ref(),
                 },
             )?;

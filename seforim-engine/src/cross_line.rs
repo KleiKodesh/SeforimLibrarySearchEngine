@@ -80,6 +80,8 @@ pub(crate) struct CrossInput<'a> {
     pub negative: Option<&'a dyn Weight>,
     /// Sections the negative query's section scope dropped.
     pub drop_sections: Option<&'a HashSet<SectionKey>>,
+    /// A vocalized search: only lines carrying the `marked` flag take part.
+    pub marked: Option<tantivy::schema::Field>,
     pub cancel: Option<&'a CancelToken>,
 }
 
@@ -201,9 +203,14 @@ pub(crate) fn find(index: &LineIndex, searcher: &Searcher, input: &CrossInput<'_
             continue; // one slot never crosses a line
         }
         check(input.cancel)?;
-        let slots: Vec<SlotLines> =
-            m.terms.iter().map(|t| slot_lines(index, searcher, &columns, t, nbits)).collect::<Result<_>>()?;
-        let Some(candidates) = candidates(&slots, &m.rule, nbits) else { continue };
+        let slots: Vec<SlotLines> = m
+            .terms
+            .iter()
+            .map(|t| slot_lines(index, searcher, &columns, t, nbits, input))
+            .collect::<Result<_>>()?;
+        let Some(candidates) = candidates(&slots, &m.rule, nbits) else {
+            continue;
+        };
         let pairs = pairs(&slots, &candidates, &columns, &inline, input)?;
         let pairs = drop_negative(pairs, searcher, input)?;
         check(input.cancel)?;
@@ -262,6 +269,7 @@ fn slot_lines(
     columns: &[LineColumns],
     terms: &[String],
     nbits: usize,
+    input: &CrossInput<'_>,
 ) -> Result<SlotLines> {
     let field = index.fields.text;
     let mut bits = Bits::new(nbits);
@@ -270,6 +278,7 @@ fn slot_lines(
         let inverted = segment.inverted_index(field)?;
         let mut seen = vec![0u64; (segment.max_doc() as usize).div_ceil(64)];
         for t in terms {
+            check(input.cancel)?;
             let term = Term::from_field_text(field, t);
             let Some(info) = inverted.get_term_info(&term)? else { continue };
             let mut postings = inverted.read_postings_from_terminfo(&info, IndexRecordOption::Basic)?;
@@ -278,6 +287,21 @@ fn slot_lines(
                 seen[doc as usize / 64] |= 1 << (doc % 64);
                 doc = postings.advance();
             }
+        }
+        if let Some(marked) = input.marked {
+            // a vocalized search: unmarked lines take no part
+            let mut keep = vec![0u64; seen.len()];
+            let term = Term::from_field_u64(marked, crate::index::MARKED_LINE);
+            let inverted = segment.inverted_index(marked)?;
+            if let Some(info) = inverted.get_term_info(&term)? {
+                let mut postings = inverted.read_postings_from_terminfo(&info, IndexRecordOption::Basic)?;
+                let mut doc = postings.doc();
+                while doc != TERMINATED {
+                    keep[doc as usize / 64] |= 1 << (doc % 64);
+                    doc = postings.advance();
+                }
+            }
+            seen.iter_mut().zip(&keep).for_each(|(a, b)| *a &= b);
         }
         let alive = segment.alive_bitset();
         for (i, &w) in seen.iter().enumerate() {

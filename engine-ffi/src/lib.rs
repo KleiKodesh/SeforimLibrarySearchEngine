@@ -976,6 +976,9 @@ pub unsafe extern "C" fn se_search_copy_line_hits(
         let hits = search.line_hits();
         let start = (offset as usize).min(hits.len());
         let end = start.saturating_add(count as usize).min(hits.len());
+        if end <= start || out.is_null() {
+            return Ok(0);
+        }
         let out = std::slice::from_raw_parts_mut(out, (end - start) * 3);
         for (i, h) in hits[start..end].iter().enumerate() {
             out[i * 3] = h.position;

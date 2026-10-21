@@ -25,6 +25,7 @@ use tantivy::schema::Field;
 use tantivy_fst::Automaton;
 
 use crate::walk::DEFAULT_MAX_EXPANDED_TERMS;
+use crate::word_model::{WordBounds, WordModel};
 
 /// Minimum number of non-wildcard characters a pattern must contain.
 pub const MIN_ANCHOR_LENGTH: usize = 2;
@@ -336,6 +337,7 @@ pub struct HebrewWildcardQuery {
     pattern: WildcardPattern,
     matched_terms_sink: Option<MatchedTermsSink>,
     max_expansions: usize,
+    word_model: WordModel,
 }
 
 impl HebrewWildcardQuery {
@@ -346,6 +348,7 @@ impl HebrewWildcardQuery {
             pattern: WildcardPattern::parse(pattern)?,
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
+            word_model: WordModel::default(),
         })
     }
 
@@ -356,7 +359,13 @@ impl HebrewWildcardQuery {
             pattern: WildcardPattern::parse_ignoring_quotes(pattern)?,
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
+            word_model: WordModel::default(),
         })
+    }
+
+    /// Which index terms are words (see [`WordModel`]); default FtsLib's.
+    pub fn set_word_model(&mut self, model: WordModel) {
+        self.word_model = model;
     }
 
     /// Collects the matched forms into `sink` during the search.
@@ -384,9 +393,9 @@ impl HebrewWildcardQuery {
         WildcardAutomaton::new(self.pattern.clone())
     }
 
-    fn automaton_weight(&self) -> AutomatonWeight<WildcardAutomaton> {
-        let mut weight =
-            AutomatonWeight::new(self.field, WildcardAutomaton::new(self.pattern.clone()));
+    fn automaton_weight(&self) -> AutomatonWeight<WordBounds<WildcardAutomaton>> {
+        let automaton = WordBounds::new(WildcardAutomaton::new(self.pattern.clone()), self.word_model);
+        let mut weight = AutomatonWeight::new(self.field, automaton);
         if let Some(sink) = &self.matched_terms_sink {
             weight.set_matched_terms_sink(sink.clone());
         }

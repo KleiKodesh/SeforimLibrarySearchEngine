@@ -21,6 +21,7 @@ use tantivy::schema::Field;
 use tantivy_fst::Automaton;
 
 use crate::walk::{DEFAULT_MAX_EXPANDED_TERMS, ZERO_WIDTH_BYTES};
+use crate::word_model::{WordBounds, WordModel};
 
 /// A Levenshtein DFA as a tantivy automaton. With `transparent_quotes` the
 /// canonical quote byte `"` is skipped (the state does not move), so an
@@ -70,6 +71,29 @@ impl Automaton for LevenshteinDfa {
     }
 }
 
+/// The DFA shared between the walk and the expansion rank.
+pub struct SharedDfa(Arc<LevenshteinDfa>);
+
+impl Automaton for SharedDfa {
+    type State = u32;
+
+    fn start(&self) -> u32 {
+        self.0.start()
+    }
+
+    fn is_match(&self, state: &u32) -> bool {
+        self.0.is_match(state)
+    }
+
+    fn can_match(&self, state: &u32) -> bool {
+        self.0.can_match(state)
+    }
+
+    fn accept(&self, state: &u32, byte: u8) -> u32 {
+        self.0.accept(state, byte)
+    }
+}
+
 /// Fuzzy query for one word: every indexed term within `distance` plain
 /// Levenshtein edits (insert, delete, substitute; a transposition is two
 /// edits, as in FtsLib's `Levenshtein.Distance`).
@@ -81,6 +105,7 @@ pub struct HebrewFuzzyQuery {
     matched_terms_sink: Option<MatchedTermsSink>,
     max_expansions: usize,
     ignore_quotes: bool,
+    word_model: WordModel,
 }
 
 /// FtsLib's `FuzzyExpander.MaxAllowedDistance`.
@@ -98,7 +123,18 @@ impl HebrewFuzzyQuery {
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
             ignore_quotes: false,
+            word_model: WordModel::default(),
         }
+    }
+
+    /// Which index terms are words (see [`WordModel`]); default FtsLib's.
+    pub fn set_word_model(&mut self, model: WordModel) {
+        self.word_model = model;
+    }
+
+    /// The word model.
+    pub fn word_model(&self) -> WordModel {
+        self.word_model
     }
 
     /// Makes the quote transparent (התעלם מגרשיים): distances are measured
@@ -156,9 +192,9 @@ impl HebrewFuzzyQuery {
         }
     }
 
-    fn automaton_weight(&self) -> AutomatonWeight<LevenshteinDfa> {
+    fn automaton_weight(&self) -> AutomatonWeight<WordBounds<SharedDfa>> {
         let automaton = Arc::new(self.automaton());
-        let mut weight = AutomatonWeight::new(self.field, automaton.clone());
+        let mut weight = AutomatonWeight::new(self.field, WordBounds::new(SharedDfa(automaton.clone()), self.word_model));
         if let Some(sink) = &self.matched_terms_sink {
             weight.set_matched_terms_sink(sink.clone());
         }

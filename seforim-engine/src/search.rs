@@ -5,7 +5,7 @@
 
 use hebrew_fts::{
     ExactTermsQuery, HebrewFuzzyQuery, HebrewWalkQuery, HebrewWildcardQuery, PreparedQueryGroups,
-    Proximity, SnippetWindowLocator, WalkOptions, DEFAULT_CONTEXT_WORDS,
+    Proximity, SnippetWindowLocator, WalkOptions, WordModel, DEFAULT_CONTEXT_WORDS,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{Collector, SegmentCollector};
@@ -79,6 +79,37 @@ pub enum TypoModeSpec {
     /// Edit distance 1 in every combination (≥4 letters).
     #[serde(rename = "full_edit1")]
     FullEdit1,
+}
+
+/// Which words are words (see [`hebrew_fts::WordModel`]). JSON `"ftslib"`
+/// (default) / `"otzaria"`.
+///
+/// - `ftslib`: FtsLib's words of 2..=29 letters. One-letter (and 30+
+///   letter) query words are dropped, every expansion admits only such
+///   index terms, and distances count only such words (byte-identical with
+///   FtsLib on either index flavour).
+/// - `otzaria`: every word of 1+ letters is a word, as in Otzaria: a
+///   one-letter query word is a slot matched at its own position, and
+///   distances count every word. Rules evaluated on index positions (span
+///   queries) need this model, since the positions count every word: under
+///   `ftslib` proximity, phrase alternatives and the negative proximity run
+///   as an AND checked on the text instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WordModelSpec {
+    #[default]
+    #[serde(rename = "ftslib")]
+    FtsLib,
+    Otzaria,
+}
+
+impl From<WordModelSpec> for WordModel {
+    fn from(s: WordModelSpec) -> WordModel {
+        match s {
+            WordModelSpec::FtsLib => WordModel::FtsLib,
+            WordModelSpec::Otzaria => WordModel::Otzaria,
+        }
+    }
 }
 
 /// Serializable mirror of [`WalkOptions`].
@@ -221,8 +252,12 @@ pub struct SearchRequest {
     pub context_words: usize,
     /// Per-pair spacing (Otzaria's customSpacing): `gaps[i]` = max words
     /// between group i and group i+1 (0 = adjacent). Runs as a span query;
-    /// needs an index with positions. Order follows `require_ordered`.
+    /// needs an index with positions. Order follows `require_ordered`. The
+    /// positions count every indexed word (one-letter words too), whatever
+    /// `word_model`.
     pub gaps: Option<Vec<u32>>,
+    /// Which words are words (see [`WordModelSpec`]). Default FtsLib's.
+    pub word_model: WordModelSpec,
     /// Partial matching (Otzaria's wordMatchMode): a line needs only this
     /// many of the searchable groups (anyWord = 1, mostWords = n/2 + 1,
     /// atLeast = N; clamped to 1..n). None = all groups (FtsLib). When it
@@ -271,6 +306,7 @@ impl Default for SearchRequest {
             require_ordered: false,
             context_words: DEFAULT_CONTEXT_WORDS,
             gaps: None,
+            word_model: WordModelSpec::default(),
             min_groups: None,
             proximity: None,
             exclude: None,
@@ -392,6 +428,8 @@ pub struct SnippetSession {
     min_groups: usize,
     context_words: usize,
     keep_marks: bool,
+    /// Which words the locators count (the request's word model).
+    model: WordModel,
     /// Text-level negative filter (see [`ExcludeSpec`]).
     negative: Option<NegativeFilter>,
     terms: TermTable,
@@ -530,13 +568,9 @@ impl SnippetSession {
             let next = std::sync::atomic::AtomicUsize::new(0);
             // Locators are kept across calls (one per worker): their scratch
             // buffers are already grown, so a batch allocates nothing per line.
-            let (context, keep_marks) = (self.context_words, self.keep_marks);
+            let (context, keep_marks, model) = (self.context_words, self.keep_marks, self.model);
             while self.pool.len() < threads {
-                self.pool.push(if keep_marks {
-                    SnippetWindowLocator::keeping_marks(context)
-                } else {
-                    SnippetWindowLocator::new(context)
-                });
+                self.pool.push(SnippetWindowLocator::with_model(context, keep_marks, model));
             }
             let mut parts: Vec<Option<Vec<Option<(usize, Snippet)>>>> = vec![None; chunks];
             std::thread::scope(|scope| {
@@ -723,9 +757,10 @@ impl LineIndex {
         sink: &MatchedTermsSink,
         searcher: &tantivy::Searcher,
         fm: Option<&FmIndex>,
+        model: WordModel,
     ) -> Result<Option<Arc<dyn SpanTermSource>>> {
         let field = self.fields.text;
-        if let Some(terms) = self.fm_terms(fm, searcher, group)? {
+        if let Some(terms) = self.fm_terms(fm, searcher, group, model)? {
             let mut q = ExactTermsQuery::new(field, terms);
             q.set_matched_terms_sink(sink.clone());
             return Ok(Some(q.span_slot()));
@@ -736,6 +771,7 @@ impl LineIndex {
                     return Ok(None);
                 }
                 let mut q = HebrewWalkQuery::new(field, word.clone(), (*options).into());
+                q.set_word_model(model);
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
             }
@@ -746,6 +782,7 @@ impl LineIndex {
                     HebrewWildcardQuery::new(field, pattern)
                 };
                 let Ok(mut q) = q else { return Ok(None) };
+                q.set_word_model(model);
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
             }
@@ -754,6 +791,7 @@ impl LineIndex {
                     return Ok(None);
                 }
                 let mut q = hebrew_fts::HebrewGrammarQuery::new(field, word.clone(), *prefixes, *suffixes);
+                q.set_word_model(model);
                 q.set_ignore_quotes(*ignore_quotes);
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
@@ -763,6 +801,7 @@ impl LineIndex {
                     return Ok(None);
                 }
                 let mut q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
+                q.set_word_model(model);
                 q.set_ignore_quotes(*ignore_quotes);
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
@@ -770,7 +809,7 @@ impl LineIndex {
             GroupSpec::Any { alternatives } => {
                 let mut sources = Vec::new();
                 for a in alternatives {
-                    if let Some(s) = self.group_slot(a, sink, searcher, fm)? {
+                    if let Some(s) = self.group_slot(a, sink, searcher, fm, model)? {
                         sources.push(s);
                     }
                 }
@@ -796,6 +835,7 @@ impl LineIndex {
         window: Option<u32>,
         searcher: &tantivy::Searcher,
         fm: Option<&FmIndex>,
+        model: WordModel,
         sinks: &mut Vec<MatchedTermsSink>,
     ) -> Result<Option<SpanQuery>> {
         if !self.options.positions {
@@ -813,7 +853,7 @@ impl LineIndex {
         let mut span: Option<SpanQuery> = None;
         for (i, group) in groups.iter().enumerate() {
             let sink = MatchedTermsSink::new();
-            let Some(slot) = self.group_slot(group, &sink, searcher, fm)? else {
+            let Some(slot) = self.group_slot(group, &sink, searcher, fm, model)? else {
                 return Ok(None);
             };
             sinks.push(sink);
@@ -836,8 +876,9 @@ impl LineIndex {
         sink: &MatchedTermsSink,
         searcher: &tantivy::Searcher,
         fm: Option<&FmIndex>,
+        model: WordModel,
     ) -> Result<Option<Box<dyn Query>>> {
-        if let Some(terms) = self.fm_terms(fm, searcher, group)? {
+        if let Some(terms) = self.fm_terms(fm, searcher, group, model)? {
             let mut q = ExactTermsQuery::new(self.fields.text, terms);
             q.set_matched_terms_sink(sink.clone());
             return Ok(Some(Box::new(q)));
@@ -848,6 +889,7 @@ impl LineIndex {
                     return Ok(None);
                 }
                 let mut q = HebrewWalkQuery::new(self.fields.text, word.clone(), (*options).into());
+                q.set_word_model(model);
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
@@ -861,6 +903,7 @@ impl LineIndex {
                     HebrewWildcardQuery::new(self.fields.text, pattern)
                 };
                 let Ok(mut q) = parsed else { return Ok(None) };
+                q.set_word_model(model);
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
@@ -874,6 +917,7 @@ impl LineIndex {
                     return Ok(None);
                 }
                 let mut q = hebrew_fts::HebrewGrammarQuery::new(self.fields.text, word.clone(), *prefixes, *suffixes);
+                q.set_word_model(model);
                 q.set_ignore_quotes(*ignore_quotes);
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
@@ -883,6 +927,7 @@ impl LineIndex {
                     return Ok(None);
                 }
                 let mut q = HebrewFuzzyQuery::new(self.fields.text, word.clone(), *distance);
+                q.set_word_model(model);
                 q.set_ignore_quotes(*ignore_quotes);
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
@@ -890,7 +935,7 @@ impl LineIndex {
             GroupSpec::Any { alternatives } => {
                 let mut parts: Vec<(Occur, Box<dyn Query>)> = Vec::new();
                 for a in alternatives {
-                    if let Some(q) = self.group_query(a, sink, searcher, fm)? {
+                    if let Some(q) = self.group_query(a, sink, searcher, fm, model)? {
                         parts.push((Occur::Should, q));
                     }
                 }
@@ -921,6 +966,7 @@ impl LineIndex {
         fm: Option<&FmIndex>,
         searcher: &tantivy::Searcher,
         group: &GroupSpec,
+        model: WordModel,
     ) -> Result<Option<Vec<Vec<u8>>>> {
         let Some(fm) = fm else { return Ok(None) };
         let field = self.fields.text;
@@ -945,6 +991,7 @@ impl LineIndex {
                     &core,
                     suffix_only,
                     q.max_expansions(),
+                    model,
                 )?;
                 Ok(Some(terms))
             }
@@ -953,6 +1000,7 @@ impl LineIndex {
                     return Ok(None);
                 }
                 let mut q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
+                q.set_word_model(model);
                 q.set_ignore_quotes(*ignore_quotes);
                 let inverted = dict()?;
                 let terms = if *ignore_quotes {
@@ -962,6 +1010,7 @@ impl LineIndex {
                         q.word(),
                         q.distance_limit(),
                         q.max_expansions(),
+                        model,
                     )?
                 } else {
                     fm_expand::expand_fuzzy(
@@ -971,6 +1020,7 @@ impl LineIndex {
                         q.word(),
                         q.distance_limit(),
                         q.max_expansions(),
+                        model,
                     )?
                 };
                 Ok(Some(terms))
@@ -1003,11 +1053,13 @@ impl LineIndex {
             request
         };
         let keep_marks = self.options.keep_marks;
-        let locator = if keep_marks {
-            SnippetWindowLocator::keeping_marks(request.context_words)
-        } else {
-            SnippetWindowLocator::new(request.context_words)
-        };
+        let model: WordModel = request.word_model.into();
+        let locator = SnippetWindowLocator::with_model(request.context_words, keep_marks, model);
+        // Index positions count every word; the text counts the model's
+        // words. Span queries (rules read off the positions) therefore run
+        // only when the two agree: Otzaria's model. Otherwise those rules
+        // run as an AND checked on the text, as without positions.
+        let spans = self.options.positions && model == WordModel::Otzaria;
         // Partial matching: at least `min` of the searchable groups. Clamped
         // to 1..n like Otzaria's WordMatch::min_words; n or more = all. (n
         // counts the request's groups; Otzaria counts distinct materialized
@@ -1029,6 +1081,7 @@ impl LineIndex {
             max_word_distance: if partial { usize::MAX } else { request.max_word_distance.unwrap_or(usize::MAX) },
             context_words: request.context_words,
             keep_marks,
+            model,
             min_groups: 0,
             negative: None,
             terms: TermTable::default(),
@@ -1043,13 +1096,13 @@ impl LineIndex {
         let mut sinks = Vec::new();
 
         let main_query: Option<Box<dyn Query>> = if let Some(prox) = &proximity {
-            if self.options.positions && request.groups.len() > 1 {
+            if spans && request.groups.len() > 1 {
                 // One span query: the rule checked on each candidate's positions.
                 let (gaps, window) = match prox {
                     Proximity::Ordered { gaps } => (gaps.clone(), None),
                     Proximity::AnyOrder { max_span } => (Vec::new(), Some(*max_span)),
                 };
-                self.span_query(&request.groups, &gaps, true, window, &searcher, fm, &mut sinks)?
+                self.span_query(&request.groups, &gaps, true, window, &searcher, fm, model, &mut sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else {
                 // Without positions: every group present; the locator
@@ -1058,7 +1111,7 @@ impl LineIndex {
                 let mut complete = true;
                 for group in &request.groups {
                     let sink = MatchedTermsSink::new();
-                    match self.group_query(group, &sink, &searcher, fm)? {
+                    match self.group_query(group, &sink, &searcher, fm, model)? {
                         Some(q) => {
                             clauses.push((Occur::Must, q));
                             sinks.push(sink);
@@ -1073,7 +1126,7 @@ impl LineIndex {
             }
         } else if let (Some(gaps), false) = (&request.gaps, partial) {
             // Per-pair spacing: a span query, one slot per group, each gap its own limit.
-            self.span_query(&request.groups, gaps, request.require_ordered, None, &searcher, fm, &mut sinks)?
+            self.span_query(&request.groups, gaps, request.require_ordered, None, &searcher, fm, model, &mut sinks)?
                 .map(|q| Box::new(q) as Box<dyn Query>)
         } else {
             // One query + one sink per searchable slot. Rejected wildcards skip
@@ -1081,7 +1134,7 @@ impl LineIndex {
             let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
             for group in &request.groups {
                 let sink = MatchedTermsSink::new();
-                if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                if let Some(q) = self.group_query(group, &sink, &searcher, fm, model)? {
                     clauses.push((Occur::Must, q));
                     sinks.push(sink);
                 }
@@ -1109,15 +1162,15 @@ impl LineIndex {
                 continue;
             }
             let mut alt_sinks = Vec::new();
-            let q: Option<Box<dyn Query>> = if self.options.positions && phrase.len() > 1 {
-                self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, fm, &mut alt_sinks)?
+            let q: Option<Box<dyn Query>> = if spans && phrase.len() > 1 {
+                self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, fm, model, &mut alt_sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else {
                 let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
                 let mut complete = true;
                 for group in phrase {
                     let sink = MatchedTermsSink::new();
-                    match self.group_query(group, &sink, &searcher, fm)? {
+                    match self.group_query(group, &sink, &searcher, fm, model)? {
                         Some(q) => {
                             clauses.push((Occur::Must, q));
                             alt_sinks.push(sink);
@@ -1156,21 +1209,21 @@ impl LineIndex {
                 Some(p) if ex.groups.len() > 1 => Some(p.resolve(ex.groups.len())?),
                 _ => None,
             };
-            let negative: Option<Box<dyn Query>> = if let (Some(prox), true) = (&ex_proximity, self.options.positions) {
+            let negative: Option<Box<dyn Query>> = if let (Some(prox), true) = (&ex_proximity, spans) {
                 let (gaps, window) = match prox {
                     Proximity::Ordered { gaps } => (gaps.clone(), None),
                     Proximity::AnyOrder { max_span } => (Vec::new(), Some(*max_span)),
                 };
-                self.span_query(&ex.groups, &gaps, true, window, &searcher, fm, &mut negative_sinks)?
+                self.span_query(&ex.groups, &gaps, true, window, &searcher, fm, model, &mut negative_sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else if let (Some(gaps), None) = (&ex.gaps, &ex.proximity) {
-                self.span_query(&ex.groups, gaps, ex.require_ordered, None, &searcher, fm, &mut negative_sinks)?
+                self.span_query(&ex.groups, gaps, ex.require_ordered, None, &searcher, fm, model, &mut negative_sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else {
                 let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
                 for group in &ex.groups {
                     let sink = MatchedTermsSink::new();
-                    if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                    if let Some(q) = self.group_query(group, &sink, &searcher, fm, model)? {
                         clauses.push((Occur::Must, q));
                         negative_sinks.push(sink);
                     }
@@ -1181,12 +1234,12 @@ impl LineIndex {
                 let needs_text = if ex_proximity.is_some() {
                     // without positions the rule is checked on the text; a
                     // skipped word would shift the pairs: no exclusion then
-                    !self.options.positions && negative_sinks.len() == ex.groups.len()
+                    !spans && negative_sinks.len() == ex.groups.len()
                 } else {
                     let bound = ex.max_word_distance.is_some() || ex.require_ordered;
                     ex.gaps.is_none() && negative_sinks.len() > 1 && bound
                 };
-                let skip = ex_proximity.is_some() && !self.options.positions && !needs_text;
+                let skip = ex_proximity.is_some() && !spans && !needs_text;
                 if needs_text {
                     // Build the scorers once so the walks report the excluded
                     // forms; the docs themselves are not needed.

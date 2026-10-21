@@ -281,6 +281,14 @@ impl SnippetWindowLocator {
         Self::with_tokens(context_words, TextTokens::keeping_marks())
     }
 
+    /// A locator counting the words of `model` (see
+    /// [`WordModel`](crate::WordModel)): FtsLib's is [`new`](Self::new) /
+    /// [`keeping_marks`](Self::keeping_marks); Otzaria's also counts every
+    /// one-letter word, so distances equal the index positions.
+    pub fn with_model(context_words: usize, keep_marks: bool, model: crate::WordModel) -> SnippetWindowLocator {
+        Self::with_tokens(context_words, TextTokens::new(keep_marks, model))
+    }
+
     fn with_tokens(context_words: usize, text_tokens: TextTokens) -> SnippetWindowLocator {
         SnippetWindowLocator {
             context_words,

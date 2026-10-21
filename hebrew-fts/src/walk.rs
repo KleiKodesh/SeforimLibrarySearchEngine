@@ -51,6 +51,7 @@ use tantivy_fst::Automaton;
 use crate::quote_free::QuoteFree;
 use crate::set_automaton::SetAutomaton;
 use crate::variants;
+use crate::word_model::{WordBounds, WordModel};
 
 /// A word with ≤ this many letters counts as "short" (raises the advanced
 /// prefix/suffix allowances).
@@ -961,6 +962,7 @@ pub struct HebrewWalkQuery {
     options: WalkOptions,
     matched_terms_sink: Option<MatchedTermsSink>,
     max_expansions: usize,
+    word_model: WordModel,
 }
 
 impl HebrewWalkQuery {
@@ -974,7 +976,13 @@ impl HebrewWalkQuery {
             options,
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
+            word_model: WordModel::default(),
         }
+    }
+
+    /// Which index terms are words (see [`WordModel`]); default FtsLib's.
+    pub fn set_word_model(&mut self, model: WordModel) {
+        self.word_model = model;
     }
 
     /// Collects the indexed forms this walk matches into `sink` during the
@@ -988,10 +996,10 @@ impl HebrewWalkQuery {
         self.max_expansions = cap;
     }
 
-    fn automaton_weight(&self) -> AutomatonWeight<QuoteFree<HebrewWalkAutomaton>> {
-        let automaton = QuoteFree::new(
-            HebrewWalkAutomaton::new(&self.word, &self.options),
-            !self.options.exact_quotes,
+    fn automaton_weight(&self) -> AutomatonWeight<WordBounds<QuoteFree<HebrewWalkAutomaton>>> {
+        let automaton = WordBounds::new(
+            QuoteFree::new(HebrewWalkAutomaton::new(&self.word, &self.options), !self.options.exact_quotes),
+            self.word_model,
         );
         let mut weight = AutomatonWeight::new(self.field, automaton);
         if let Some(sink) = &self.matched_terms_sink {

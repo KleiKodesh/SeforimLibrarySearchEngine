@@ -279,7 +279,7 @@ class OtzariaSearch {
   /// ([blockedSections]) and drop the positive hits in them. Empty unless the
   /// scope is sameSection.
   List<SearchOptions> sectionNegativeSearches({List<int>? books}) => negativeScope == NegativeScope.sameSection
-      ? [for (final w in _negativeWords()) _withOptions(SearchOptions(w, books: books), _globalSet())]
+      ? [for (final w in _negativeWords()) _withOptions(SearchOptions(w, books: books, wordModel: WordModel.otzaria), _globalSet())]
       : const [];
 
   /// The engine search: the query string with the global options, and per
@@ -311,6 +311,8 @@ class OtzariaSearch {
       SearchOptions(
         [for (final w in words) _queryWord(w)].join(' '),
         words: perWord,
+        // Otzaria's words: a one-letter word is a word, matched at its place
+        wordModel: WordModel.otzaria,
         contextWords: contextWords,
         exclude: _exclude(),
         phraseAlternatives: _phraseAlternatives(words),
@@ -319,8 +321,8 @@ class OtzariaSearch {
     );
     // The user's settings as they are: the engine counts the words for
     // partial matching (which wins over proximity: the match is at line
-    // resolution) and cuts the words it drops out of the proximity, merging
-    // their gaps.
+    // resolution) and cuts the words it drops (no letters) out of the
+    // proximity, merging their gaps.
     if (mode == SearchMode.advanced) s.wordMatch = wordMatch;
     if (words.length > 1) s.proximity = _proximity(words.length, customSpacing);
     return s;

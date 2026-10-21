@@ -146,7 +146,11 @@ seforim.db knowledge).
   text by the locator. Snippet = ONE best window per hit (tightest span, strict-< tie
   = earliest), marks = every query-term token in the window.
 - Offsets are UTF-16 (.NET/JS indices) everywhere the page reads them.
-- Word lengths: only 2..29 LETTERS are indexed; quotes and marks don't count.
+- Word lengths: FtsLib indexes only 2..29 LETTERS (quotes and marks don't count). Our
+  index holds EVERY word of 1+ letters (Otzaria; >128 bytes = no term, keeps its
+  position). `word_model` ftslib restricts walks to 2..29 inside the walk
+  (`WordBounds`, before the cap) + the 2..29 locator scanner; otzaria counts all.
+  User's rule: a dropped one-letter word is a bug in Otzaria mode (a x b checks x).
 - FtsLib wildcard budgets: anchor ≥2, ≤4 `?`, leading `*` ≤3, trailing/internal ≤4,
   both ≤7. Cap 2000, shortest first, then doc count.
 

@@ -9,8 +9,9 @@
 //! - `~` / `~N` suffix → fuzzy, N clamped to [`MAX_FUZZY_DISTANCE`] (FtsLib
 //!   allowed 3).
 //! - `%` at the start / end → FtsLib's grammatical prefixes / suffixes.
-//! - A plain literal of fewer than 2 or 30+ letters is dropped (the index has
-//!   none).
+//! - A plain literal of fewer than 2 or 30+ letters is dropped (FtsLib's
+//!   index has none). With Otzaria's word model ([`tokenize_query_with`])
+//!   every literal of 1+ letters is a word.
 //! - Marks stripped, ASCII lowercased, intra-word quotes kept as the canonical
 //!   `"` the index stores, a trailing quote dropped, other chars dropped.
 //!
@@ -22,6 +23,7 @@
 //! engine's job ([`QueryToken::index`] numbers the words for per-word options).
 
 use crate::chars::{is_intra_word_quote, is_letter, is_strippable_mark};
+use crate::word_model::WordModel;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 /// FtsLib allowed `~3`; tantivy's Levenshtein DFA stops at 2.
@@ -42,7 +44,7 @@ pub enum QueryToken {
 /// What one word token searches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryTerm {
-    /// A literal word (2..29 letters).
+    /// A literal word (2..29 letters; 1+ in Otzaria's word model).
     Word(String),
     /// A `*` / `?` pattern.
     Wildcard(String),
@@ -64,6 +66,13 @@ pub enum QueryTerm {
 /// state. A typed word with nothing searchable (`,`, `א`) still takes its
 /// index.
 pub fn tokenize_query(query: &str, keep_marks: bool) -> Vec<QueryToken> {
+    tokenize_query_with(query, keep_marks, WordModel::FtsLib)
+}
+
+/// [`tokenize_query`] with the literals of `model`: FtsLib's 2..=29
+/// letters, or Otzaria's every word of 1+ letters (a word too long to be an
+/// index term simply matches nothing, as in Otzaria).
+pub fn tokenize_query_with(query: &str, keep_marks: bool, model: WordModel) -> Vec<QueryToken> {
     let mut out = Vec::new();
     let mut index = 0;
     let mut start = 0;
@@ -74,7 +83,7 @@ pub fn tokenize_query(query: &str, keep_marks: bool) -> Vec<QueryToken> {
         let split = split_on_index_separators(typed);
         let mut any = false;
         for raw in split.split(' ').filter(|t| !t.is_empty()) {
-            out.push(QueryToken::Word { index, term: parse_term(raw, keep_marks) });
+            out.push(QueryToken::Word { index, term: parse_term(raw, keep_marks, model) });
             any = true;
         }
         if !any {
@@ -138,7 +147,7 @@ fn split_on_index_separators(query: &str) -> String {
 
 /// FtsLib `ParseToken` (ignore-quotes and walk options are applied by the
 /// caller).
-fn parse_term(raw: &str, keep_marks: bool) -> Option<QueryTerm> {
+fn parse_term(raw: &str, keep_marks: bool, model: WordModel) -> Option<QueryTerm> {
     let prefixes = raw.starts_with('%');
     let suffixes = raw.ends_with('%');
     let raw = if prefixes || suffixes { raw.trim_matches('%') } else { raw };
@@ -170,7 +179,8 @@ fn parse_term(raw: &str, keep_marks: bool) -> Option<QueryTerm> {
     if prefixes || suffixes {
         return Some(QueryTerm::Grammar { word: normalised, prefixes, suffixes });
     }
-    if !(2..30).contains(&letters) {
+    let (min, max) = model.letter_bounds();
+    if letters < min || letters > max {
         return None;
     }
     Some(QueryTerm::Word(if keep_marks { normalise(text, true) } else { normalised }))
@@ -234,6 +244,24 @@ mod tests {
                 Some(Word("תורה".into())),
             ]
         );
+    }
+
+    #[test]
+    fn otzaria_model_keeps_every_word() {
+        let long = "א".repeat(40);
+        let q = format!("משה ו ה' {long} , 12");
+        let got: Vec<_> = tokenize_query_with(&q, false, WordModel::Otzaria)
+            .into_iter()
+            .map(|t| match t {
+                QueryToken::Word { index, term: Some(QueryTerm::Word(w)) } => format!("{index}:{w}"),
+                QueryToken::Word { index, term: None } => format!("{index}-"),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(got, ["0:משה".to_string(), "1:ו".into(), "2:ה".into(), format!("3:{long}"), "4-".into(), "5-".into()]);
+        // FtsLib's model drops the one-letter and the 30+ letter words
+        let ftslib = tokenize_query(&q, false).into_iter().filter(|t| matches!(t, QueryToken::Word { term: Some(_), .. })).count();
+        assert_eq!(ftslib, 1);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use tantivy::schema::Field;
 
 use crate::grammar::build_candidates;
 use crate::set_automaton::SetAutomaton;
+use crate::word_model::{WordBounds, WordModel};
 
 /// Matches every indexed form of a Hebrew base word under grammatical
 /// prefix/suffix expansion (תחיליות/סופיות), per FtsLib's GrammarExpander.
@@ -22,6 +23,7 @@ pub struct HebrewGrammarQuery {
     expand_suffixes: bool,
     matched_terms_sink: Option<MatchedTermsSink>,
     ignore_quotes: bool,
+    word_model: WordModel,
 }
 
 impl HebrewGrammarQuery {
@@ -48,7 +50,13 @@ impl HebrewGrammarQuery {
             expand_suffixes,
             matched_terms_sink: None,
             ignore_quotes: false,
+            word_model: WordModel::default(),
         }
+    }
+
+    /// Which index terms are words (see [`WordModel`]); default FtsLib's.
+    pub fn set_word_model(&mut self, model: WordModel) {
+        self.word_model = model;
     }
 
     /// Collects the indexed forms this query matches into `sink` while the
@@ -67,7 +75,7 @@ impl HebrewGrammarQuery {
         Ok(std::sync::Arc::new(self.automaton_weight()))
     }
 
-    fn automaton_weight(&self) -> AutomatonWeight<SetAutomaton> {
+    fn automaton_weight(&self) -> AutomatonWeight<WordBounds<SetAutomaton>> {
         let word: String = if self.ignore_quotes {
             self.word.chars().filter(|&c| c != '"').collect()
         } else {
@@ -78,7 +86,7 @@ impl HebrewGrammarQuery {
         if self.ignore_quotes {
             automaton = automaton.with_transparent_quotes();
         }
-        let mut weight = AutomatonWeight::new(self.field, automaton);
+        let mut weight = AutomatonWeight::new(self.field, WordBounds::new(automaton, self.word_model));
         if let Some(sink) = &self.matched_terms_sink {
             weight.set_matched_terms_sink(sink.clone());
         }

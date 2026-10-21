@@ -12,10 +12,10 @@
 
 use std::collections::BTreeMap;
 
-use hebrew_fts::{tokenize_query, QueryTerm, QueryToken, DEFAULT_CONTEXT_WORDS};
+use hebrew_fts::{tokenize_query_with, QueryTerm, QueryToken, WordModel, DEFAULT_CONTEXT_WORDS};
 use serde::{Deserialize, Serialize};
 
-use crate::search::{ExcludeSpec, GroupSpec, ProximitySpec, SearchRequest, TypoModeSpec, WalkOptionsSpec};
+use crate::search::{ExcludeSpec, GroupSpec, ProximitySpec, SearchRequest, TypoModeSpec, WalkOptionsSpec, WordModelSpec};
 use crate::{Error, Result};
 
 /// A search: the query string and the options of every word.
@@ -69,6 +69,11 @@ pub struct SearchOptions {
     pub words: BTreeMap<usize, WordOptions>,
 
     // ── Query-level ──
+    /// Which words are words: FtsLib's 2..=29 letters (default) or
+    /// Otzaria's every word, one-letter words included (see
+    /// [`WordModelSpec`]). Applies to the query, the negative query and the
+    /// phrase alternatives.
+    pub word_model: WordModelSpec,
     /// FtsLib's word distance: max words between the matched words. None = no limit.
     pub max_word_distance: Option<usize>,
     /// FtsLib: the words in query order.
@@ -118,6 +123,7 @@ impl Default for SearchOptions {
             part_of_word_max_letters: None,
             grammar_prefix_max_letters: None,
             words: BTreeMap::new(),
+            word_model: WordModelSpec::default(),
             max_word_distance: None,
             require_ordered: false,
             min_groups: None,
@@ -212,7 +218,8 @@ impl SearchOptions {
     /// typed words.
     pub fn to_request(&self, keep_marks: bool) -> Result<SearchRequest> {
         let global = self.global();
-        let main = slots(&self.query, keep_marks, |i| match self.words.get(&i) {
+        let model: WordModel = self.word_model.into();
+        let main = slots(&self.query, keep_marks, model, |i| match self.words.get(&i) {
             Some(w) => (w.apply(global), w.alternatives.as_slice()),
             None => (global, &[]),
         });
@@ -223,7 +230,7 @@ impl SearchOptions {
         };
         let exclude = match &self.exclude {
             Some(e) => {
-                let ex = slots(&e.query, keep_marks, |_| (global, &[]));
+                let ex = slots(&e.query, keep_marks, model, |_| (global, &[]));
                 Some(ExcludeSpec {
                     proximity: e.proximity.as_ref().map(|p| ex.lower(p)).transpose()?,
                     groups: ex.groups,
@@ -239,7 +246,7 @@ impl SearchOptions {
             .iter()
             .map(|p| {
                 let o = WalkOptionsSpec { ignore_quotes: p.ignore_quotes, ..Default::default() };
-                slots(&p.query, keep_marks, |_| (o, &[])).groups
+                slots(&p.query, keep_marks, model, |_| (o, &[])).groups
             })
             .filter(|p| !p.is_empty())
             .collect();
@@ -249,6 +256,7 @@ impl SearchOptions {
             require_ordered: self.require_ordered,
             context_words: self.context_words,
             gaps: None,
+            word_model: self.word_model,
             min_groups,
             exclude,
             phrase_alternatives,
@@ -339,14 +347,16 @@ struct Slots {
 impl Slots {
     /// A proximity given per typed word, as the slots' own proximity.
     ///
-    /// A dropped word (one letter, 30+ letters, no letters) has no term in
-    /// the index, and the text tokenizer gives such a word no position
-    /// either, so it is cut out of the rule and the gaps around it merge:
-    /// `a x b` with gaps `[g0, g1]` → `a b` with `g0 + g1`. In Otzaria
-    /// (`resolve_gaps`) `x` is a word of its own, at one position, with at
-    /// most `g0` words before it and `g1` after it up to `b`; with `x`
-    /// invisible that leaves at most `g0 + g1` words between `a` and `b`:
-    /// the same lines, except that `x` itself is not checked. Sub-words of
+    /// A dropped word is not a word of the request's model, so the text
+    /// tokenizer gives it no position: it is cut out of the rule and the
+    /// gaps around it merge: `a x b` with gaps `[g0, g1]` → `a b` with
+    /// `g0 + g1`. With Otzaria's word model only a typed word with no
+    /// letters (`,`, `12`) is dropped; a one-letter word is a slot of its
+    /// own, matched at its position, as in Otzaria. With FtsLib's model one-
+    /// letter and 30+ letter words are dropped too (FtsLib has none). In
+    /// Otzaria (`resolve_gaps`) a dropped `x` would be a word with at most
+    /// `g0` words before it and `g1` after it up to `b`; with `x` invisible
+    /// that leaves at most `g0 + g1` words between `a` and `b`. Sub-words of
     /// one typed word (`אשר־שמע` typed as one word) are adjacent: gap 0. The
     /// gap before an OR slot (`a | b`) is the one before its first word, the
     /// gap after it the one after its last word. Any order: Otzaria's window
@@ -410,7 +420,12 @@ impl Slots {
 /// and alternatives, which go to every sub-word cut from it; the
 /// alternatives join the sub-word's slot (and stand for the word when it
 /// cannot search itself).
-fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String])) -> Slots {
+fn slots<'a>(
+    query: &str,
+    keep_marks: bool,
+    model: WordModel,
+    word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String]),
+) -> Slots {
     let mut groups = Vec::new();
     let mut typed: Vec<Option<(usize, usize)>> = Vec::new();
     let mut pending: Vec<GroupSpec> = Vec::new();
@@ -420,7 +435,7 @@ fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptions
         1 => groups.push(pending.pop().unwrap()),
         _ => groups.push(GroupSpec::Any { alternatives: std::mem::take(pending) }),
     };
-    for token in tokenize_query(query, keep_marks) {
+    for token in tokenize_query_with(query, keep_marks, model) {
         let (index, term) = match token {
             QueryToken::Pipe => {
                 last_was_pipe = true;
@@ -434,7 +449,7 @@ fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptions
         let (o, alternatives) = word(index);
         let mut members: Vec<GroupSpec> = term.into_iter().map(|t| group(t, o)).collect();
         for alt in alternatives {
-            for t in tokenize_query(alt, keep_marks) {
+            for t in tokenize_query_with(alt, keep_marks, model) {
                 if let QueryToken::Word { term: Some(t), .. } = t {
                     members.push(group(t, o));
                 }
@@ -598,6 +613,20 @@ mod tests {
         assert_eq!(min("משה ו תורה ספר", WordMatchSpec::All), None);
         assert_eq!(min("משה ו תורה ספר", WordMatchSpec::AtLeast { count: 3 }), None);
         assert_eq!(min("משה ו תורה ספר", WordMatchSpec::AtLeast { count: 0 }), Some(1));
+        // Otzaria's word model: the one-letter word is a slot of its own
+        let o = SearchOptions {
+            query: "משה ו תורה ספר".into(),
+            word_model: WordModelSpec::Otzaria,
+            word_match: Some(WordMatchSpec::MostWords),
+            proximity: Some(ProximitySpec::Ordered { gaps: vec![2, 3, 4] }),
+            ..Default::default()
+        };
+        let r = o.to_request(false).unwrap();
+        assert_eq!((r.groups.len(), r.min_groups), (4, Some(3)));
+        assert_eq!(r.proximity, Some(ProximitySpec::Ordered { gaps: vec![2, 3, 4] }));
+        assert_eq!(r.word_model, WordModelSpec::Otzaria);
+        let j: SearchOptions = serde_json::from_str(r#"{"query":"א","word_model":"otzaria"}"#).unwrap();
+        assert_eq!(j.to_request(false).unwrap().groups.len(), 1);
         let j: SearchOptions = serde_json::from_str(r#"{"query":"א ב","word_match":{"mode":"at_least","count":2}}"#).unwrap();
         assert_eq!(j.word_match, Some(WordMatchSpec::AtLeast { count: 2 }));
     }

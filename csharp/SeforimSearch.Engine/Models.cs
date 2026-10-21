@@ -65,6 +65,18 @@ namespace SeforimSearch.Engine
         FullEdit1 = 1,
     }
 
+    /// <summary>Which words are words (the engine's <c>word_model</c>).</summary>
+    public enum WordModel
+    {
+        /// <summary>FtsLib's words of 2..29 letters: one-letter (and 30+ letter) query words
+        /// are dropped, expansions reach only such index terms, distances count only such
+        /// words. Byte-identical with FtsLib.</summary>
+        FtsLib = 0,
+        /// <summary>Otzaria's: every word of 1+ letters is a word, matched at its own
+        /// position and counted in distances.</summary>
+        Otzaria = 1,
+    }
+
     /// <summary>Hebrew walk options for a word (Otzaria's search options).</summary>
     public sealed class WalkOptions
     {
@@ -362,6 +374,9 @@ namespace SeforimSearch.Engine
         /// positions; one entry per consecutive pair. Null = not used.</summary>
         public List<int>? Gaps { get; set; }
 
+        /// <summary>Which words are words (see <see cref="SeforimSearch.Engine.WordModel"/>).</summary>
+        public WordModel WordModel { get; set; }
+
         /// <summary>Partial matching (Otzaria's wordMatchMode): a line needs only this
         /// many of the groups (anyWord = 1, mostWords = n/2 + 1, atLeast = N; clamped
         /// to 1..n). Null = all groups. Below the group count, MaxWordDistance,
@@ -412,6 +427,7 @@ namespace SeforimSearch.Engine
             }
             if (MinGroups.HasValue)
                 sb.Append(",\"min_groups\":").Append(MinGroups.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (WordModel == WordModel.Otzaria) sb.Append(",\"word_model\":\"otzaria\"");
             if (Proximity != null)
             {
                 sb.Append(",\"proximity\":");
@@ -565,6 +581,10 @@ namespace SeforimSearch.Engine
         public Dictionary<int, WordOptions> Words { get; } = new Dictionary<int, WordOptions>();
 
         // query level
+        /// <summary>Which words are words: FtsLib's 2..29 letters (default) or Otzaria's every
+        /// word, one-letter words included. Applies to the query, the negative query and the
+        /// phrase alternatives.</summary>
+        public WordModel WordModel { get; set; }
         /// <summary>FtsLib's word distance. Null = no limit.</summary>
         public int? MaxWordDistance { get; set; }
         /// <summary>FtsLib: the words in query order.</summary>
@@ -578,7 +598,9 @@ namespace SeforimSearch.Engine
         /// <summary>Words of context per side of the snippet.</summary>
         public int ContextWords { get; set; } = 8;
         /// <summary>Otzaria's proximity, per TYPED word (gaps[i] between typed words i and i+1,
-        /// words the engine drops included: it cuts them out and merges the gaps around them).
+        /// words the engine drops included: it cuts them out and merges the gaps around them;
+        /// with <see cref="SeforimSearch.Engine.WordModel.Otzaria"/> a one-letter word is a word, only
+        /// words with no letters are dropped).
         /// When set, MaxWordDistance / RequireOrdered are not used.</summary>
         public Proximity? Proximity { get; set; }
         /// <summary>Otzaria's negative query (its words use the global word options).</summary>
@@ -610,6 +632,7 @@ namespace SeforimSearch.Engine
                 }
                 sb.Append('}');
             }
+            if (WordModel == WordModel.Otzaria) sb.Append(",\"word_model\":\"otzaria\"");
             if (MaxWordDistance.HasValue) sb.Append(",\"max_word_distance\":").Append(MaxWordDistance.Value.ToString(inv));
             if (RequireOrdered) sb.Append(",\"require_ordered\":true");
             if (MinGroups.HasValue) sb.Append(",\"min_groups\":").Append(MinGroups.Value.ToString(inv));

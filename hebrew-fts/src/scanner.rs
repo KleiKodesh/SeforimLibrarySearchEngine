@@ -15,6 +15,7 @@ use unicode_general_category::{get_general_category, GeneralCategory};
 
 use crate::chars;
 use crate::html_tags;
+use crate::word_model::WordModel;
 
 /// Maximum number of chars accumulated for a tag name (as in the C# original).
 const TAG_NAME_CAP: usize = 16;
@@ -36,7 +37,8 @@ pub struct WordSpan {
     /// letter of this word. Used by the snippet window locator to measure
     /// window length without re-scanning.
     pub visible_start: usize,
-    /// Number of letters in the word (2..=29). Quotes and kept marks in the
+    /// Number of letters in the word (2..=29 in FtsLib's word model, 1+ in
+    /// Otzaria's: see [`scan_words`]). Quotes and kept marks in the
     /// normalized text are not counted. This is FtsLib's `NormLen`: the
     /// word's visible width.
     pub letters: usize,
@@ -75,8 +77,29 @@ pub fn scan(text: &str, on_word: impl FnMut(&str, WordSpan)) -> usize {
 /// counting) is the C# loop's, step for step; the pre-optimisation version
 /// that materialised a `(byte, utf16, char)` table per line is kept in
 /// `scanner_reference.rs` and a property test asserts identical output.
+pub fn scan_with(text: &str, keep_marks: bool, on_word: impl FnMut(&str, WordSpan)) -> usize {
+    scan_bounded(text, keep_marks, 2, 29, on_word)
+}
+
+/// Like [`scan_with`], with the words of `model`: FtsLib's 2..=29 letters
+/// (exactly [`scan_with`]) or Otzaria's every word of 1+ letters, at any
+/// length (the index tokenizer leaves a word over
+/// [`MAX_TERM_BYTES`](crate::word_model::MAX_TERM_BYTES) out of the terms
+/// but keeps its position).
+pub fn scan_words(text: &str, keep_marks: bool, model: WordModel, on_word: impl FnMut(&str, WordSpan)) -> usize {
+    let (min, max) = model.letter_bounds();
+    scan_bounded(text, keep_marks, min, max, on_word)
+}
+
 #[allow(unused_assignments)] // the final flush!'s buffer reset is never read
-pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, WordSpan)) -> usize {
+#[inline(always)]
+fn scan_bounded(
+    text: &str,
+    keep_marks: bool,
+    min_letters: usize,
+    max_letters: usize,
+    mut on_word: impl FnMut(&str, WordSpan),
+) -> usize {
     let bytes = text.as_bytes();
     let n = bytes.len();
     if n == 0 {
@@ -111,7 +134,7 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
 
     macro_rules! flush {
         ($end_b:expr, $end_u:expr) => {{
-            if buf_chars > 1 && buf_chars < 30 {
+            if buf_chars >= min_letters && buf_chars <= max_letters {
                 // A quote is part of the word only BETWEEN letters (רש"י). One
                 // after the last letter is quotation punctuation (יצחק"): FtsLib
                 // drops it, so it must not become part of the term. The tail
@@ -436,6 +459,7 @@ pub struct TextTokens {
     norm: String,
     tokens: Vec<TextToken>,
     keep_marks: bool,
+    model: WordModel,
     raw_utf16_len: usize,
 }
 
@@ -449,6 +473,15 @@ impl TextTokens {
         }
     }
 
+    /// A tokenizer for the words of `model` (see [`scan_words`]).
+    pub fn new(keep_marks: bool, model: WordModel) -> TextTokens {
+        TextTokens {
+            keep_marks,
+            model,
+            ..TextTokens::default()
+        }
+    }
+
     /// Tokenizes `text`. The tokens AND every token's normalized view are
     /// reused on the next call — copy what you keep.
     pub fn tokenize(&mut self, text: &str) -> &[TextToken] {
@@ -456,7 +489,7 @@ impl TextTokens {
         self.tokens.clear();
         let norm = &mut self.norm;
         let tokens = &mut self.tokens;
-        self.raw_utf16_len = scan_with(text, self.keep_marks, |word, span| {
+        self.raw_utf16_len = scan_words(text, self.keep_marks, self.model, |word, span| {
             let norm_start = norm.len();
             norm.push_str(word);
             tokens.push(TextToken {

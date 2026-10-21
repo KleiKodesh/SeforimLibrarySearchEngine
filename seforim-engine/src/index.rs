@@ -6,7 +6,10 @@
 //! itself needs: `line_id`, the catalog `position` (results come back in that
 //! order) and `book_id` (for filtered search by book). No text, nothing the
 //! host can read from SQLite by line id (line index, sections, references):
-//! grouping and placement are the host's job on the returned line ids. Positions in the text postings are optional: without them the
+//! grouping and placement are the host's job on the returned line ids. An
+//! index that keeps marks also flags the lines that carry a mark (`marked`,
+//! one term, those lines only): Otzaria's vocalized search sees only such
+//! lines. Positions in the text postings are optional: without them the
 //! index is smaller and word distance is validated by the snippet locator
 //! on the line text (FtsLib's way); with them, span queries also work.
 
@@ -28,8 +31,13 @@ pub struct IndexOptions {
     /// Store word positions in the postings. Off: smaller index, distance is
     /// validated from the text only.
     pub positions: bool,
-    /// Keep nikud/te'amim in the indexed terms (`hebrew_marked` tokenizer),
-    /// for vocalized text searched with the ignore-nikud/te'amim options.
+    /// Keep nikud / te'amim (and combining accents) in the indexed terms,
+    /// in canonical order (`hebrew_marked` tokenizer), and flag the lines
+    /// that carry an attached mark. Every walk reads the marks as zero
+    /// width, so a search returns exactly what the mark-stripped index
+    /// returns; the `match_nikud` / `match_teamim` options (Otzaria's
+    /// vocalized search) need it. Off (default): today's mark-stripped
+    /// index, smaller and with faster broad walks.
     pub keep_marks: bool,
 }
 
@@ -53,7 +61,15 @@ pub struct LineFields {
     pub book_id: Field,
     /// The line text, Hebrew-tokenized.
     pub text: Field,
+    /// `keep_marks` only: the lines carrying an attached mark hold the term
+    /// [`MARKED_LINE`] (Otzaria's `contains_attached_marks`, the lines its
+    /// vocalized field `textVocalized` holds). None on a mark-stripped index
+    /// or a marks index built before the flag existed.
+    pub marked: Option<Field>,
 }
+
+/// The `marked` field's one term.
+pub const MARKED_LINE: u64 = 1;
 
 const OPTIONS_FILE: &str = "engine_options.json";
 
@@ -76,6 +92,7 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
         .set_tokenizer(tokenizer)
         .set_index_option(record);
     let text = b.add_text_field("text", TextOptions::default().set_indexing_options(indexing));
+    let marked = options.keep_marks.then(|| b.add_u64_field("marked", INDEXED));
     (
         b.build(),
         LineFields {
@@ -83,6 +100,7 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
             position,
             book_id,
             text,
+            marked,
         },
     )
 }
@@ -158,7 +176,9 @@ impl LineIndex {
             .unwrap_or_default();
         let index = Index::open(MmapDirectory::open(dir)?)?;
         hebrew_fts::register_hebrew_tokenizer(index.tokenizers());
-        let (_, fields) = line_schema(options);
+        let (_, mut fields) = line_schema(options);
+        // a marks index built before the line flag has no `marked` field
+        fields.marked = index.schema().get_field("marked").ok();
         Ok(Self::wrap(index, fields, options, dir))
     }
 
@@ -239,12 +259,18 @@ impl LineWriter {
     /// Queues a line. Not visible until `commit`.
     pub fn add(&mut self, line: &LineDoc) -> Result<()> {
         let f = self.fields;
-        self.writer.add_document(doc!(
+        let mut document = doc!(
             f.line_id => line.line_id,
             f.position => line.position,
             f.book_id => line.book_id,
             f.text => line.text.as_str(),
-        ))?;
+        );
+        if let Some(marked) = f.marked {
+            if hebrew_fts::chars::contains_attached_marks(&line.text) {
+                document.add_u64(marked, MARKED_LINE);
+            }
+        }
+        self.writer.add_document(document)?;
         Ok(())
     }
 

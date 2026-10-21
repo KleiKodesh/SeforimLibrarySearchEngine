@@ -171,17 +171,167 @@ pub fn is_strippable_mark(c: char) -> bool {
     ('\u{0591}'..='\u{05C7}').contains(&c) && c != '\u{05C0}' && c != '\u{05C3}' && c != '\u{05C6}'
 }
 
-/// Cantillation marks: U+0591..U+05AF.
+/// Otzaria `is_taam_mark` (vocalized search classes): every attached mark
+/// that is not nikud ([`is_nikud`]): the cantillation marks U+0591..U+05AF,
+/// meteg U+05BD and the upper / lower dots U+05C4 / U+05C5.
 #[inline(always)]
 pub fn is_taam(c: char) -> bool {
-    ('\u{0591}'..='\u{05AF}').contains(&c)
+    is_attached_mark(c) && !is_nikud(c)
 }
 
-/// Vowel points: the strippable marks that are not te'amim (U+05B0..U+05BD,
-/// U+05BF, U+05C1/U+05C2, U+05C4/U+05C5, U+05C7).
+/// Otzaria `is_nikud_mark` (vocalized search classes): the vowel points
+/// U+05B0..U+05BB, dagesh / mappiq U+05BC, rafe U+05BF, the shin / sin dots
+/// U+05C1 / U+05C2 and qamatz qatan U+05C7.
 #[inline(always)]
 pub fn is_nikud(c: char) -> bool {
-    is_strippable_mark(c) && !is_taam(c)
+    matches!(c, '\u{05B0}'..='\u{05BC}' | '\u{05BF}' | '\u{05C1}' | '\u{05C2}' | '\u{05C7}')
+}
+
+/// The general combining marks U+0300..U+036F: kept in the terms of an index
+/// that keeps marks, never nikud or te'amim (Otzaria: always free in a
+/// vocalized search).
+#[inline(always)]
+pub fn is_combining_mark(c: char) -> bool {
+    ('\u{0300}'..='\u{036F}').contains(&c)
+}
+
+/// A mark an index that keeps marks holds inside its terms: an attached
+/// Hebrew mark or a general combining mark ([`is_word_mark`] without
+/// U+FB1E, which the word rule drops).
+#[inline(always)]
+pub fn is_term_mark(c: char) -> bool {
+    is_attached_mark(c) || is_combining_mark(c)
+}
+
+/// The term marks ([`is_term_mark`]) as code point ranges: the zero-width
+/// characters of a marks-keeping dictionary's walks and caps. The separators
+/// inside U+0591..U+05C7 (maqaf, paseq, sof pasuq, nun hafukha) never occur
+/// inside a term, so the whole range can be given.
+pub const TERM_MARK_RANGES: [(char, char); 2] = [('\u{0300}', '\u{036F}'), ('\u{0591}', '\u{05C7}')];
+
+/// Otzaria `contains_attached_marks`: the line carries at least one attached
+/// mark (only such lines are in Otzaria's vocalized field, `textVocalized`).
+pub fn contains_attached_marks(text: &str) -> bool {
+    text.chars().any(is_attached_mark)
+}
+
+/// `term` without its term marks ([`is_term_mark`]).
+pub fn strip_term_marks(term: &str) -> std::borrow::Cow<'_, str> {
+    if term.chars().any(is_term_mark) {
+        std::borrow::Cow::Owned(term.chars().filter(|&c| !is_term_mark(c)).collect())
+    } else {
+        std::borrow::Cow::Borrowed(term)
+    }
+}
+
+/// The Unicode canonical combining class of a term mark (Unicode 16
+/// `UnicodeData.txt`); 0 for every other char (letters, digits, quotes).
+/// Marks are kept in canonical order (stable by this class) in the terms of
+/// an index that keeps marks and in the typed words, so the order a text
+/// or a user put two marks of one letter in does not matter.
+pub fn combining_class(c: char) -> u8 {
+    match c {
+        '\u{0300}'..='\u{0314}' => 230,
+        '\u{0315}' => 232,
+        '\u{0316}'..='\u{0319}' => 220,
+        '\u{031A}' => 232,
+        '\u{031B}' => 216,
+        '\u{031C}'..='\u{0320}' => 220,
+        '\u{0321}'..='\u{0322}' => 202,
+        '\u{0323}'..='\u{0326}' => 220,
+        '\u{0327}'..='\u{0328}' => 202,
+        '\u{0329}'..='\u{0333}' => 220,
+        '\u{0334}'..='\u{0338}' => 1,
+        '\u{0339}'..='\u{033C}' => 220,
+        '\u{033D}'..='\u{0344}' => 230,
+        '\u{0345}' => 240,
+        '\u{0346}' => 230,
+        '\u{0347}'..='\u{0349}' => 220,
+        '\u{034A}'..='\u{034C}' => 230,
+        '\u{034D}'..='\u{034E}' => 220,
+        '\u{034F}' => 0,
+        '\u{0350}'..='\u{0352}' => 230,
+        '\u{0353}'..='\u{0356}' => 220,
+        '\u{0357}' => 230,
+        '\u{0358}' => 232,
+        '\u{0359}'..='\u{035A}' => 220,
+        '\u{035B}' => 230,
+        '\u{035C}' => 233,
+        '\u{035D}'..='\u{035E}' => 234,
+        '\u{035F}' => 233,
+        '\u{0360}'..='\u{0361}' => 234,
+        '\u{0362}' => 233,
+        '\u{0363}'..='\u{036F}' => 230,
+        '\u{0591}' => 220,
+        '\u{0592}'..='\u{0595}' => 230,
+        '\u{0596}' => 220,
+        '\u{0597}'..='\u{0599}' => 230,
+        '\u{059A}' => 222,
+        '\u{059B}' => 220,
+        '\u{059C}'..='\u{05A1}' => 230,
+        '\u{05A2}'..='\u{05A7}' => 220,
+        '\u{05A8}'..='\u{05A9}' => 230,
+        '\u{05AA}' => 220,
+        '\u{05AB}'..='\u{05AC}' => 230,
+        '\u{05AD}' => 222,
+        '\u{05AE}' => 228,
+        '\u{05AF}' => 230,
+        '\u{05B0}' => 10,
+        '\u{05B1}' => 11,
+        '\u{05B2}' => 12,
+        '\u{05B3}' => 13,
+        '\u{05B4}' => 14,
+        '\u{05B5}' => 15,
+        '\u{05B6}' => 16,
+        '\u{05B7}' => 17,
+        '\u{05B8}' => 18,
+        '\u{05B9}'..='\u{05BA}' => 19,
+        '\u{05BB}' => 20,
+        '\u{05BC}' => 21,
+        '\u{05BD}' => 22,
+        '\u{05BF}' => 23,
+        '\u{05C1}' => 24,
+        '\u{05C2}' => 25,
+        '\u{05C4}' => 230,
+        '\u{05C5}' => 220,
+        '\u{05C7}' => 18,
+        _ => 0,
+    }
+}
+
+/// Appends the term mark `mark` to `text` in canonical order: before the
+/// marks at the end of `text` whose combining class is greater (a stable
+/// insertion sort of each mark run, Unicode's canonical ordering). Returns
+/// nothing; the caller counts bytes.
+pub fn push_mark_canonical(text: &mut String, mark: char) {
+    let class = combining_class(mark);
+    if class == 0 {
+        text.push(mark);
+        return;
+    }
+    let mut at = text.len();
+    for (i, c) in text.char_indices().rev() {
+        let k = combining_class(c);
+        if k <= class || k == 0 {
+            break;
+        }
+        at = i;
+    }
+    text.insert(at, mark);
+}
+
+/// `term` with the marks of each letter in canonical order (see
+/// [`push_mark_canonical`]).
+pub fn canonical_marks(term: &str) -> String {
+    let mut out = String::with_capacity(term.len());
+    for c in term.chars() {
+        if is_term_mark(c) {
+            push_mark_canonical(&mut out, c);
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -225,6 +375,27 @@ mod tests {
         assert_eq!(fold_presentation_form('\u{FB4F}'), Some("\u{05D0}\u{05DC}"));
         assert_eq!(fold_presentation_form('\u{05D0}'), None);
         assert!(is_indexable_len(127) && !is_indexable_len(128));
+    }
+
+    #[test]
+    fn mark_classes_and_canonical_order() {
+        // Otzaria's classes: nikud U+05B0..U+05BC, U+05BF, U+05C1, U+05C2, U+05C7; te'amim the rest
+        for c in ['\u{05B0}', '\u{05BB}', '\u{05BC}', '\u{05BF}', '\u{05C1}', '\u{05C2}', '\u{05C7}'] {
+            assert!(is_nikud(c) && !is_taam(c) && is_term_mark(c), "{c:?}");
+        }
+        for c in ['\u{0591}', '\u{05AF}', '\u{05BD}', '\u{05C4}', '\u{05C5}'] {
+            assert!(is_taam(c) && !is_nikud(c) && is_term_mark(c), "{c:?}");
+        }
+        assert!(is_term_mark('\u{0301}') && !is_nikud('\u{0301}') && !is_taam('\u{0301}'));
+        assert!(!is_term_mark('\u{05BE}') && !is_term_mark('\u{05D0}') && !is_term_mark('\u{FB1E}'));
+        // canonical order is stable by class: dagesh (21) after a vowel, a
+        // ta'am (220) after both, two marks of one class keep their order
+        assert_eq!(canonical_marks("\u{05D1}\u{05BC}\u{0591}\u{05B8}"), "\u{05D1}\u{05B8}\u{05BC}\u{0591}");
+        assert_eq!(canonical_marks("\u{05D1}\u{0596}\u{0591}"), "\u{05D1}\u{0596}\u{0591}");
+        // never across a letter
+        assert_eq!(canonical_marks("\u{05D1}\u{05BC}\u{05D2}\u{05B8}"), "\u{05D1}\u{05BC}\u{05D2}\u{05B8}");
+        assert!(contains_attached_marks("a\u{05B8}") && !contains_attached_marks("a\u{0301}\u{05BE}"));
+        assert_eq!(strip_term_marks("\u{05D1}\u{05B8}\u{0301}\""), "\u{05D1}\"");
     }
 
     #[test]

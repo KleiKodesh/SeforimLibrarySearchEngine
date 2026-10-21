@@ -13,7 +13,7 @@ use std::cmp::Reverse;
 
 use hebrew_fts::fuzzy::{Distance, LevenshteinDfa};
 use hebrew_fts::wildcard::WildcardAutomaton;
-use hebrew_fts::walk::ZERO_WIDTH_BYTES;
+use hebrew_fts::marks::{strip_mark_bytes, zero_width_chars};
 use tantivy::termdict::TermDictionary;
 
 use crate::fm_index::FmIndex;
@@ -54,18 +54,25 @@ fn term_of(dict: &TermDictionary, rowid: u32, buf: &mut Vec<u8>) -> Result<bool>
 }
 
 /// Keeps the best `cap` slots of `ranked` under the walk's order: lowest
-/// rank, then shortest (quote zero-width), then highest doc count, then the
-/// quote-free bytes. As in the walk's cap, a term and its quoted variants
-/// (רשי, רש"י) are ONE slot (FtsLib's index stored only the quote-free
-/// term), ranked by their summed doc count; a kept slot keeps all of them.
-fn cap_like_the_walk(dict: &TermDictionary, mut ranked: Vec<(u32, Vec<u8>)>, cap: usize) -> Result<Vec<Vec<u8>>> {
+/// rank, then shortest (quotes zero-width, and marks on an index that keeps
+/// them), then highest doc count, then the stripped bytes. As in the walk's
+/// cap, a term and its quoted or vocalized variants are ONE slot (FtsLib's
+/// index stored only the quote-free term), ranked by their summed doc count;
+/// a kept slot keeps all of them.
+fn cap_like_the_walk(
+    dict: &TermDictionary,
+    mut ranked: Vec<(u32, Vec<u8>)>,
+    cap: usize,
+    marked_terms: bool,
+) -> Result<Vec<Vec<u8>>> {
+    let zero_width = zero_width_chars(marked_terms);
     let mut forms: std::collections::HashMap<Vec<u8>, (u32, usize, u64, Vec<Vec<u8>>)> =
         std::collections::HashMap::new();
     for (rank, term) in &ranked {
-        let form = ZERO_WIDTH_BYTES.strip(term).into_owned();
+        let form = zero_width.strip(term).into_owned();
         let slot = forms
             .entry(form)
-            .or_insert((u32::MAX, ZERO_WIDTH_BYTES.term_len(term), 0, Vec::new()));
+            .or_insert((u32::MAX, zero_width.term_len(term), 0, Vec::new()));
         slot.0 = slot.0.min(*rank);
         slot.3.push(term.clone());
     }
@@ -90,7 +97,9 @@ fn cap_like_the_walk(dict: &TermDictionary, mut ranked: Vec<(u32, Vec<u8>)>, cap
 
 /// FtsLib `ExpandWildcardWithFm`, verified: the terms the wildcard walk
 /// would match, capped like the walk. `core`/`suffix_only` from
-/// [`fm_wildcard_shape`]; `automaton` the walk's.
+/// [`fm_wildcard_shape`]; `automaton` the walk's (built on mark-free text:
+/// with `marked_terms` a candidate is verified on its mark-free bytes, as
+/// the walk reads it through `MarkFree`).
 pub fn expand_wildcard(
     fm: &FmIndex,
     dict: &TermDictionary,
@@ -98,15 +107,20 @@ pub fn expand_wildcard(
     core: &str,
     suffix_only: bool,
     cap: usize,
+    marked_terms: bool,
 ) -> Result<Vec<Vec<u8>>> {
     let mut buf = Vec::new();
     let mut kept = Vec::new();
     for rowid in fm.find_row_ids(core, suffix_only) {
-        if term_of(dict, rowid, &mut buf)? && automaton.accepts(&buf) {
+        if !term_of(dict, rowid, &mut buf)? {
+            continue;
+        }
+        let ok = if marked_terms { automaton.accepts(&strip_mark_bytes(&buf)) } else { automaton.accepts(&buf) };
+        if ok {
             kept.push((0u32, buf.clone()));
         }
     }
-    cap_like_the_walk(dict, kept, cap)
+    cap_like_the_walk(dict, kept, cap, marked_terms)
 }
 
 /// FtsLib `ExpandFuzzy`, verified: the terms within `max_distance` edits of
@@ -114,7 +128,8 @@ pub fn expand_wildcard(
 ///
 /// The sidecar is searched with the quote-stripped word: dropping quotes from
 /// both strings never increases their edit distance, so the sidecar's hits
-/// are a superset of the walk's; the DFA then gives each its real distance.
+/// are a superset of the walk's; the DFA then gives each its real distance
+/// (on the mark-free form when the DFA was built for a marks-keeping index).
 pub fn expand_fuzzy(
     fm: &FmIndex,
     dict: &TermDictionary,
@@ -122,6 +137,7 @@ pub fn expand_fuzzy(
     word: &str,
     max_distance: u8,
     cap: usize,
+    marked_terms: bool,
 ) -> Result<Vec<Vec<u8>>> {
     let mut buf = Vec::new();
     let mut kept = Vec::new();
@@ -135,7 +151,7 @@ pub fn expand_fuzzy(
             }
         }
     }
-    cap_like_the_walk(dict, kept, cap)
+    cap_like_the_walk(dict, kept, cap, marked_terms)
 }
 
 /// Plain Levenshtein distance over chars (insert, delete, substitute: FtsLib's
@@ -172,6 +188,7 @@ pub fn expand_fuzzy_quote_free(
     word: &str,
     max_distance: u8,
     cap: usize,
+    marked_terms: bool,
 ) -> Result<Vec<Vec<u8>>> {
     let query: Vec<char> = text_form(word).chars().collect();
     let mut buf = Vec::new();
@@ -186,7 +203,7 @@ pub fn expand_fuzzy_quote_free(
             kept.push((d as u32, buf.clone()));
         }
     }
-    cap_like_the_walk(dict, kept, cap)
+    cap_like_the_walk(dict, kept, cap, marked_terms)
 }
 
 #[cfg(test)]

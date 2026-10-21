@@ -36,12 +36,12 @@ use regex_automata::util::primitives::StateID;
 use regex_automata::util::start;
 use regex_automata::{Anchored, MatchKind};
 use regex_syntax::hir::{Class, ClassUnicode, ClassUnicodeRange, Hir, HirKind, Repetition};
-use tantivy::query::{AutomatonWeight, EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight};
+use tantivy::query::{EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight};
 use tantivy::schema::Field;
 use tantivy_fst::Automaton;
 
 use crate::quote_free::QuoteFree;
-use crate::walk::{DEFAULT_MAX_EXPANDED_TERMS, ZERO_WIDTH_BYTES};
+use crate::walk::DEFAULT_MAX_EXPANDED_TERMS;
 
 /// Otzaria's `MAX_BOUNDED_REPEAT`: a bounded repetition above it is
 /// unbounded for the walk (the verifier keeps the bound).
@@ -598,6 +598,8 @@ pub struct HebrewRegexQuery {
     automaton: RegexTermAutomaton,
     matched_terms_sink: Option<MatchedTermsSink>,
     max_expansions: usize,
+    /// The index keeps marks in its terms: they are read as zero width.
+    marked_terms: bool,
 }
 
 impl HebrewRegexQuery {
@@ -608,7 +610,16 @@ impl HebrewRegexQuery {
             automaton: RegexTermAutomaton(term_part(pattern)?),
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
+            marked_terms: false,
         })
+    }
+
+    /// The index keeps marks in its terms (`keep_marks`): the folded pattern
+    /// (marks dropped) then reads them as zero width
+    /// ([`crate::marks::MarkFree`]), matching what it matches on the
+    /// mark-stripped index.
+    pub fn set_marked_terms(&mut self, marked_terms: bool) {
+        self.marked_terms = marked_terms;
     }
 
     /// Collects the matched forms into `sink` during the search.
@@ -626,25 +637,25 @@ impl HebrewRegexQuery {
         QuoteFree::new(self.automaton.clone(), true)
     }
 
-    fn automaton_weight(&self) -> AutomatonWeight<QuoteFree<RegexTermAutomaton>> {
-        let mut weight = AutomatonWeight::new(self.field, self.automaton());
-        if let Some(sink) = &self.matched_terms_sink {
-            weight.set_matched_terms_sink(sink.clone());
+    fn plan(&self) -> crate::marks::WeightPlan<'_> {
+        crate::marks::WeightPlan {
+            field: self.field,
+            sink: self.matched_terms_sink.as_ref(),
+            cap: Some(self.max_expansions),
+            marked_terms: self.marked_terms,
+            mark_free: self.marked_terms,
         }
-        weight.set_max_expansions(self.max_expansions);
-        weight.set_zero_width_bytes(ZERO_WIDTH_BYTES);
-        weight
     }
 
     /// This word as a span slot, capped per segment.
     pub fn span_slot(&self, _searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
-        Ok(Arc::new(self.automaton_weight()))
+        Ok(self.plan().span(self.automaton()))
     }
 }
 
 impl Query for HebrewRegexQuery {
     fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        Ok(Box::new(self.automaton_weight()))
+        Ok(self.plan().boxed(self.automaton()))
     }
 }
 

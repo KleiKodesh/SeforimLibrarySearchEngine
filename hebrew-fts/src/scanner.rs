@@ -41,9 +41,10 @@ pub struct WordSpan {
     /// UTF-16 length of the word's quote-free, mark-free term (FtsLib's term,
     /// its `NormLen`): the word's visible width.
     pub letters: usize,
-    /// UTF-8 bytes of the term before lowercasing, quotes included: what
-    /// Otzaria's `RemoveLongFilter` measures. At [`chars::MAX_TERM_BYTES`]
-    /// or more the word is not indexed (it keeps its position).
+    /// UTF-8 bytes of the term before lowercasing, quotes included, marks
+    /// not (also when they are kept): what Otzaria's `RemoveLongFilter`
+    /// measures on its plain field. At [`chars::MAX_TERM_BYTES`] or more the
+    /// word is not indexed (it keeps its position).
     pub term_bytes: usize,
     /// The word's position: one per word, except the second reading of a
     /// paired reading `(X) [Y]`, which takes X's position (Otzaria).
@@ -396,8 +397,11 @@ pub fn scan_with(text: &str, keep_marks: bool, mut on_word: impl FnMut(&str, Wor
                     || (x == 0xD7 && matches!(bytes[b + 1], 0x81 | 0x82 | 0x84 | 0x85 | 0x87)))
             {
                 if keep_marks {
-                    s.norm.text.push_str(&text[b..b + 2]);
-                    s.norm.term_bytes += 2;
+                    // canonical order among its letter's marks; marks do not
+                    // count in term_bytes (see `Normalized::term_bytes`)
+                    let mark = char::from_u32((u32::from(x & 0x1F) << 6) | u32::from(bytes[b + 1] & 0x3F))
+                        .unwrap_or('\u{05B0}');
+                    s.norm.push_mark(mark);
                 }
                 s.prev = '\u{05B0}';
                 b += 2;
@@ -765,6 +769,22 @@ mod tests {
         assert_eq!((s[0].1.term_bytes, s[0].1.letters), (5, 2));
         assert_eq!(s[1].1.term_bytes, 128);
         assert!(!chars::is_indexable_len(s[1].1.term_bytes));
+    }
+
+    #[test]
+    fn kept_marks_in_canonical_order() {
+        let terms = |text: &str| {
+            let mut out = Vec::new();
+            scan_with(text, true, |w, s| out.push((w.to_string(), s.term_bytes)));
+            out
+        };
+        // dagesh + qamats typed in either order, a ta'am before a vowel, a
+        // combining accent: one canonical term, marks not counted in bytes
+        let a = terms("\u{05D1}\u{05BC}\u{05B8}\u{05E8}\u{0591}\u{05B5}\u{05D0}\u{0301}");
+        let b = terms("\u{05D1}\u{05B8}\u{05BC}\u{05E8}\u{05B5}\u{0591}\u{05D0}\u{0301}");
+        assert_eq!(a, [("\u{05D1}\u{05B8}\u{05BC}\u{05E8}\u{05B5}\u{0591}\u{05D0}\u{0301}".to_string(), 6)]);
+        assert_eq!(a, b);
+        assert_same("\u{05D1}\u{05BC}\u{05B8}\u{05E8}\u{0591}\u{05B5}\u{05D0}\u{0301} \u{FB31}\u{05B8}");
     }
 
     #[test]

@@ -19,6 +19,9 @@ the index stores only what the engine itself needs:
   positions, for span/slop queries)
 - `line_id`, the catalog `position`, and `book_id` (kept for **filtered
   search by book**)
+- on an index built with `keep_marks` only: a `marked` flag on the lines
+  that carry a nikud / ta'am mark (one term; Otzaria's vocalized search
+  sees only those lines, so the engine filters by it)
 
 Nothing else: no text, and no data the host can read from SQLite by line id.
 Grouping, sections, line index, references, neighbour lines and the like are
@@ -141,9 +144,10 @@ is clean, and CHANGELOG.md has the entry.
    (`termdict/fst_termdict/shortest_first.rs`, `termdict/mod.rs`)
    - *What:* a breadth-first walk of the FST by word length in characters.
      All matches of length L come before any of length L+1, and the caller
-     stops pulling levels when it has enough. The caller may name ASCII
-     bytes that count as zero width (`ZeroWidthBytes`); hebrew-fts passes
-     the intra-word quote, so רש"י is as short as רשי, as in FtsLib whose
+     stops pulling levels when it has enough. The caller may name
+     characters that count as zero width (`ZeroWidthChars`: ASCII bytes
+     plus ranges of multi-byte characters); hebrew-fts passes the
+     intra-word quote, and the marks on an index that keeps them, so רש"י is as short as רשי, as in FtsLib whose
      terms carried no quotes. With quickwit's SSTable dictionary (no FST to
      walk) the same API streams the whole expansion once and groups it by
      length: same result, full-walk cost.
@@ -155,7 +159,7 @@ is clean, and CHANGELOG.md has the entry.
 
 3. **Expansion cap instead of errors.**
    (`query/automaton_weight.rs`: `set_max_expansions`,
-   `set_expansion_rank`, `set_zero_width_bytes`; `fuzzy_query.rs`,
+   `set_expansion_rank`, `set_zero_width_chars`; `fuzzy_query.rs`,
    `regex_query.rs`, `phrase_query/regex_phrase_weight.rs`)
    - *What:* an automaton query can be capped at N words (we use FtsLib's
      2000). Unranked queries use the shortest-first walk, with ties going to
@@ -226,12 +230,16 @@ are not printed), so upstream's query-parser tests stay as they are.
     verbatim) on the visible text; a property test keeps the single-pass
     scanner equal to it.
   - Two variants: `hebrew` strips nikud and te'amim, `hebrew_marked` keeps
-    them.
+    them (and the combining accents U+0300..U+036F) in canonical order:
+    the marks of one letter are sorted by their Unicode combining class
+    (stable), so a text or a query typing dagesh before or after the vowel
+    gives one term. A kept mark counts in no length: the 128-byte limit
+    measures the mark-free bytes, so both variants index the same words.
 - **Walks:**
   - **Grammar** (`%word`, `word%`): 34 prefixes and 32 suffixes.
   - **Otzaria options:** grammatical/Aramaic prefixes and suffixes, ktiv
     male/haser, part-of-word, advanced prefixes/suffixes, ignore gershayim,
-    typos (שגיאות כתיב), ignore nikud, ignore te'amim. Ported from Otzaria's
+    typos (שגיאות כתיב), match nikud, match te'amim. Ported from Otzaria's
     code (`hebrew_query.rs`, `quote_expansion.rs`), all inside the walk:
     - **Quote-free terms** (always, unless `exact_quotes`): an index term also
       matches by its quote-free form, so `רמבם` finds `רמב"ם` (Otzaria's
@@ -336,8 +344,8 @@ are not printed), so upstream's query-parser tests stay as they are.
     `{"kind":"regex","pattern":...}` takes a pattern as is (no folding, no
     case folding, no 300-char limit; still whole-term and size-bounded). Otzaria's sequence may also continue onto the next line: that
     part is deferred with cross-line matching. An index that keeps marks
-    is refused (its terms are vocalized; the folded pattern cannot match
-    them): an error.
+    reads the term marks as zero width (`MarkFree`), so the folded pattern
+    matches what it matches on the mark-stripped index.
   - Not yet: Otzaria's `Line` kind (`CrossSpace`: an explicit space class
     such as `[ ,]`, inner anchors or `\b`, a wildcard-only word in a
     sequence), which Otzaria matches on each line's text. Such a query
@@ -428,8 +436,8 @@ are not printed), so upstream's query-parser tests stay as they are.
   - Word options, for every word: `grammar_prefixes`, `grammar_suffixes`,
     `aramaic_prefixes`, `aramaic_suffixes`, `ktiv_male_haser`,
     `part_of_word`, `advanced_prefixes`, `advanced_suffixes`,
-    `ignore_quotes`, `exact_quotes`, `spelling_errors`, `ignore_nikud`,
-    `ignore_teamim`, `typo_mode`, `prefix_max_letters`,
+    `ignore_quotes`, `exact_quotes`, `spelling_errors`, `match_nikud`,
+    `match_teamim`, `typo_mode`, `prefix_max_letters`,
     `suffix_max_letters`, `part_of_word_max_letters`,
     `grammar_prefix_max_letters`. Wildcard, fuzzy and `%` words take only
     `ignore_quotes` (as FtsLib's parser).
@@ -494,12 +502,58 @@ are not printed), so upstream's query-parser tests stay as they are.
     ignore-gershayim option; the verification restores exactness.
   - When the index has several segments (after incremental updates) or no
     sidecar, those groups fall back to the walk; merge and rebuild to get
-    it back. A `keep_marks` index (terms with Hebrew marks) gets no
-    sidecar; it keeps using the walk. Symbol codes are 16-bit and sort keys
+    it back. On a `keep_marks` index the sidecar's text is the mark-free
+    form too (the vocalized spellings of a word are rows of one text) and
+    the candidates are verified on their mark-free bytes. Symbol codes are 16-bit and sort keys
     take the width the alphabet needs (every script being a word char, the
     dictionary holds about 280 distinct chars), as in FtsLib's `FmIndex`.
   - Measured on the full index (1,755,598 terms): built in 2.4 s, 41 MB;
     `*יצח*` 41 ms against 1.1 s as a walk (FtsLib: 0.26 s).
+- **Vocalized matching (nikud / te'amim)** (Otzaria's `match_nikud` /
+  `match_taamim`; `match_nikud` / `match_teamim` in `SearchOptions`, globally
+  or per word; C# `MatchNikud` / `MatchTeamim`, Dart `matchNikud` /
+  `matchTeamim`). Needs an index built with `keep_marks` (an option of the
+  build: the default index strips the marks and stays exactly as before;
+  a vocalized search on it is an error).
+  - The `keep_marks` index stores every term with its marks in canonical
+    order and flags the lines that carry an attached mark (`marked`, one
+    term: Otzaria's `contains_attached_marks` on the raw line).
+  - Default search on it: every walk (word walks, wildcard, `%`, fuzzy
+    DFA, user regex, FM verification) reads the marks as zero width
+    (`hebrew_fts::marks::MarkFree`, a walk state around any term automaton)
+    and the cap counts the mark-free forms (tantivy `ZeroWidthChars`: the
+    vocalized spellings of a word are one slot, summed doc counts), so the
+    lines are those of the mark-stripped index. The plain fast path stays
+    a trie walk (inside the wrapper).
+  - Matching (Otzaria's rule, its `vocalized_token_pattern`): every typed
+    mark of an enabled class is required on its letter, every mark not
+    typed is free, a typed mark of a disabled class and a typed combining
+    accent are dropped. Classes as Otzaria: nikud U+05B0..U+05BC, U+05BF,
+    U+05C1, U+05C2, U+05C7; te'amim every other attached mark (meteg
+    U+05BD and the dots U+05C4 / U+05C5 included). The required marks are
+    edges of the word walk's core trie, the free marks zero-width
+    self-loops in every phase: affix letters and variants whose letters
+    differ (ktiv, Aramaic endings, the typo list) take any marks; a typo
+    edit drops the requirement (Otzaria's free-mark typo branches), a mark
+    is never an edit.
+  - Vocalized mode (Otzaria's `voc_mode`): when the flags are on globally
+    or for any word, the search sees only lines that carry an attached
+    mark, as Otzaria then runs the whole query on `textVocalized`, which
+    holds only such lines (`hebrew_query.rs` `normalize_line_for_indexing`,
+    `contains_attached_marks`; `search_engine.rs` `search_text_field`).
+    A word with no typed mark then matches any vocalization, on those
+    lines. The negative query is vocalized when the global flags are on
+    (Otzaria passes them to both builds): it excludes only lines that
+    carry a mark. Low level: `SearchRequest::vocalized`,
+    `ExcludeSpec::vocalized`.
+  - Deviations, named: marks are compared in canonical order (Otzaria
+    requires the typed order; the order of two marks on one letter differs
+    between texts); the 128-byte limit measures mark-free bytes (Otzaria's
+    vocalized field drops a long vocalized word); the cap tie-break sums
+    the doc counts of a word's spellings (FtsLib counted lines of its one
+    stripped term: differs only when one line holds two spellings, at the
+    cap boundary). The old exact-marks mode (`ignore_nikud` /
+    `ignore_teamim`) is gone.
 - **Partial matching** (Otzaria's wordMatchMode): `min_groups` in the
   request (C# `MinGroups`, Dart `minGroups`, demo `--match any|most|atleast`).
   A line needs only that many of the groups (anyWord 1, mostWords n/2+1,
@@ -614,8 +668,10 @@ are not printed), so upstream's query-parser tests stay as they are.
     - one slot: Otzaria's tiers (`match_tier`, ported verbatim: the typed
       form or an alternative 0, inside a longer word 1, a ktiv male/haser
       variant 2, the rest 3), a line scores the sum of 1000 / 100 / 10 / 1
-      over the tiers it holds. A keep-marks index is Otzaria's vocalized
-      field, which it never tiers: 1 per line.
+      over the tiers it holds (on a keep-marks index a term tiers by its
+      mark-free form). A vocalized search (`match_nikud` /
+      `match_teamim`) is Otzaria's vocalized field, which it never tiers:
+      1 per line.
     - a fuzzy slot (`word~N`, Otzaria's fuzzy mode, its plain builder):
       1000 + BM25 of the exact word (its spellings: the word and the terms
       that are the word with quotes inserted, frequencies summed, doc counts
@@ -654,8 +710,8 @@ are not printed), so upstream's query-parser tests stay as they are.
     pass its ceiling) is not ported: our walks cap instead of failing, so
     every phrase is scored. Otzaria's fuzzy mode with its magic dictionary
     (`build_lexical_fuzzy_query`, the lexical tier 30) is not ported: the
-    engine has no lexical forms; ours is its plain builder. On a keep-marks
-    index fuzzy words score 1 (Otzaria's vocalized fuzzy is unranked), and a
+    engine has no lexical forms; ours is its plain builder. In a vocalized
+    search fuzzy words score 1 (Otzaria's vocalized fuzzy is unranked), and a
     fuzzy word at distance 0 scores 1 (Otzaria adds its quote-free
     spelling's BM25). A repeated word is a slot of its own in the count
     (Otzaria merges duplicate words). A one-word query's multi-word

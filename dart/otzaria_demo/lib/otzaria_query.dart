@@ -234,10 +234,11 @@ class OtzariaSearch {
       ..aramaicPrefixes = o.contains(OtzariaOption.aramaicPrefixes)
       ..aramaicSuffixes = o.contains(OtzariaOption.aramaicSuffixes)
       ..ignoreQuotes = o.contains(OtzariaOption.ignoreGershayim)
-      // Otzaria's ניקוד/טעמים REQUIRE the typed marks; on a keep-marks index
-      // that is the default (no ignore flags). Without them, ignore marks.
-      ..ignoreNikud = marksIndex && !o.contains(OtzariaOption.nikud)
-      ..ignoreTeamim = marksIndex && !o.contains(OtzariaOption.teamim)
+      // Otzaria's nikud / te'amim options: typed marks of the class required,
+      // untyped marks free, only lines that carry a mark (the engine's
+      // match_nikud / match_teamim; they need a keep-marks index).
+      ..matchNikud = o.contains(OtzariaOption.nikud)
+      ..matchTeamim = o.contains(OtzariaOption.teamim)
       ..prefixMaxLetters = prefixMaxLetters
       ..suffixMaxLetters = suffixMaxLetters
       ..partOfWordMaxLetters = partOfWordMaxLetters
@@ -249,7 +250,6 @@ class OtzariaSearch {
   /// alternatives; null when it has neither.
   WordOptions? _wordOverride(Set<String> own, Set<String> global, List<String> alternatives) {
     bool? d(String k) => own.contains(k) == global.contains(k) ? null : own.contains(k);
-    bool? marks(String k) => marksIndex && d(k) != null ? !own.contains(k) : null;
     final w = WordOptions(
       grammarPrefixes: d(OtzariaOption.grammaticalPrefixes),
       grammarSuffixes: d(OtzariaOption.grammaticalSuffixes),
@@ -261,8 +261,8 @@ class OtzariaSearch {
       aramaicPrefixes: d(OtzariaOption.aramaicPrefixes),
       aramaicSuffixes: d(OtzariaOption.aramaicSuffixes),
       ignoreQuotes: d(OtzariaOption.ignoreGershayim),
-      ignoreNikud: marks(OtzariaOption.nikud),
-      ignoreTeamim: marks(OtzariaOption.teamim),
+      matchNikud: d(OtzariaOption.nikud),
+      matchTeamim: d(OtzariaOption.teamim),
       alternatives: [for (final a in alternatives) _queryWord(a)],
     );
     return w.toJson().isEmpty ? null : w;

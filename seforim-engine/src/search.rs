@@ -147,8 +147,11 @@ pub struct WalkOptionsSpec {
     /// Set by the engine: the word is one of several in the query.
     #[serde(skip)]
     pub phrase_word: bool,
-    pub ignore_nikud: bool,
-    pub ignore_teamim: bool,
+    /// Otzaria's `match_nikud`: typed nikud required on its letter, untyped
+    /// marks free (needs an index that keeps marks).
+    pub match_nikud: bool,
+    /// Otzaria's `match_taamim`: the same for te'amim.
+    pub match_teamim: bool,
     /// Caller-set limits (Otzaria). Absent = the walk's defaults.
     pub prefix_max_letters: Option<u32>,
     pub suffix_max_letters: Option<u32>,
@@ -184,8 +187,9 @@ impl From<WalkOptionsSpec> for WalkOptions {
                 TypoModeSpec::FullEdit1 => hebrew_fts::TypoMode::FullEdit1,
             },
             phrase_word: s.phrase_word,
-            ignore_nikud: s.ignore_nikud,
-            ignore_teamim: s.ignore_teamim,
+            match_nikud: s.match_nikud,
+            match_teamim: s.match_teamim,
+            marked_terms: false,
             prefix_max_letters: s.prefix_max_letters,
             suffix_max_letters: s.suffix_max_letters,
             part_of_word_max_letters: s.part_of_word_max_letters,
@@ -312,6 +316,13 @@ pub struct SearchRequest {
     /// For the generation order: `(book_id, generation_order)` per book,
     /// from the host (Otzaria's `generationOrder`); books absent come last.
     pub book_generations: Vec<(u64, u32)>,
+    /// Otzaria's vocalized mode (`match_nikud` / `match_taamim` on, for the
+    /// query or for any of its words): only lines that carry an attached
+    /// mark can match, as Otzaria then searches its vocalized field
+    /// (`textVocalized`), which holds only those lines. Applies to the main
+    /// query and the phrase alternatives. Needs an index built with
+    /// `keep_marks` (it flags those lines).
+    pub vocalized: bool,
 }
 
 impl Default for SearchRequest {
@@ -329,6 +340,7 @@ impl Default for SearchRequest {
             books: None,
             order: ResultsOrder::Catalog,
             book_generations: Vec::new(),
+            vocalized: false,
         }
     }
 }
@@ -372,6 +384,11 @@ pub struct ExcludeSpec {
     /// words. A line carrying one is dropped: in the query (one word, or a
     /// span query with positions) or, without positions, on the text.
     pub phrase_alternatives: Vec<Vec<GroupSpec>>,
+    /// Vocalized negative (Otzaria builds the negative on its vocalized
+    /// field when nikud / te'amim matching is on for it): only a line that
+    /// carries an attached mark is excluded (its phrase alternatives too).
+    /// Needs `keep_marks`.
+    pub vocalized: bool,
 }
 
 /// One matching line (hits come in the requested order, catalog by default): only the ids the index keeps. The
@@ -505,7 +522,11 @@ fn locate_with(
     // Scan the text once; the negative filter and every matcher reuse the
     // tokens (they depend on the text only, not on the query).
     locator.tokenize(text);
-    if negative.iter().any(|n| n.excludes(locator, 0)) {
+    if negative.iter().any(|n| {
+        // a vocalized negative sees only lines that carry a mark (Otzaria's
+        // vocalized field)
+        (!n.vocalized || hebrew_fts::chars::contains_attached_marks(text)) && n.excludes(locator, 0)
+    }) {
         return None;
     }
     matchers
@@ -522,6 +543,9 @@ struct NegativeFilter {
     require_ordered: bool,
     /// Otzaria's proximity: replaces the two FtsLib limits above.
     proximity: Option<Proximity>,
+    /// Vocalized (see [`ExcludeSpec::vocalized`]): only a line carrying a
+    /// mark can be excluded.
+    vocalized: bool,
 }
 
 impl NegativeFilter {
@@ -962,7 +986,7 @@ impl LineIndex {
                 if word.is_empty() {
                     return Ok(None);
                 }
-                let mut q = HebrewWalkQuery::new(field, word.clone(), (*options).into());
+                let mut q = HebrewWalkQuery::new(field, word.clone(), self.walk_options(options));
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
             }
@@ -973,6 +997,7 @@ impl LineIndex {
                     HebrewWildcardQuery::new(field, pattern)
                 };
                 let Ok(mut q) = q else { return Ok(None) };
+                q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
             }
@@ -982,6 +1007,7 @@ impl LineIndex {
                 }
                 let mut q = hebrew_fts::HebrewGrammarQuery::new(field, word.clone(), *prefixes, *suffixes);
                 q.set_ignore_quotes(*ignore_quotes);
+                q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
             }
@@ -991,13 +1017,14 @@ impl LineIndex {
                 }
                 let mut q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
                 q.set_ignore_quotes(*ignore_quotes);
+                q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
             }
             GroupSpec::Unindexed { .. } => None,
             GroupSpec::Regex { pattern } => {
-                self.regex_index_check()?;
                 let mut q = HebrewRegexQuery::new(field, pattern).map_err(|e| Error::Unsupported(e.to_string()))?;
+                q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
                 Some(q.span_slot(searcher)?)
             }
@@ -1084,7 +1111,7 @@ impl LineIndex {
                 if word.is_empty() {
                     return Ok(None);
                 }
-                let mut q = HebrewWalkQuery::new(self.fields.text, word.clone(), (*options).into());
+                let mut q = HebrewWalkQuery::new(self.fields.text, word.clone(), self.walk_options(options));
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
@@ -1098,6 +1125,7 @@ impl LineIndex {
                     HebrewWildcardQuery::new(self.fields.text, pattern)
                 };
                 let Ok(mut q) = parsed else { return Ok(None) };
+                q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
@@ -1112,6 +1140,7 @@ impl LineIndex {
                 }
                 let mut q = hebrew_fts::HebrewGrammarQuery::new(self.fields.text, word.clone(), *prefixes, *suffixes);
                 q.set_ignore_quotes(*ignore_quotes);
+                q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
@@ -1121,14 +1150,15 @@ impl LineIndex {
                 }
                 let mut q = HebrewFuzzyQuery::new(self.fields.text, word.clone(), *distance);
                 q.set_ignore_quotes(*ignore_quotes);
+                q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
             GroupSpec::Unindexed { .. } => None,
             GroupSpec::Regex { pattern } => {
-                self.regex_index_check()?;
                 let mut q =
                     HebrewRegexQuery::new(self.fields.text, pattern).map_err(|e| Error::Unsupported(e.to_string()))?;
+                q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
                 Some(Box::new(q))
             }
@@ -1148,15 +1178,53 @@ impl LineIndex {
         })
     }
 
-    /// A user regex walks plain terms: an index that keeps marks stores
-    /// vocalized terms the folded pattern cannot match.
-    fn regex_index_check(&self) -> Result<()> {
-        if self.options.keep_marks {
+    /// `query` restricted to the lines that carry an attached mark (the
+    /// `marked` flag of a `keep_marks` index).
+    fn marked_lines_only(&self, query: Box<dyn Query>) -> Result<Box<dyn Query>> {
+        let field = self.marked_field()?;
+        let marked = tantivy::query::TermQuery::new(
+            tantivy::Term::from_field_u64(field, crate::index::MARKED_LINE),
+            tantivy::schema::IndexRecordOption::Basic,
+        );
+        Ok(Box::new(BooleanQuery::new(vec![(Occur::Must, query), (Occur::Must, Box::new(marked))])))
+    }
+
+    /// The `marked` line flag, or the error a vocalized search gets on an
+    /// index that cannot serve it.
+    fn marked_field(&self) -> Result<tantivy::schema::Field> {
+        if !self.options.keep_marks {
             return Err(Error::Unsupported(
-                "user regex queries need an index without marks (keep_marks off)".into(),
+                "nikud / te'amim matching (match_nikud, match_teamim) needs an index built with keep_marks".into(),
             ));
         }
+        self.fields.marked.ok_or_else(|| {
+            Error::Unsupported("this keep_marks index predates the vocalized line flag: rebuild it".into())
+        })
+    }
+
+    /// Errors when `request` asks for vocalized matching the index cannot serve.
+    fn check_vocalized(&self, request: &SearchRequest) -> Result<()> {
+        fn wants(g: &GroupSpec) -> bool {
+            match g {
+                GroupSpec::Word { options, .. } => options.match_nikud || options.match_teamim,
+                GroupSpec::Any { alternatives } => alternatives.iter().any(wants),
+                _ => false,
+            }
+        }
+        let ex = request.exclude.as_ref();
+        let any = request.vocalized
+            || ex.is_some_and(|e| e.vocalized || e.groups.iter().any(wants) || e.phrase_alternatives.iter().flatten().any(wants))
+            || request.groups.iter().any(wants)
+            || request.phrase_alternatives.iter().flatten().any(wants);
+        if any {
+            self.marked_field()?;
+        }
         Ok(())
+    }
+
+    /// A word's walk options, with the index's mark layout.
+    fn walk_options(&self, spec: &WalkOptionsSpec) -> WalkOptions {
+        WalkOptions { marked_terms: self.options.keep_marks, ..(*spec).into() }
     }
 
     /// The FM-index sidecar to expand with, if the index has one for its
@@ -1201,6 +1269,7 @@ impl LineIndex {
                     &core,
                     suffix_only,
                     q.max_expansions(),
+                    self.options.keep_marks,
                 )?;
                 Ok(Some(terms))
             }
@@ -1210,6 +1279,7 @@ impl LineIndex {
                 }
                 let mut q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
                 q.set_ignore_quotes(*ignore_quotes);
+                q.set_marked_terms(self.options.keep_marks);
                 let inverted = dict()?;
                 let terms = if *ignore_quotes {
                     fm_expand::expand_fuzzy_quote_free(
@@ -1218,6 +1288,7 @@ impl LineIndex {
                         q.word(),
                         q.distance_limit(),
                         q.max_expansions(),
+                        self.options.keep_marks,
                     )?
                 } else {
                     fm_expand::expand_fuzzy(
@@ -1227,6 +1298,7 @@ impl LineIndex {
                         q.word(),
                         q.distance_limit(),
                         q.max_expansions(),
+                        self.options.keep_marks,
                     )?
                 };
                 Ok(Some(terms))
@@ -1266,6 +1338,7 @@ impl LineIndex {
     /// [`search_options_cancellable`](Self::search_options_cancellable)).
     pub fn search_cancellable(&self, request: &SearchRequest, cancel: Option<CancelToken>) -> Result<SearchResult> {
         CancelToken::check(cancel.as_ref())?;
+        self.check_vocalized(request)?;
         // Otzaria's word options know whether the word stands alone (its
         // single-word vs phrase budgets): mark the words of a multi-word query.
         // The negative query is built the same way (Otzaria builds it with
@@ -1442,7 +1515,7 @@ impl LineIndex {
         let main_membership: Option<Box<dyn Query>> = if relevance {
             relevance::check_positions(
                 self.options.positions,
-                !keep_marks,
+                !request.vocalized,
                 main_query.is_some().then_some((shape, main_slots.as_slice())),
                 &alternative_groups,
             )?;
@@ -1465,10 +1538,15 @@ impl LineIndex {
             }
         };
 
+        // Otzaria's vocalized mode: only the lines that carry a mark.
+        let query = if request.vocalized { self.marked_lines_only(query)? } else { query };
+
         // The negative query (see ExcludeSpec) and its phrase alternatives:
         // each excluded in the query itself, or on the text at locate time.
         // Text-level parts: their sinks and limits (distance, order, proximity).
         let mut text_negatives: Vec<(Vec<MatchedTermsSink>, usize, bool, Option<Proximity>)> = Vec::new();
+        // A vocalized negative (and its phrases) sees only lines that carry a mark.
+        let negative_vocalized = request.exclude.as_ref().is_some_and(|e| e.vocalized);
         let mut query_negatives: Vec<Box<dyn Query>> = Vec::new();
         // Builds the scorers once so the walks report the excluded forms of
         // a text-level part; the docs themselves are not needed.
@@ -1574,7 +1652,10 @@ impl LineIndex {
             query
         } else {
             let mut clauses = vec![(Occur::Must, query)];
-            clauses.extend(query_negatives.into_iter().map(|q| (Occur::MustNot, q)));
+            for q in query_negatives {
+                let q = if negative_vocalized { self.marked_lines_only(q)? } else { q };
+                clauses.push((Occur::MustNot, q));
+            }
             Box::new(BooleanQuery::new(clauses))
         };
 
@@ -1654,6 +1735,7 @@ impl LineIndex {
                     max_word_distance,
                     require_ordered,
                     proximity,
+                    vocalized: negative_vocalized,
                 });
             }
         }
@@ -1726,7 +1808,8 @@ impl LineIndex {
             let main_slots_len = main_slots.len();
             let plan = relevance::ScorePlan {
                 field: self.fields.text,
-                keep_marks,
+                vocalized: request.vocalized,
+                marked_terms: keep_marks,
                 main: (main_ok && main_terms.len() == main_slots.len()).then(|| relevance::MainPlan {
                     shape,
                     slots: main_slots,

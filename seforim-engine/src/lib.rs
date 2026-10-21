@@ -1039,12 +1039,177 @@ mod tests {
         assert!(matches!(index.search_cancellable(&plain, Some(token)), Err(Error::Cancelled)));
     }
 
+    // ---- Vocalized matching on an index that keeps marks (Design 1) ----
+
+    const SHALOM: &str = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
+    /// shin + qamats + shin dot, lamed, vav + holam, final mem
+    const SHALOM_V: &str = "\u{05E9}\u{05B8}\u{05C1}\u{05DC}\u{05D5}\u{05B9}\u{05DD}";
+    /// the same marks, shin dot BEFORE qamats (the other order a text may hold)
+    const SHALOM_V_REORDERED: &str = "\u{05E9}\u{05C1}\u{05B8}\u{05DC}\u{05D5}\u{05B9}\u{05DD}";
+    /// patah instead of qamats
+    const SHALOM_PATAH: &str = "\u{05E9}\u{05B7}\u{05DC}\u{05D5}\u{05B9}\u{05DD}";
+    const OLAM: &str = "\u{05E2}\u{05D5}\u{05DC}\u{05DD}";
+    const OLAM_V: &str = "\u{05E2}\u{05D5}\u{05B9}\u{05DC}\u{05B8}\u{05DD}";
+
+    fn vocalized_lines() -> Vec<LineDoc> {
+        [
+            format!("{SHALOM} {OLAM}"),                     // 1: no mark at all
+            format!("{SHALOM_V} {OLAM}"),                   // 2
+            format!("{SHALOM_V_REORDERED} x"),              // 3: marks in the other order
+            format!("{SHALOM_PATAH} {OLAM_V}"),             // 4
+            format!("{SHALOM} {OLAM_V}"),                   // 5: the mark is on another word
+            format!("{}{SHALOM_V} {}", "\u{05D5}\u{05B0}", "\u{05E9}\u{05DC}\"\u{05DD}"), // 6: vocalized prefix; a quoted word
+            "\u{05D1}\u{05E8}\u{05DB}\u{05D4} \u{0591}".to_string(), // 7: only a lone ta'am
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, t)| line(i as u64 + 1, i as u64, 1, t))
+        .collect()
+    }
+
+    /// One writer thread: one segment, so the FM sidecar can be built.
+    fn build_one_segment(dir: &std::path::Path, options: IndexOptions, lines: &[LineDoc]) -> LineIndex {
+        let index = LineIndex::create(dir, options).unwrap();
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        for l in lines {
+            w.add(l).unwrap();
+        }
+        w.commit(None).unwrap();
+        index
+    }
+
+    /// The located hits of a search: line ids whose text the locator confirms.
+    fn located_ids(index: &LineIndex, lines: &[LineDoc], o: &SearchOptions) -> Vec<u64> {
+        let mut r = index.search_options(o).unwrap();
+        let hits = r.hits.clone();
+        let mut ids: Vec<u64> = hits
+            .iter()
+            .filter(|h| {
+                let text = &lines.iter().find(|l| l.line_id == h.line_id).unwrap().text;
+                r.session.locate(text).is_some()
+            })
+            .map(|h| h.line_id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
     #[test]
-    fn user_regex_refused_on_a_marks_index() {
+    fn marks_index_default_search_equals_the_stripped_index() {
+        let lines = vocalized_lines();
+        for positions in [false, true] {
+            let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let stripped = build_one_segment(d1.path(), IndexOptions { positions, keep_marks: false }, &lines);
+            let marked = build_one_segment(d2.path(), IndexOptions { positions, keep_marks: true }, &lines);
+            // the FM sidecar serves a marks index too (its text is mark-free)
+            assert!(stripped.build_fm_sidecar().unwrap() && marked.build_fm_sidecar().unwrap());
+            let queries: Vec<SearchOptions> = vec![
+                SearchOptions { query: SHALOM.into(), ..Default::default() },
+                SearchOptions { query: SHALOM_V.into(), ..Default::default() }, // typed marks ignored
+                SearchOptions { query: SHALOM.into(), grammar_prefixes: true, ..Default::default() },
+                SearchOptions { query: SHALOM.into(), ignore_quotes: true, ktiv_male_haser: true, ..Default::default() },
+                SearchOptions { query: "*\u{05DC}\u{05D5}\u{05DD}".into(), ..Default::default() }, // leading *: FM
+                SearchOptions { query: "\u{05E9}\u{05DC}*".into(), ignore_quotes: true, ..Default::default() },
+                SearchOptions { query: format!("{SHALOM}~1"), ignore_quotes: true, ..Default::default() }, // FM fuzzy
+                SearchOptions { query: format!("%{SHALOM}"), ..Default::default() },
+                SearchOptions { query: "/\u{05E9}\u{05DC}.\u{05DD}/".into(), user_regex: true, ..Default::default() },
+                SearchOptions { query: format!("{SHALOM} {OLAM}"), max_word_distance: Some(0), ..Default::default() },
+                SearchOptions {
+                    query: format!("{SHALOM} {OLAM}"),
+                    proximity: Some(ProximitySpec::Ordered { gaps: vec![0] }),
+                    ..Default::default()
+                },
+                SearchOptions { query: SHALOM.into(), spelling_errors: true, ..Default::default() },
+            ];
+            for o in &queries {
+                let a = located_ids(&stripped, &lines, o);
+                let b = located_ids(&marked, &lines, o);
+                assert!(!a.is_empty(), "{:?}", o.query.escape_unicode().to_string());
+                assert_eq!(a, b, "positions={positions} {}", o.query.escape_unicode());
+            }
+        }
+    }
+
+    #[test]
+    fn vocalized_matching_follows_otzaria() {
+        let lines = vocalized_lines();
         let dir = tempfile::tempdir().unwrap();
-        let index = build(dir.path(), IndexOptions { positions: true, keep_marks: true }, &[line(1, 0, 1, "abc")]);
-        let o = SearchOptions { query: "/ab./".into(), user_regex: true, ..Default::default() };
-        assert!(matches!(index.search_options(&o), Err(Error::Unsupported(_))));
+        let index = build_one_segment(dir.path(), IndexOptions { positions: true, keep_marks: true }, &lines);
+        let nikud = |q: &str| SearchOptions { query: q.into(), match_nikud: true, ..Default::default() };
+        // typed marks required, untyped free; the typed order does not matter
+        assert_eq!(located_ids(&index, &lines, &nikud(SHALOM_V)), [2, 3]);
+        assert_eq!(located_ids(&index, &lines, &nikud(SHALOM_V_REORDERED)), [2, 3]);
+        // only the qamats typed: the holam and shin dot are free
+        assert_eq!(located_ids(&index, &lines, &nikud("\u{05E9}\u{05B8}\u{05DC}\u{05D5}\u{05DD}")), [2, 3]);
+        // decision 5 (Otzaria's vocalized field): no mark typed = every line
+        // that carries an attached mark, wherever it is (5: on the other
+        // word); the unmarked line 1 never
+        assert_eq!(located_ids(&index, &lines, &nikud(SHALOM)), [2, 3, 4, 5]);
+        // te'amim only: the typed nikud is dropped, the vocalized mode stays
+        let teamim = SearchOptions { query: SHALOM_V.into(), match_teamim: true, ..Default::default() };
+        assert_eq!(located_ids(&index, &lines, &teamim), [2, 3, 4, 5]);
+        // per word: word 0 vocalized, word 1 free; the whole query vocalized
+        let mut words = std::collections::BTreeMap::new();
+        words.insert(0, WordOptions { match_nikud: Some(true), ..Default::default() });
+        let per_word = SearchOptions { query: format!("{SHALOM_V} {OLAM}"), words, ..Default::default() };
+        assert_eq!(located_ids(&index, &lines, &per_word), [2]);
+        let per_word_plain = SearchOptions { query: format!("{SHALOM} {OLAM}"), ..per_word.clone() };
+        assert_eq!(located_ids(&index, &lines, &per_word_plain), [2, 4, 5]);
+        // the negative query is vocalized too (global flags): only lines
+        // that carry a mark are excluded
+        let ex = SearchOptions {
+            query: SHALOM.into(),
+            match_nikud: true,
+            exclude: Some(ExcludeOptions { query: OLAM.into(), ..Default::default() }),
+            ..Default::default()
+        };
+        assert_eq!(located_ids(&index, &lines, &ex), [3]);
+        // prefixes take free marks; the typed word keeps its requirement
+        let prefixed = SearchOptions { query: SHALOM_V.into(), match_nikud: true, grammar_prefixes: true, ..Default::default() };
+        assert_eq!(located_ids(&index, &lines, &prefixed), [2, 3, 6]);
+        // counts follow the line filter
+        let r = index.search_options(&nikud(SHALOM)).unwrap();
+        assert_eq!(r.counts().total, 4);
+        // a mark-stripped index cannot match marks: a clear error
+        let d2 = tempfile::tempdir().unwrap();
+        let stripped = build_one_segment(d2.path(), IndexOptions { positions: true, keep_marks: false }, &lines);
+        assert!(matches!(stripped.search_options(&nikud(SHALOM_V)), Err(Error::Unsupported(_))));
+    }
+
+    #[test]
+    fn cap_counts_mark_free_forms() {
+        // four spellings of one word and two other words of its length:
+        // under a cap of 2 slots the spellings are ONE slot (summed doc
+        // count), so both of them and the more frequent other word are kept
+        let texts = [
+            SHALOM.to_string(),
+            SHALOM_V.to_string(),
+            SHALOM_PATAH.to_string(),
+            "\u{05E9}\u{05DC}\u{05D5}\u{05DF}".to_string(),
+            "\u{05E9}\u{05DC}\u{05D5}\u{05DF}".to_string(),
+            "\u{05E9}\u{05DC}\u{05D5}\u{05E9}".to_string(),
+        ];
+        let lines: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| line(i as u64 + 1, i as u64, 1, t)).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let index = build_one_segment(dir.path(), IndexOptions { positions: false, keep_marks: true }, &lines);
+        let searcher = index.reader().unwrap().searcher();
+        let mut q = hebrew_fts::HebrewWildcardQuery::new(index.text_field(), "\u{05E9}\u{05DC}*").unwrap();
+        q.set_marked_terms(true);
+        q.set_max_expansions(2);
+        let sink = tantivy::query::MatchedTermsSink::new();
+        q.set_matched_terms_sink(sink.clone());
+        let hits = searcher.search(&q, &tantivy::collector::Count).unwrap();
+        let mut kept = sink.take_strings();
+        kept.sort();
+        let mut expected = vec![
+            "\u{05E9}\u{05DC}\u{05D5}\u{05DD}".to_string(),
+            hebrew_fts::chars::canonical_marks(SHALOM_V),
+            hebrew_fts::chars::canonical_marks(SHALOM_PATAH),
+            "\u{05E9}\u{05DC}\u{05D5}\u{05DF}".to_string(),
+        ];
+        expected.sort();
+        assert_eq!(kept, expected);
+        assert_eq!(hits, 5);
     }
 
     #[test]

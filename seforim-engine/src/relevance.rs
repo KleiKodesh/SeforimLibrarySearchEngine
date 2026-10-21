@@ -156,8 +156,12 @@ pub(crate) struct MainPlan<'a> {
 /// Everything a relevance score is made of.
 pub(crate) struct ScorePlan<'a> {
     pub field: Field,
-    /// The index keeps marks: Otzaria's vocalized field, which it never ranks in tiers.
-    pub keep_marks: bool,
+    /// Otzaria's vocalized mode (match_nikud / match_teamim): its vocalized
+    /// field, which it never ranks in tiers.
+    pub vocalized: bool,
+    /// The index keeps marks in its terms: a word's spellings include its
+    /// vocalized forms, tiers compare mark-free forms.
+    pub marked_terms: bool,
     /// None: the main query cannot match.
     pub main: Option<MainPlan<'a>>,
     /// The main query's doc set, when phrase alternatives make a hit's main
@@ -248,8 +252,12 @@ fn base_form_of_final(c: char) -> Option<char> {
 /// suffixes, a final letter in its base form, final he to tav / vav-tav),
 /// 2 a ktiv male/haser variant (vav / yod and quotes aside), 3 the rest.
 pub(crate) fn match_tier(term: &str, roots: &[String]) -> u8 {
+    // quotes and marks dropped: on an index that keeps marks a vocalized
+    // term tiers as its letters (the mark-stripped index's term)
     fn unquoted(s: &str) -> String {
-        s.chars().filter(|c| !matches!(c, '\'' | '"')).collect()
+        s.chars()
+            .filter(|&c| !matches!(c, '\'' | '"') && !hebrew_fts::chars::is_term_mark(c))
+            .collect()
     }
     fn skeleton(s: &str) -> String {
         s.chars()
@@ -298,21 +306,35 @@ fn quoteless(word: &str) -> Option<String> {
 
 /// Otzaria's `quote_expansion::spellings`: `word` first (indexed or not),
 /// then every term of the index that is `word` with quotes inserted (none
-/// when `word` has a quote itself).
-fn spellings(searcher: &Searcher, field: Field, word: &str) -> Result<Vec<String>> {
+/// when `word` has a quote itself). On an index that keeps marks, also every
+/// vocalized spelling of those (the marks read as zero width), so the word
+/// counts as on the mark-stripped index.
+fn spellings(searcher: &Searcher, field: Field, word: &str, marked_terms: bool) -> Result<Vec<String>> {
     let mut out = vec![word.to_string()];
-    if word.contains(['"', '\'']) {
+    let quoted = word.contains(['"', '\'']);
+    if quoted && !marked_terms {
         return Ok(out);
     }
-    let automaton = hebrew_fts::quote_free::QuoteFree::new(hebrew_fts::SetAutomaton::from_strings([word]), true);
+    let automaton = hebrew_fts::quote_free::QuoteFree::new(hebrew_fts::SetAutomaton::from_strings([word]), !quoted);
+    let mut add = |key: &[u8]| {
+        if let Ok(term) = std::str::from_utf8(key) {
+            if !out.iter().any(|known| known == term) {
+                out.push(term.to_string());
+            }
+        }
+    };
     for reader in searcher.segment_readers() {
         let inverted = reader.inverted_index(field)?;
-        let mut stream = inverted.terms().search(&automaton).into_stream()?;
-        while stream.advance() {
-            if let Ok(term) = std::str::from_utf8(stream.key()) {
-                if !out.iter().any(|known| known == term) {
-                    out.push(term.to_string());
-                }
+        if marked_terms {
+            let marks_free = hebrew_fts::MarkFree::new(&automaton);
+            let mut stream = inverted.terms().search(marks_free).into_stream()?;
+            while stream.advance() {
+                add(stream.key());
+            }
+        } else {
+            let mut stream = inverted.terms().search(&automaton).into_stream()?;
+            while stream.advance() {
+                add(stream.key());
             }
         }
     }
@@ -753,7 +775,7 @@ struct MainWeights {
 impl MainWeights {
     fn new(searcher: &Searcher, plan: &ScorePlan<'_>, m: &MainPlan<'_>) -> Result<MainWeights> {
         let field = plan.field;
-        let ranked = !plan.keep_marks;
+        let ranked = !plan.vocalized;
         let mut w = MainWeights { tiers: None, fuzzy: vec![None; m.slots.len()], phrase: None, fuzzy_phrase: None };
         let fuzzy_slot = |g: &GroupSpec| -> Result<Option<Vec<(Vec<String>, Bm25Weight)>>> {
             let GroupSpec::Fuzzy { word, distance, .. } = g else {
@@ -765,7 +787,7 @@ impl MainWeights {
             }
             let mut exact = Vec::new();
             for x in std::iter::once(word.clone()).chain(quoteless(word)) {
-                let s = spellings(searcher, field, &x)?;
+                let s = spellings(searcher, field, &x, plan.marked_terms)?;
                 let group: Vec<Term> = s.iter().map(|t| Term::from_field_text(field, t)).collect();
                 let stats = SharedStatistics { inner: searcher, group: &group };
                 let bm25 = Bm25Weight::for_terms(&stats, &group[..1])?;
@@ -794,7 +816,7 @@ impl MainWeights {
                 if ranked && !partial && m.slots.len() > 1 && all_fuzzy(&m.slots) {
                     let mut words = Vec::with_capacity(m.slots.len());
                     for g in &m.slots {
-                        words.push(spellings(searcher, field, &first_root(g))?);
+                        words.push(spellings(searcher, field, &first_root(g), plan.marked_terms)?);
                     }
                     w.fuzzy_phrase = Some(words);
                 }

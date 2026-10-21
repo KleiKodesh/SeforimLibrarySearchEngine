@@ -3,8 +3,9 @@
 //! The same Levenshtein DFA tantivy's `FuzzyTermQuery` uses, run through an
 //! [`AutomatonWeight`] configured the FtsLib way: capped at
 //! [`DEFAULT_MAX_EXPANDED_TERMS`] per segment, closest (edit distance) first,
-//! then shortest (the intra-word quote is zero-width, see
-//! [`ZERO_WIDTH_BYTES`]), then most frequent. With a [`MatchedTermsSink`]
+//! then shortest (the intra-word quote is zero-width, and the marks on an
+//! index that keeps them, see [`crate::marks::zero_width_chars`]), then most
+//! frequent. With a [`MatchedTermsSink`]
 //! attached the matched forms come back with the search.
 //!
 //! tantivy's own DFA wrapper cannot be built from outside the crate, so this
@@ -20,7 +21,8 @@ use tantivy::query::{
 use tantivy::schema::Field;
 use tantivy_fst::Automaton;
 
-use crate::walk::{DEFAULT_MAX_EXPANDED_TERMS, ZERO_WIDTH_BYTES};
+use crate::marks::MarkFree;
+use crate::walk::DEFAULT_MAX_EXPANDED_TERMS;
 
 /// A Levenshtein DFA as a tantivy automaton. With `transparent_quotes` the
 /// canonical quote byte `"` is skipped (the state does not move), so an
@@ -29,12 +31,23 @@ use crate::walk::{DEFAULT_MAX_EXPANDED_TERMS, ZERO_WIDTH_BYTES};
 pub struct LevenshteinDfa {
     dfa: DFA,
     transparent_quotes: bool,
+    /// [`Self::distance`] skips the term's marks (an index that keeps marks;
+    /// the walk itself runs the DFA inside [`MarkFree`]).
+    transparent_marks: bool,
 }
 
 impl LevenshteinDfa {
     /// The edit distance of `term` from the query word (`AtLeast` for
-    /// non-matches), quotes skipped when they are transparent.
+    /// non-matches), quotes skipped when they are transparent, marks when
+    /// the index keeps them (FtsLib's Levenshtein ran on mark-free terms).
     pub fn distance(&self, term: &[u8]) -> Distance {
+        let unmarked;
+        let term = if self.transparent_marks {
+            unmarked = crate::marks::strip_mark_bytes(term);
+            unmarked.as_ref()
+        } else {
+            term
+        };
         if self.transparent_quotes && term.iter().any(|&b| crate::chars::is_term_quote_byte(b)) {
             let stripped: Vec<u8> = term.iter().copied().filter(|&b| !crate::chars::is_term_quote_byte(b)).collect();
             self.dfa.eval(stripped)
@@ -70,6 +83,29 @@ impl Automaton for LevenshteinDfa {
     }
 }
 
+/// One DFA shared by the walk (inside [`MarkFree`]) and the cap's rank.
+struct SharedDfa(Arc<LevenshteinDfa>);
+
+impl Automaton for SharedDfa {
+    type State = u32;
+
+    fn start(&self) -> u32 {
+        self.0.start()
+    }
+
+    fn is_match(&self, state: &u32) -> bool {
+        self.0.is_match(state)
+    }
+
+    fn can_match(&self, state: &u32) -> bool {
+        self.0.can_match(state)
+    }
+
+    fn accept(&self, state: &u32, byte: u8) -> u32 {
+        self.0.accept(state, byte)
+    }
+}
+
 /// Fuzzy query for one word: every indexed term within `distance` plain
 /// Levenshtein edits (insert, delete, substitute; a transposition is two
 /// edits, as in FtsLib's `Levenshtein.Distance`).
@@ -81,6 +117,8 @@ pub struct HebrewFuzzyQuery {
     matched_terms_sink: Option<MatchedTermsSink>,
     max_expansions: usize,
     ignore_quotes: bool,
+    /// The index keeps marks in its terms: they are read as zero width.
+    marked_terms: bool,
 }
 
 /// FtsLib's `FuzzyExpander.MaxAllowedDistance`.
@@ -98,7 +136,14 @@ impl HebrewFuzzyQuery {
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
             ignore_quotes: false,
+            marked_terms: false,
         }
+    }
+
+    /// The index keeps marks in its terms (`keep_marks`): distances are
+    /// measured on the mark-free forms ([`MarkFree`]).
+    pub fn set_marked_terms(&mut self, marked_terms: bool) {
+        self.marked_terms = marked_terms;
     }
 
     /// Makes the quote transparent (התעלם מגרשיים): distances are measured
@@ -153,19 +198,22 @@ impl HebrewFuzzyQuery {
         LevenshteinDfa {
             dfa: builder.build_dfa(&word),
             transparent_quotes: self.ignore_quotes,
+            transparent_marks: self.marked_terms,
         }
     }
 
-    fn automaton_weight(&self) -> AutomatonWeight<LevenshteinDfa> {
-        let automaton = Arc::new(self.automaton());
-        let mut weight = AutomatonWeight::new(self.field, automaton.clone());
+    fn configure<A>(&self, mut weight: AutomatonWeight<A>, dfa: Arc<LevenshteinDfa>) -> AutomatonWeight<A>
+    where
+        A: Automaton + Send + Sync + 'static,
+        A::State: Clone,
+    {
         if let Some(sink) = &self.matched_terms_sink {
             weight.set_matched_terms_sink(sink.clone());
         }
         weight.set_max_expansions(self.max_expansions);
-        weight.set_zero_width_bytes(ZERO_WIDTH_BYTES);
+        weight.set_zero_width_chars(crate::marks::zero_width_chars(self.marked_terms));
         // Closest first: the edit distance of the matched term.
-        weight.set_expansion_rank(Arc::new(move |key: &[u8]| match automaton.distance(key) {
+        weight.set_expansion_rank(Arc::new(move |key: &[u8]| match dfa.distance(key) {
             Distance::Exact(d) | Distance::AtLeast(d) => d as u32,
         }));
         weight
@@ -178,13 +226,23 @@ impl HebrewFuzzyQuery {
         &self,
         _searcher: &tantivy::Searcher,
     ) -> tantivy::Result<Arc<dyn SpanTermSource>> {
-        Ok(Arc::new(self.automaton_weight()))
+        let dfa = Arc::new(self.automaton());
+        Ok(if self.marked_terms {
+            Arc::new(self.configure(AutomatonWeight::<MarkFree<SharedDfa>>::new(self.field, MarkFree::new(SharedDfa(dfa.clone()))), dfa))
+        } else {
+            Arc::new(self.configure(AutomatonWeight::<LevenshteinDfa>::new(self.field, dfa.clone()), dfa))
+        })
     }
 }
 
 impl Query for HebrewFuzzyQuery {
     fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        Ok(Box::new(self.automaton_weight()))
+        let dfa = Arc::new(self.automaton());
+        Ok(if self.marked_terms {
+            Box::new(self.configure(AutomatonWeight::<MarkFree<SharedDfa>>::new(self.field, MarkFree::new(SharedDfa(dfa.clone()))), dfa))
+        } else {
+            Box::new(self.configure(AutomatonWeight::<LevenshteinDfa>::new(self.field, dfa.clone()), dfa))
+        })
     }
 }
 

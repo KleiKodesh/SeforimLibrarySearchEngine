@@ -73,7 +73,7 @@ in one or two lines. Remove entries that turn out to be wrong.
   (e.g. keep the FST walk's matched words instead of throwing them away). Must cost
   nothing when unused.
 - **tantivy changes stay upstream-PR ready.** No Hebrew / FtsLib rule inside tantivy
-  (the zero-width quote is passed in by hebrew-fts via `ZeroWidthBytes`); both
+  (the zero-width quote and marks are passed in by hebrew-fts via `ZeroWidthChars`); both
   dictionaries (FST and quickwit SSTable) must build and pass; don't touch upstream's
   tests (hide new query fields from Debug instead); rustfmt-clean; CHANGELOG entry.
   Test both: `cargo test --lib -- query:: termdict::` and the same with
@@ -158,7 +158,11 @@ seforim.db knowledge).
   our scanner = FtsLib's, so there is ONE model (the old `word_model` option is gone).
   A dropped one-letter word is a bug (a x b checks x).
 - FM index sort keys are 7-bit (sigma <= 128) in both FtsLib and ours: digits pushed the
-  alphabet past 64. The FM sidecar refuses a vocalized (keep_marks) dictionary.
+  alphabet past 64. On a keep_marks dictionary the FM text is the mark-free form.
+- **keep_marks = Design 1 (user's decision):** terms keep their marks (canonical order),
+  every walk reads them zero-width (`MarkFree`) unless match_nikud / match_teamim
+  require typed marks; the cap groups mark-free forms. Vocalized mode filters to lines
+  carrying a mark (`marked` field), as Otzaria's textVocalized. Old exact-marks mode gone.
 - FtsLib wildcard budgets: anchor ≥2, ≤4 `?`, leading `*` ≤3, trailing/internal ≤4,
   both ≤7. Cap 2000, shortest first, then doc count.
 

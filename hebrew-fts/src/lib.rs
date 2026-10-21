@@ -18,6 +18,7 @@ pub mod fuzzy;
 pub mod grammar;
 pub mod grammar_query;
 mod html_tags;
+pub mod marks;
 mod scanner_reference;
 pub mod prepared;
 pub mod query_parser;
@@ -44,4 +45,5 @@ pub use snippet::{Proximity, SnippetDescriptor, SnippetWindowLocator, DEFAULT_CO
 pub use set_automaton::SetAutomaton;
 pub use user_regex::{HebrewRegexQuery, UserRegex, UserRegexError};
 pub use tokenizer::{register_hebrew_tokenizer, HebrewTokenizer, HEBREW_TOKENIZER_NAME};
+pub use marks::MarkFree;
 pub use walk::{HebrewWalkAutomaton, HebrewWalkQuery, TypoMode, WalkOptions};

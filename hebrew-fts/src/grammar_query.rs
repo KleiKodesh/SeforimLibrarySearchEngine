@@ -6,7 +6,7 @@
 //! exist — FtsLib's generate-then-verify, in one focused walk. Attach a
 //! [`MatchedTermsSink`] to also receive the surviving forms with the results.
 
-use tantivy::query::{AutomatonWeight, EnableScoring, MatchedTermsSink, Query, Weight};
+use tantivy::query::{EnableScoring, MatchedTermsSink, Query, Weight};
 use tantivy::schema::Field;
 
 use crate::grammar::build_candidates;
@@ -22,6 +22,8 @@ pub struct HebrewGrammarQuery {
     expand_suffixes: bool,
     matched_terms_sink: Option<MatchedTermsSink>,
     ignore_quotes: bool,
+    /// The index keeps marks in its terms: they are read as zero width.
+    marked_terms: bool,
 }
 
 impl HebrewGrammarQuery {
@@ -48,7 +50,14 @@ impl HebrewGrammarQuery {
             expand_suffixes,
             matched_terms_sink: None,
             ignore_quotes: false,
+            marked_terms: false,
         }
+    }
+
+    /// The index keeps marks in its terms (`keep_marks`): the forms then
+    /// match whatever marks a term carries ([`crate::marks::MarkFree`]).
+    pub fn set_marked_terms(&mut self, marked_terms: bool) {
+        self.marked_terms = marked_terms;
     }
 
     /// Collects the indexed forms this query matches into `sink` while the
@@ -64,10 +73,20 @@ impl HebrewGrammarQuery {
         &self,
         _searcher: &tantivy::Searcher,
     ) -> tantivy::Result<std::sync::Arc<dyn tantivy::query::SpanTermSource>> {
-        Ok(std::sync::Arc::new(self.automaton_weight()))
+        Ok(self.plan().span(self.automaton()))
     }
 
-    fn automaton_weight(&self) -> AutomatonWeight<SetAutomaton> {
+    fn plan(&self) -> crate::marks::WeightPlan<'_> {
+        crate::marks::WeightPlan {
+            field: self.field,
+            sink: self.matched_terms_sink.as_ref(),
+            cap: Some(crate::walk::DEFAULT_MAX_EXPANDED_TERMS),
+            marked_terms: self.marked_terms,
+            mark_free: self.marked_terms,
+        }
+    }
+
+    fn automaton(&self) -> SetAutomaton {
         let word: String = if self.ignore_quotes {
             self.word.chars().filter(|&c| !crate::chars::is_term_quote(c)).collect()
         } else {
@@ -78,19 +97,13 @@ impl HebrewGrammarQuery {
         if self.ignore_quotes {
             automaton = automaton.with_transparent_quotes();
         }
-        let mut weight = AutomatonWeight::new(self.field, automaton);
-        if let Some(sink) = &self.matched_terms_sink {
-            weight.set_matched_terms_sink(sink.clone());
-        }
-        weight.set_max_expansions(crate::walk::DEFAULT_MAX_EXPANDED_TERMS);
-        weight.set_zero_width_bytes(crate::walk::ZERO_WIDTH_BYTES);
-        weight
+        automaton
     }
 }
 
 impl Query for HebrewGrammarQuery {
     fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        Ok(Box::new(self.automaton_weight()))
+        Ok(self.plan().boxed(self.automaton()))
     }
 }
 

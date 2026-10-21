@@ -42,10 +42,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tantivy::query::{
-    AutomatonWeight, EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight,
+    EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight,
 };
 use tantivy::schema::Field;
-use tantivy::termdict::ZeroWidthBytes;
 use tantivy_fst::Automaton;
 
 use crate::quote_free::QuoteFree;
@@ -105,11 +104,18 @@ pub struct WalkOptions {
     /// The word is one of several in the query (Otzaria's phrase budget,
     /// and no Levenshtein scan in [`TypoMode::Otzaria`]). Set by the engine.
     pub phrase_word: bool,
-    /// Ignore nikud: בראשית matches בְּרֵאשִׁית (needs a marks-keeping field,
-    /// `hebrew_marked`). Off: vocalization must match exactly.
-    pub ignore_nikud: bool,
-    /// Ignore te'amim (cantillation), independently of nikud.
-    pub ignore_teamim: bool,
+    /// Otzaria's `match_nikud` (its nikud option): every nikud mark typed in the word
+    /// (vowels, dagesh, rafe, shin / sin dots, qamatz qatan) is required on
+    /// its letter; marks not typed are free. Off (default): typed nikud is
+    /// dropped and every mark is free. Matters on an index that keeps marks.
+    pub match_nikud: bool,
+    /// Otzaria's `match_taamim` (its te'amim option): the same for te'amim (cantillation,
+    /// meteg, upper / lower dots), independently of nikud.
+    pub match_teamim: bool,
+    /// Set by the engine: the index keeps marks in its terms (its
+    /// `keep_marks` layout). The walk then reads every mark as zero width
+    /// ([`crate::marks::MarkFree`]) unless the word requires typed marks.
+    pub marked_terms: bool,
 
     // ── Limits, set by the caller (Otzaria). None = the defaults below. ──
     /// קידומות (מתקדם): max letters before the word. Default 3, or 5 for a
@@ -291,12 +297,19 @@ fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
     // the self-loops then do the matching against the index.
     let word: String = word
         .chars()
-        .filter(|&c| {
-            !(options.ignore_quotes && crate::chars::is_term_quote(c))
-                && !(options.ignore_nikud && crate::chars::is_nikud(c))
-                && !(options.ignore_teamim && crate::chars::is_taam(c))
-        })
+        .filter(|&c| !(options.ignore_quotes && crate::chars::is_term_quote(c)))
         .collect();
+    // Vocalized matching (typed marks required): the variants come from the
+    // letters; the typed form itself keeps its marks (Otzaria's
+    // `vocalized_token_pattern`), every other variant changes letters and
+    // matches with free marks (its `vocalized_free_pattern`).
+    let stripped = crate::chars::strip_term_marks(&word);
+    if stripped.len() != word.len() {
+        let mut set = core_variants(&stripped, options);
+        set.remove(stripped.as_ref());
+        set.insert(word);
+        return set;
+    }
     let mut set = BTreeSet::new();
     // Otzaria's order: the typo roots first, each through the other options.
     match typo_plan(&word, options) {
@@ -395,8 +408,9 @@ const PREFIXED: u64 = 1 << 38;
 
 const PEND_NONE: u64 = 0;
 const PEND_LETTER: u64 = 1;
-const PEND_MARK_D6: u64 = 2;
-const PEND_MARK_D7: u64 = 3;
+/// Vocalized matching: read the lead byte (data bits) of a possible free
+/// mark; its tail decides.
+const PEND_MARK: u64 = 2;
 /// Typo edit in the core: read the lead byte (kept in the data bits) of a
 /// two-byte character.
 const PEND_EDIT_LEAD: u64 = 4;
@@ -410,6 +424,13 @@ const PEND_OWE_TAIL: u64 = 6;
 const EDITED: u64 = 1 << 39;
 /// Data bits of the typo pending kinds (bits 40..56).
 const DATA_SHIFT: u32 = 40;
+/// Vocalized matching with a typo edit (bit 56): a core config that passed
+/// one of the typed form's required marks without reading it. Such a path
+/// matches only once edited (Otzaria matches its typo variants with free
+/// marks); unedited it is the typed form, whose marks are required.
+const FREE: u64 = 1 << 56;
+/// The bits a core config carries through every step.
+const CORE_BITS: u64 = PREFIXED | EDITED | FREE;
 
 #[inline]
 fn data(c: Config) -> u16 {
@@ -469,27 +490,9 @@ fn is_ascii_letter(b: u8) -> bool {
 }
 /// Lead byte of a UTF-8 Hebrew letter (א..ת = 0xD7 0x90..0xAA).
 const HEBREW_LEAD: u8 = 0xD7;
-/// Lead byte of most Hebrew marks (U+0591..U+05BF = 0xD6 0x91..0xBF).
-const MARK_LEAD: u8 = 0xD6;
 #[inline]
 fn is_hebrew_tail_letter(b: u8) -> bool {
     (0x90..=0xAA).contains(&b)
-}
-/// Tail byte of a ta'am after 0xD6 (U+0591..U+05AF).
-#[inline]
-fn is_taam_tail(b: u8) -> bool {
-    (0x91..=0xAF).contains(&b)
-}
-/// Tail byte of a nikud mark after 0xD6 (U+05B0..U+05BF).
-#[inline]
-fn is_nikud_d6_tail(b: u8) -> bool {
-    (0xB0..=0xBF).contains(&b)
-}
-/// Tail byte of a 0xD7-encoded nikud: shin/sin dots (05C1/05C2), upper/lower
-/// dots (05C4/05C5), qamatz qatan (05C7).
-#[inline]
-fn is_nikud_d7_tail(b: u8) -> bool {
-    matches!(b, 0x81 | 0x82 | 0x84 | 0x85 | 0x87)
 }
 
 /// The composite walk automaton. State = sorted set of NFA configs; empty =
@@ -512,15 +515,38 @@ pub struct HebrewWalkAutomaton {
     /// alone ([`WalkState::Trie`]).
     trie_only: bool,
     transparent_quotes: bool,
-    ignore_nikud: bool,
-    ignore_teamim: bool,
+    /// Vocalized matching: the word carries required marks (its typed form
+    /// in the core trie keeps them) and every mark of the term the trie does
+    /// not ask for is free (a zero-width self-loop, in every phase).
+    free_marks: bool,
+}
+
+/// The marks of `word` a vocalized search requires: the typed nikud when
+/// `match_nikud`, the typed te'amim when `match_teamim` (Otzaria's
+/// `VocalizedFlags::requires`); every other mark is dropped (Otzaria drops a
+/// typed mark of a disabled class and never requires a general combining
+/// mark U+0300..U+036F). The word keeps its letters and quotes, its marks
+/// in canonical order.
+pub fn required_marks_form(word: &str, match_nikud: bool, match_teamim: bool) -> String {
+    word.chars()
+        .filter(|&c| {
+            !crate::chars::is_term_mark(c)
+                || (match_nikud && crate::chars::is_nikud(c))
+                || (match_teamim && crate::chars::is_taam(c))
+        })
+        .collect()
 }
 
 impl HebrewWalkAutomaton {
     /// Builds the automaton for `word` under `options`. `word` must already be
-    /// normalized the way the index normalizes (lowercase ASCII, nikud
-    /// stripped, canonical '"').
+    /// normalized the way the index normalizes (lowercase, canonical '"',
+    /// marks in canonical order). Marks left in `word` are REQUIRED on their
+    /// letters (vocalized matching; see [`required_marks_form`]) and every
+    /// other mark of a term is free. A word without marks matches mark-free
+    /// terms only: on an index that keeps marks, wrap it in
+    /// [`MarkFree`](crate::marks::MarkFree) ([`HebrewWalkQuery`] does).
     pub fn new(word: &str, options: &WalkOptions) -> HebrewWalkAutomaton {
+        let free_marks = word.chars().any(crate::chars::is_term_mark);
         let letters = word.chars().filter(|&c| crate::chars::starts_word(c)).count(); // letters and digits, marks not
         let short = letters <= SHORT_WORD_MAX_LETTERS;
 
@@ -592,12 +618,10 @@ impl HebrewWalkAutomaton {
                 && !options.grammar_suffixes
                 && any_post == 0
                 && typo == Typo::Off
-                && !options.ignore_nikud
-                && !options.ignore_teamim
+                && !free_marks
                 && !options.ignore_quotes,
             transparent_quotes: options.ignore_quotes,
-            ignore_nikud: options.ignore_nikud,
-            ignore_teamim: options.ignore_teamim,
+            free_marks,
         }
     }
 
@@ -632,6 +656,19 @@ impl HebrewWalkAutomaton {
                     self.for_each_child_char(value(config), |_, target| {
                         self.close_into(pack(TAG_CORE, PEND_NONE, target) | gate | EDITED, set);
                     });
+                }
+                // Vocalized matching with typos: a required mark of the
+                // typed form may be passed unread (FREE), for an edited path
+                // (letters changed: its marks are free).
+                if self.free_marks && self.typo != Typo::Off {
+                    let bits = config & CORE_BITS;
+                    self.for_each_child_mark(value(config), |target| {
+                        self.close_into(pack(TAG_CORE, PEND_NONE, target) | bits | FREE, set);
+                    });
+                }
+                if config & FREE != 0 && config & EDITED == 0 {
+                    // unedited and missing a required mark: no suffix may follow
+                    return;
                 }
                 let flags = self.core_flags(config);
                 if flags & CORE_GRAM != 0 {
@@ -682,7 +719,23 @@ impl HebrewWalkAutomaton {
                 f(char_key(b, None), t);
             } else if is_two_byte_lead(b) {
                 for &(b2, t2) in self.core.edges(t) {
-                    f(char_key(b, Some(b2)), t2);
+                    // a typed (required) mark is not a character to edit
+                    if !crate::marks::is_mark_char(b, b2) {
+                        f(char_key(b, Some(b2)), t2);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Calls `f(node)` for every mark the core trie spells from `node`.
+    fn for_each_child_mark(&self, node: u32, mut f: impl FnMut(u32)) {
+        for &(b, t) in self.core.edges(node) {
+            if crate::marks::is_mark_lead(b) {
+                for &(b2, t2) in self.core.edges(t) {
+                    if crate::marks::is_mark_char(b, b2) {
+                        f(t2);
+                    }
                 }
             }
         }
@@ -731,11 +784,13 @@ impl HebrewWalkAutomaton {
 
     fn step_config(&self, config: Config, byte: u8, out: &mut Vec<Config>) {
         let t = tag(config);
-        // The prefix gate and the used typo edit travel with the core configs.
-        let gate = config & (PREFIXED | EDITED);
+        // The prefix gate, the used typo edit and a passed required mark
+        // travel with the core configs.
+        let gate = config & CORE_BITS;
         match pending(config) {
             PEND_EDIT_LEAD => {
-                if is_continuation(byte) {
+                // a free mark is never a typo edit (Otzaria counts letters)
+                if is_continuation(byte) && !(self.free_marks && crate::marks::is_mark_char(data(config) as u8, byte)) {
                     let base = pack(TAG_CORE, PEND_NONE, value(config)) | gate;
                     self.typo_after_char(base, char_key(data(config) as u8, Some(byte)), out);
                 }
@@ -765,19 +820,10 @@ impl HebrewWalkAutomaton {
                 }
                 return;
             }
-            // Resolving a possible skipped mark: 0xD6 <tail>.
-            PEND_MARK_D6 => {
-                if (self.ignore_teamim && is_taam_tail(byte))
-                    || (self.ignore_nikud && is_nikud_d6_tail(byte))
-                {
+            // Resolving a possible free mark: <lead> <tail>.
+            PEND_MARK => {
+                if crate::marks::is_mark_char(data(config) as u8, byte) {
                     // Mark skipped; back to where we were.
-                    self.close_into(pack(t, PEND_NONE, value(config)) | gate, out);
-                }
-                return;
-            }
-            // Resolving a possible skipped 0xD7-encoded nikud.
-            PEND_MARK_D7 => {
-                if self.ignore_nikud && is_nikud_d7_tail(byte) {
                     self.close_into(pack(t, PEND_NONE, value(config)) | gate, out);
                 }
                 return;
@@ -792,12 +838,13 @@ impl HebrewWalkAutomaton {
             _ => {}
         }
 
-        // Mark transparency applies in every phase: a mark may begin here.
-        if byte == MARK_LEAD && (self.ignore_nikud || self.ignore_teamim) {
-            self.close_into(pack(t, PEND_MARK_D6, value(config)) | gate, out);
-        }
-        if byte == HEBREW_LEAD && self.ignore_nikud {
-            self.close_into(pack(t, PEND_MARK_D7, value(config)) | gate, out);
+        // Free marks apply in every phase: a mark may begin here (the core
+        // trie may also read it: a typed, required mark).
+        if self.free_marks && crate::marks::is_mark_lead(byte) {
+            let pend = with_data(pack(t, PEND_MARK, value(config)) | gate, byte as u16);
+            if !out.contains(&pend) {
+                out.push(pend);
+            }
         }
 
         match t {
@@ -869,8 +916,11 @@ impl HebrewWalkAutomaton {
             return false;
         }
         match tag(config) {
-            // Zero suffix: the word may simply end here.
-            TAG_CORE => self.core_flags(config) & CORE_BARE != 0,
+            // Zero suffix: the word may simply end here (unless it passed a
+            // required mark unread without an edit).
+            TAG_CORE => {
+                self.core_flags(config) & CORE_BARE != 0 && (config & FREE == 0 || config & EDITED != 0)
+            }
             TAG_POST => self
                 .suffixes
                 .as_ref()
@@ -948,11 +998,6 @@ impl Automaton for HebrewWalkAutomaton {
 /// `FuzzyExpander.DefaultMaxExpandedTerms`).
 pub const DEFAULT_MAX_EXPANDED_TERMS: usize = 2000;
 
-/// Bytes that do not count towards a term's length when the cap prefers
-/// shorter terms: the intra-word quote the tokenizer keeps (רש"י is as
-/// short as רשי, as in FtsLib whose terms carried no quotes).
-pub const ZERO_WIDTH_BYTES: ZeroWidthBytes = ZeroWidthBytes::new(b"\"'");
-
 /// Tantivy query running the Otzaria walk for one word.
 #[derive(Debug, Clone)]
 pub struct HebrewWalkQuery {
@@ -988,18 +1033,37 @@ impl HebrewWalkQuery {
         self.max_expansions = cap;
     }
 
-    fn automaton_weight(&self) -> AutomatonWeight<QuoteFree<HebrewWalkAutomaton>> {
-        let automaton = QuoteFree::new(
-            HebrewWalkAutomaton::new(&self.word, &self.options),
-            !self.options.exact_quotes,
-        );
-        let mut weight = AutomatonWeight::new(self.field, automaton);
-        if let Some(sink) = &self.matched_terms_sink {
-            weight.set_matched_terms_sink(sink.clone());
+    /// The word's automaton, and whether it must read marks as zero width
+    /// ([`MarkFree`](crate::marks::MarkFree)): on an index that keeps marks,
+    /// a word with no required mark (see [`required_marks_form`]) matches
+    /// every vocalization, exactly what the mark-stripped index matches; a
+    /// word with required marks walks them itself (vocalized matching).
+    fn automaton(&self) -> (QuoteFree<HebrewWalkAutomaton>, bool) {
+        let o = &self.options;
+        let typed = required_marks_form(&self.word, o.match_nikud, o.match_teamim);
+        let required = typed.chars().any(crate::chars::is_term_mark);
+        let automaton = QuoteFree::new(HebrewWalkAutomaton::new(&typed, o), !o.exact_quotes);
+        (automaton, o.marked_terms && !required)
+    }
+
+    fn plan(&self, mark_free: bool) -> crate::marks::WeightPlan<'_> {
+        crate::marks::WeightPlan {
+            field: self.field,
+            sink: self.matched_terms_sink.as_ref(),
+            cap: Some(self.max_expansions),
+            marked_terms: self.options.marked_terms,
+            mark_free,
         }
-        weight.set_max_expansions(self.max_expansions);
-        weight.set_zero_width_bytes(ZERO_WIDTH_BYTES);
-        weight
+    }
+
+    /// Whether the walk matches the dictionary term `term` (tests, checks).
+    pub fn accepts(&self, term: &[u8]) -> bool {
+        let (automaton, mark_free) = self.automaton();
+        if mark_free {
+            run(&crate::marks::MarkFree::new(automaton), term)
+        } else {
+            run(&automaton, term)
+        }
     }
 
     /// This walk as a slot of a [`SpanQuery`](tantivy::query::SpanQuery):
@@ -1007,13 +1071,27 @@ impl HebrewWalkQuery {
     /// collects the matched forms. The expansion cap applies per
     /// segment.
     pub fn span_slot(&self, _searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
-        Ok(Arc::new(self.automaton_weight()))
+        let (automaton, mark_free) = self.automaton();
+        Ok(self.plan(mark_free).span(automaton))
     }
+}
+
+/// Runs `automaton` over `term`.
+pub(crate) fn run<A: Automaton>(automaton: &A, term: &[u8]) -> bool {
+    let mut state = automaton.start();
+    for &b in term {
+        if !automaton.can_match(&state) {
+            return false;
+        }
+        state = automaton.accept(&state, b);
+    }
+    automaton.is_match(&state)
 }
 
 impl Query for HebrewWalkQuery {
     fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        Ok(Box::new(self.automaton_weight()))
+        let (automaton, mark_free) = self.automaton();
+        Ok(self.plan(mark_free).boxed(automaton))
     }
 }
 
@@ -1390,18 +1468,14 @@ mod tests {
         assert!(matches(&a, "וברכות")); // exact core + suffix
         assert!(matches(&a, "ברקתו")); // edited core + suffix
         assert!(!matches(&a, "רבקתו")); // two edits
-        // An edit never spends inside a mark: ignore-nikud keeps one edit.
-        let a = walk(
-            "ברכה",
-            WalkOptions {
-                spelling_errors: true,
-                typo_mode: TypoMode::FullEdit1,
-                ignore_nikud: true,
-                ..Default::default()
-            },
+        // An edit never spends inside a mark: on an index that keeps marks
+        // they are zero width, one edit stays one edit.
+        let q = marked(
+            "\u{05D1}\u{05E8}\u{05DB}\u{05D4}",
+            WalkOptions { spelling_errors: true, typo_mode: TypoMode::FullEdit1, ..Default::default() },
         );
-        assert!(matches(&a, "בְּרָקָה"));
-        assert!(!matches(&a, "בְּרָקָח"));
+        assert!(q.accepts("\u{05D1}\u{05B0}\u{05BC}\u{05E8}\u{05B8}\u{05E7}\u{05B8}\u{05D4}".as_bytes()));
+        assert!(!q.accepts("\u{05D1}\u{05B0}\u{05BC}\u{05E8}\u{05B8}\u{05E7}\u{05B8}\u{05D7}".as_bytes()));
     }
 
     // Otzaria grammatical_prefix_uses_full_rich_group:
@@ -1460,77 +1534,104 @@ mod tests {
         assert!(!matches(&a, "קקקקתורה"));
     }
 
+    /// The walk as the engine runs it on an index that keeps marks.
+    fn marked(word: &str, options: WalkOptions) -> HebrewWalkQuery {
+        HebrewWalkQuery::new(Field::from_field_id(0), word, WalkOptions { marked_terms: true, ..options })
+    }
+
+    fn acc(q: &HebrewWalkQuery, term: &str) -> bool {
+        q.accepts(term.as_bytes())
+    }
+
+    // bet resh alef shin yod tav, plain and fully vocalized (canonical order)
+    const BERESHIT: &str = "\u{05D1}\u{05E8}\u{05D0}\u{05E9}\u{05D9}\u{05EA}";
+    const BERESHIT_VOC: &str = "\u{05D1}\u{05B0}\u{05BC}\u{05E8}\u{05B5}\u{05D0}\u{05E9}\u{05B4}\u{05C1}\u{05D9}\u{05EA}";
+
     #[test]
-    fn ignore_nikud() {
-        let a = walk(
-            "בראשית",
-            WalkOptions {
-                ignore_nikud: true,
-                ..Default::default()
-            },
-        );
-        assert!(matches(&a, "בראשית"));
-        assert!(matches(&a, "בְּרֵאשִׁית")); // vocalized indexed form
-        // off → exact only
-        let a2 = walk("בראשית", WalkOptions::default());
-        assert!(!matches(&a2, "בְּרֵאשִׁית"));
-        // a vocalized QUERY with the flag matches the bare indexed form
-        let a3 = walk(
-            "בְּרֵאשִׁית",
-            WalkOptions {
-                ignore_nikud: true,
-                ..Default::default()
-            },
-        );
-        assert!(matches(&a3, "בראשית"));
+    fn marks_are_free_unless_matched() {
+        // default: every mark is zero width, typed marks are dropped
+        let q = marked(BERESHIT, WalkOptions::default());
+        assert!(acc(&q, BERESHIT) && acc(&q, BERESHIT_VOC));
+        assert!(acc(&q, "\u{05D1}\u{05E8}\u{05D0}\u{0591}\u{05E9}\u{05D9}\u{05EA}\u{0301}"));
+        let q = marked(BERESHIT_VOC, WalkOptions::default());
+        assert!(acc(&q, BERESHIT) && acc(&q, BERESHIT_VOC));
+        // the plain fast path stays the trie (wrapped)
+        assert!(matches!(walk(BERESHIT, WalkOptions::default()).start(), WalkState::Trie(_)));
+        // a mark-free index: no wrapper, a plain word matches plain terms
+        let plain = HebrewWalkQuery::new(Field::from_field_id(0), BERESHIT, WalkOptions::default());
+        assert!(acc(&plain, BERESHIT) && !acc(&plain, BERESHIT_VOC));
     }
 
     #[test]
-    fn ignore_teamim_independent_of_nikud() {
-        // word with an etnahta (ta'am) only
-        let with_taam = "ברא\u{0591}שית";
-        let a = walk(
-            "בראשית",
-            WalkOptions {
-                ignore_teamim: true,
-                ..Default::default()
-            },
-        );
-        assert!(matches(&a, with_taam));
-        // but nikud is NOT ignored by the teamim flag
-        assert!(!matches(&a, "בְּרֵאשִׁית"));
-        // and vice versa: nikud flag alone doesn't skip teamim
-        let a2 = walk(
-            "בראשית",
-            WalkOptions {
-                ignore_nikud: true,
-                ..Default::default()
-            },
-        );
-        assert!(!matches(&a2, with_taam));
-        // both flags: fully vocalized + cantillated matches
-        let a3 = walk(
-            "בראשית",
-            WalkOptions {
-                ignore_nikud: true,
-                ignore_teamim: true,
-                ..Default::default()
-            },
-        );
-        assert!(matches(&a3, "בְּרֵ\u{0591}אשִׁית"));
+    fn typed_marks_required_untyped_free() {
+        // bet + qamats, resh: the qamats is required on the bet
+        let typed = "\u{05D1}\u{05B8}\u{05E8}";
+        let q = marked(typed, WalkOptions { match_nikud: true, ..Default::default() });
+        assert!(acc(&q, typed));
+        assert!(acc(&q, "\u{05D1}\u{05B8}\u{05BC}\u{05E8}\u{05B0}")); // untyped dagesh and sheva free
+        assert!(acc(&q, "\u{05D1}\u{05B8}\u{0591}\u{05E8}\u{0301}")); // te'amim, combining accent free
+        assert!(!acc(&q, "\u{05D1}\u{05E8}")); // typed mark missing
+        assert!(!acc(&q, "\u{05D1}\u{05B7}\u{05E8}")); // another vowel
+        assert!(!acc(&q, "\u{05D1}\u{05E8}\u{05B8}")); // on another letter
+        assert!(!matches!(walk(typed, WalkOptions::default()).start(), WalkState::Trie(_)));
+        // two typed marks of one letter, canonical order in term and query
+        let q = marked("\u{05D1}\u{05B8}\u{05BC}\u{05E8}", WalkOptions { match_nikud: true, ..Default::default() });
+        assert!(acc(&q, "\u{05D1}\u{05B8}\u{05BC}\u{05E8}"));
+        assert!(acc(&q, "\u{05D1}\u{05B8}\u{05BC}\u{0591}\u{05E8}"));
+        assert!(!acc(&q, "\u{05D1}\u{05B8}\u{05E8}"));
+        assert!(!acc(&q, "\u{05D1}\u{05BC}\u{05E8}"));
     }
 
     #[test]
-    fn nikud_transparency_composes_with_prefixes() {
-        let a = walk(
-            "תורה",
-            WalkOptions {
-                grammar_prefixes: true,
-                ignore_nikud: true,
-                ..Default::default()
-            },
-        );
-        assert!(matches(&a, "הַתּוֹרָה")); // vocalized prefix + word
+    fn nikud_and_teamim_are_independent_classes() {
+        // a typed ta'am (etnahta) and a typed vowel (qamats)
+        let typed = "\u{05D1}\u{05B8}\u{05E8}\u{0591}";
+        let nikud = marked(typed, WalkOptions { match_nikud: true, ..Default::default() });
+        let teamim = marked(typed, WalkOptions { match_teamim: true, ..Default::default() });
+        let both = marked(typed, WalkOptions { match_nikud: true, match_teamim: true, ..Default::default() });
+        let vowel_only = "\u{05D1}\u{05B8}\u{05E8}";
+        let taam_only = "\u{05D1}\u{05E8}\u{0591}";
+        assert!(acc(&nikud, vowel_only) && !acc(&nikud, taam_only));
+        assert!(!acc(&teamim, vowel_only) && acc(&teamim, taam_only));
+        assert!(acc(&both, typed) && !acc(&both, vowel_only) && !acc(&both, taam_only));
+        // Otzaria's classes: meteg (U+05BD) and the upper dot (U+05C4) are te'amim
+        let meteg = "\u{05D1}\u{05BD}\u{05E8}";
+        assert!(acc(&marked(meteg, WalkOptions { match_nikud: true, ..Default::default() }), "\u{05D1}\u{05E8}"));
+        assert!(!acc(&marked(meteg, WalkOptions { match_teamim: true, ..Default::default() }), "\u{05D1}\u{05E8}"));
+        assert!(crate::chars::is_taam('\u{05BD}') && crate::chars::is_taam('\u{05C4}') && crate::chars::is_taam('\u{05C5}'));
+        assert!(crate::chars::is_nikud('\u{05BC}') && crate::chars::is_nikud('\u{05C7}') && !crate::chars::is_nikud('\u{05BD}'));
+    }
+
+    #[test]
+    fn required_marks_compose_with_affixes_and_variants() {
+        // grammatical prefixes: the prefix letters take any marks
+        let typed = "\u{05EA}\u{05BC}\u{05D5}\u{05E8}\u{05D4}"; // dagesh typed on the tav
+        let o = WalkOptions { match_nikud: true, grammar_prefixes: true, grammar_suffixes: true, ..Default::default() };
+        let q = marked(typed, o);
+        assert!(acc(&q, "\u{05D4}\u{05B7}\u{05EA}\u{05BC}\u{05D5}\u{05B9}\u{05E8}\u{05B8}\u{05D4}"));
+        assert!(acc(&q, "\u{05D5}\u{05B0}\u{05D4}\u{05B7}\u{05EA}\u{05BC}\u{05D5}\u{05E8}\u{05EA}\u{05D5}\u{05B9}"));
+        assert!(!acc(&q, "\u{05D4}\u{05B7}\u{05EA}\u{05D5}\u{05B9}\u{05E8}\u{05B8}\u{05D4}")); // dagesh missing
+        // ktiv male/haser: a variant whose letters differ matches with free marks
+        let q = marked(typed, WalkOptions { match_nikud: true, ktiv_male_haser: true, ..Default::default() });
+        assert!(acc(&q, "\u{05EA}\u{05BC}\u{05D5}\u{05E8}\u{05D4}"));
+        assert!(!acc(&q, "\u{05EA}\u{05D5}\u{05E8}\u{05D4}"));
+        assert!(acc(&q, "\u{05EA}\u{05D5}\u{05D5}\u{05E8}\u{05D4}")); // letters changed: marks free
+    }
+
+    #[test]
+    fn required_marks_with_typo_edits() {
+        // 4 letters, typo as the only option: edit distance 1 in the walk;
+        // the unedited word needs its typed mark, an edited one does not
+        let typed = "\u{05D1}\u{05B0}\u{05E8}\u{05DB}\u{05D4}";
+        let q = marked(typed, WalkOptions { match_nikud: true, spelling_errors: true, ..Default::default() });
+        assert!(acc(&q, typed));
+        assert!(acc(&q, "\u{05D1}\u{05B0}\u{05BC}\u{05E8}\u{05B8}\u{05DB}\u{05B8}\u{05D4}"));
+        assert!(!acc(&q, "\u{05D1}\u{05E8}\u{05DB}\u{05D4}")); // unedited, mark missing
+        assert!(acc(&q, "\u{05D1}\u{05E8}\u{05E7}\u{05D4}")); // substitution: marks free
+        assert!(acc(&q, "\u{05D1}\u{05B8}\u{05E8}\u{05DB}\u{05D4}\u{05D4}")); // insertion: marks free
+        assert!(!acc(&q, "\u{05D1}\u{05E8}\u{05E7}\u{05D7}")); // two edits
+        // a mark is never an edit: an extra mark on the unedited word is free
+        assert!(acc(&q, "\u{05D1}\u{05B0}\u{05E8}\u{05B8}\u{05DB}\u{05D4}"));
     }
 
     #[test]

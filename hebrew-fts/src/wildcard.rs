@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use tantivy::query::{AutomatonWeight, EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight};
+use tantivy::query::{EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight};
 use tantivy::schema::Field;
 use tantivy_fst::Automaton;
 
@@ -343,6 +343,8 @@ pub struct HebrewWildcardQuery {
     pattern: WildcardPattern,
     matched_terms_sink: Option<MatchedTermsSink>,
     max_expansions: usize,
+    /// The index keeps marks in its terms: they are read as zero width.
+    marked_terms: bool,
 }
 
 impl HebrewWildcardQuery {
@@ -353,6 +355,7 @@ impl HebrewWildcardQuery {
             pattern: WildcardPattern::parse(pattern)?,
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
+            marked_terms: false,
         })
     }
 
@@ -363,6 +366,7 @@ impl HebrewWildcardQuery {
             pattern: WildcardPattern::parse_ignoring_quotes(pattern)?,
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
+            marked_terms: false,
         })
     }
 
@@ -391,26 +395,32 @@ impl HebrewWildcardQuery {
         WildcardAutomaton::new(self.pattern.clone())
     }
 
-    fn automaton_weight(&self) -> AutomatonWeight<WildcardAutomaton> {
-        let mut weight =
-            AutomatonWeight::new(self.field, WildcardAutomaton::new(self.pattern.clone()));
-        if let Some(sink) = &self.matched_terms_sink {
-            weight.set_matched_terms_sink(sink.clone());
+    /// The index keeps marks in its terms (`keep_marks`): the pattern then
+    /// reads them as zero width ([`crate::marks::MarkFree`]), so it matches
+    /// what it matches on the mark-stripped index.
+    pub fn set_marked_terms(&mut self, marked_terms: bool) {
+        self.marked_terms = marked_terms;
+    }
+
+    fn plan(&self) -> crate::marks::WeightPlan<'_> {
+        crate::marks::WeightPlan {
+            field: self.field,
+            sink: self.matched_terms_sink.as_ref(),
+            cap: Some(self.max_expansions),
+            marked_terms: self.marked_terms,
+            mark_free: self.marked_terms,
         }
-        weight.set_max_expansions(self.max_expansions);
-        weight.set_zero_width_bytes(crate::walk::ZERO_WIDTH_BYTES);
-        weight
     }
 
     /// This pattern as a span slot, capped per segment.
     pub fn span_slot(&self, _searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
-        Ok(Arc::new(self.automaton_weight()))
+        Ok(self.plan().span(self.automaton()))
     }
 }
 
 impl Query for HebrewWildcardQuery {
     fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        Ok(Box::new(self.automaton_weight()))
+        Ok(self.plan().boxed(self.automaton()))
     }
 }
 

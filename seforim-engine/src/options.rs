@@ -50,10 +50,13 @@ pub struct SearchOptions {
     pub exact_quotes: bool,
     /// שגיאות כתיב, expanded per `typo_mode`.
     pub spelling_errors: bool,
-    /// Ignore nikud (on an index that keeps marks).
-    pub ignore_nikud: bool,
-    /// Ignore te'amim (on an index that keeps marks).
-    pub ignore_teamim: bool,
+    /// Otzaria's `match_nikud`: the nikud typed in a word is required on its
+    /// letter, marks not typed are free; the search then sees only lines
+    /// that carry a mark (Otzaria's vocalized field). Off: every mark is
+    /// ignored. Needs an index built with `keep_marks`.
+    pub match_nikud: bool,
+    /// Otzaria's `match_taamim`: the same for te'amim.
+    pub match_teamim: bool,
     pub typo_mode: TypoModeSpec,
     /// Limits (Otzaria). None = the walk's defaults.
     pub prefix_max_letters: Option<u32>,
@@ -123,8 +126,8 @@ impl Default for SearchOptions {
             ignore_quotes: false,
             exact_quotes: false,
             spelling_errors: false,
-            ignore_nikud: false,
-            ignore_teamim: false,
+            match_nikud: false,
+            match_teamim: false,
             typo_mode: TypoModeSpec::default(),
             prefix_max_letters: None,
             suffix_max_letters: None,
@@ -163,8 +166,8 @@ pub struct WordOptions {
     pub ignore_quotes: Option<bool>,
     pub exact_quotes: Option<bool>,
     pub spelling_errors: Option<bool>,
-    pub ignore_nikud: Option<bool>,
-    pub ignore_teamim: Option<bool>,
+    pub match_nikud: Option<bool>,
+    pub match_teamim: Option<bool>,
     pub typo_mode: Option<TypoModeSpec>,
     pub prefix_max_letters: Option<u32>,
     pub suffix_max_letters: Option<u32>,
@@ -227,8 +230,8 @@ impl SearchOptions {
             spelling_errors: self.spelling_errors,
             typo_mode: self.typo_mode,
             phrase_word: false,
-            ignore_nikud: self.ignore_nikud,
-            ignore_teamim: self.ignore_teamim,
+            match_nikud: self.match_nikud,
+            match_teamim: self.match_teamim,
             prefix_max_letters: self.prefix_max_letters,
             suffix_max_letters: self.suffix_max_letters,
             part_of_word_max_letters: self.part_of_word_max_letters,
@@ -237,9 +240,15 @@ impl SearchOptions {
     }
 
     /// Lowers to the low-level request. `keep_marks`: the index keeps
-    /// nikud / te'amim, so plain words keep the marks typed. Errors when a
-    /// proximity's `gaps` does not have one entry per consecutive pair of
-    /// typed words.
+    /// nikud / te'amim, so plain words keep the marks typed (the walk drops
+    /// those of a class not matched). Errors when a proximity's `gaps` does
+    /// not have one entry per consecutive pair of typed words.
+    ///
+    /// Vocalized mode (Otzaria's `voc_mode`): `match_nikud` / `match_teamim`
+    /// on globally or for any word makes the whole search see only lines
+    /// that carry a mark (`SearchRequest::vocalized`); the negative query is
+    /// vocalized when the global flags are on (Otzaria passes the global
+    /// flags to both builds).
     pub fn to_request(&self, keep_marks: bool) -> Result<SearchRequest> {
         // A user regex `/.../` (Otzaria): the whole query is the regex, on
         // its own: no word options, negative query, distance or grouping.
@@ -264,6 +273,12 @@ impl SearchOptions {
             }
         }
         let global = self.global();
+        let global_vocalized = global.match_nikud || global.match_teamim;
+        let vocalized = global_vocalized
+            || self
+                .words
+                .values()
+                .any(|w| w.match_nikud == Some(true) || w.match_teamim == Some(true));
         let main = slots(&self.query, keep_marks, |i| match self.words.get(&i) {
             Some(w) => (w.apply(global), w.alternatives.as_slice()),
             None => (global, &[]),
@@ -298,6 +313,9 @@ impl SearchOptions {
                     require_ordered: e.require_ordered,
                     gaps: None,
                     phrase_alternatives: phrases(&e.phrase_alternatives, keep_marks),
+                    // Otzaria: `voc.or(options_vocalized_flags(negative_search_options))`
+                    vocalized: global_vocalized
+                        || e.words.values().any(|w| w.match_nikud == Some(true) || w.match_teamim == Some(true)),
                 })
             }
             None => None,
@@ -316,6 +334,7 @@ impl SearchOptions {
             books: self.books.clone(),
             order: self.order,
             book_generations: self.book_generations.clone(),
+            vocalized,
         })
     }
 }
@@ -368,8 +387,8 @@ impl WordOptions {
             spelling_errors: self.spelling_errors.unwrap_or(base.spelling_errors),
             typo_mode: self.typo_mode.unwrap_or(base.typo_mode),
             phrase_word: base.phrase_word,
-            ignore_nikud: self.ignore_nikud.unwrap_or(base.ignore_nikud),
-            ignore_teamim: self.ignore_teamim.unwrap_or(base.ignore_teamim),
+            match_nikud: self.match_nikud.unwrap_or(base.match_nikud),
+            match_teamim: self.match_teamim.unwrap_or(base.match_teamim),
             prefix_max_letters: self.prefix_max_letters.or(base.prefix_max_letters),
             suffix_max_letters: self.suffix_max_letters.or(base.suffix_max_letters),
             part_of_word_max_letters: self.part_of_word_max_letters.or(base.part_of_word_max_letters),

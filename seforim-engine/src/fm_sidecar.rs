@@ -1,6 +1,7 @@
 //! The FM-index sidecar of a line index: `<segment-id>.fmi` next to the
-//! segment it was built from, over the dictionary's quote-stripped term
-//! forms (rowid = ordinal + 1). Built after the merge into one segment;
+//! segment it was built from, over the dictionary's quote- and mark-stripped
+//! term forms (rowid = ordinal + 1; on an index that keeps marks the
+//! vocalized spellings of a word are rows of the same text). Built after the merge into one segment;
 //! loaded lazily and memory-mapped on the first leading-`*` or fuzzy search.
 
 use std::path::{Path, PathBuf};
@@ -18,11 +19,14 @@ pub fn sidecar_path(dir: &Path, segment: SegmentId) -> PathBuf {
     dir.join(format!("{}.fmi", segment.uuid_string()))
 }
 
-/// The FM text form of a dictionary term: its quotes dropped (FtsLib's terms
-/// carried none). Candidates found through it are verified against the real
-/// term, so this only widens the candidate set, never the result.
+/// The FM text form of a dictionary term: its quotes and marks dropped
+/// (FtsLib's terms carried neither). Candidates found through it are
+/// verified against the real term, so this only widens the candidate set,
+/// never the result.
 pub fn text_form(term: &str) -> String {
-    term.chars().filter(|&c| !hebrew_fts::chars::is_term_quote(c)).collect()
+    term.chars()
+        .filter(|&c| !hebrew_fts::chars::is_term_quote(c) && !hebrew_fts::chars::is_term_mark(c))
+        .collect()
 }
 
 /// True when `path` holds a sidecar built over `num_terms` terms.
@@ -37,9 +41,8 @@ fn sidecar_matches(path: &Path, num_terms: usize) -> bool {
 /// Idempotent: a sidecar that already matches the segment is kept as is.
 /// Returns true when a sidecar is in place; false (nothing built, searches
 /// use the walk) when the index has several segments, has no terms, or its
-/// dictionary cannot be FM-indexed (a `keep_marks` index: terms with nikud
-/// or te'amim, which the FM candidate search does not model; or a char
-/// outside the BMP). Err only on I/O failure.
+/// dictionary cannot be FM-indexed (a char outside the BMP). Err only on
+/// I/O failure.
 pub fn build(index: &Index, text: Field, dir: &Path) -> Result<bool> {
     let reader = index.reader()?;
     let searcher = reader.searcher();
@@ -61,9 +64,6 @@ pub fn build(index: &Index, text: Field, dir: &Path) -> Result<bool> {
     let mut stream = dict.stream()?;
     while stream.advance() {
         let Ok(term) = std::str::from_utf8(stream.key()) else { return Ok(false) };
-        if term.chars().any(hebrew_fts::chars::is_attached_mark) {
-            return Ok(false); // a vocalized dictionary: searches use the walk
-        }
         forms.push(text_form(term));
     }
     let Ok(bytes) = fm_index::build(forms.iter().map(|s| s.as_str())) else {

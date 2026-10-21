@@ -147,8 +147,12 @@ pub fn keep_second_of_paired_readings(query: &str) -> std::borrow::Cow<'_, str> 
 pub struct Normalized {
     /// The term: Otzaria's token text, lowercased (its `LowerCaser`).
     pub text: String,
-    /// UTF-8 bytes of the token text before lowercasing: what Otzaria's
-    /// `RemoveLongFilter` measures.
+    /// UTF-8 bytes of the token text before lowercasing, marks not counted:
+    /// what Otzaria's `RemoveLongFilter` measures on its plain field. An
+    /// index that keeps marks measures the same bytes, so it indexes exactly
+    /// the words the mark-stripped index does (Otzaria's vocalized field
+    /// measures with the marks: a named deviation, words of 128 bytes or
+    /// more only).
     pub term_bytes: usize,
     /// UTF-16 length of the quote-free, mark-free term (FtsLib's term and
     /// `NormLen`): the word's visible width.
@@ -171,8 +175,7 @@ impl Normalizer {
     pub fn push(&self, out: &mut Normalized, c: char) {
         if is_word_mark(c) && c != '\u{FB1E}' {
             if self.keep_marks {
-                out.text.push(c);
-                out.term_bytes += c.len_utf8();
+                out.push_mark(c);
             }
             return;
         }
@@ -194,8 +197,7 @@ impl Normalizer {
             for f in folded.chars() {
                 if is_attached_mark(f) {
                     if self.keep_marks {
-                        out.text.push(f);
-                        out.term_bytes += f.len_utf8();
+                        out.push_mark(f);
                     }
                 } else {
                     push_lower(out, f);
@@ -213,6 +215,16 @@ impl Normalizer {
             self.push(&mut out, c);
         }
         out
+    }
+}
+
+impl Normalized {
+    /// Appends a kept mark in canonical order among the marks of its letter
+    /// ([`crate::chars::push_mark_canonical`]); marks count neither in
+    /// [`Normalized::term_bytes`] nor in [`Normalized::letters`].
+    #[inline]
+    pub fn push_mark(&mut self, mark: char) {
+        crate::chars::push_mark_canonical(&mut self.text, mark);
     }
 }
 
@@ -294,6 +306,15 @@ mod tests {
         assert_eq!((w.text.as_str(), w.term_bytes, w.letters), ("ab", 2, 2));
         let m = Normalizer { keep_marks: true, wildcards: false };
         let w = m.normalize("\u{05D0}\u{05B0}");
-        assert_eq!((w.term_bytes, w.letters), (4, 1));
+        assert_eq!((w.text.as_str(), w.term_bytes, w.letters), ("\u{05D0}\u{05B0}", 2, 1));
+        // marks in canonical order: dagesh (class 21) after qamats (18),
+        // whatever the typed order
+        let a = m.normalize("\u{05D1}\u{05BC}\u{05B8}\u{05D2}");
+        let b = m.normalize("\u{05D1}\u{05B8}\u{05BC}\u{05D2}");
+        assert_eq!(a.text, "\u{05D1}\u{05B8}\u{05BC}\u{05D2}");
+        assert_eq!(a, b);
+        // a presentation form's mark joins the canonical order too
+        let c = m.normalize("\u{FB31}\u{05B8}");
+        assert_eq!(c.text, "\u{05D1}\u{05B8}\u{05BC}");
     }
 }

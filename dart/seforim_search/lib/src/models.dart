@@ -8,8 +8,10 @@ class IndexOptions {
   /// validated from the line text by the snippet locator.
   final bool positions;
 
-  /// Keep nikud/te'amim in indexed terms (for [WalkOptions.ignoreNikud] /
-  /// [WalkOptions.ignoreTeamim]).
+  /// Keep nikud/te'amim in indexed terms (canonical order) and flag the lines
+  /// that carry a mark. Searches ignore the marks unless
+  /// [WalkOptions.matchNikud] / [WalkOptions.matchTeamim] ask for them, so
+  /// default results equal the mark-stripped index's.
   final bool keepMarks;
 
   Map<String, Object?> toJson() => {'positions': positions, 'keep_marks': keepMarks};
@@ -95,8 +97,8 @@ class WalkOptions {
     this.exactQuotes = false,
     this.spellingErrors = false,
     this.typoMode = TypoMode.otzaria,
-    this.ignoreNikud = false,
-    this.ignoreTeamim = false,
+    this.matchNikud = false,
+    this.matchTeamim = false,
     this.prefixMaxLetters,
     this.suffixMaxLetters,
     this.partOfWordMaxLetters,
@@ -140,11 +142,12 @@ class WalkOptions {
   /// Which typo behaviour [spellingErrors] uses. Default [TypoMode.otzaria].
   final TypoMode typoMode;
 
-  /// Ignore nikud (matters on a keepMarks index).
-  final bool ignoreNikud;
+  /// Otzaria's match_nikud: typed nikud required on its letter, untyped marks
+  /// free, only lines that carry a mark (needs a keepMarks index).
+  final bool matchNikud;
 
-  /// Ignore te'amim (matters on a keepMarks index).
-  final bool ignoreTeamim;
+  /// Otzaria's match_taamim: the same for te'amim.
+  final bool matchTeamim;
 
   /// Max letters before the word (advanced prefixes). Null = engine default
   /// (3, or 5 for a word of ≤3 letters).
@@ -185,8 +188,8 @@ class WalkOptions {
     flag('exact_quotes', exactQuotes);
     flag('spelling_errors', spellingErrors);
     if (typoMode == TypoMode.fullEdit1) m['typo_mode'] = 'full_edit1';
-    flag('ignore_nikud', ignoreNikud);
-    flag('ignore_teamim', ignoreTeamim);
+    flag('match_nikud', matchNikud);
+    flag('match_teamim', matchTeamim);
     return m;
   }
 }
@@ -535,8 +538,8 @@ class SearchOptions {
     this.ignoreQuotes = false,
     this.exactQuotes = false,
     this.spellingErrors = false,
-    this.ignoreNikud = false,
-    this.ignoreTeamim = false,
+    this.matchNikud = false,
+    this.matchTeamim = false,
     this.typoMode = TypoMode.otzaria,
     this.prefixMaxLetters,
     this.suffixMaxLetters,
@@ -572,7 +575,7 @@ class SearchOptions {
 
   /// התעלם מגרשיים (also for wildcard / fuzzy / `%` words).
   bool ignoreQuotes;
-  bool exactQuotes, spellingErrors, ignoreNikud, ignoreTeamim;
+  bool exactQuotes, spellingErrors, matchNikud, matchTeamim;
   TypoMode typoMode;
   int? prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters, grammarPrefixMaxLetters;
 
@@ -629,7 +632,7 @@ class SearchOptions {
         if (userRegex) 'user_regex': true,
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
-            ignoreNikud, ignoreTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,
+            matchNikud, matchTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,
             grammarPrefixMaxLetters),
         if (words.isNotEmpty) 'words': {for (final e in words.entries) '${e.key}': e.value.toJson()},
         if (maxWordDistance != null) 'max_word_distance': maxWordDistance,
@@ -662,8 +665,8 @@ Map<String, Object?> _wordFields(
     bool? ignoreQuotes,
     bool? exactQuotes,
     bool? spellingErrors,
-    bool? ignoreNikud,
-    bool? ignoreTeamim,
+    bool? matchNikud,
+    bool? matchTeamim,
     TypoMode? typoMode,
     int? prefixMaxLetters,
     int? suffixMaxLetters,
@@ -689,8 +692,8 @@ Map<String, Object?> _wordFields(
   flag('ignore_quotes', ignoreQuotes);
   flag('exact_quotes', exactQuotes);
   flag('spelling_errors', spellingErrors);
-  flag('ignore_nikud', ignoreNikud);
-  flag('ignore_teamim', ignoreTeamim);
+  flag('match_nikud', matchNikud);
+  flag('match_teamim', matchTeamim);
   if (typoMode != null) m['typo_mode'] = typoMode == TypoMode.fullEdit1 ? 'full_edit1' : 'otzaria';
   limit('prefix_max_letters', prefixMaxLetters);
   limit('suffix_max_letters', suffixMaxLetters);
@@ -714,8 +717,8 @@ class WordOptions {
     this.ignoreQuotes,
     this.exactQuotes,
     this.spellingErrors,
-    this.ignoreNikud,
-    this.ignoreTeamim,
+    this.matchNikud,
+    this.matchTeamim,
     this.typoMode,
     this.prefixMaxLetters,
     this.suffixMaxLetters,
@@ -726,7 +729,7 @@ class WordOptions {
 
   bool? grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes;
   bool? ktivMaleHaser, partOfWord, advancedPrefixes, advancedSuffixes;
-  bool? ignoreQuotes, exactQuotes, spellingErrors, ignoreNikud, ignoreTeamim;
+  bool? ignoreQuotes, exactQuotes, spellingErrors, matchNikud, matchTeamim;
   TypoMode? typoMode;
   int? prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters, grammarPrefixMaxLetters;
 
@@ -738,7 +741,7 @@ class WordOptions {
         if (alternatives.isNotEmpty) 'alternatives': alternatives,
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
-            ignoreNikud, ignoreTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,
+            matchNikud, matchTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,
             grammarPrefixMaxLetters),
       };
 }

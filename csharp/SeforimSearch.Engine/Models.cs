@@ -17,8 +17,11 @@ namespace SeforimSearch.Engine
         /// still validated, from the line text by the snippet locator.</summary>
         public bool Positions { get; set; } = true;
 
-        /// <summary>Keep nikud/te'amim in indexed terms (for vocalized text searched
-        /// with <see cref="WalkOptions.IgnoreNikud"/> / <see cref="WalkOptions.IgnoreTeamim"/>).</summary>
+        /// <summary>Keep nikud/te'amim in indexed terms (canonical order) and flag the lines
+        /// that carry a mark. Every search ignores the marks unless
+        /// <see cref="WalkOptions.MatchNikud"/> / <see cref="WalkOptions.MatchTeamim"/> asks
+        /// for them (Otzaria's vocalized search), so default results equal the
+        /// mark-stripped index's.</summary>
         public bool KeepMarks { get; set; }
 
         internal string ToJson() =>
@@ -94,10 +97,11 @@ namespace SeforimSearch.Engine
         /// <summary>Which typo behaviour <see cref="SpellingErrors"/> uses. Default
         /// <see cref="TypoMode.Otzaria"/>.</summary>
         public TypoMode TypoMode { get; set; }
-        /// <summary>Ignore nikud (needs a KeepMarks index to matter).</summary>
-        public bool IgnoreNikud { get; set; }
-        /// <summary>Ignore te'amim (needs a KeepMarks index to matter).</summary>
-        public bool IgnoreTeamim { get; set; }
+        /// <summary>Otzaria's match_nikud: typed nikud required on its letter, untyped marks
+        /// free, only lines that carry a mark. Needs a KeepMarks index (else an error).</summary>
+        public bool MatchNikud { get; set; }
+        /// <summary>Otzaria's match_taamim: the same for te'amim.</summary>
+        public bool MatchTeamim { get; set; }
 
         /// <summary>קידומות (מתקדם): max letters before the word. Null = default
         /// (3, or 5 for a word of ≤3 letters).</summary>
@@ -155,8 +159,8 @@ namespace SeforimSearch.Engine
                 first = false;
                 sb.Append("\"typo_mode\":\"full_edit1\"");
             }
-            Flag("ignore_nikud", IgnoreNikud);
-            Flag("ignore_teamim", IgnoreTeamim);
+            Flag("match_nikud", MatchNikud);
+            Flag("match_teamim", MatchTeamim);
             sb.Append('}');
         }
     }
@@ -570,10 +574,11 @@ namespace SeforimSearch.Engine
         public bool ExactQuotes { get; set; }
         /// <summary>שגיאות כתיב, expanded per <see cref="TypoMode"/>.</summary>
         public bool SpellingErrors { get; set; }
-        /// <summary>Ignore nikud (on a KeepMarks index).</summary>
-        public bool IgnoreNikud { get; set; }
-        /// <summary>Ignore te'amim (on a KeepMarks index).</summary>
-        public bool IgnoreTeamim { get; set; }
+        /// <summary>Otzaria's match_nikud: typed nikud required, untyped marks free, only
+        /// lines that carry a mark (needs a KeepMarks index).</summary>
+        public bool MatchNikud { get; set; }
+        /// <summary>Otzaria's match_taamim: the same for te'amim.</summary>
+        public bool MatchTeamim { get; set; }
         public TypoMode TypoMode { get; set; }
         /// <summary>Limits (Otzaria). Null = the walk's defaults.</summary>
         public int? PrefixMaxLetters { get; set; }
@@ -629,7 +634,7 @@ namespace SeforimSearch.Engine
             if (UserRegex) sb.Append(",\"user_regex\":true");
             WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes, KtivMaleHaser,
                 PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes, SpellingErrors,
-                IgnoreNikud, IgnoreTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters, PartOfWordMaxLetters,
+                MatchNikud, MatchTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters, PartOfWordMaxLetters,
                 GrammarPrefixMaxLetters);
             WriteWords(sb, Words);
             if (MaxWordDistance.HasValue) sb.Append(",\"max_word_distance\":").Append(MaxWordDistance.Value.ToString(inv));
@@ -700,7 +705,7 @@ namespace SeforimSearch.Engine
         internal static void WordFields(StringBuilder sb, bool? grammarPrefixes, bool? grammarSuffixes,
             bool? aramaicPrefixes, bool? aramaicSuffixes, bool? ktivMaleHaser, bool? partOfWord,
             bool? advancedPrefixes, bool? advancedSuffixes, bool? ignoreQuotes, bool? exactQuotes,
-            bool? spellingErrors, bool? ignoreNikud, bool? ignoreTeamim, TypoMode? typoMode,
+            bool? spellingErrors, bool? matchNikud, bool? matchTeamim, TypoMode? typoMode,
             int? prefixMaxLetters, int? suffixMaxLetters, int? partOfWordMaxLetters, int? grammarPrefixMaxLetters)
         {
             var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -723,8 +728,8 @@ namespace SeforimSearch.Engine
             Flag("ignore_quotes", ignoreQuotes);
             Flag("exact_quotes", exactQuotes);
             Flag("spelling_errors", spellingErrors);
-            Flag("ignore_nikud", ignoreNikud);
-            Flag("ignore_teamim", ignoreTeamim);
+            Flag("match_nikud", matchNikud);
+            Flag("match_teamim", matchTeamim);
             if (typoMode.HasValue)
                 sb.Append(",\"typo_mode\":").Append(typoMode.Value == TypoMode.FullEdit1 ? "\"full_edit1\"" : "\"otzaria\"");
             Limit("prefix_max_letters", prefixMaxLetters);
@@ -749,8 +754,8 @@ namespace SeforimSearch.Engine
         public bool? IgnoreQuotes { get; set; }
         public bool? ExactQuotes { get; set; }
         public bool? SpellingErrors { get; set; }
-        public bool? IgnoreNikud { get; set; }
-        public bool? IgnoreTeamim { get; set; }
+        public bool? MatchNikud { get; set; }
+        public bool? MatchTeamim { get; set; }
         public TypoMode? TypoMode { get; set; }
         public int? PrefixMaxLetters { get; set; }
         public int? SuffixMaxLetters { get; set; }
@@ -771,7 +776,7 @@ namespace SeforimSearch.Engine
             sb.Append(']');
             SearchOptions.WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes,
                 KtivMaleHaser, PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes,
-                SpellingErrors, IgnoreNikud, IgnoreTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters,
+                SpellingErrors, MatchNikud, MatchTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters,
                 PartOfWordMaxLetters, GrammarPrefixMaxLetters);
             sb.Append('}');
         }

@@ -73,6 +73,22 @@ pub unsafe extern "C" fn se_reduce_paired_readings(query: *const u8, len: usize)
     })
 }
 
+/// Otzaria's `parse_user_regex` kind for `query`, as a JSON string:
+/// `"none"` (not `/.../`), `"invalid"` (searched as plain text),
+/// `"word"`, `"sequence"`, `"line"` (not supported yet). A host sets
+/// `"user_regex": true` in the search to search `/.../` as a regex. Free
+/// with `se_string_free`.
+///
+/// # Safety
+/// `query` must be valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn se_user_regex_kind(query: *const u8, len: usize) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let q = str_arg(query, len)?;
+        Ok(out_string(serde_json::to_string(seforim_engine::user_regex_kind(q)).map_err(err)?))
+    })
+}
+
 unsafe fn str_arg<'a>(ptr: *const u8, len: usize) -> Result<&'a str, String> {
     if ptr.is_null() {
         return if len == 0 { Ok("") } else { Err("null string".into()) };

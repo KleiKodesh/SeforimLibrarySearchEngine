@@ -93,6 +93,10 @@ pub struct SearchOptions {
     pub books: Option<Vec<u64>>,
     /// Whole phrases ORed with the query (Otzaria's acronym expansion).
     pub phrase_alternatives: Vec<PhraseOptions>,
+    /// Otzaria's user regex: a query wrapped in `/.../` is a regex (see
+    /// `hebrew_fts::user_regex`). Off (the default, FtsLib's behaviour): the
+    /// query is plain text whatever its slashes.
+    pub user_regex: bool,
 }
 
 impl Default for SearchOptions {
@@ -127,6 +131,7 @@ impl Default for SearchOptions {
             exclude: None,
             books: None,
             phrase_alternatives: Vec::new(),
+            user_regex: false,
         }
     }
 }
@@ -211,6 +216,26 @@ impl SearchOptions {
     /// proximity's `gaps` does not have one entry per consecutive pair of
     /// typed words.
     pub fn to_request(&self, keep_marks: bool) -> Result<SearchRequest> {
+        // A user regex `/.../` (Otzaria): the whole query is the regex, on
+        // its own: no word options, negative query, distance or grouping.
+        // One word = a term set; several = an adjacent ordered phrase. An
+        // invalid pattern is searched as plain text, as Otzaria's app does.
+        if self.user_regex && hebrew_fts::user_regex::is_wrapped(&self.query) {
+            match hebrew_fts::user_regex::parse(&self.query) {
+                Ok(re) => {
+                    let n = re.words.len();
+                    return Ok(SearchRequest {
+                        groups: re.words.into_iter().map(|pattern| GroupSpec::Regex { pattern }).collect(),
+                        context_words: self.context_words,
+                        proximity: (n > 1).then(|| ProximitySpec::Ordered { gaps: vec![0; n - 1] }),
+                        books: self.books.clone(),
+                        ..Default::default()
+                    });
+                }
+                Err(e @ hebrew_fts::UserRegexError::LineKind) => return Err(Error::Unsupported(e.to_string())),
+                Err(hebrew_fts::UserRegexError::Invalid(_)) => {}
+            }
+        }
         let global = self.global();
         let main = slots(&self.query, keep_marks, |i| match self.words.get(&i) {
             Some(w) => (w.apply(global), w.alternatives.as_slice()),

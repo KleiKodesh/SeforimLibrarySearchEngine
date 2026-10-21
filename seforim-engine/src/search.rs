@@ -4,7 +4,7 @@
 //! the texts the host fetches.
 
 use hebrew_fts::{
-    ExactTermsQuery, HebrewFuzzyQuery, HebrewWalkQuery, HebrewWildcardQuery, PreparedQueryGroups,
+    ExactTermsQuery, HebrewFuzzyQuery, HebrewRegexQuery, HebrewWalkQuery, HebrewWildcardQuery, PreparedQueryGroups,
     Proximity, SnippetWindowLocator, WalkOptions, DEFAULT_CONTEXT_WORDS,
 };
 use serde::{Deserialize, Serialize};
@@ -101,6 +101,10 @@ pub enum GroupSpec {
     /// (as a rejected wildcard); a proximity rule counts it as one word
     /// between its neighbours (`SearchOptions` lowers it).
     Unindexed { word: String },
+    /// One word of a user regex `/.../` (Otzaria's term kinds): a whole-term
+    /// regex walked over the dictionary, quote transparent, capped shortest
+    /// first. `pattern` is a word of [`hebrew_fts::UserRegex`].
+    Regex { pattern: String },
     /// One slot satisfied by any of its alternatives (FtsLib `a | b`).
     /// Alternatives that cannot search (empty word, rejected wildcard) are
     /// dropped; if none remain, the slot is skipped.
@@ -952,6 +956,12 @@ impl LineIndex {
                 Some(q.span_slot(searcher)?)
             }
             GroupSpec::Unindexed { .. } => None,
+            GroupSpec::Regex { pattern } => {
+                self.regex_index_check()?;
+                let mut q = HebrewRegexQuery::new(field, pattern).map_err(|e| Error::Unsupported(e.to_string()))?;
+                q.set_matched_terms_sink(sink.clone());
+                Some(q.span_slot(searcher)?)
+            }
             GroupSpec::Any { alternatives } => {
                 let mut sources = Vec::new();
                 for a in alternatives {
@@ -1076,6 +1086,13 @@ impl LineIndex {
                 Some(Box::new(q))
             }
             GroupSpec::Unindexed { .. } => None,
+            GroupSpec::Regex { pattern } => {
+                self.regex_index_check()?;
+                let mut q =
+                    HebrewRegexQuery::new(self.fields.text, pattern).map_err(|e| Error::Unsupported(e.to_string()))?;
+                q.set_matched_terms_sink(sink.clone());
+                Some(Box::new(q))
+            }
             GroupSpec::Any { alternatives } => {
                 let mut parts: Vec<(Occur, Box<dyn Query>)> = Vec::new();
                 for a in alternatives {
@@ -1090,6 +1107,17 @@ impl LineIndex {
                 }
             }
         })
+    }
+
+    /// A user regex walks plain terms: an index that keeps marks stores
+    /// vocalized terms the folded pattern cannot match.
+    fn regex_index_check(&self) -> Result<()> {
+        if self.options.keep_marks {
+            return Err(Error::Unsupported(
+                "user regex queries need an index without marks (keep_marks off)".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// The FM-index sidecar to expand with, if the index has one for its

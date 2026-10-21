@@ -12,7 +12,7 @@ namespace SeforimSearch.Demo
     /// Demo console:
     ///   build  [--db path] [--index dir] [--max-lines N] [--no-positions]
     ///   search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] query...
-    ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] [--cancel-after MS] query...
+    ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] [--regex] [--cancel-after MS] query...
     /// The seforim.db path defaults to KitveiHakodesh's resolution order
     /// (registry choice, then Otzaria, then Zayit).
     /// </summary>
@@ -135,6 +135,7 @@ namespace SeforimSearch.Demo
                 },
                 MaxWordDistance = distance >= int.MaxValue ? (int?)null : distance,
                 RequireOrdered = args.Contains("--ordered"),
+                UserRegex = args.Contains("--regex"),
             };
             // --cancel-after N: cancel the count after N ms (cancellation smoke test)
             using var cts = int.TryParse(Option(args, "--cancel-after"), out var ca)

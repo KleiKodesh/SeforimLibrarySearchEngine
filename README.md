@@ -295,6 +295,58 @@ are not printed), so upstream's query-parser tests stay as they are.
   keeps marks, a plain word keeps its typed nikud / te'amim (vocalized
   search). It only tokenizes and numbers the words; the engine groups them
   and applies the options.
+- **User regex queries `/.../`** (`user_regex.rs`, Otzaria's
+  `user_regex.rs` `parse` / `fold_pattern` / `prepare_term_part` and its
+  `term_automaton`; opt-in: `user_regex` in `SearchOptions`, C#
+  `UserRegex`, Dart `userRegex`, off by default so FtsLib mode is
+  unchanged; `user_regex_kind` / C ABI `se_user_regex_kind` / C#
+  `SeforimIndex.UserRegexKind` / Dart `SeforimIndex.userRegexKind` tell a
+  host what a query is, as Otzaria's `parse_user_regex`):
+  - Detected when the trimmed query is longer than 2 chars, starts and ends
+    with `/` and has no slash next to a space between the outer slashes
+    (`/a/ /b/` is two words). The whole query is the regex, on its own:
+    word options, distance, negative query and phrase alternatives do not
+    apply (as Otzaria). An invalid pattern (syntax, over 300 chars, only
+    anchors/spaces, too complex) is searched as plain text with every
+    option, as Otzaria's app does (the Dart demo asks the kind first).
+  - Folded like the index text (marks dropped, maqaf/paseq a space, quotes
+    ASCII, presentation forms decomposed), parsed case-insensitively in the
+    Rust `regex` dialect, edge anchors and spaces dropped, split on
+    whitespace separators (a space run, `\s`, `\s+`).
+  - Each word compiles like Otzaria's: classes narrowed to its term
+    alphabet (quotes, digits, a-z, Hebrew letters), lazy made greedy,
+    bounded repeats above 7 unbounded (a second, aggressive pass when the
+    cost is too high), an anchored dense DFA (`regex-automata`), and a
+    verifier (`\A(?:narrowed)\z`) when relaxing let in more terms.
+    The DFA is walked over the term dictionary (`GroupSpec::Regex`,
+    `HebrewRegexQuery`), whole-term, quote transparent, verified at each
+    match, with the matched-terms sink. One word (Otzaria's `Word`): that
+    term set. Several words (`Sequence`): each a walk, adjacent and in
+    order (a span query with positions; the locator checks it on the text
+    without them; both give the same lines and counts).
+  - Deviations, named: the cap is ours (2000 per segment, shortest first,
+    like every walk) where Otzaria takes up to 10000 terms (a sequence
+    8192 per word) in dictionary order under postings budgets, and reports
+    `truncated`; we report no truncation flag. Narrowing to Otzaria's term
+    alphabet means a letter outside it, literal or class (an accented
+    Latin letter, Cyrillic, Greek), never matches (as Otzaria). A byte
+    class (`(?-u:...)`) is invalid, as Otzaria. The low-level request's
+    `{"kind":"regex","pattern":...}` takes a pattern as is (no folding, no
+    case folding, no 300-char limit; still whole-term and size-bounded). Otzaria's sequence may also continue onto the next line: that
+    part is deferred with cross-line matching. An index that keeps marks
+    is refused (its terms are vocalized; the folded pattern cannot match
+    them): an error.
+  - Not yet: Otzaria's `Line` kind (`CrossSpace`: an explicit space class
+    such as `[ ,]`, inner anchors or `\b`, a wildcard-only word in a
+    sequence), which Otzaria matches on each line's text. Such a query
+    returns an error for now.
+  - Measured (full index, C# demo `count --regex`, positions / no
+    positions): a one-word pattern with `?` 102,774 lines in 209 / 284 ms;
+    a broad `.*` word (capped) 707,649 lines in 285 / 216 ms; a two-word
+    sequence 15,228 lines in 122 ms / 0.05-0.12 min (20k texts fetched from SQLite and validated; run to run); a leading
+    class `[...]+` suffix 44,780 lines in 0.04 min; `\w{2,5}` (capped)
+    6,265,804 lines in 0.07 / 0.05 min; a verified `\w{1,30}` + suffix
+    44,780 lines in 0.08 / 0.04 min.
 - **Snippet locator.** A step-for-step port of FtsLib's
   `PreparedQueryGroups`, `SnippetWindowLocator` and `SnippetDescriptor`.
   Offsets are UTF-16 (.NET/JS string indices).
@@ -654,6 +706,11 @@ what a page needs.
   distance is checked from the line text, so an index without positions works.
 
 ## Open
+- Otzaria's user-regex `Line` kind (a pattern matched on each line's text:
+  an explicit space class, inner anchors or `\b`, a wildcard-only word in
+  a sequence) returns an error: its single-line part needs an engine
+  design (candidate lines from the pattern's required literals, the host's
+  texts validated on Otzaria's line view).
 - Otzaria gaps found by the Dart demo (see `dart/README.md`):
   - ראשי תיבות and תרגום ארמי are done host-side in the Dart demo
     (Otzaria's dictionary assets → phrase / word alternatives).

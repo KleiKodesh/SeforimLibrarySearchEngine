@@ -523,10 +523,15 @@ class SearchOptions {
     this.exclude,
     this.books,
     List<PhraseOptions>? phraseAlternatives,
+    this.userRegex = false,
   })  : words = words ?? {},
         phraseAlternatives = phraseAlternatives ?? [];
 
   String query;
+
+  /// Otzaria's user regex: a query wrapped in `/.../` is a regex. Off (the
+  /// default, FtsLib's behaviour): the query is plain text.
+  bool userRegex;
 
   // Word options: every word, unless [words] overrides (see [WalkOptions]
   // for each one's meaning).
@@ -579,6 +584,7 @@ class SearchOptions {
 
   Map<String, Object?> toJson() => {
         'query': query,
+        if (userRegex) 'user_regex': true,
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
             ignoreNikud, ignoreTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,

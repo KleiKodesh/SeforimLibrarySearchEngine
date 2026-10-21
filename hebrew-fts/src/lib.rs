@@ -26,6 +26,7 @@ pub mod scanner;
 pub mod set_automaton;
 pub mod snippet;
 pub mod tokenizer;
+pub mod user_regex;
 pub mod variants;
 pub mod walk;
 pub mod wildcard;
@@ -41,5 +42,6 @@ pub use query_parser::{tokenize_query, QueryTerm, QueryToken, MAX_FUZZY_DISTANCE
 pub use scanner::{scan, scan_with, TextToken, TextTokens, WordSpan};
 pub use snippet::{Proximity, SnippetDescriptor, SnippetWindowLocator, DEFAULT_CONTEXT_WORDS, MARK_STRIDE};
 pub use set_automaton::SetAutomaton;
+pub use user_regex::{HebrewRegexQuery, UserRegex, UserRegexError};
 pub use tokenizer::{register_hebrew_tokenizer, HebrewTokenizer, HEBREW_TOKENIZER_NAME};
 pub use walk::{HebrewWalkAutomaton, HebrewWalkQuery, TypoMode, WalkOptions};

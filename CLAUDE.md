@@ -233,6 +233,9 @@ seforim.db knowledge).
   exclusion in the engine, was a mistake the user corrected: the index keeps only
   line_id, position, book_id; sections/line index come from SQLite on the host.
 - PowerShell 5.1 strips quotes from JSON arguments to native exes: pass via a file.
+- Git Bash rewrites an argument that starts with `/` into a Windows path (MSYS path
+  conversion): a regex query `/.../` silently became a path. Set `MSYS_NO_PATHCONV=1`
+  (and then pass `C:/...` paths, not `/c/...`).
 - Git Bash heredocs turn `\\u` into `\u`: Python with `\u` escapes must be written to a
   .py file (Write tool), never a heredoc. `python -I` ignores PYTHONIOENCODING: use
   `python -I -X utf8` for scripts that print Hebrew (compare.py).
@@ -250,8 +253,7 @@ seforim.db knowledge).
 ## Open decisions / next
 
 - **User's goal: every search feature Otzaria's current engine has that we lack gets
-  added** (from the feature matrix of otzaria_search_engine v5.0.0): regex `/…/`
-  queries, relevance (and generation) ordering, positive sameSection scope and
+  added** (from the feature matrix of otzaria_search_engine v5.0.0): relevance (and generation) ordering, positive sameSection scope and
   cross-line phrases (both ON HOLD: anything matching across lines is designed with
   the user first), separate
   negative options, vocalized matching without a keep-marks index. Semantic search:
@@ -275,7 +277,8 @@ seforim.db knowledge).
   `github.com/Otzaria/otzaria_search_engine` v5.0.0 (Rust `hebrew_query.rs`,
   `api/search_engine.rs`, `lexicons.rs`); clone them into the scratchpad to port.
 - Done: exact totals + per-book counts (`SearchResult::counts` / `count_batch`);
-  cancellation (`CancelToken`, pull-based streaming); Dart binding; full-DB side-by-side parity (16/17); FM sidecar; wordMatchMode;
+  cancellation (`CancelToken`, pull-based streaming); user regex `/.../` term kinds
+  (Word, Sequence; Otzaria's Line kind still open); Dart binding; full-DB side-by-side parity (16/17); FM sidecar; wordMatchMode;
   negative query (`ExcludeSpec`); תרגום ארמי as a HOST lexicon (Dart demo
   `translation_lexicon.dart`) and ראשי תיבות (host `acronym_lexicon.dart` + engine
   `phrase_alternatives`): app assets/dictionaries stay out of the engine.

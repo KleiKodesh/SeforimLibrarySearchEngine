@@ -9,6 +9,11 @@ license = "MIT"
 [dependencies]
 tantivy = { path = "../tantivy" }
 tantivy-fst = "0.5"
+# User regex queries (/.../): parse and fold like Otzaria (already in the lockfile).
+regex-syntax = "0.8"
+# Term regex DFA + verifier, as Otzaria's term_automaton (both in the lockfile through tantivy).
+regex = { version = "1", default-features = false, features = ["std", "unicode"] }
+regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "unicode", "dfa-build", "dfa-search"] }
 levenshtein_automata = "0.2.1"
 unicode-general-category = "1.0"
 # Fast non-cryptographic hasher for the per-token term lookup (already in the

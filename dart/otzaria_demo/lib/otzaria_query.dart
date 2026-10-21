@@ -9,6 +9,16 @@ enum SearchMode { exact, advanced, fuzzy }
 /// Otzaria's `WordMatchMode`: how many of the query words a result needs.
 enum WordMatchMode { all, anyWord, mostWords, atLeast }
 
+/// Otzaria's `UserRegexQuery._isWrapped`: longer than 2 chars, starts and
+/// ends with `/`, and no slash next to a space inside (`/a/ /b/` is words).
+bool isUserRegex(String query) {
+  final q = query.trim();
+  return q.length > 2 &&
+      q.startsWith('/') &&
+      q.endsWith('/') &&
+      !RegExp(r'\s/|/\s').hasMatch(q.substring(1, q.length - 1));
+}
+
 /// Otzaria's `SearchScope` for the negative query: within the distance, the
 /// whole line (paragraph), or the whole section.
 enum NegativeScope { wordDistance, sameParagraph, sameSection }
@@ -288,6 +298,13 @@ class OtzariaSearch {
   /// The engine search: the query string with the global options, and per
   /// word only what differs (Otzaria's wordOptions) plus its alternatives.
   SearchOptions toOptions({int contextWords = 8}) {
+    // A user regex `/.../` (Otzaria's UserRegexQuery): a valid pattern goes
+    // to the engine whole, on its own (no word options, distance, negative
+    // query or grouping); an invalid one is searched as words with every
+    // option, as Otzaria's app does.
+    if (isUserRegex(query) && SeforimIndex.userRegexKind(query) != 'invalid') {
+      return SearchOptions(query.trim(), contextWords: contextWords, userRegex: true);
+    }
     // `|` and `%` are FtsLib syntax in the engine's query string: an Otzaria
     // word is literal, so they are dropped from it.
     final words = [

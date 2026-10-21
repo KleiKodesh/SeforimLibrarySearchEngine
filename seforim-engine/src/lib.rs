@@ -23,6 +23,8 @@ pub use fm_index::FmIndex;
 /// paired reading `(X) [Y]` becomes ` Y `. The query parser runs it; hosts
 /// that number the query's words themselves run it first.
 pub use hebrew_fts::word_rule::keep_second_of_paired_readings as reduce_paired_readings;
+/// Otzaria's user-regex kind of a query (see `hebrew_fts::user_regex::classify`).
+pub use hebrew_fts::user_regex::classify as user_regex_kind;
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
 pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, WordOptions};
 pub use search::{
@@ -960,5 +962,73 @@ mod tests {
         assert!(matches!(r.session.try_locate_many(&refs), Err(Error::Cancelled)));
         assert!(matches!(r.count_batch(&refs[..1]), Err(Error::Cancelled)));
         assert!(matches!(index.search_cancellable(&plain, Some(token)), Err(Error::Cancelled)));
+    }
+
+    #[test]
+    fn user_regex_refused_on_a_marks_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = build(dir.path(), IndexOptions { positions: true, keep_marks: true }, &[line(1, 0, 1, "abc")]);
+        let o = SearchOptions { query: "/ab./".into(), user_regex: true, ..Default::default() };
+        assert!(matches!(index.search_options(&o), Err(Error::Unsupported(_))));
+    }
+
+    #[test]
+    fn user_regex_queries_walk_the_dictionary() {
+        // shalom, shalem, sh-l-m with quote, olam, and filler
+        const SHALOM: &str = "\u{05e9}\u{05dc}\u{05d5}\u{05dd}";
+        const SHALEM: &str = "\u{05e9}\u{05dc}\u{05dd}";
+        const QUOTED: &str = "\u{05e9}\u{05dc}\"\u{05dd}";
+        const OLAM: &str = "\u{05e2}\u{05d5}\u{05dc}\u{05dd}";
+        let texts = [
+            format!("{SHALOM} {OLAM}"),
+            format!("{SHALEM} x {OLAM}"),
+            format!("{QUOTED}"),
+            format!("{OLAM} {SHALOM}"),
+            "Abc abd".to_string(),
+        ];
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let lines: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| line(i as u64, i as u64, 1, t)).collect();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &lines);
+            let found = |q: &str| -> Vec<u64> {
+                let mut r = index
+                    .search_options(&SearchOptions { query: q.into(), user_regex: true, ..Default::default() })
+                    .unwrap();
+                let hits = r.hits.clone();
+                hits.iter()
+                    .filter(|h| r.session.locate(&texts[h.line_id as usize]).is_some())
+                    .map(|h| h.line_id)
+                    .collect()
+            };
+            // one word: whole-term, quote transparent
+            assert_eq!(found("/\u{05e9}\u{05dc}\u{05d5}?\u{05dd}/"), vec![0, 1, 2, 3], "positions={positions}");
+            assert_eq!(found("/\u{05e9}\u{05dc}/"), Vec::<u64>::new());
+            // case-insensitive, classes
+            assert_eq!(found("/AB[CD]/"), vec![4]);
+            // a sequence: adjacent, in order
+            assert_eq!(found("/\u{05e9}\u{05dc}\u{05d5}?\u{05dd} \u{05e2}\u{05d5}\u{05dc}\u{05dd}/"), vec![0], "positions={positions}");
+            // an invalid pattern is plain text (no hit here), the line kind an error
+            assert_eq!(found("/a(b/"), Vec::<u64>::new());
+            assert!(index
+                .search_options(&SearchOptions { query: "/a[ ,]b/".into(), user_regex: true, ..Default::default() })
+                .is_err());
+            // off (FtsLib's default): the slashes are plain text, no regex
+            let plain = SearchOptions { query: "/AB[CD]/".into(), ..Default::default() };
+            assert!(index.search_options(&plain).unwrap().hits.is_empty());
+            // a bounded Unicode-class repeat walks narrowed, the verifier keeps the bound
+            assert_eq!(found("/\\w{3}/"), vec![1, 2, 4]);
+            // the regex sequence is exact on both flavours, counts included
+            let mut r = index
+                .search_options(&SearchOptions {
+                    query: "/\u{05e9}\u{05dc}\u{05d5}?\u{05dd} \u{05e2}\u{05d5}\u{05dc}\u{05dd}/".into(),
+                    user_regex: true,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(r.count_needs_text(), !positions);
+            let hit_texts: Vec<&str> = r.hits.iter().map(|h| texts[h.line_id as usize].as_str()).collect();
+            r.count_batch(&hit_texts).unwrap();
+            assert_eq!(r.counts().total, 1);
+        }
     }
 }

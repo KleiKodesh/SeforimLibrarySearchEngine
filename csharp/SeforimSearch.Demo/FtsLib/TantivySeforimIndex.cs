@@ -79,6 +79,9 @@ namespace FtsLib.Fts5
 
         public bool RequireOrdered { get; set; }
 
+        /// <summary>Otzaria's user regex (/.../). Off in FtsLib mode: FtsLib had none.</summary>
+        public bool UserRegex { get; set; }
+
         public int ContextWords { get; set; } = TantivySeforimIndex.DefaultContextWords;
     }
 
@@ -200,6 +203,7 @@ namespace FtsLib.Fts5
                 MaxWordDistance = options.MaxWordDistance,
                 RequireOrdered = options.RequireOrdered,
                 ContextWords = options.ContextWords,
+                UserRegex = options.UserRegex,
             };
         }
 

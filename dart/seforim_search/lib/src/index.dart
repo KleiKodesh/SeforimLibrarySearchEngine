@@ -52,6 +52,16 @@ final class SeforimIndex implements Finalizable {
   /// The native library's version.
   static String get nativeVersion => _n.nativeVersion;
 
+  /// Otzaria's user-regex kind of [query]: `none` (not `/.../`), `invalid`
+  /// (searched as plain text), `word`, `sequence`, `line` (not supported
+  /// yet). Set [SearchOptions.userRegex] to search `/.../` as a regex.
+  static String userRegexKind(String query) {
+    return using((a) {
+      final (q, ql) = utf8Native(query, a);
+      return jsonDecode(_n.takeString(_n.userRegexKind(q, ql))) as String;
+    });
+  }
+
   /// Otzaria's query sanitizer step: every paired reading `(X) [Y]` becomes
   /// ` Y `, as the engine's query parser does. A host that numbers the
   /// query's words itself (per-word options, per-pair spacing) runs it first.

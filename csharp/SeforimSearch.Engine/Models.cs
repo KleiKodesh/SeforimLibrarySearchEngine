@@ -587,12 +587,16 @@ namespace SeforimSearch.Engine
         public List<long>? Books { get; set; }
         /// <summary>Whole phrases ORed with the query (Otzaria's acronym expansion).</summary>
         public List<PhraseOptions> PhraseAlternatives { get; } = new List<PhraseOptions>();
+        /// <summary>Otzaria's user regex: a query wrapped in /.../ is a regex. Off (the
+        /// default, FtsLib's behaviour): the query is plain text.</summary>
+        public bool UserRegex { get; set; }
 
         internal string ToJson()
         {
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             var sb = new StringBuilder("{\"query\":");
             Json.WriteString(sb, Query ?? "");
+            if (UserRegex) sb.Append(",\"user_regex\":true");
             WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes, KtivMaleHaser,
                 PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes, SpellingErrors,
                 IgnoreNikud, IgnoreTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters, PartOfWordMaxLetters,

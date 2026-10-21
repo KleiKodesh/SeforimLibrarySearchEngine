@@ -417,22 +417,7 @@ namespace SeforimSearch.Engine
                 sb.Append(",\"proximity\":");
                 Proximity.WriteJson(sb);
             }
-            if (PhraseAlternatives.Count > 0)
-            {
-                sb.Append(",\"phrase_alternatives\":[");
-                for (int p = 0; p < PhraseAlternatives.Count; p++)
-                {
-                    if (p > 0) sb.Append(',');
-                    sb.Append('[');
-                    for (int i = 0; i < PhraseAlternatives[p].Count; i++)
-                    {
-                        if (i > 0) sb.Append(',');
-                        PhraseAlternatives[p][i].WriteJson(sb);
-                    }
-                    sb.Append(']');
-                }
-                sb.Append(']');
-            }
+            WritePhrases(sb, PhraseAlternatives);
             if (Books != null)
             {
                 sb.Append(",\"books\":[");
@@ -450,6 +435,25 @@ namespace SeforimSearch.Engine
             }
             sb.Append('}');
             return sb.ToString();
+        }
+
+        /// <summary>Writes ",\"phrase_alternatives\":[[group, ...], ...]" when there are any.</summary>
+        internal static void WritePhrases(StringBuilder sb, List<List<QueryGroup>> phrases)
+        {
+            if (phrases.Count == 0) return;
+            sb.Append(",\"phrase_alternatives\":[");
+            for (int p = 0; p < phrases.Count; p++)
+            {
+                if (p > 0) sb.Append(',');
+                sb.Append('[');
+                for (int i = 0; i < phrases[p].Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    phrases[p][i].WriteJson(sb);
+                }
+                sb.Append(']');
+            }
+            sb.Append(']');
         }
     }
 
@@ -479,6 +483,11 @@ namespace SeforimSearch.Engine
         /// RequireOrdered and Gaps are ignored. Null = not used.</summary>
         public Proximity? Proximity { get; set; }
 
+        /// <summary>Whole phrases ORed with the negative query (Otzaria's acronym expansion),
+        /// each as <see cref="SearchRequest.PhraseAlternatives"/>: adjacent, in order, all
+        /// words. A line carrying one is dropped.</summary>
+        public List<List<QueryGroup>> PhraseAlternatives { get; } = new List<List<QueryGroup>>();
+
         internal void WriteJson(StringBuilder sb)
         {
             sb.Append("{\"groups\":[");
@@ -505,6 +514,7 @@ namespace SeforimSearch.Engine
                 sb.Append(",\"proximity\":");
                 Proximity.WriteJson(sb);
             }
+            SearchRequest.WritePhrases(sb, PhraseAlternatives);
             sb.Append('}');
         }
     }
@@ -594,7 +604,8 @@ namespace SeforimSearch.Engine
         /// words the engine drops included: it cuts them out and merges the gaps around them).
         /// When set, MaxWordDistance / RequireOrdered are not used.</summary>
         public Proximity? Proximity { get; set; }
-        /// <summary>Otzaria's negative query (its words use the global word options).</summary>
+        /// <summary>Otzaria's negative query: its words take the word options above as their
+        /// default and have their own per-word overrides (<see cref="ExcludeOptions.Words"/>).</summary>
         public ExcludeOptions? Exclude { get; set; }
         /// <summary>Filtered search: only these book ids. Null = every book.</summary>
         public List<long>? Books { get; set; }
@@ -620,19 +631,7 @@ namespace SeforimSearch.Engine
                 PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes, SpellingErrors,
                 IgnoreNikud, IgnoreTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters, PartOfWordMaxLetters,
                 GrammarPrefixMaxLetters);
-            if (Words.Count > 0)
-            {
-                sb.Append(",\"words\":{");
-                bool first = true;
-                foreach (var kv in Words)
-                {
-                    if (!first) sb.Append(',');
-                    first = false;
-                    sb.Append('"').Append(kv.Key.ToString(inv)).Append("\":");
-                    kv.Value.WriteJson(sb);
-                }
-                sb.Append('}');
-            }
+            WriteWords(sb, Words);
             if (MaxWordDistance.HasValue) sb.Append(",\"max_word_distance\":").Append(MaxWordDistance.Value.ToString(inv));
             if (RequireOrdered) sb.Append(",\"require_ordered\":true");
             if (MinGroups.HasValue) sb.Append(",\"min_groups\":").Append(MinGroups.Value.ToString(inv));
@@ -678,6 +677,23 @@ namespace SeforimSearch.Engine
             }
             sb.Append('}');
             return sb.ToString();
+        }
+
+        /// <summary>Writes ",\"words\":{\"i\":{...}, ...}" when there are any.</summary>
+        internal static void WriteWords(StringBuilder sb, Dictionary<int, WordOptions> words)
+        {
+            if (words.Count == 0) return;
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            sb.Append(",\"words\":{");
+            bool first = true;
+            foreach (var kv in words)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append('"').Append(kv.Key.ToString(inv)).Append("\":");
+                kv.Value.WriteJson(sb);
+            }
+            sb.Append('}');
         }
 
         /// <summary>Writes the word-option fields (",name":value), skipping nulls.</summary>
@@ -761,11 +777,24 @@ namespace SeforimSearch.Engine
         }
     }
 
-    /// <summary>The negative query of <see cref="SearchOptions"/>: its words (all
-    /// required, together) use the global word options.</summary>
+    /// <summary>The negative query of <see cref="SearchOptions"/> (Otzaria's negativeQuery):
+    /// its words, all required, together. Options are per word: a negative word takes the
+    /// global word options of <see cref="SearchOptions"/> as its default and has its own
+    /// overrides and alternatives in <see cref="Words"/> (Otzaria's negativeSearchOptions /
+    /// negativeAlternativeWords). There is no separate global set for the negative query: a
+    /// host with one writes it onto every negative word.</summary>
     public sealed class ExcludeOptions
     {
+        public ExcludeOptions() { }
+        public ExcludeOptions(string query) { Query = query; }
+
         public string Query { get; set; } = "";
+        /// <summary>Per-word overrides of <see cref="Query"/>'s words, by typed-word index,
+        /// with the same rule and fields as <see cref="SearchOptions.Words"/>.</summary>
+        public Dictionary<int, WordOptions> Words { get; } = new Dictionary<int, WordOptions>();
+        /// <summary>Whole phrases ORed with the negative query (Otzaria's acronym expansion
+        /// of the negative words): a line carrying one, as a phrase, is dropped too.</summary>
+        public List<PhraseOptions> PhraseAlternatives { get; } = new List<PhraseOptions>();
         public int? MaxWordDistance { get; set; }
         public bool RequireOrdered { get; set; }
         public Proximity? Proximity { get; set; }
@@ -774,6 +803,17 @@ namespace SeforimSearch.Engine
         {
             sb.Append("{\"query\":");
             Json.WriteString(sb, Query ?? "");
+            SearchOptions.WriteWords(sb, Words);
+            if (PhraseAlternatives.Count > 0)
+            {
+                sb.Append(",\"phrase_alternatives\":[");
+                for (int i = 0; i < PhraseAlternatives.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    PhraseAlternatives[i].WriteJson(sb);
+                }
+                sb.Append(']');
+            }
             if (MaxWordDistance.HasValue)
                 sb.Append(",\"max_word_distance\":").Append(MaxWordDistance.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (RequireOrdered) sb.Append(",\"require_ordered\":true");

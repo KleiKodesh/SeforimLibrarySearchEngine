@@ -84,11 +84,14 @@ class OtzariaSearch {
     this.customSpacing,
     this.negativeQuery = '',
     this.negativeScope = NegativeScope.wordDistance,
+    this.negativeWordOptions,
+    Map<int, List<String>>? negativeAlternativeWords,
     this.translations,
     this.acronymLexicon,
   })  :globalOptions = globalOptions ?? {},
         wordOptions = wordOptions ?? {},
-        alternativeWords = alternativeWords ?? {};
+        alternativeWords = alternativeWords ?? {},
+        negativeAlternativeWords = negativeAlternativeWords ?? {};
 
   final String query;
   final SearchMode mode;
@@ -133,9 +136,19 @@ class OtzariaSearch {
 
   /// Otzaria's negativeQuery: words that must not appear. It runs with the
   /// same distance / order as the positive query (Otzaria passes
-  /// `negativeDistance: state.distance`, `negativeScope: proximityScope`) and,
-  /// in this demo, the same global options. Empty = none.
+  /// `negativeDistance: state.distance`, `negativeScope: proximityScope`),
+  /// with options per word ([negativeWordOptions]). Empty = none.
   final String negativeQuery;
+
+  /// Otzaria's negativeSearchOptions as the app sends them
+  /// (`effectiveNegativeSearchOptions`: its negative global set expanded onto
+  /// every word, or the per-word map), by negative word index: each word's
+  /// FULL option set; a word absent here has none. Null = every negative
+  /// word takes the positive global options (the engine's default).
+  final Map<int, Set<String>>? negativeWordOptions;
+
+  /// Otzaria's negativeAlternativeWords: extra words per negative word.
+  final Map<int, List<String>> negativeAlternativeWords;
 
   /// Otzaria's Aramaic↔Hebrew dictionary for "תרגום ארמי"; null = not loaded
   /// (the option then warns and does nothing, as Otzaria without the asset).
@@ -146,13 +159,17 @@ class OtzariaSearch {
 
   /// Otzaria acronym_alternatives: when any word has the option, the whole
   /// query's phrase alternatives (advanced mode only).
-  List<PhraseOptions> _phraseAlternatives(List<String> words) {
+  List<PhraseOptions> _phraseAlternatives(List<String> words, Set<String> Function(int) optionsOf) {
     if (mode != SearchMode.advanced) return const [];
     // Otzaria: no acronym alternatives in vocalized (nikud/te'amim) search
     if (globalOptions[OtzariaOption.nikud] == true || globalOptions[OtzariaOption.teamim] == true) return const [];
     var enabled = false;
     for (var i = 0; i < words.length; i++) {
-      if (_optionsFor(i).contains(OtzariaOption.acronyms)) enabled = true;
+      final o = optionsOf(i);
+      // a word's own nikud/te'amim option makes the build vocalized too
+      // (Otzaria: voc.or(options_vocalized_flags(search_options)))
+      if (o.contains(OtzariaOption.nikud) || o.contains(OtzariaOption.teamim)) return const [];
+      if (o.contains(OtzariaOption.acronyms)) enabled = true;
     }
     if (!enabled) return const [];
     final lex = acronymLexicon;
@@ -251,19 +268,54 @@ class OtzariaSearch {
     return w.toJson().isEmpty ? null : w;
   }
 
+  /// Negative word [i]'s options (Otzaria keys): its own set from
+  /// [negativeWordOptions] (none when absent there, as Otzaria), or the
+  /// positive global set when [negativeWordOptions] is null.
+  Set<String> _negativeOptionsFor(int i) {
+    final own = negativeWordOptions;
+    if (own == null) return _globalSet();
+    final s = {...?own[i]};
+    for (final u in s.intersection(OtzariaOption.unsupported)) {
+      warnings.add('option "$u" is not supported by the engine; ignored');
+    }
+    return s;
+  }
+
   /// Otzaria's apply_advanced_negative_query: the negative words as a query
-  /// of their own, always "all words", with the positive distance and order.
-  /// The engine gives them the global word options.
+  /// of their own (built like the positive one), always "all words", with
+  /// the positive distance and order. Options are per word: each negative
+  /// word sends only what differs from the global options, plus its
+  /// alternatives (negativeAlternativeWords, Aramaic translations); the
+  /// acronym option ORs the negative query's acronym phrases into it.
   ExcludeOptions? _exclude() {
     if (negativeScope == NegativeScope.sameSection) return null; // host-side, see sectionNegativeSearches
     final words = _negativeWords();
     if (words.isEmpty) return null;
+    final global = _globalSet();
+    final perWord = <int, WordOptions>{};
+    final options = [for (var i = 0; i < words.length; i++) _negativeOptionsFor(i)];
+    for (var i = 0; i < words.length; i++) {
+      final o = options[i];
+      final translate = o.contains(OtzariaOption.aramaicTranslation);
+      if (translate && translations == null) {
+        warnings.add('option "${OtzariaOption.aramaicTranslation}" needs --dictionary (Otzaria assets/dictionary.json)');
+      }
+      final alts = <String>[
+        ...?negativeAlternativeWords[i],
+        if (translate) ...?translations?.expansions(words[i]),
+      ];
+      final w = _wordOverride(o, global, alts);
+      if (w != null) perWord[i] = w;
+    }
     // proximityScope: wordDistance → distance/order; sameParagraph → the
     // whole line, no limits.
     final limits = negativeScope == NegativeScope.wordDistance && words.length > 1;
     // the demo has no separate negative spacing (Otzaria's
     // negativeCustomSpacing): the positive distance and order
-    return ExcludeOptions(words.join(' '), proximity: limits ? _proximity(words.length, null) : null);
+    return ExcludeOptions(words.join(' '),
+        words: perWord,
+        phraseAlternatives: _phraseAlternatives(words, (i) => options[i]),
+        proximity: limits ? _proximity(words.length, null) : null);
   }
 
   /// Otzaria's `resolve_gaps` + `resolve_proximity` (hebrew_query.rs) for
@@ -281,9 +333,15 @@ class OtzariaSearch {
     return Proximity.ordered([for (var i = 0; i < wordCount - 1; i++) spacing[i] ?? maxCustom]);
   }
 
-  /// The negative words (advanced mode only).
-  List<String> _negativeWords() =>
-      mode == SearchMode.advanced ? [for (final w in splitQueryWords(negativeQuery)) _queryWord(w)] : const [];
+  /// The negative words (advanced mode only). As for the positive words,
+  /// `|` and `%` (FtsLib syntax) are dropped from them, and a word of only
+  /// those is dropped, so the word indexes stay those of the engine.
+  List<String> _negativeWords() => mode == SearchMode.advanced
+      ? [
+          for (final w in splitQueryWords(negativeQuery))
+            if (w.replaceAll(RegExp('[|%]'), '').isNotEmpty) _queryWord(w.replaceAll(RegExp('[|%]'), ''))
+        ]
+      : const [];
 
   /// Negative scope sameSection (Otzaria's scoped_words_query) is the HOST's
   /// job, since the index holds no sections: run each of these searches (one
@@ -333,7 +391,7 @@ class OtzariaSearch {
         words: perWord,
         contextWords: contextWords,
         exclude: _exclude(),
-        phraseAlternatives: _phraseAlternatives(words),
+        phraseAlternatives: _phraseAlternatives(words, _optionsFor),
       ),
       global,
     );

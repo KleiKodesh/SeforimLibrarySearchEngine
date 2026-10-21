@@ -366,6 +366,12 @@ pub struct ExcludeSpec {
     /// `require_ordered` and `gaps` are ignored. With positions it is
     /// excluded in the query (span query); without, on the line text.
     pub proximity: Option<ProximitySpec>,
+    /// Whole phrases ORed with the negative query (Otzaria's acronym
+    /// expansion of the negative words), each as
+    /// [`SearchRequest::phrase_alternatives`]: adjacent, in order, all
+    /// words. A line carrying one is dropped: in the query (one word, or a
+    /// span query with positions) or, without positions, on the text.
+    pub phrase_alternatives: Vec<Vec<GroupSpec>>,
 }
 
 /// One matching line (hits come in the requested order, catalog by default): only the ids the index keeps. The
@@ -445,8 +451,9 @@ pub struct SnippetSession {
     min_groups: usize,
     context_words: usize,
     keep_marks: bool,
-    /// Text-level negative filter (see [`ExcludeSpec`]).
-    negative: Option<NegativeFilter>,
+    /// Text-level negative filters (see [`ExcludeSpec`]): the negative
+    /// query and its phrase alternatives; a line any of them finds is dropped.
+    negative: Vec<NegativeFilter>,
     terms: TermTable,
     locator: SnippetWindowLocator,
     /// One locator per `locate_many` worker, kept across batches.
@@ -488,7 +495,7 @@ impl Matcher {
 /// First matcher that passes, with its index.
 fn locate_with(
     matchers: &[Matcher],
-    negative: Option<&NegativeFilter>,
+    negative: &[NegativeFilter],
     locator: &mut SnippetWindowLocator,
     text: &str,
 ) -> Option<(usize, Snippet)> {
@@ -498,7 +505,7 @@ fn locate_with(
     // Scan the text once; the negative filter and every matcher reuse the
     // tokens (they depend on the text only, not on the query).
     locator.tokenize(text);
-    if negative.is_some_and(|n| n.excludes(locator, 0)) {
+    if negative.iter().any(|n| n.excludes(locator, 0)) {
         return None;
     }
     matchers
@@ -538,7 +545,7 @@ impl SnippetSession {
     /// pass (not all groups present, wrong order, too far apart, or the
     /// excluded words present).
     pub fn locate(&mut self, text: &str) -> Option<Snippet> {
-        let (i, mut s) = locate_with(&self.matchers, self.negative.as_ref(), &mut self.locator, text)?;
+        let (i, mut s) = locate_with(&self.matchers, &self.negative, &mut self.locator, text)?;
         let prepared = &self.matchers[i].prepared;
         for m in s.marks.chunks_exact_mut(3) {
             m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
@@ -602,12 +609,12 @@ impl SnippetSession {
     fn run_many<T: Send>(
         &mut self,
         texts: &[&str],
-        f: impl Fn(&[Matcher], Option<&NegativeFilter>, &mut SnippetWindowLocator, &str) -> T + Sync,
+        f: impl Fn(&[Matcher], &[NegativeFilter], &mut SnippetWindowLocator, &str) -> T + Sync,
     ) -> Result<Vec<T>> {
         let cancel = self.cancel.as_ref();
         CancelToken::check(cancel)?;
         let matchers = &self.matchers;
-        let negative = self.negative.as_ref();
+        let negative = self.negative.as_slice();
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
@@ -1261,10 +1268,18 @@ impl LineIndex {
         CancelToken::check(cancel.as_ref())?;
         // Otzaria's word options know whether the word stands alone (its
         // single-word vs phrase budgets): mark the words of a multi-word query.
+        // The negative query is built the same way (Otzaria builds it with
+        // the positive's builder): its words are phrase words when it has several.
         let phrase;
-        let request = if request.groups.len() > 1 {
+        let negative_phrase = request.exclude.as_ref().is_some_and(|e| e.groups.len() > 1);
+        let request = if request.groups.len() > 1 || negative_phrase {
             let mut r = request.clone();
-            r.groups.iter_mut().for_each(mark_phrase_word);
+            if r.groups.len() > 1 {
+                r.groups.iter_mut().for_each(mark_phrase_word);
+            }
+            if let Some(e) = r.exclude.as_mut().filter(|e| e.groups.len() > 1) {
+                e.groups.iter_mut().for_each(mark_phrase_word);
+            }
             phrase = r;
             &phrase
         } else {
@@ -1298,7 +1313,7 @@ impl LineIndex {
             context_words: request.context_words,
             keep_marks,
             min_groups: 0,
-            negative: None,
+            negative: Vec::new(),
             terms: TermTable::default(),
             locator,
             pool: Vec::new(),
@@ -1450,12 +1465,22 @@ impl LineIndex {
             }
         };
 
-        // The negative query (see ExcludeSpec): excluded in the query itself,
-        // or on the text at locate time.
-        let mut negative_sinks: Vec<MatchedTermsSink> = Vec::new();
-        let mut text_level_negative: Option<(usize, bool, Option<Proximity>)> = None;
-        let mut query = query;
+        // The negative query (see ExcludeSpec) and its phrase alternatives:
+        // each excluded in the query itself, or on the text at locate time.
+        // Text-level parts: their sinks and limits (distance, order, proximity).
+        let mut text_negatives: Vec<(Vec<MatchedTermsSink>, usize, bool, Option<Proximity>)> = Vec::new();
+        let mut query_negatives: Vec<Box<dyn Query>> = Vec::new();
+        // Builds the scorers once so the walks report the excluded forms of
+        // a text-level part; the docs themselves are not needed.
+        let fill_sinks = |q: &dyn Query| -> Result<()> {
+            let w = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
+            for segment in searcher.segment_readers() {
+                let _ = w.scorer(segment, 1.0)?;
+            }
+            Ok(())
+        };
         if let Some(ex) = &request.exclude {
+            let mut negative_sinks: Vec<MatchedTermsSink> = Vec::new();
             let ex_proximity = match &ex.proximity {
                 Some(p) if ex.groups.len() > 1 => Some(p.resolve(ex.groups.len())?),
                 _ => None,
@@ -1492,19 +1517,66 @@ impl LineIndex {
                 };
                 let skip = ex_proximity.is_some() && !self.options.positions && !needs_text;
                 if needs_text {
-                    // Build the scorers once so the walks report the excluded
-                    // forms; the docs themselves are not needed.
-                    let w = negative.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
-                    for segment in searcher.segment_readers() {
-                        let _ = w.scorer(segment, 1.0)?;
-                    }
-                    text_level_negative =
-                        Some((ex.max_word_distance.unwrap_or(usize::MAX), ex.require_ordered, ex_proximity.clone()));
+                    fill_sinks(negative.as_ref())?;
+                    text_negatives.push((
+                        negative_sinks,
+                        ex.max_word_distance.unwrap_or(usize::MAX),
+                        ex.require_ordered,
+                        ex_proximity.clone(),
+                    ));
                 } else if !skip {
-                    query = Box::new(BooleanQuery::new(vec![(Occur::Must, query), (Occur::MustNot, negative)]));
+                    query_negatives.push(negative);
+                }
+            }
+            // Phrase alternatives of the negative query, built as the
+            // positive's: a span query with positions; without, an AND
+            // checked on the text (ordered, distance 0). A phrase with a
+            // word that matches no term can never be present: it excludes
+            // nothing.
+            for phrase in &ex.phrase_alternatives {
+                if phrase.is_empty() {
+                    continue;
+                }
+                let mut sinks = Vec::new();
+                if self.options.positions && phrase.len() > 1 {
+                    if let Some(q) =
+                        self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, fm, &mut sinks)?
+                    {
+                        query_negatives.push(Box::new(q));
+                    }
+                    continue;
+                }
+                let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                let mut complete = true;
+                for group in phrase {
+                    let sink = MatchedTermsSink::new();
+                    match self.group_query(group, &sink, &searcher, fm)? {
+                        Some(q) => {
+                            clauses.push((Occur::Must, q));
+                            sinks.push(sink);
+                        }
+                        None => complete = false,
+                    }
+                }
+                if !complete || clauses.is_empty() {
+                    continue;
+                }
+                let q: Box<dyn Query> = Box::new(BooleanQuery::new(clauses));
+                if phrase.len() > 1 {
+                    fill_sinks(q.as_ref())?;
+                    text_negatives.push((sinks, 0, true, None));
+                } else {
+                    query_negatives.push(q);
                 }
             }
         }
+        let query: Box<dyn Query> = if query_negatives.is_empty() {
+            query
+        } else {
+            let mut clauses = vec![(Occur::Must, query)];
+            clauses.extend(query_negatives.into_iter().map(|q| (Occur::MustNot, q)));
+            Box::new(BooleanQuery::new(clauses))
+        };
 
         let timing = std::env::var_os("SEFORIM_ENGINE_TIMING").is_some();
         let t = std::time::Instant::now();
@@ -1573,11 +1645,11 @@ impl LineIndex {
         if !relevance {
             relevance::sort_hits(&mut hits, request.order, &request.book_generations);
         }
-        if let Some((max_word_distance, require_ordered, proximity)) = text_level_negative {
-            let negative_terms: Vec<Vec<String>> = negative_sinks.iter().map(|s| s.take_strings()).collect();
+        for (sinks, max_word_distance, require_ordered, proximity) in text_negatives {
+            let negative_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
             // a word with no indexed form can never be present: no exclusion
             if negative_terms.iter().all(|g| !g.is_empty()) {
-                session.negative = Some(NegativeFilter {
+                session.negative.push(NegativeFilter {
                     prepared: PreparedQueryGroups::from_groups(&negative_terms),
                     max_word_distance,
                     require_ordered,
@@ -1644,7 +1716,7 @@ impl LineIndex {
                 };
         let phrase_needs_text =
             !self.options.positions && request.phrase_alternatives.iter().any(|p| p.len() > 1);
-        session.count_needs_text = main_needs_text || phrase_needs_text || session.negative.is_some();
+        session.count_needs_text = main_needs_text || phrase_needs_text || !session.negative.is_empty();
         if session.matchers.is_empty() {
             return Ok(SearchResult::new(Vec::new(), session));
         }

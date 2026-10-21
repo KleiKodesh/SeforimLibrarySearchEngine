@@ -175,6 +175,37 @@ void main() {
     s.close();
   });
 
+  test('SearchOptions: a negative word has its own options', () {
+    const nitna = 'ניתנה';
+    const torah = 'תורה';
+    int hits(SearchOptions o) {
+      final s = index.search(o);
+      final n = s.hitCount;
+      s.close();
+      return n;
+    }
+
+    // the global options are the negative word's default...
+    expect(hits(SearchOptions(nitna, exclude: ExcludeOptions(torah))), 1);
+    expect(hits(SearchOptions(nitna, grammarPrefixes: true, exclude: ExcludeOptions(torah))), 0);
+    // ...and its own override wins, either way
+    expect(hits(SearchOptions(nitna, exclude: ExcludeOptions(torah, words: {0: WordOptions(grammarPrefixes: true)}))), 0);
+    expect(
+        hits(SearchOptions(nitna,
+            grammarPrefixes: true, exclude: ExcludeOptions(torah, words: {0: WordOptions(grammarPrefixes: false)}))),
+        1);
+    // its alternatives join its slot
+    expect(
+        hits(SearchOptions(nitna,
+            exclude: ExcludeOptions('ספר', words: {0: WordOptions(alternatives: ['למשה'])}))),
+        0);
+    // a phrase alternative of the negative query (positions: in the query)
+    expect(
+        hits(SearchOptions(nitna,
+            exclude: ExcludeOptions('', phraseAlternatives: [const PhraseOptions('$nitna למשה')]))),
+        0);
+  });
+
   test('paired readings keep their second reading', () {
     expect(SeforimIndex.reducePairedReadings('א (בג) [דה] ו'), 'א  דה  ו');
     expect(SeforimIndex.reducePairedReadings('(א) ב'), '(א) ב');

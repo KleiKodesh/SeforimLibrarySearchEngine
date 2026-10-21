@@ -793,6 +793,13 @@ mod tests {
                 (r#"{"query":"תורה","grammar_prefixes":true}"#, 1),
                 (r#"{"query":"תורה","grammar_prefixes":true,"words":{"0":{"grammar_prefixes":false}}}"#, 0),
                 (r#"{"query":"ספר","words":{"0":{"alternatives":["%תורה"]}}}"#, 1),
+                // a negative word: the global options are its default, its own override wins
+                (r#"{"query":"ניתנה","exclude":{"query":"תורה"}}"#, 1),
+                (r#"{"query":"ניתנה","grammar_prefixes":true,"exclude":{"query":"תורה"}}"#, 0),
+                (r#"{"query":"ניתנה","exclude":{"query":"תורה","words":{"0":{"grammar_prefixes":true}}}}"#, 0),
+                (r#"{"query":"ניתנה","grammar_prefixes":true,"exclude":{"query":"תורה","words":{"0":{"grammar_prefixes":false}}}}"#, 1),
+                (r#"{"query":"ניתנה","exclude":{"query":"ספר","words":{"0":{"alternatives":["למשה"]}}}}"#, 0),
+                (r#"{"query":"ניתנה","exclude":{"query":"","phrase_alternatives":[{"query":"ניתנה למשה"}]}}"#, 0),
             ] {
                 let search = se_search(index, json.as_ptr(), json.len());
                 assert!(!search.is_null(), "{:?}", CStr::from_ptr(se_last_error()));

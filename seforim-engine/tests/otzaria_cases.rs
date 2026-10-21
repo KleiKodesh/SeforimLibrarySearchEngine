@@ -17,8 +17,8 @@
 //! without, the snippet locator validates it on the text.
 
 use seforim_engine::{
-    ExcludeSpec, GroupSpec, IndexOptions, LineDoc, LineIndex, ProximitySpec, SearchOptions, SearchRequest,
-    SearchResult, TypoModeSpec, WalkOptionsSpec, WordOptions,
+    ExcludeOptions, ExcludeSpec, GroupSpec, IndexOptions, LineDoc, LineIndex, PhraseOptions, ProximitySpec,
+    SearchOptions, SearchRequest, SearchResult, TypoModeSpec, WalkOptionsSpec, WordOptions,
 };
 
 fn w(word: &str) -> GroupSpec {
@@ -376,6 +376,66 @@ fn per_word_overrides_through_search_options() {
                 ..Default::default()
             },
         );
+    }
+}
+
+/// Otzaria's negative per-word options (`negative_search_options`, keyed by
+/// word index; the negative query is built by the positive's builder): a
+/// negative word with its own grammatical prefixes, its own alternative
+/// (`negative_alternative_words`) and the acronym phrase of the negative
+/// query, through the public options API.
+#[test]
+fn negative_word_has_its_own_options() {
+    let amar = "\u{05D0}\u{05DE}\u{05E8}";
+    let rabbi = "\u{05E8}\u{05D1}\u{05D9}";
+    let meir = "\u{05DE}\u{05D0}\u{05D9}\u{05E8}";
+    let lines: &[&str] = &[
+        "\u{05D0}\u{05DE}\u{05E8} \u{05E8}\u{05D1}\u{05D9} \u{05D9}\u{05D5}\u{05D7}\u{05E0}\u{05DF}",
+        "\u{05D5}\u{05D0}\u{05DE}\u{05E8} \u{05E8}\u{05D1}\u{05D9} \u{05D9}\u{05D5}\u{05D7}\u{05E0}\u{05DF}",
+        "\u{05E9}\u{05D0}\u{05DE}\u{05E8} \u{05E8}\u{05D1}\u{05D9} \u{05DE}\u{05D0}\u{05D9}\u{05E8}",
+        "\u{05E8}\u{05D1}\u{05D9} \u{05DE}\u{05D0}\u{05D9}\u{05E8}",
+    ];
+    let search = |global_prefixes: bool, word: Option<WordOptions>| {
+        let mut ex = ExcludeOptions { query: amar.into(), ..Default::default() };
+        if let Some(w) = word {
+            ex.words.insert(0, w);
+        }
+        SearchOptions { query: rabbi.into(), grammar_prefixes: global_prefixes, exclude: Some(ex), ..Default::default() }
+    };
+    let prefixes = |on: bool| Some(WordOptions { grammar_prefixes: Some(on), ..Default::default() });
+    for positions in [true, false] {
+        // the negative word as typed
+        assert_eq!(matches_options(lines, positions, &search(false, None)), vec![2, 3, 4], "positions={positions}");
+        // its own grammatical prefixes: also the prefixed forms
+        assert_eq!(matches_options(lines, positions, &search(false, prefixes(true))), vec![4], "positions={positions}");
+        // the global options are only its default: off for it alone
+        assert_eq!(matches_options(lines, positions, &search(true, None)), vec![4], "positions={positions}");
+        assert_eq!(matches_options(lines, positions, &search(true, prefixes(false))), vec![2, 3, 4], "positions={positions}");
+        // its own alternative word joins its slot
+        let alt = Some(WordOptions { alternatives: vec![meir.into()], ..Default::default() });
+        assert_eq!(matches_options(lines, positions, &search(false, alt)), vec![2], "positions={positions}");
+    }
+    // the negative query's acronym phrase (Otzaria ORs it into the negative)
+    let lines: &[&str] = &[
+        "\u{05DB}\u{05EA}\u{05D1} \u{05E8}\u{05DE}\u{05D1}\"\u{05DD} \u{05D1}\u{05D4}\u{05DC}\u{05DB}\u{05D5}\u{05EA}",
+        "\u{05DB}\u{05EA}\u{05D1} \u{05E8}\u{05D1}\u{05D9} \u{05DE}\u{05E9}\u{05D4} \u{05D1}\u{05DF} \u{05DE}\u{05D9}\u{05D9}\u{05DE}\u{05D5}\u{05DF} \u{05D1}\u{05E1}\u{05E4}\u{05E8}\u{05D5}",
+        "\u{05DB}\u{05EA}\u{05D1} \u{05E8}\u{05D1}\u{05D9} \u{05DE}\u{05E9}\u{05D4} \u{05D1}\u{05E1}\u{05E4}\u{05E8}\u{05D5}",
+        "\u{05DB}\u{05EA}\u{05D1} \u{05DE}\u{05E9}\u{05D4} \u{05D1}\u{05DF} \u{05E8}\u{05D1}\u{05D9} \u{05DE}\u{05D9}\u{05D9}\u{05DE}\u{05D5}\u{05DF}",
+    ];
+    let o = SearchOptions {
+        query: "\u{05DB}\u{05EA}\u{05D1}".into(),
+        exclude: Some(ExcludeOptions {
+            query: "\u{05E8}\u{05DE}\u{05D1}\"\u{05DD}".into(),
+            phrase_alternatives: vec![PhraseOptions {
+                query: "\u{05E8}\u{05D1}\u{05D9} \u{05DE}\u{05E9}\u{05D4} \u{05D1}\u{05DF} \u{05DE}\u{05D9}\u{05D9}\u{05DE}\u{05D5}\u{05DF}".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for positions in [true, false] {
+        assert_eq!(matches_options(lines, positions, &o), vec![3, 4], "positions={positions}");
     }
 }
 

@@ -26,7 +26,9 @@ search options (Otzaria names):
   --match all|any|most|atleast  (wordMatchMode; default all)   --match-count N  (for atleast)
   --acronym           ראשי תיבות (needs --acronyms path to Otzaria's assets/Acronyms.json)
   --translation       תרגום ארמי (needs --dictionary path to Otzaria's assets/dictionary.json)
-  --exclude "words"   negative query (same distance/order/options)
+  --exclude "words"   negative query (same distance/order; a,b = alternatives of a negative word)
+  --exclude-options grammar-prefixes,ktiv,...   the negative words' own options (Otzaria's
+                      negative options, on every negative word; "" = none). Absent: the options above
   --exclude-scope distance|paragraph|section   (negativeScope; default distance)
   --book TEXT         only books whose title/category contains TEXT
   --group section|identical  (Otzaria's grouping; limit/offset then count groups)
@@ -43,7 +45,8 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
   const valued = {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
     'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd', 'spacing', 'match',
-    'match-count', 'exclude', 'exclude-scope', 'dictionary', 'acronyms', 'group', 'group-scan', 'order',
+    'match-count', 'exclude', 'exclude-scope', 'exclude-options', 'dictionary', 'acronyms', 'group', 'group-scan',
+    'order',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -182,6 +185,23 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     'translation': OtzariaOption.aramaicTranslation,
     'acronym': OtzariaOption.acronyms,
   };
+  // The negative words: a,b alternatives per word (negativeAlternativeWords)
+  // and, with --exclude-options, their own option set on every negative word
+  // (Otzaria's negative options as the app sends them, per word).
+  final negWords = <String>[];
+  final negAlts = <int, List<String>>{};
+  for (final w in splitQueryWords(o['exclude'] ?? '')) {
+    final parts = w.split(',').where((p) => p.isNotEmpty).toList();
+    if (parts.isEmpty) continue;
+    if (parts.length > 1) negAlts[negWords.length] = parts.sublist(1);
+    negWords.add(parts.first);
+  }
+  final negOptions = o['exclude-options']
+      ?.split(',')
+      .map((f) => f.trim())
+      .where((f) => f.isNotEmpty)
+      .map((f) => flagToOption[f] ?? (throw ArgumentError('--exclude-options: unknown option "$f"')))
+      .toSet();
   final contextWords = _int(o, 'context') ?? 8;
   final req = OtzariaSearch(
     query: mainWords.join(' '),
@@ -197,7 +217,9 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
       _ => WordMatchMode.all,
     },
     wordMatchCount: _int(o, 'match-count') ?? 1,
-    negativeQuery: o['exclude'] ?? '',
+    negativeQuery: negWords.join(' '),
+    negativeWordOptions: negOptions == null ? null : {for (var i = 0; i < negWords.length; i++) i: negOptions},
+    negativeAlternativeWords: negAlts,
     acronymLexicon: o['acronyms'] == null ? null : AcronymLexicon.load(o['acronyms']!),
     translations: o['dictionary'] == null ? null : TranslationLexicon.load(o['dictionary']!),
     negativeScope: switch (o['exclude-scope'] ?? 'distance') {

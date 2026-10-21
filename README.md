@@ -449,8 +449,12 @@ are not printed), so upstream's query-parser tests stay as they are.
     `{"mode":"at_least","count":N}`: Otzaria's wordMatchMode, the engine
     counts the slots it searches, a dropped word not counted; wins over
     `min_groups`), `context_words`, `proximity` (per TYPED word, see the
-    proximity item), `exclude` (`{query, max_word_distance,
-    require_ordered, proximity}`; its words use the global options),
+    proximity item), `exclude` (`{query, words, phrase_alternatives,
+    max_word_distance, require_ordered, proximity}`; options are per
+    word: a negative word is a word like any other, the global options
+    are its default and `exclude.words` its own overrides and
+    alternatives, same typed-word index rule as `words`; no separate
+    global set for the negative query),
     `books`, `phrase_alternatives` (`[{query, ignore_quotes}]`), `order`
     (`"catalog"` default, `"relevance"`, `"generation"`) and
     `book_generations` (`[[book_id, generation_order], ...]`), see the
@@ -507,7 +511,20 @@ are not printed), so upstream's query-parser tests stay as they are.
   `SearchRequest.Exclude`, Dart `exclude`, demo `--exclude "words"
   [--exclude-scope distance|paragraph]`): the words to drop, as a query of their own
   with its own distance, order and spacing, every word required (Otzaria's
-  `apply_advanced_negative_query`). One word, several words with no
+  `apply_advanced_negative_query`, which builds it with the positive's
+  builder). Options are PER WORD, as for the positive words: the global
+  word options are the default, `exclude.words[i]` (`WordOptions`: any
+  option, plus `alternatives` ORed into the word's slot) overrides them for
+  negative word i (Otzaria's `negative_search_options` /
+  `negative_alternative_words`); there is no separate global option set
+  for the negative query (a host with one, like Otzaria's
+  negativeGlobalSearchOptions, writes it onto every negative word). The
+  words of a several-word negative query are phrase words (Otzaria's
+  phrase budgets), as in the positive query. `exclude.phrase_alternatives`
+  ORs whole phrases into the negative query (Otzaria ORs the acronym
+  expansion of the negative words into it): a line carrying one is
+  dropped, in the query (one word, or a span query with positions) or on
+  the text without positions (adjacent, in order). One word, several words with no
   distance/order limit, or per-pair spacing are excluded in the query
   itself (MustNot); several words bound by distance/order are checked on
   the line text at locate time, like the positive filters. Section-scoped
@@ -516,7 +533,8 @@ are not printed), so upstream's query-parser tests stay as they are.
   line ids mapped to sections with SQLite (`line_toc`), the sets
   intersected, and the positive hits in those sections dropped (a hit
   without a section is never dropped). The Dart demo does this for
-  `--exclude-scope section`.
+  `--exclude-scope section` (its per-word searches still use the global
+  options: section scope is on hold).
 - **Phrase alternatives** (for Otzaria's ראשי תיבות): `phrase_alternatives`
   in the request (C# `PhraseAlternatives`, Dart `phraseAlternatives`). Each
   is a phrase ORed with the main query: its words adjacent, in order and all

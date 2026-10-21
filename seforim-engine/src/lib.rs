@@ -521,6 +521,79 @@ mod tests {
         assert_eq!(r.hits.len(), 7);
     }
 
+    /// Options are per word: a negative word takes the global word options
+    /// as its default and has its own overrides, alternatives and phrase
+    /// alternatives, on both index flavours.
+    #[test]
+    fn exclude_words_have_their_own_options() {
+        let torah = "\u{05EA}\u{05D5}\u{05E8}\u{05D4}";
+        let beracha = "\u{05D1}\u{05E8}\u{05DB}\u{05D4}";
+        let shalom = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
+        let moshe = "\u{05DE}\u{05E9}\u{05D4}";
+        let rabbenu = "\u{05E8}\u{05D1}\u{05E0}\u{05D5}";
+        let texts = [
+            format!("{torah} \u{05D5}{beracha}"),           // 1: ve-beracha
+            format!("{torah} {beracha}"),                   // 2
+            format!("{torah} \u{05D2}\u{05D3}\u{05D5}\u{05DC}\u{05D4}"), // 3: gedola
+            format!("{torah} {moshe} {rabbenu}"),           // 4: the phrase
+            format!("{torah} {shalom}"),                    // 5
+            format!("{rabbenu} {torah} {moshe}"),           // 6: phrase words, wrong order
+        ];
+        let docs: Vec<LineDoc> =
+            texts.iter().enumerate().map(|(i, t)| line(i as u64 + 1, i as u64, 1, t)).collect();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &docs);
+            // the lines that pass: hits whose snippet locates
+            let passing = |o: &SearchOptions| -> Vec<u64> {
+                let mut r = index.search_options(o).unwrap();
+                let hits = r.hits.clone();
+                hits.into_iter()
+                    .filter(|h| r.session.locate(&texts[h.line_id as usize - 1]).is_some())
+                    .map(|h| h.line_id)
+                    .collect()
+            };
+            let search = |prefixes: bool, ex: ExcludeOptions| SearchOptions {
+                query: torah.into(),
+                grammar_prefixes: prefixes,
+                exclude: Some(ex),
+                ..Default::default()
+            };
+            let ex = |words: &[(usize, WordOptions)]| ExcludeOptions {
+                query: beracha.into(),
+                words: words.iter().cloned().collect(),
+                ..Default::default()
+            };
+            let prefixes = |on: bool| WordOptions { grammar_prefixes: Some(on), ..Default::default() };
+            // no override: the global options (off) are the default
+            assert_eq!(passing(&search(false, ex(&[]))), [1, 3, 4, 5, 6], "positions={positions}");
+            // inherited when on
+            assert_eq!(passing(&search(true, ex(&[]))), [3, 4, 5, 6], "positions={positions}");
+            // the negative word's own option, either way
+            assert_eq!(passing(&search(false, ex(&[(0, prefixes(true))]))), [3, 4, 5, 6], "positions={positions}");
+            assert_eq!(passing(&search(true, ex(&[(0, prefixes(false))]))), [1, 3, 4, 5, 6], "positions={positions}");
+            // alternatives join the negative word's slot
+            let alt = WordOptions { alternatives: vec![shalom.into()], ..Default::default() };
+            assert_eq!(passing(&search(false, ex(&[(0, alt)]))), [1, 3, 4, 6], "positions={positions}");
+            // phrase alternatives of the negative query: adjacent, in order
+            let with_phrase = ExcludeOptions {
+                query: "\u{05D2}\u{05D3}\u{05D5}\u{05DC}\u{05D4}".into(),
+                phrase_alternatives: vec![PhraseOptions { query: format!("{moshe} {rabbenu}"), ..Default::default() }],
+                ..Default::default()
+            };
+            let o = search(false, with_phrase);
+            assert_eq!(passing(&o), [1, 2, 5, 6], "positions={positions}");
+            // the text-level phrase makes counts need the texts
+            assert_eq!(index.search_options(&o).unwrap().count_needs_text(), !positions, "positions={positions}");
+            // a one-word phrase is excluded in the query
+            let one = ExcludeOptions {
+                phrase_alternatives: vec![PhraseOptions { query: shalom.into(), ..Default::default() }],
+                ..Default::default()
+            };
+            assert_eq!(passing(&search(false, one)), [1, 2, 3, 4, 6], "positions={positions}");
+        }
+    }
+
     #[test]
     fn phrase_alternatives_or_with_main_query() {
         for positions in [true, false] {

@@ -84,6 +84,11 @@ in one or two lines. Remove entries that turn out to be wrong.
   decision; replaced the global cap).
 - **Options are the user's choice**: nikud / te'amim ignore, quotes ignore, index with
   or without positions — offer them, never force one behaviour.
+- **Options are PER WORD** (user's decision): a negative (exclude) word is a word like
+  any other, with its own `WordOptions` and alternatives (`exclude.words`); the top-level
+  SearchOptions fields are only the default for words that set nothing. No separate
+  global option set for the negative query (Otzaria's negativeGlobalSearchOptions is
+  expanded onto each negative word by the host).
 - **C# must build and run on .NET 10 AND .NET Framework 4.8.** Package =
   netstandard2.0; demo = `net10.0;net48`, x64.
 - **The C# demo mirrors FtsLib's API** (same class / member names) for easy switching.
@@ -255,8 +260,7 @@ seforim.db knowledge).
 - **User's goal: every search feature Otzaria's current engine has that we lack gets
   added** (from the feature matrix of otzaria_search_engine v5.0.0): positive sameSection scope and
   cross-line phrases (both ON HOLD: anything matching across lines is designed with
-  the user first), separate
-  negative options, vocalized matching without a keep-marks index. Semantic search:
+  the user first), vocalized matching without a keep-marks index. Semantic search:
   ask the user first.
 - **Reuse Otzaria's tests**: its engine has ~309 inline-line search tests
   (`rust/src/api/search_engine.rs`) and ~92 query tests (`hebrew_query.rs`); plan in

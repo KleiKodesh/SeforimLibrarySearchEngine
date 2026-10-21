@@ -88,7 +88,9 @@ pub struct SearchOptions {
     /// merges the gaps around them (see `Slots::lower`). When set,
     /// `max_word_distance` / `require_ordered` are not used.
     pub proximity: Option<ProximitySpec>,
-    /// Otzaria's negative query: lines with these words are dropped.
+    /// Otzaria's negative query: lines with these words are dropped. Its
+    /// words take the word options above as their default and have their
+    /// own per-word overrides (`ExcludeOptions::words`).
     pub exclude: Option<ExcludeOptions>,
     /// Filtered search: only these book ids. None = every book.
     pub books: Option<Vec<u64>>,
@@ -173,12 +175,26 @@ pub struct WordOptions {
     pub alternatives: Vec<String>,
 }
 
-/// The negative query: its words use the global word options.
+/// The negative query (Otzaria's negativeQuery). Options are per word: a
+/// negative word is a word like any other, with the global word options of
+/// [`SearchOptions`] as its default and its own overrides and alternatives
+/// in `words` (Otzaria's negativeSearchOptions / negativeAlternativeWords).
+/// There is no separate global option set for the negative query: a host
+/// with one (Otzaria's negativeGlobalSearchOptions) writes it onto every
+/// negative word.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExcludeOptions {
     /// Words (query syntax) that must not appear; all of them, together.
     pub query: String,
+    /// Per-word overrides of `query`'s words, by typed-word index, with the
+    /// same rule and fields as [`SearchOptions::words`] (alternatives join
+    /// the word's slot).
+    pub words: BTreeMap<usize, WordOptions>,
+    /// Whole phrases ORed with the negative query (Otzaria's acronym
+    /// expansion of the negative words): a line carrying any of them, as
+    /// a phrase, is dropped too.
+    pub phrase_alternatives: Vec<PhraseOptions>,
     pub max_word_distance: Option<usize>,
     pub require_ordered: bool,
     /// Per typed word of `query`, as [`SearchOptions::proximity`].
@@ -265,7 +281,12 @@ impl SearchOptions {
         };
         let exclude = match &self.exclude {
             Some(e) => {
-                let ex = slots(&e.query, keep_marks, |_| (global, &[]));
+                // per word, exactly as the positive words: the global
+                // options are the default, `e.words` the word's own
+                let ex = slots(&e.query, keep_marks, |i| match e.words.get(&i) {
+                    Some(w) => (w.apply(global), w.alternatives.as_slice()),
+                    None => (global, &[]),
+                });
                 let (groups, proximity) = match &e.proximity {
                     Some(p) => (ex.searched_groups(), Some(ex.lower(p)?)),
                     None => (ex.groups.clone(), None),
@@ -276,21 +297,12 @@ impl SearchOptions {
                     max_word_distance: e.max_word_distance,
                     require_ordered: e.require_ordered,
                     gaps: None,
+                    phrase_alternatives: phrases(&e.phrase_alternatives, keep_marks),
                 })
             }
             None => None,
         };
-        let phrase_alternatives = self
-            .phrase_alternatives
-            .iter()
-            .map(|p| {
-                let o = WalkOptionsSpec { ignore_quotes: p.ignore_quotes, ..Default::default() };
-                slots(&p.query, keep_marks, |_| (o, &[])).groups
-            })
-            // A phrase with a word too long to be indexed can never match
-            // (Otzaria: its literal matches no term).
-            .filter(|p: &Vec<GroupSpec>| !p.is_empty() && !p.iter().any(is_long))
-            .collect();
+        let phrase_alternatives = phrases(&self.phrase_alternatives, keep_marks);
         Ok(SearchRequest {
             groups,
             max_word_distance: self.max_word_distance,
@@ -364,6 +376,20 @@ impl WordOptions {
             grammar_prefix_max_letters: self.grammar_prefix_max_letters.or(base.grammar_prefix_max_letters),
         }
     }
+}
+
+/// Phrase alternatives as slot lists: each phrase's words matched as
+/// written (plus its quote option).
+fn phrases(list: &[PhraseOptions], keep_marks: bool) -> Vec<Vec<GroupSpec>> {
+    list.iter()
+        .map(|p| {
+            let o = WalkOptionsSpec { ignore_quotes: p.ignore_quotes, ..Default::default() };
+            slots(&p.query, keep_marks, |_| (o, &[])).groups
+        })
+        // A phrase with a word too long to be indexed can never match
+        // (Otzaria: its literal matches no term).
+        .filter(|p: &Vec<GroupSpec>| !p.is_empty() && !p.iter().any(is_long))
+        .collect()
 }
 
 /// One slot for a parsed term with its word's options. Wildcard, fuzzy and
@@ -711,6 +737,41 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(o.to_request(false).unwrap().exclude.unwrap().proximity, Some(ProximitySpec::Ordered { gaps: vec![1] }));
+    }
+
+    #[test]
+    fn exclude_words_are_words_with_their_own_options() {
+        // typed word 1 of the negative query is split by a maqaf: its
+        // override and alternative reach both parts; word 2 inherits
+        let o: SearchOptions = serde_json::from_str(
+            "{\"query\":\"\u{05D0}\u{05D1}\",\"grammar_prefixes\":true,\"exclude\":{\"query\":\"\u{05D2}\u{05D3} \u{05D4}\u{05D5}\u{05D6}\u{05BE}\u{05D7}\u{05D8} \u{05D9}\u{05DB}\",\
+             \"words\":{\"1\":{\"grammar_prefixes\":false,\"part_of_word\":true,\"alternatives\":[\"\u{05DC}\u{05DE}\"]}},\
+             \"phrase_alternatives\":[{\"query\":\"\u{05E0}\u{05E1} \u{05E2}\u{05E4}\",\"ignore_quotes\":true},{\"query\":\"\"}]}}",
+        )
+        .unwrap();
+        let ex = o.to_request(false).unwrap().exclude.unwrap();
+        assert_eq!(ex.groups.len(), 4);
+        let (w, opts) = word_of(&ex.groups[0]);
+        assert_eq!(w, "\u{05D2}\u{05D3}");
+        assert!(opts.grammar_prefixes && !opts.part_of_word);
+        let GroupSpec::Any { alternatives } = &ex.groups[1] else { panic!("{:?}", ex.groups[1]) };
+        assert_eq!(word_of(&alternatives[0]).0, "\u{05D4}\u{05D5}\u{05D6}");
+        assert_eq!(word_of(&alternatives[1]).0, "\u{05DC}\u{05DE}");
+        let GroupSpec::Any { alternatives } = &ex.groups[2] else { panic!("{:?}", ex.groups[2]) };
+        assert_eq!(word_of(&alternatives[0]).0, "\u{05D7}\u{05D8}");
+        for a in alternatives {
+            let o = word_of(a).1;
+            assert!(!o.grammar_prefixes && o.part_of_word);
+        }
+        let (w, opts) = word_of(&ex.groups[3]);
+        assert_eq!(w, "\u{05D9}\u{05DB}");
+        assert!(opts.grammar_prefixes && !opts.part_of_word);
+        // phrase alternatives: literal words with their quote option; an
+        // empty phrase is dropped
+        assert_eq!(ex.phrase_alternatives.len(), 1);
+        let (w, opts) = word_of(&ex.phrase_alternatives[0][1]);
+        assert_eq!(w, "\u{05E2}\u{05E4}");
+        assert!(opts.ignore_quotes && !opts.grammar_prefixes);
     }
 
     #[test]

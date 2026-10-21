@@ -57,4 +57,18 @@ void main() {
         .toJson();
     expect(back['phrase_alternatives'].toString(), contains('רמבם'));
   });
+
+  test('a negative word with the option sends the negative phrase alternatives', () {
+    final json = OtzariaSearch(
+      query: 'כתב',
+      negativeQuery: 'רמב"ם',
+      negativeWordOptions: {
+        0: {OtzariaOption.acronyms}
+      },
+      acronymLexicon: lex,
+    ).toOptions().toJson();
+    expect(json.containsKey('phrase_alternatives'), isFalse);
+    final ex = json['exclude'] as Map<String, Object?>;
+    expect(ex['phrase_alternatives'].toString(), contains('מיימון'));
+  });
 }

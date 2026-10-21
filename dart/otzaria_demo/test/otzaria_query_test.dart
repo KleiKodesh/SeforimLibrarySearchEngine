@@ -44,6 +44,43 @@ void main() {
     });
   });
 
+  test('negative words have their own options and alternatives', () {
+    const torah = 'תורה';
+    const beracha = 'ברכה';
+    const shalom = 'שלום';
+    // no negative options given: every negative word takes the global set
+    final inherit = OtzariaSearch(
+      query: torah,
+      globalOptions: {OtzariaOption.grammaticalPrefixes: true},
+      negativeQuery: '$beracha $shalom',
+    ).toOptions().toJson();
+    expect(inherit['grammar_prefixes'], isTrue);
+    final inheritEx = inherit['exclude'] as Map<String, Object?>;
+    expect(inheritEx['query'], '$beracha $shalom');
+    expect(inheritEx.containsKey('words'), isFalse);
+    // Otzaria's negativeSearchOptions: each word its full set (word 0 none,
+    // so prefixes off for it); negativeAlternativeWords join word 0's slot
+    final own = OtzariaSearch(
+      query: torah,
+      globalOptions: {OtzariaOption.grammaticalPrefixes: true},
+      negativeQuery: '$beracha $shalom',
+      negativeWordOptions: {
+        1: {OtzariaOption.grammaticalPrefixes, OtzariaOption.fullOrDefective}
+      },
+      negativeAlternativeWords: {
+        0: [torah]
+      },
+    ).toOptions().toJson();
+    expect(own['grammar_prefixes'], isTrue);
+    expect((own['exclude'] as Map<String, Object?>)['words'], {
+      '0': {
+        'alternatives': [torah],
+        'grammar_prefixes': false
+      },
+      '1': {'ktiv_male_haser': true},
+    });
+  });
+
   test('exact mode sends no word match', () {
     final s = OtzariaSearch(query: 'משה תורה', mode: SearchMode.exact).toOptions().toJson();
     expect(s.containsKey('word_match'), isFalse);

@@ -368,11 +368,22 @@ class SearchRequest {
 /// SQLite (`line_toc`), intersect, and drop the positive hits there.
 class ExcludeSpec {
   ExcludeSpec(
-      {List<QueryGroup>? groups, this.maxWordDistance, this.requireOrdered = false, this.gaps, this.proximity})
-      : groups = groups ?? [];
+      {List<QueryGroup>? groups,
+      this.maxWordDistance,
+      this.requireOrdered = false,
+      this.gaps,
+      this.proximity,
+      List<List<QueryGroup>>? phraseAlternatives})
+      : groups = groups ?? [],
+        phraseAlternatives = phraseAlternatives ?? [];
 
   /// AND across groups, OR within each group's expansion.
   final List<QueryGroup> groups;
+
+  /// Whole phrases ORed with the negative query (Otzaria's acronym
+  /// expansion), each as [SearchRequest.phraseAlternatives]: adjacent, in
+  /// order, all words. A line carrying one is dropped.
+  final List<List<QueryGroup>> phraseAlternatives;
 
   /// Words allowed between the excluded words. Null = anywhere in the line.
   int? maxWordDistance;
@@ -393,6 +404,10 @@ class ExcludeSpec {
         'require_ordered': requireOrdered,
         if (gaps != null) 'gaps': [for (final g in gaps!) g < 0 ? 0 : g],
         if (proximity != null) 'proximity': proximity!.toJson(),
+        if (phraseAlternatives.isNotEmpty)
+          'phrase_alternatives': [
+            for (final p in phraseAlternatives) [for (final g in p) g.toJson()]
+          ],
       };
 }
 
@@ -590,7 +605,9 @@ class SearchOptions {
   /// not used.
   Proximity? proximity;
 
-  /// Otzaria's negative query (its words use the global word options).
+  /// Otzaria's negative query: its words take the word options above as
+  /// their default and have their own per-word overrides
+  /// ([ExcludeOptions.words]).
   ExcludeOptions? exclude;
 
   /// Filtered search: only these book ids. Null = every book.
@@ -726,17 +743,38 @@ class WordOptions {
       };
 }
 
-/// The negative query of [SearchOptions]: its words (all required, together)
-/// use the global word options.
+/// The negative query of [SearchOptions] (Otzaria's negativeQuery): its
+/// words, all required, together. Options are per word: a negative word takes
+/// the global word options of [SearchOptions] as its default and has its own
+/// overrides and alternatives in [words] (Otzaria's negativeSearchOptions /
+/// negativeAlternativeWords). There is no separate global set for the
+/// negative query: a host with one writes it onto every negative word.
 class ExcludeOptions {
-  ExcludeOptions(this.query, {this.maxWordDistance, this.requireOrdered = false, this.proximity});
+  ExcludeOptions(this.query,
+      {Map<int, WordOptions>? words,
+      List<PhraseOptions>? phraseAlternatives,
+      this.maxWordDistance,
+      this.requireOrdered = false,
+      this.proximity})
+      : words = words ?? {},
+        phraseAlternatives = phraseAlternatives ?? [];
   String query;
+
+  /// Per-word overrides of [query]'s words, by typed-word index, with the
+  /// same rule and fields as [SearchOptions.words].
+  final Map<int, WordOptions> words;
+
+  /// Whole phrases ORed with the negative query (Otzaria's acronym expansion
+  /// of the negative words): a line carrying one, as a phrase, is dropped too.
+  final List<PhraseOptions> phraseAlternatives;
   int? maxWordDistance;
   bool requireOrdered;
   Proximity? proximity;
 
   Map<String, Object?> toJson() => {
         'query': query,
+        if (words.isNotEmpty) 'words': {for (final e in words.entries) '${e.key}': e.value.toJson()},
+        if (phraseAlternatives.isNotEmpty) 'phrase_alternatives': [for (final p in phraseAlternatives) p.toJson()],
         if (maxWordDistance != null) 'max_word_distance': maxWordDistance,
         if (requireOrdered) 'require_ordered': true,
         if (proximity != null) 'proximity': proximity!.toJson(),

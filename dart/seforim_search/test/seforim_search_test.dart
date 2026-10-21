@@ -125,6 +125,25 @@ void main() {
     plain.close();
   });
 
+  test('cancel token stops the session and later searches', () {
+    const bereshit = '\u05D1\u05E8\u05D0\u05E9\u05D9\u05EA';
+    final token = SearchCancelToken();
+    final s = index.search(SearchOptions(bereshit), cancel: token);
+    expect(s.hitCount, 1);
+    expect(s.locateBatch([text2]).single, isNotNull);
+    token.cancel();
+    expect(() => s.locateBatch([text2]), throwsA(isA<SearchCancelledException>()));
+    expect(() => s.countBatch([text2]), throwsA(isA<SearchCancelledException>()));
+    s.close();
+    expect(() => index.search(SearchOptions(bereshit), cancel: token), throwsA(isA<SearchCancelledException>()));
+    // another token from its address
+    final other = SearchCancelToken();
+    final s2 = index.search(SearchOptions(bereshit), cancel: other);
+    SearchCancelToken.cancelAt(other.address);
+    expect(() => s2.locateBatch([text2]), throwsA(isA<SearchCancelledException>()));
+    s2.close();
+  });
+
   test('any + fuzzy + a host-joined longer text', () {
     final s = index.searchRequest(SearchRequest(groups: [
       const QueryGroup.any([QueryGroup.word('משה'), QueryGroup.fuzzy('למשא', 1)]),

@@ -10,7 +10,7 @@ import 'native.dart';
 /// One search: every matching line (catalog order) and the snippet state
 /// (prepared groups, distance/order filters, term table). Not thread-safe.
 final class SearchSession implements Finalizable {
-  SearchSession.internal(this._index, this._handle, this.contextWords) {
+  SearchSession.internal(this._index, this._handle, this.contextWords, [this._cancel]) {
     _n.searchCloseFinalizer.attach(this, _handle, detach: this);
     hitCount = _n.searchHitCount(_handle);
   }
@@ -19,6 +19,9 @@ final class SearchSession implements Finalizable {
 
   // ignore: unused_field
   final SeforimIndex _index;
+  // Keeps the cancel token alive as long as the session.
+  // ignore: unused_field
+  final SearchCancelToken? _cancel;
   Pointer<Void> _handle;
 
   /// Words of context per side this search locates with.

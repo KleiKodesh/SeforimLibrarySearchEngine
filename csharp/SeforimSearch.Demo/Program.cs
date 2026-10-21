@@ -12,7 +12,7 @@ namespace SeforimSearch.Demo
     /// Demo console:
     ///   build  [--db path] [--index dir] [--max-lines N] [--no-positions]
     ///   search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] query...
-    ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] query...
+    ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] [--cancel-after MS] query...
     /// The seforim.db path defaults to KitveiHakodesh's resolution order
     /// (registry choice, then Otzaria, then Zayit).
     /// </summary>
@@ -121,7 +121,7 @@ namespace SeforimSearch.Demo
         private static int Count(SeforimDbFtsEngine engine, string[] args)
         {
             var words = args.Skip(1).Where((a, i) => !a.StartsWith("--", StringComparison.Ordinal)
-                && (i == 0 || !new[] { "--db", "--index", "--distance" }.Contains(args[i]))).ToArray();
+                && (i == 0 || !new[] { "--db", "--index", "--distance", "--cancel-after" }.Contains(args[i]))).ToArray();
             string query = string.Join(" ", words);
             int distance = int.TryParse(Option(args, "--distance"), out var d) ? d : int.MaxValue;
             var options = new FtsLib.Fts5.TantivySearchOptions
@@ -136,8 +136,17 @@ namespace SeforimSearch.Demo
                 MaxWordDistance = distance >= int.MaxValue ? (int?)null : distance,
                 RequireOrdered = args.Contains("--ordered"),
             };
+            // --cancel-after N: cancel the count after N ms (cancellation smoke test)
+            using var cts = int.TryParse(Option(args, "--cancel-after"), out var ca)
+                ? new System.Threading.CancellationTokenSource(ca) : new System.Threading.CancellationTokenSource();
             var sw = Stopwatch.StartNew();
-            var counts = engine.Index.CountByBook(query, options);
+            HitCounts counts;
+            try { counts = engine.Index.CountByBook(query, options, cts.Token); }
+            catch (OperationCanceledException)
+            {
+                Console.Error.WriteLine($"count: cancelled after {sw.Elapsed.TotalMilliseconds:F0} ms");
+                return 3;
+            }
             Console.Error.WriteLine($"count: {counts.Total:N0} lines in {counts.ByBook.Count:N0} books " +
                                     $"(hits validated {counts.Validated:N0}, exact={counts.Exact}) in " +
                                     (sw.Elapsed.TotalSeconds < 1 ? $"{sw.Elapsed.TotalMilliseconds:F0} ms" : $"{sw.Elapsed.TotalMinutes:F2} min"));

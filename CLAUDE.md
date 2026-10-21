@@ -253,7 +253,7 @@ seforim.db knowledge).
   added** (from the feature matrix of otzaria_search_engine v5.0.0): regex `/…/`
   queries, relevance (and generation) ordering, positive sameSection scope and
   cross-line phrases (both ON HOLD: anything matching across lines is designed with
-  the user first), streaming/cancellation, separate
+  the user first), separate
   negative options, vocalized matching without a keep-marks index. Semantic search:
   ask the user first.
 - **Reuse Otzaria's tests**: its engine has ~309 inline-line search tests
@@ -274,7 +274,8 @@ seforim.db knowledge).
   Otzaria's sources: `github.com/Otzaria/otzaria` (Dart) and
   `github.com/Otzaria/otzaria_search_engine` v5.0.0 (Rust `hebrew_query.rs`,
   `api/search_engine.rs`, `lexicons.rs`); clone them into the scratchpad to port.
-- Done: exact totals + per-book counts (`SearchResult::counts` / `count_batch`); Dart binding; full-DB side-by-side parity (16/17); FM sidecar; wordMatchMode;
+- Done: exact totals + per-book counts (`SearchResult::counts` / `count_batch`);
+  cancellation (`CancelToken`, pull-based streaming); Dart binding; full-DB side-by-side parity (16/17); FM sidecar; wordMatchMode;
   negative query (`ExcludeSpec`); תרגום ארמי as a HOST lexicon (Dart demo
   `translation_lexicon.dart`) and ראשי תיבות (host `acronym_lexicon.dart` + engine
   `phrase_alternatives`): app assets/dictionaries stay out of the engine.

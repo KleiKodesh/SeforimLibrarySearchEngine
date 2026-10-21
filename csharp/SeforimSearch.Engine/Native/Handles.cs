@@ -36,6 +36,15 @@ namespace SeforimSearch.Engine.Native
         protected override bool ReleaseHandle() { NativeMethods.se_search_close(handle); return true; }
     }
 
+    /// <summary>Owns a native cancel token; freed exactly once (a search holding
+    /// it keeps its own reference inside the engine).</summary>
+    internal sealed class CancelTokenHandle : SafeHandle
+    {
+        public CancelTokenHandle() : base(IntPtr.Zero, true) { }
+        public override bool IsInvalid => handle == IntPtr.Zero;
+        protected override bool ReleaseHandle() { NativeMethods.se_cancel_token_free(handle); return true; }
+    }
+
     /// <summary>UTF-8 marshalling and native-error helpers.</summary>
     internal static class Interop
     {
@@ -59,23 +68,30 @@ namespace SeforimSearch.Engine.Native
             return message.Length == 0 ? "unknown native error" : message;
         }
 
+        /// <summary>The exception for the last native error: an
+        /// <see cref="OperationCanceledException"/> when the search was cancelled.</summary>
+        public static Exception Fail(string message) =>
+            NativeMethods.se_last_error_cancelled() != 0
+                ? new OperationCanceledException(message)
+                : new SeforimEngineException(message);
+
         /// <summary>Throws when a status call failed.</summary>
         public static void Check(int status)
         {
-            if (status != 0) throw new SeforimEngineException(LastError());
+            if (status != 0) throw Fail(LastError());
         }
 
         /// <summary>Throws when a handle-returning call failed.</summary>
         public static T Check<T>(T handle) where T : SafeHandle
         {
-            if (handle.IsInvalid) throw new SeforimEngineException(LastError());
+            if (handle.IsInvalid) throw Fail(LastError());
             return handle;
         }
 
         /// <summary>Reads and frees an engine-owned JSON string.</summary>
         public static string TakeString(IntPtr p)
         {
-            if (p == IntPtr.Zero) throw new SeforimEngineException(LastError());
+            if (p == IntPtr.Zero) throw Fail(LastError());
             try { return FromUtf8Z(p); }
             finally { NativeMethods.se_string_free(p); }
         }
@@ -87,7 +103,7 @@ namespace SeforimSearch.Engine.Native
             {
                 // Either an empty result or an error; errors leave a message.
                 string error = FromUtf8Z(NativeMethods.se_last_error());
-                if (error.Length != 0) throw new SeforimEngineException(error);
+                if (error.Length != 0) throw Fail(error);
                 return Array.Empty<uint>();
             }
             try

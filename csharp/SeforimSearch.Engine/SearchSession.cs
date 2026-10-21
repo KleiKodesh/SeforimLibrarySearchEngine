@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using SeforimSearch.Engine.Native;
 
 namespace SeforimSearch.Engine
@@ -15,8 +16,17 @@ namespace SeforimSearch.Engine
     {
         private readonly SearchHandle _handle;
 
+        private readonly CancelTokenHandle? _cancel;
+        private CancellationTokenRegistration _registration;
+
         internal SearchSession(SearchHandle handle, int contextWords)
+            : this(handle, contextWords, null, default) { }
+
+        internal SearchSession(SearchHandle handle, int contextWords, CancelTokenHandle? cancel,
+                               CancellationTokenRegistration registration)
         {
+            _cancel = cancel;
+            _registration = registration;
             _handle = handle;
             ContextWords = contextWords;
             HitCount = (long)NativeMethods.se_search_hit_count(_handle);
@@ -116,7 +126,7 @@ namespace SeforimSearch.Engine
             get
             {
                 int r = NativeMethods.se_search_count_needs_text(_handle);
-                if (r < 0) throw new SeforimEngineException(Interop.LastError());
+                if (r < 0) throw Interop.Fail(Interop.LastError());
                 return r != 0;
             }
         }
@@ -131,7 +141,7 @@ namespace SeforimSearch.Engine
         {
             long passed = WithTexts(texts, (p, l) =>
                 NativeMethods.se_search_count_batch(_handle, p, l, (UIntPtr)texts.Count));
-            if (passed < 0) throw new SeforimEngineException(Interop.LastError());
+            if (passed < 0) throw Interop.Fail(Interop.LastError());
             return passed;
         }
 
@@ -164,6 +174,11 @@ namespace SeforimSearch.Engine
             return terms;
         }
 
-        public void Dispose() => _handle.Dispose();
+        public void Dispose()
+        {
+            _handle.Dispose();
+            _registration.Dispose();   // waits for a running cancel callback
+            _cancel?.Dispose();
+        }
     }
 }

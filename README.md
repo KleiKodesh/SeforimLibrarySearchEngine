@@ -336,6 +336,28 @@ are not printed), so upstream's query-parser tests stay as they are.
     passing lines. `exact` turns true when every hit is counted. This is
     the no-positions flavour's path, and FtsLib's text-based distance on
     either flavour.
+- **Cancellation and streaming** (Otzaria's cancel token / streamed pages):
+  a `CancelToken` (Rust `LineIndex::search_cancellable` /
+  `search_options_cancellable`; C ABI `se_cancel_token_new` / `_cancel` /
+  `_free`, `se_search_cancellable`, `se_last_error_cancelled`; C#
+  `SeforimIndex.Search(SearchOptions, CancellationToken)`, which throws
+  `OperationCanceledException`; Dart `search(options, cancel:
+  SearchCancelToken())`, `SearchCancelledException`, `cancelAt(address)`
+  from another isolate).
+  - Checked before the walks, per segment, every 4096 collected docs (the
+    collection then walks the scorer itself), and per chunk of every
+    `try_locate_many` / `count_batch` of the session (`locate_many` gives
+    all-None once cancelled). The 4096 counts matched docs, deleted ones
+    included. A search without a token runs the old path (no check, no
+    cost); with one, the same speed (234k-hit count: 99-123 ms with a
+    token, 117-310 ms without: run-to-run noise). The C# FtsLib facade
+    binds its ct to `CountByBook` only: its search sessions outlive the
+    enumeration, and FtsLib's locate calls never throw.
+  - Streaming is pull-based, by design of the bare-minimum rule (texts come
+    from the host): the host pages the hits (`copy_hits` / `GetHits`) and
+    locates or counts them batch by batch, each batch cancellable. The
+    walks themselves run inside tantivy's scorer creation and are not
+    interrupted (they are capped).
 - **Search:** every matching line in catalog order, plus a snippet session.
   - The session locates snippets for a whole batch across all cores.
   - It applies the word-distance and order filters. Widening a short

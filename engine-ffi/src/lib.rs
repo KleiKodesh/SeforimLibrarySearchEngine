@@ -19,14 +19,17 @@ use std::path::PathBuf;
 use std::ptr;
 
 use seforim_engine::{
-    IndexOptions, LineDoc, LineIndex, LineWriter, SearchOptions, SearchRequest, SearchResult, Snippet,
+    CancelToken, IndexOptions, LineDoc, LineIndex, LineWriter, SearchOptions, SearchRequest, SearchResult, Snippet,
 };
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
+    static LAST_CANCELLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn set_error(message: impl std::fmt::Display) {
+    let cancelled = message.to_string() == seforim_engine::Error::Cancelled.to_string();
+    LAST_CANCELLED.with(|c| c.set(cancelled));
     let text = message.to_string().replace('\0', " ");
     LAST_ERROR.with(|e| *e.borrow_mut() = CString::new(text).unwrap_or_default());
 }
@@ -89,6 +92,7 @@ fn out_string(s: String) -> *mut c_char {
 /// after a call always belongs to that call.
 fn guard<T>(fallback: T, f: impl FnOnce() -> Result<T, String>) -> T {
     LAST_ERROR.with(|e| *e.borrow_mut() = CString::default());
+    LAST_CANCELLED.with(|c| c.set(false));
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
@@ -388,6 +392,73 @@ pub unsafe extern "C" fn se_search(
     })
 }
 
+/// 1 when the calling thread's last error was a cancellation (the search's
+/// cancel token was cancelled), else 0.
+#[no_mangle]
+pub extern "C" fn se_last_error_cancelled() -> i32 {
+    LAST_CANCELLED.with(|c| c.get() as i32)
+}
+
+/// A new cancel token (Otzaria's cancellation token): pass it to
+/// `se_search_cancellable`; `se_cancel_token_cancel` from any thread stops
+/// that search and its later locate / count calls (they fail with
+/// `se_last_error_cancelled() == 1`). Free with `se_cancel_token_free`.
+#[no_mangle]
+pub extern "C" fn se_cancel_token_new() -> *mut CancelToken {
+    Box::into_raw(Box::new(CancelToken::new()))
+}
+
+/// Cancels `token` (any thread; returns at once). Cannot be undone.
+///
+/// # Safety
+/// `token` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_cancel_token_cancel(token: *const CancelToken) {
+    if let Some(t) = token.as_ref() {
+        t.cancel();
+    }
+}
+
+/// Frees a token. A search that holds it keeps its own reference.
+///
+/// # Safety
+/// `token` must come from `se_cancel_token_new` and not be freed twice.
+#[no_mangle]
+pub unsafe extern "C" fn se_cancel_token_free(token: *mut CancelToken) {
+    if !token.is_null() {
+        drop(Box::from_raw(token));
+    }
+}
+
+/// `se_search` with a cancel token (null = not cancellable): the search
+/// checks it before the walks, per segment and every 4096 collected docs;
+/// the returned session's locate / count batches check it per chunk.
+///
+/// # Safety
+/// As `se_search`; `token` null or live.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_cancellable(
+    index: *const LineIndex,
+    request_json: *const u8,
+    request_len: usize,
+    token: *const CancelToken,
+) -> *mut SearchResult {
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        let cancel = token.as_ref().cloned();
+        let json: serde_json::Value =
+            serde_json::from_str(str_arg(request_json, request_len)?).map_err(err)?;
+        let result = if json.get("query").is_some() {
+            let options: SearchOptions = serde_json::from_value(json).map_err(err)?;
+            index.search_options_cancellable(&options, cancel).map_err(err)?
+        } else {
+            let request: SearchRequest = serde_json::from_value(json).map_err(err)?;
+            index.search_cancellable(&request, cancel).map_err(err)?
+        };
+        Ok(Box::into_raw(Box::new(result)))
+    })
+}
+
 /// Number of matching lines.
 ///
 /// # Safety
@@ -530,7 +601,7 @@ pub unsafe extern "C" fn se_search_locate_batch(
         let t0 = std::time::Instant::now();
         let strs = text_args(texts, lens, count)?;
         let t1 = std::time::Instant::now();
-        let located = search.session.locate_many(&strs);
+        let located = search.session.try_locate_many(&strs).map_err(err)?;
         let t2 = std::time::Instant::now();
         let mut out = Vec::with_capacity(count * 16);
         for snippet in located {
@@ -682,7 +753,24 @@ mod tests {
             se_string_free(c);
             assert_eq!(se_search_count_batch(search, ptrs.as_ptr(), lens.as_ptr(), 1), 1);
             assert_eq!(se_search_count_batch(search, ptrs.as_ptr(), lens.as_ptr(), 1), -1);
+            assert_eq!(se_last_error_cancelled(), 0);
             se_search_close(search);
+
+            // cancellation: a cancelled token stops the session's locates and
+            // counts, and a search started with it fails at once
+            let token = se_cancel_token_new();
+            let search = se_search_cancellable(index, req.as_ptr(), req.len(), token);
+            assert!(!search.is_null());
+            se_cancel_token_cancel(token);
+            let buf = se_search_locate_batch(search, ptrs.as_ptr(), lens.as_ptr(), 1);
+            assert!(buf.data.is_null());
+            assert_eq!(se_last_error_cancelled(), 1);
+            assert_eq!(se_search_count_batch(search, ptrs.as_ptr(), lens.as_ptr(), 1), -1);
+            assert_eq!(se_last_error_cancelled(), 1);
+            se_search_close(search);
+            assert!(se_search_cancellable(index, req.as_ptr(), req.len(), token).is_null());
+            assert_eq!(se_last_error_cancelled(), 1);
+            se_cancel_token_free(token);
 
             // the public SearchOptions object: per-word override wins
             for (json, hits) in [

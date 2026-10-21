@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Collections.Generic;
 using SeforimSearch.Engine.Native;
 
@@ -117,6 +118,36 @@ namespace SeforimSearch.Engine
             fixed (byte* j = json)
                 return new SearchSession(Interop.Check(NativeMethods.se_search(_handle, j, (UIntPtr)json.Length)),
                                          options.ContextWords);
+        }
+
+        /// <summary>
+        /// <see cref="Search(SearchOptions)"/> with cancellation (Otzaria's cancel
+        /// token): cancelling <paramref name="ct"/> stops the search (checked before
+        /// the walks, per segment and every 4096 collected docs) and every later
+        /// <see cref="SearchSession.LocateBatch"/> / <see cref="SearchSession.CountBatch"/>
+        /// of the returned session (checked per chunk of work). A cancelled call
+        /// throws <see cref="OperationCanceledException"/>.
+        /// </summary>
+        public SearchSession Search(SearchOptions options, CancellationToken ct)
+        {
+            if (!ct.CanBeCanceled) return Search(options);
+            ct.ThrowIfCancellationRequested();
+            var token = NativeMethods.se_cancel_token_new();
+            var registration = ct.Register(s => NativeMethods.se_cancel_token_cancel(((CancelTokenHandle)s!).DangerousGetHandle()), token);
+            try
+            {
+                byte[] json = Interop.ToUtf8(options.ToJson());
+                fixed (byte* j = json)
+                    return new SearchSession(
+                        Interop.Check(NativeMethods.se_search_cancellable(_handle, j, (UIntPtr)json.Length, token)),
+                        options.ContextWords, token, registration);
+            }
+            catch
+            {
+                registration.Dispose();
+                token.Dispose();
+                throw;
+            }
         }
 
         public void Dispose() => _handle.Dispose();

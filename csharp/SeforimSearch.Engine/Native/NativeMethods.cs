@@ -98,6 +98,21 @@ namespace SeforimSearch.Engine.Native
         public static extern IntPtr se_search_take_new_terms(SearchHandle search);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern SearchHandle se_search_cancellable(IndexHandle index, byte* request, UIntPtr requestLen, CancelTokenHandle token);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_last_error_cancelled();
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern CancelTokenHandle se_cancel_token_new();
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void se_cancel_token_cancel(IntPtr token);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void se_cancel_token_free(IntPtr token);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern int se_search_count_needs_text(SearchHandle search);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

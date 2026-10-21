@@ -5,6 +5,6 @@
 library;
 
 export 'src/models.dart';
-export 'src/native.dart' show SeforimNative, SeforimEngineException;
+export 'src/native.dart' show SeforimNative, SeforimEngineException, SearchCancelledException;
 export 'src/index.dart';
 export 'src/session.dart';

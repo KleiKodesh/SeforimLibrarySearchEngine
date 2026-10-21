@@ -13,6 +13,13 @@ class SeforimEngineException implements Exception {
   String toString() => 'SeforimEngineException: $message';
 }
 
+/// Thrown when a search's [SearchCancelToken] was cancelled.
+class SearchCancelledException extends SeforimEngineException {
+  SearchCancelledException(super.message);
+  @override
+  String toString() => 'SearchCancelledException: $message';
+}
+
 /// `SeBuffer {u32* data; usize len; usize cap}` — returned by value.
 final class SeBuffer extends Struct {
   external Pointer<Uint32> data;
@@ -76,6 +83,14 @@ final class SeforimNative {
             SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int)>('se_search_locate_batch'),
         takeNewTerms = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_search_take_new_terms'),
+        searchCancellable = lib.lookupFunction<
+            Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, Size, Pointer<Void>),
+            Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>)>('se_search_cancellable'),
+        lastErrorCancelled = lib.lookupFunction<Int32 Function(), int Function()>('se_last_error_cancelled'),
+        cancelTokenNew = lib.lookupFunction<Pointer<Void> Function(), Pointer<Void> Function()>('se_cancel_token_new'),
+        cancelTokenCancel = lib.lookupFunction<_CloseC, _CloseD>('se_cancel_token_cancel'),
+        cancelTokenFinalizer =
+            NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_cancel_token_free').cast()),
         countNeedsText = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
             'se_search_count_needs_text'),
         countBatch = lib.lookupFunction<
@@ -113,6 +128,11 @@ final class SeforimNative {
   final int Function(Pointer<Void>, int, int, Pointer<Uint64>) searchCopyHits;
   final SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) locateBatch;
   final Pointer<Utf8> Function(Pointer<Void>) takeNewTerms;
+  final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>) searchCancellable;
+  final int Function() lastErrorCancelled;
+  final Pointer<Void> Function() cancelTokenNew;
+  final void Function(Pointer<Void>) cancelTokenCancel;
+  final NativeFinalizer cancelTokenFinalizer;
   final int Function(Pointer<Void>) countNeedsText;
   final int Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) countBatch;
   final Pointer<Utf8> Function(Pointer<Void>) searchCounts;
@@ -156,7 +176,8 @@ final class SeforimNative {
 
   SeforimEngineException error([String fallback = 'native call failed']) {
     final msg = lastError().toDartString();
-    return SeforimEngineException(msg.isEmpty ? fallback : msg);
+    final text = msg.isEmpty ? fallback : msg;
+    return lastErrorCancelled() != 0 ? SearchCancelledException(text) : SeforimEngineException(text);
   }
 
   Pointer<Void> checkPtr(Pointer<Void> p) {
@@ -183,7 +204,7 @@ final class SeforimNative {
     try {
       if (b.data == nullptr) {
         final msg = lastError().toDartString();
-        if (msg.isNotEmpty) throw SeforimEngineException(msg);
+        if (msg.isNotEmpty) throw error();
         return Uint32List(0);
       }
       return Uint32List.fromList(b.data.asTypedList(b.len));

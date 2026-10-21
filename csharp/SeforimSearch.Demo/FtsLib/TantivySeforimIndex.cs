@@ -143,7 +143,7 @@ namespace FtsLib.Fts5
             // last batch after the loop ends), as FtsLib's results carried their own
             // prepared state. The native session is freed when the last result holding
             // it is collected (SafeHandle).
-            var session = new SearchSessionRef(Engine().Search(request));
+            var session = new SearchSessionRef(Engine().Search(request)); // no ct: the session outlives the enumeration (FtsLib-shaped locates never throw)
             using var corpus = _openCorpus();
             batchSizeAt ??= _ => 256;
 
@@ -214,7 +214,7 @@ namespace FtsLib.Fts5
                                      CancellationToken ct = default, int batchSize = 4096)
         {
             options ??= new TantivySearchOptions();
-            using var session = Engine().Search(ToRequest(query, options));
+            using var session = Engine().Search(ToRequest(query, options), ct);
             if (!session.CountNeedsText) return session.GetCounts();
             using var corpus = _openCorpus();
             for (long offset = 0; offset < session.HitCount;)

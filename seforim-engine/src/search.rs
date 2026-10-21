@@ -23,6 +23,40 @@ use crate::index::LineIndex;
 use crate::options::SearchOptions;
 use crate::{Error, Result};
 
+/// Cancels a running search from another thread (Otzaria's
+/// `cancel_lexical_search`). Cheap to clone; every clone shares one flag. A
+/// token cannot be reset: a new search takes a new token. Checked before
+/// the query weight (the walks), per segment, every 4096 collected docs,
+/// and per chunk of every snippet locate / count batch; a cancelled call
+/// returns [`Error::Cancelled`].
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken(Arc<std::sync::atomic::AtomicBool>);
+
+impl CancelToken {
+    /// A token that is not cancelled.
+    pub fn new() -> CancelToken {
+        CancelToken::default()
+    }
+
+    /// Asks the search holding this token to stop. Returns at once.
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether [`cancel`](Self::cancel) has been called.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn check(token: Option<&CancelToken>) -> Result<()> {
+        if token.is_some_and(|t| t.is_cancelled()) {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// One AND slot of a query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -409,6 +443,8 @@ pub struct SnippetSession {
     /// alternative, the text-level negative): an exact count then needs
     /// the lines' texts. False: every hit passes, the hit list is exact.
     count_needs_text: bool,
+    /// The search's cancel token (None: not cancellable).
+    cancel: Option<CancelToken>,
 }
 
 /// One way a line can match: prepared terms plus the filters to apply.
@@ -500,15 +536,25 @@ impl SnippetSession {
     /// Locates a batch of matched lines across all cores (one locator per
     /// thread; the prepared map is shared read-only), then numbers the marks'
     /// terms in document order. Same results as calling [`locate`](Self::locate)
-    /// on each text in turn, term ids included.
+    /// on each text in turn, term ids included. Once the search's cancel
+    /// token is cancelled every entry is None; use
+    /// [`try_locate_many`](Self::try_locate_many) to see the cancellation.
     pub fn locate_many(&mut self, texts: &[&str]) -> Vec<Option<Snippet>> {
+        let n = texts.len();
+        self.try_locate_many(texts).unwrap_or_else(|_| vec![None; n])
+    }
+
+    /// [`locate_many`](Self::locate_many), stopping with
+    /// [`Error::Cancelled`] when the search's token is cancelled (checked
+    /// per chunk of work).
+    pub fn try_locate_many(&mut self, texts: &[&str]) -> Result<Vec<Option<Snippet>>> {
         if self.matchers.is_empty() {
-            return vec![None; texts.len()];
+            return Ok(vec![None; texts.len()]);
         }
         // Snippets with marks still holding the query's term ORDINALS.
-        let located = self.run_many(texts, locate_with);
+        let located = self.run_many(texts, locate_with)?;
         // Ordinals -> search-wide term ids, in document order (deterministic).
-        located
+        Ok(located
             .into_iter()
             .map(|r| {
                 r.map(|(i, mut s)| {
@@ -519,14 +565,14 @@ impl SnippetSession {
                     s
                 })
             })
-            .collect()
+            .collect())
     }
 
     /// Whether each text passes (the same test as [`locate`](Self::locate)
     /// returning Some), across all cores; the term table is not touched.
-    pub fn passes_many(&mut self, texts: &[&str]) -> Vec<bool> {
+    pub fn passes_many(&mut self, texts: &[&str]) -> Result<Vec<bool>> {
         if self.matchers.is_empty() {
-            return vec![false; texts.len()];
+            return Ok(vec![false; texts.len()]);
         }
         self.run_many(texts, |m, n, l, t| locate_with(m, n, l, t).is_some())
     }
@@ -538,12 +584,15 @@ impl SnippetSession {
     }
 
     /// Runs `f` on every text, in parallel for large batches (one locator
-    /// per worker, kept across calls), results in input order.
+    /// per worker, kept across calls), results in input order. Stops with
+    /// [`Error::Cancelled`] when the token is cancelled (checked per chunk).
     fn run_many<T: Send>(
         &mut self,
         texts: &[&str],
         f: impl Fn(&[Matcher], Option<&NegativeFilter>, &mut SnippetWindowLocator, &str) -> T + Sync,
-    ) -> Vec<T> {
+    ) -> Result<Vec<T>> {
+        let cancel = self.cancel.as_ref();
+        CancelToken::check(cancel)?;
         let matchers = &self.matchers;
         let negative = self.negative.as_ref();
         let threads = std::thread::available_parallelism()
@@ -555,6 +604,7 @@ impl SnippetSession {
             for t in texts {
                 located.push(f(matchers, negative, &mut self.locator, t));
             }
+            CancelToken::check(cancel)?;
         } else {
             // Work is split by BYTES, not by text count: locate cost is linear
             // in the text length, and count-based chunks left one thread with
@@ -598,7 +648,7 @@ impl SnippetSession {
                             let mut done = Vec::new();
                             loop {
                                 let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if c >= chunks {
+                                if c >= chunks || cancel.is_some_and(|t| t.is_cancelled()) {
                                     break;
                                 }
                                 let part = &texts[bounds[c]..bounds[c + 1]];
@@ -617,10 +667,11 @@ impl SnippetSession {
                 }
             });
             for p in parts {
-                located.extend(p.expect("every chunk is located"));
+                // a chunk left undone: the token was cancelled
+                located.extend(p.ok_or(Error::Cancelled)?);
             }
         }
-        located
+        Ok(located)
     }
 
     /// A passing descriptor as a Snippet whose marks carry term ordinals.
@@ -728,8 +779,9 @@ impl SearchResult {
             )));
         }
         let pass = if self.session.count_needs_text {
-            self.session.passes_many(texts)
+            self.session.passes_many(texts)?
         } else {
+            CancelToken::check(self.session.cancel.as_ref())?;
             vec![true; texts.len()]
         };
         let mut passed = 0;
@@ -1128,6 +1180,24 @@ impl LineIndex {
     /// through the returned session, which applies the word-distance and
     /// order filters.
     pub fn search(&self, request: &SearchRequest) -> Result<SearchResult> {
+        self.search_cancellable(request, None)
+    }
+
+    /// [`search_options`](Self::search_options) with a cancel token: the
+    /// search, and the returned session's locate / count calls, stop with
+    /// [`Error::Cancelled`] once `cancel` is cancelled.
+    pub fn search_options_cancellable(
+        &self,
+        options: &SearchOptions,
+        cancel: Option<CancelToken>,
+    ) -> Result<SearchResult> {
+        self.search_cancellable(&options.to_request(self.options.keep_marks)?, cancel)
+    }
+
+    /// [`search`](Self::search) with a cancel token (see
+    /// [`search_options_cancellable`](Self::search_options_cancellable)).
+    pub fn search_cancellable(&self, request: &SearchRequest, cancel: Option<CancelToken>) -> Result<SearchResult> {
+        CancelToken::check(cancel.as_ref())?;
         // Otzaria's word options know whether the word stands alone (its
         // single-word vs phrase budgets): mark the words of a multi-word query.
         let phrase;
@@ -1172,6 +1242,7 @@ impl LineIndex {
             locator,
             pool: Vec::new(),
             count_needs_text: false,
+            cancel: cancel.clone(),
         };
 
         let reader = self.index.reader()?;
@@ -1342,6 +1413,7 @@ impl LineIndex {
 
         let timing = std::env::var_os("SEFORIM_ENGINE_TIMING").is_some();
         let t = std::time::Instant::now();
+        CancelToken::check(cancel.as_ref())?;
         let weight = query.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
         if timing {
             eprintln!("  [timing] weight (walks + caps): {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
@@ -1352,7 +1424,27 @@ impl LineIndex {
             books: request.books.as_ref().map(|b| Arc::new(b.iter().copied().collect())),
         };
         for (ord, segment) in searcher.segment_readers().iter().enumerate() {
+            CancelToken::check(cancel.as_ref())?;
             let mut child = collector.for_segment(ord as SegmentOrdinal, segment)?;
+            if let Some(token) = &cancel {
+                // Cancellable: walk the scorer, checking every 4096 docs.
+                let mut scorer = weight.scorer(segment, 1.0)?;
+                let alive = segment.alive_bitset();
+                let mut doc = scorer.doc();
+                let mut seen = 0u32;
+                while doc != tantivy::TERMINATED {
+                    if alive.is_none_or(|a| a.is_alive(doc)) {
+                        child.collect(doc, 0.0);
+                    }
+                    seen = seen.wrapping_add(1);
+                    if seen % 4096 == 0 && token.is_cancelled() {
+                        return Err(Error::Cancelled);
+                    }
+                    doc = scorer.advance();
+                }
+                hits.extend(child.harvest());
+                continue;
+            }
             // `for_each_no_score` does NOT skip deleted docs (tantivy's own
             // collectors check the alive bitset themselves). Without this an
             // updated line (delete + add) came back in its OLD version too,

@@ -26,7 +26,7 @@ pub use hebrew_fts::word_rule::keep_second_of_paired_readings as reduce_paired_r
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
 pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, WordOptions};
 pub use search::{
-    ExcludeSpec, GroupSpec, HitCounts, PlacedHit, ProximitySpec, SearchRequest, SearchResult, Snippet, SnippetSession,
+    CancelToken, ExcludeSpec, GroupSpec, HitCounts, PlacedHit, ProximitySpec, SearchRequest, SearchResult, Snippet, SnippetSession,
     TypoModeSpec, WalkOptionsSpec, SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,
 };
 
@@ -38,6 +38,8 @@ pub enum Error {
     /// A request the index cannot serve (e.g. spacing without positions, an
     /// FM-index over a dictionary with too many distinct characters).
     Unsupported(String),
+    /// The search was cancelled through its [`CancelToken`].
+    Cancelled,
 }
 
 impl std::fmt::Display for Error {
@@ -46,6 +48,7 @@ impl std::fmt::Display for Error {
             Error::Tantivy(e) => write!(f, "{e}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Unsupported(m) => write!(f, "{m}"),
+            Error::Cancelled => write!(f, "search cancelled"),
         }
     }
 }
@@ -929,5 +932,33 @@ mod tests {
                 assert_eq!(c.books, by_book.into_iter().collect::<Vec<_>>());
             }
         }
+    }
+
+    #[test]
+    fn cancel_token_stops_search_locate_and_count() {
+        const B: &str = "\u{05ea}\u{05d5}\u{05e8}\u{05d4}";
+        let dir = tempfile::tempdir().unwrap();
+        let lines: Vec<LineDoc> = (0..5000).map(|i| line(i, i, 1, &format!("{B} {i}"))).collect();
+        let index = build(dir.path(), IndexOptions::default(), &lines);
+        let req = SearchRequest {
+            groups: vec![word(B, false), word("1", false)],
+            max_word_distance: Some(0),
+            ..Default::default()
+        };
+        let plain = SearchRequest { groups: vec![word(B, false)], ..Default::default() };
+        // not cancelled: same hits as the plain search, through the scorer loop
+        let token = CancelToken::new();
+        let r = index.search_cancellable(&plain, Some(token.clone())).unwrap();
+        assert_eq!(r.hits, index.search(&plain).unwrap().hits);
+        assert_eq!(r.hits.len(), 5000);
+        let mut r = index.search_cancellable(&req, Some(token.clone())).unwrap();
+        assert_eq!(r.hits.len(), 1);
+        let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+        let refs: Vec<&str> = texts.iter().map(|t| t.as_str()).collect();
+        assert!(r.session.try_locate_many(&refs[1..2]).unwrap()[0].is_some());
+        token.cancel();
+        assert!(matches!(r.session.try_locate_many(&refs), Err(Error::Cancelled)));
+        assert!(matches!(r.count_batch(&refs[..1]), Err(Error::Cancelled)));
+        assert!(matches!(index.search_cancellable(&plain, Some(token)), Err(Error::Cancelled)));
     }
 }

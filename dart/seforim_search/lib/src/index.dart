@@ -8,6 +8,29 @@ import 'models.dart';
 import 'native.dart';
 import 'session.dart';
 
+/// Cancels a search (Otzaria's cancellation token). One token per search;
+/// it cannot be reset. [cancel] returns at once; the search notices at its
+/// next check. From another isolate, pass [address] and call
+/// [SearchCancelToken.cancelAt].
+final class SearchCancelToken implements Finalizable {
+  SearchCancelToken() : handle = SeforimNative.instance.cancelTokenNew() {
+    SeforimNative.instance.cancelTokenFinalizer.attach(this, handle);
+  }
+
+  /// The native token (kept alive by this object and by the sessions using it).
+  final Pointer<Void> handle;
+
+  /// The native address, for [cancelAt] on another isolate while this
+  /// object is alive.
+  int get address => handle.address;
+
+  /// Asks the search holding this token to stop.
+  void cancel() => SeforimNative.instance.cancelTokenCancel(handle);
+
+  /// Cancels the token at [address] (from [SearchCancelToken.address]).
+  static void cancelAt(int address) => SeforimNative.instance.cancelTokenCancel(Pointer.fromAddress(address));
+}
+
 /// A line index on disk. Searches may run concurrently on separate isolates
 /// only through separate [SeforimIndex.open] calls; one writer at a time.
 ///
@@ -92,16 +115,24 @@ final class SeforimIndex implements Finalizable {
   /// Runs a search (the public API): the query string is parsed by FtsLib's
   /// rules and each word becomes one walk with its options. Every matching
   /// line in catalog order, plus the snippet session.
-  SearchSession search(SearchOptions options) => _search(options.toJson(), options.contextWords);
+  ///
+  /// With [cancel], [SearchCancelToken.cancel] stops the search (checked
+  /// before the walks, per segment and every 4096 collected docs) and every
+  /// later `locateBatch` / `countBatch` of the session (per chunk of work):
+  /// they throw [SearchCancelledException].
+  SearchSession search(SearchOptions options, {SearchCancelToken? cancel}) =>
+      _search(options.toJson(), options.contextWords, cancel);
 
   /// The low-level form: slots built by the caller ([SearchRequest]).
   SearchSession searchRequest(SearchRequest request) => _search(request.toJson(), request.contextWords);
 
-  SearchSession _search(Map<String, Object?> json, int contextWords) {
+  SearchSession _search(Map<String, Object?> json, int contextWords, [SearchCancelToken? cancel]) {
     return using((a) {
       final (j, jl) = utf8Native(jsonEncode(json), a);
-      final h = _n.checkPtr(_n.search(handle, j, jl));
-      return SearchSession.internal(this, h, contextWords);
+      final h = _n.checkPtr(cancel == null
+          ? _n.search(handle, j, jl)
+          : _n.searchCancellable(handle, j, jl, cancel.handle));
+      return SearchSession.internal(this, h, contextWords, cancel);
     });
   }
 

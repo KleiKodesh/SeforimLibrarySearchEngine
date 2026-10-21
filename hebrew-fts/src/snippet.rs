@@ -262,6 +262,15 @@ pub struct SnippetWindowLocator {
     /// [`set_min_groups`](Self::set_min_groups).
     min_groups: usize,
     proximity: ProximityScratch,
+    /// Cross-line: the index of the next line's first token after
+    /// [`tokenize_pair`](Self::tokenize_pair) (None after
+    /// [`tokenize`](Self::tokenize)). While set, every window must cross
+    /// the break: a matched token on each line.
+    break_token: Option<usize>,
+    /// UTF-16 offset of the break (the joining `\n`) in the joined text.
+    break_utf16: usize,
+    /// Synthetic tokens for [`proximity_across_positions`](Self::proximity_across_positions).
+    synthetic: Vec<TextToken>,
 }
 
 impl Default for SnippetWindowLocator {
@@ -292,6 +301,9 @@ impl SnippetWindowLocator {
             mark_ranges: Vec::with_capacity(24),
             min_groups: 0,
             proximity: ProximityScratch::default(),
+            break_token: None,
+            break_utf16: 0,
+            synthetic: Vec::new(),
         }
     }
 
@@ -330,6 +342,58 @@ impl SnippetWindowLocator {
     /// for each query.
     pub fn tokenize(&mut self, raw_html: &str) {
         self.text_tokens.tokenize(raw_html);
+        self.break_token = None;
+    }
+
+    /// Tokenizes two consecutive lines joined as `left + "\n" + right`
+    /// (see [`TextTokens::tokenize_pair`]) for a cross-line locate: until
+    /// the next [`tokenize`](Self::tokenize), every window the locate calls
+    /// find must cross the break (at least one matched token on each line),
+    /// and offsets are UTF-16 units into the joined text. Returns the UTF-16
+    /// offset of the break.
+    pub fn tokenize_pair(&mut self, left: &str, right: &str) -> usize {
+        let split = self.text_tokens.tokenize_pair(left, right);
+        self.break_token = Some(split);
+        self.break_utf16 = left.encode_utf16().count();
+        self.break_utf16
+    }
+
+    /// The break's UTF-16 offset after [`tokenize_pair`](Self::tokenize_pair);
+    /// None after [`tokenize`](Self::tokenize).
+    pub fn break_utf16(&self) -> Option<usize> {
+        self.break_token.map(|_| self.break_utf16)
+    }
+
+    /// Otzaria's proximity checked on index positions across a line break:
+    /// `occurrences` are `(position, term ordinal of prepared)` of the two
+    /// lines joined (the next line's positions shifted by the first line's
+    /// word count, `break_position`). True when a match crosses the break,
+    /// with the same window rules [`locate_proximity_tokenized`](Self::locate_proximity_tokenized)
+    /// applies to a text joined by [`tokenize_pair`](Self::tokenize_pair):
+    /// the index positions ARE the locator's tokens (same scanner), so both
+    /// index flavours agree.
+    pub fn proximity_across_positions(
+        &mut self,
+        prepared: &PreparedQueryGroups,
+        proximity: &Proximity,
+        occurrences: &mut Vec<(usize, u32)>,
+        break_position: usize,
+    ) -> bool {
+        occurrences.sort_unstable();
+        occurrences.dedup();
+        let SnippetWindowLocator { ordinals, proximity: scratch, synthetic, .. } = self;
+        synthetic.clear();
+        synthetic.extend(occurrences.iter().map(|&(p, _)| TextToken::at_position(p)));
+        ordinals.clear();
+        ordinals.extend(occurrences.iter().map(|&(_, o)| o));
+        let split = occurrences.partition_point(|&(p, _)| p < break_position);
+        let found = match proximity {
+            Proximity::Ordered { gaps } => ordered_window(synthetic, ordinals, prepared, gaps, Some(split), scratch),
+            Proximity::AnyOrder { max_span } => {
+                any_order_window(synthetic, ordinals, prepared, *max_span as usize, Some(split), scratch)
+            }
+        };
+        found.is_some()
     }
 
     /// [`locate`](Self::locate) over the text last passed to
@@ -351,8 +415,10 @@ impl SnippetWindowLocator {
             group_count,
             mark_ranges,
             min_groups,
+            break_token,
             ..
         } = self;
+        let brk = *break_token;
         let tokens = text_tokens.tokens();
         if tokens.is_empty() {
             return SnippetDescriptor::NO_MATCH;
@@ -368,7 +434,7 @@ impl SnippetWindowLocator {
         let all_groups = prepared.group_count();
         let partial = *min_groups > 0 && *min_groups < all_groups;
         let required = if partial { *min_groups } else { all_groups };
-        let (i_left, i_right, score) = find_window(tokens, ordinals, prepared, group_count, required);
+        let (i_left, i_right, score) = find_window(tokens, ordinals, prepared, group_count, required, brk);
         if score == usize::MAX {
             return SnippetDescriptor::NO_MATCH;
         }
@@ -396,7 +462,12 @@ impl SnippetWindowLocator {
         let word_dist = (tokens[i_right].position - tokens[i_left].position).saturating_sub(denominator - 1);
 
         let is_match = partial
-            || !(require_ordered && all_groups > 1 && !has_ordered_match(ordinals, prepared));
+            || !(require_ordered
+                && all_groups > 1
+                && !match brk {
+                    None => has_ordered_match(ordinals, prepared),
+                    Some(b) => has_ordered_match_across(ordinals, prepared, b),
+                });
 
         SnippetDescriptor {
             is_match,
@@ -433,8 +504,10 @@ impl SnippetWindowLocator {
             ordinals,
             mark_ranges,
             proximity: scratch,
+            break_token,
             ..
         } = self;
+        let brk = *break_token;
         let tokens = text_tokens.tokens();
         if tokens.is_empty() {
             return SnippetDescriptor::NO_MATCH;
@@ -447,8 +520,8 @@ impl SnippetWindowLocator {
         let ordinals = &ordinals[..];
         let k = prepared.group_count();
         let found = match proximity {
-            Proximity::Ordered { gaps } => ordered_window(tokens, ordinals, prepared, gaps, scratch),
-            Proximity::AnyOrder { max_span } => any_order_window(tokens, ordinals, prepared, *max_span as usize, scratch),
+            Proximity::Ordered { gaps } => ordered_window(tokens, ordinals, prepared, gaps, brk, scratch),
+            Proximity::AnyOrder { max_span } => any_order_window(tokens, ordinals, prepared, *max_span as usize, brk, scratch),
         };
         let Some((i_left, i_right, score)) = found else {
             return SnippetDescriptor::NO_MATCH;
@@ -490,13 +563,18 @@ impl SnippetWindowLocator {
 // Returns (i_left, i_right, score): token indices, not raw positions.
 
 /// `required`: distinct groups a window must cover (the group count, or
-/// fewer for partial matching).
+/// fewer for partial matching). `brk` (cross-line): the windows must cross
+/// the break at that token: a term token on each side. For each right end
+/// on the next line, the tightest such window starts at the latest
+/// covering left end if that is before the break, else at the first
+/// line's last term token (a covering window stays covering when widened).
 fn find_window(
     tokens: &[TextToken],
     ordinals: &[u32],
     prepared: &PreparedQueryGroups,
     group_count: &mut Vec<usize>,
     required: usize,
+    brk: Option<usize>,
 ) -> (usize, usize, usize) {
     let all_groups = prepared.group_count();
     if group_count.len() < all_groups {
@@ -507,6 +585,13 @@ fn find_window(
     let mut covered = 0usize;
     let (mut best_i_left, mut best_i_right, mut best_score) = (usize::MAX, usize::MAX, usize::MAX);
     let mut l = 0usize;
+    let last_left_term = match brk {
+        Some(b) => match (0..b.min(tokens.len())).rev().find(|&t| ordinals[t] != NO_TERM) {
+            Some(t) => Some(t),
+            None => return (best_i_left, best_i_right, best_score),
+        },
+        None => None,
+    };
 
     for r in 0..tokens.len() {
         if ordinals[r] != NO_TERM {
@@ -523,7 +608,7 @@ fn find_window(
         while covered >= required {
             // Score in raw chars (used only for picking the tightest window).
             let span = tokens[r].utf16_end - tokens[l].utf16_start;
-            if span < best_score {
+            if brk.is_none() && span < best_score {
                 best_score = span;
                 best_i_left = l;
                 best_i_right = r;
@@ -537,6 +622,19 @@ fn find_window(
                 }
             }
             l += 1;
+        }
+        // Cross-line: the last left end removed (l - 1, a term token) was
+        // the latest covering one for this right end.
+        if let (Some(b), Some(last)) = (brk, last_left_term) {
+            if r >= b && ordinals[r] != NO_TERM && l > 0 {
+                let x = if l - 1 < b { l - 1 } else { last };
+                let span = tokens[r].utf16_end - tokens[x].utf16_start;
+                if span < best_score {
+                    best_score = span;
+                    best_i_left = x;
+                    best_i_right = r;
+                }
+            }
         }
     }
 
@@ -559,12 +657,15 @@ fn ordered_window(
     ordinals: &[u32],
     prepared: &PreparedQueryGroups,
     gaps: &[u32],
+    brk: Option<usize>,
     scratch: &mut ProximityScratch,
 ) -> Option<(usize, usize, usize)> {
     let k = prepared.group_count();
     let ProximityScratch { chain, next, deque, .. } = scratch;
     chain.clear();
-    chain.extend((0..tokens.len()).filter(|&t| in_group(ordinals, prepared, t, 0)).map(|t| (t, t)));
+    // Cross-line (`brk`): a chain starts on the first line and ends on the next.
+    let starts = brk.unwrap_or(usize::MAX).min(tokens.len());
+    chain.extend((0..starts).filter(|&t| in_group(ordinals, prepared, t, 0)).map(|t| (t, t)));
     for g in 1..k {
         if chain.is_empty() {
             return None;
@@ -596,6 +697,9 @@ fn ordered_window(
     }
     let mut best: Option<(usize, usize, usize)> = None;
     for &(end, start) in chain.iter() {
+        if brk.is_some_and(|b| end < b) {
+            continue;
+        }
         let span = tokens[end].utf16_end - tokens[start].utf16_start;
         if best.is_none_or(|b| span < b.2) {
             best = Some((start, end, span));
@@ -615,9 +719,22 @@ fn any_order_window(
     ordinals: &[u32],
     prepared: &PreparedQueryGroups,
     max_span: usize,
+    brk: Option<usize>,
     scratch: &mut ProximityScratch,
 ) -> Option<(usize, usize, usize)> {
     let k = prepared.group_count();
+    // Cross-line (`brk`): a feasible window crosses the break when it holds
+    // a term token on each line (k >= 2: a group can then move its token to
+    // the other side of a matching without breaking it).
+    let last_left_term = match brk {
+        Some(b) => {
+            if k < 2 {
+                return None;
+            }
+            Some((0..b.min(tokens.len())).rev().find(|&t| ordinals[t] != NO_TERM)?)
+        }
+        None => None,
+    };
     scratch.reset_any_order(tokens.len(), k);
     let groups_of = |t: usize| -> &[usize] {
         if ordinals[t] == NO_TERM {
@@ -663,9 +780,24 @@ fn any_order_window(
                 break;
             }
         }
-        let span = tokens[r].utf16_end - tokens[l].utf16_start;
+        let x = match (brk, last_left_term) {
+            (Some(b), Some(last)) => {
+                if r < b {
+                    continue;
+                }
+                if l <= last {
+                    l
+                } else if tokens[r].position - tokens[last].position <= max_span {
+                    last // widened back over the break: still feasible
+                } else {
+                    continue;
+                }
+            }
+            _ => l,
+        };
+        let span = tokens[r].utf16_end - tokens[x].utf16_start;
         if best.is_none_or(|b| span < b.2) {
-            best = Some((l, r, span));
+            best = Some((x, r, span));
         }
     }
     best
@@ -701,6 +833,36 @@ fn has_ordered_match(ordinals: &[u32], prepared: &PreparedQueryGroups) -> bool {
             pos += 1;
         }
         if next_group == num_groups {
+            return true;
+        }
+    }
+    false
+}
+
+/// [`has_ordered_match`] across a line break at token `b`: an ordered match
+/// whose first group is on the first line and whose last group is on the
+/// next. Greedy: the earliest tokens for the middle groups, then any token
+/// of the last group at or after both them and the break.
+fn has_ordered_match_across(ordinals: &[u32], prepared: &PreparedQueryGroups, b: usize) -> bool {
+    let k = prepared.group_count();
+    if k < 2 {
+        return false;
+    }
+    let in_group = |t: usize, g: usize| ordinals[t] != NO_TERM && prepared.groups_at(ordinals[t] as usize).contains(&g);
+    let n = ordinals.len();
+    for start in 0..b.min(n) {
+        if !in_group(start, 0) {
+            continue;
+        }
+        let mut pos = start + 1;
+        let mut g = 1;
+        while g < k - 1 && pos < n {
+            if in_group(pos, g) {
+                g += 1;
+            }
+            pos += 1;
+        }
+        if g == k - 1 && (pos.max(b)..n).any(|t| in_group(t, k - 1)) {
             return true;
         }
     }

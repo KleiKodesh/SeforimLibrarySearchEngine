@@ -53,6 +53,12 @@ namespace SeforimSearch.Engine
         public long BookId;
         /// <summary>The raw line text (HTML allowed).</summary>
         public string Text;
+        /// <summary>The host's section of the line (same-section scope; seforim.db: its TOC
+        /// entry). Ids may repeat across books. Null: the line is a section of its own.</summary>
+        public long? SectionId;
+        /// <summary>No phrase continues into or out of this line (cross-line matching): set
+        /// for headings (Otzaria's rule). The line's word count is computed by the engine.</summary>
+        public bool NoCross;
     }
 
     /// <summary>How the typo option (שגיאות כתיב) expands a word.</summary>
@@ -627,6 +633,14 @@ namespace SeforimSearch.Engine
         /// (Otzaria's generationOrder, from the host). Books absent come last; negative
         /// ids (no such book) are not sent.</summary>
         public Dictionary<long, int> BookGenerations { get; } = new Dictionary<long, int>();
+        /// <summary>Cross-line matching: a match may continue from the end of a line onto the
+        /// start of the next line of the same book (one break at most). Such a hit has
+        /// <see cref="PlacedHit.NextLineId"/>; locate it with
+        /// <see cref="SearchSession.LocatePairs"/>. Off by default (FtsLib).</summary>
+        public bool CrossLine { get; set; }
+        /// <summary>Otzaria's SameSection scope: every word (or WordMatch's count) anywhere in
+        /// one section; the hits are that section's lines holding a word.</summary>
+        public bool SameSection { get; set; }
 
         internal string ToJson()
         {
@@ -634,6 +648,8 @@ namespace SeforimSearch.Engine
             var sb = new StringBuilder("{\"query\":");
             Json.WriteString(sb, Query ?? "");
             if (UserRegex) sb.Append(",\"user_regex\":true");
+            if (CrossLine) sb.Append(",\"cross_line\":true");
+            if (SameSection) sb.Append(",\"same_section\":true");
             WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes, KtivMaleHaser,
                 PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes, SpellingErrors,
                 MatchNikud, MatchTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters, PartOfWordMaxLetters,
@@ -805,11 +821,15 @@ namespace SeforimSearch.Engine
         public int? MaxWordDistance { get; set; }
         public bool RequireOrdered { get; set; }
         public Proximity? Proximity { get; set; }
+        /// <summary>Otzaria's SameSection negative scope: a section holding every negative
+        /// word is dropped whole.</summary>
+        public bool SameSection { get; set; }
 
         internal void WriteJson(StringBuilder sb)
         {
             sb.Append("{\"query\":");
-            Json.WriteString(sb, Query ?? "");
+            if (SameSection) { Json.WriteString(sb, Query ?? ""); sb.Append(",\"same_section\":true"); }
+            else Json.WriteString(sb, Query ?? "");
             SearchOptions.WriteWords(sb, Words);
             if (PhraseAlternatives.Count > 0)
             {
@@ -868,13 +888,17 @@ namespace SeforimSearch.Engine
     /// other placement (line index, section) comes from SQLite by line id.</summary>
     public readonly struct PlacedHit
     {
-        public PlacedHit(long position, long lineId, long bookId)
+        public PlacedHit(long position, long lineId, long bookId) : this(position, lineId, bookId, null) { }
+        public PlacedHit(long position, long lineId, long bookId, long? nextLineId)
         {
-            Position = position; LineId = lineId; BookId = bookId;
+            Position = position; LineId = lineId; BookId = bookId; NextLineId = nextLineId;
         }
         public long Position { get; }
         public long LineId { get; }
         public long BookId { get; }
+        /// <summary>Cross-line matching: the next line's id when the match may continue onto
+        /// it. Locate the hit with both texts (<see cref="SearchSession.LocatePairs"/>).</summary>
+        public long? NextLineId { get; }
     }
 
     /// <summary>
@@ -899,6 +923,10 @@ namespace SeforimSearch.Engine
         public int[] Marks { get; internal set; } = Array.Empty<int>();
         /// <summary><see cref="FlagLeadingEllipsis"/> | <see cref="FlagTrailingEllipsis"/>.</summary>
         public int Flags { get; internal set; }
+
+        /// <summary>A cross-line snippet: offsets are into <c>line + "\n" + nextLine</c> and this
+        /// is the UTF-16 offset of that "\n" (render it as a line break). Null: in-line.</summary>
+        public int? BreakAt { get; internal set; }
 
         public bool LeadingEllipsis => (Flags & FlagLeadingEllipsis) != 0;
         public bool TrailingEllipsis => (Flags & FlagTrailingEllipsis) != 0;

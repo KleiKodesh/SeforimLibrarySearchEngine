@@ -17,6 +17,8 @@ pub mod fm_sidecar;
 pub mod index;
 pub mod options;
 pub mod relevance;
+pub(crate) mod section_scope;
+pub(crate) mod cross_line;
 pub mod search;
 
 pub use fm_index::FmIndex;
@@ -26,7 +28,7 @@ pub use fm_index::FmIndex;
 pub use hebrew_fts::word_rule::keep_second_of_paired_readings as reduce_paired_readings;
 /// Otzaria's user-regex kind of a query (see `hebrew_fts::user_regex::classify`).
 pub use hebrew_fts::user_regex::classify as user_regex_kind;
-pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
+pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter, LINE_FLAG_NO_CROSS};
 pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, WordOptions};
 pub use relevance::{ResultsOrder, NOTICE_RELEVANCE_NEEDS_POSITIONS};
 pub use search::{
@@ -88,6 +90,8 @@ mod tests {
             position,
             book_id: book,
             text: text.into(),
+            section_id: None,
+            no_cross: false,
         }
     }
 
@@ -1302,6 +1306,162 @@ mod tests {
             let hit_texts: Vec<&str> = r.hits.iter().map(|h| texts[h.line_id as usize].as_str()).collect();
             r.count_batch(&hit_texts).unwrap();
             assert_eq!(r.counts().total, 1);
+        }
+    }
+
+    // ── Cross-line matching and the same-section scope ──────────────────
+    // (written, not yet run: see the pending list in the report)
+
+    const XA: &str = "\u{05d0}\u{05d1}\u{05d2}";
+    const XB: &str = "\u{05d3}\u{05d4}\u{05d5}";
+    const XC: &str = "\u{05d6}\u{05d7}\u{05d8}";
+    const XF: &str = "\u{05d9}\u{05db}\u{05dc}";
+
+    fn xline(id: u64, book: u64, text: &str, section: Option<u64>, no_cross: bool) -> LineDoc {
+        LineDoc { line_id: id, position: id, book_id: book, text: text.into(), section_id: section, no_cross }
+    }
+
+    /// The hits that pass (texts located, with the next line's text for a
+    /// hit carrying `next_line_id`): (line id, crossed).
+    fn passing(index: &LineIndex, o: &SearchOptions, texts: &[String]) -> Vec<(u64, bool)> {
+        let mut r = index.search_options(o).unwrap();
+        let hits = r.hits.clone();
+        hits.iter()
+            .filter_map(|h| {
+                let next = h.next_line_id.map(|n| texts[n as usize].as_str());
+                r.session.locate_pair(&texts[h.line_id as usize], next).map(|s| (h.line_id, s.break_at.is_some()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cross_line_every_split_both_flavours() {
+        // 0: F A | 1: B C F   (split after A)
+        // 2: F A B | 3: C F   (split after B)
+        // 4: A B C            (in-line)  | 5: F
+        // 6: F A (heading follows) | 7: B C (no_cross)
+        // 8: F A (book 1) | 9: B C (book 2)
+        // 10: C F | 11: A B   (wrong order across)
+        let texts: Vec<String> = vec![
+            format!("{XF} {XA}"),
+            format!("{XB} {XC} {XF}"),
+            format!("{XF} {XA} {XB}"),
+            format!("{XC} {XF}"),
+            format!("{XA} {XB} {XC}"),
+            XF.to_string(),
+            format!("{XF} {XA}"),
+            format!("{XB} {XC}"),
+            format!("{XF} {XA}"),
+            format!("{XB} {XC}"),
+            format!("{XC} {XF}"),
+            format!("{XA} {XB}"),
+        ];
+        let docs: Vec<LineDoc> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| xline(i as u64, if i == 9 { 2 } else { 1 }, t, None, i == 7))
+            .collect();
+        let mut by_flavour = Vec::new();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &docs);
+            let q = format!("{XA} {XB} {XC}");
+            let ordered = SearchOptions {
+                query: q.clone(),
+                proximity: Some(ProximitySpec::Ordered { gaps: vec![0, 0] }),
+                cross_line: true,
+                ..Default::default()
+            };
+            let got = passing(&index, &ordered, &texts);
+            assert_eq!(got, vec![(0, true), (2, true), (4, false)], "positions={positions}");
+            // any order: line 10 + 11 crosses too
+            let any = SearchOptions {
+                proximity: Some(ProximitySpec::AnyOrder { distance: 0 }),
+                ..ordered.clone()
+            };
+            let got_any = passing(&index, &any, &texts);
+            assert!(got_any.contains(&(10, true)), "positions={positions}");
+            // option off: in-line only (unchanged)
+            let off = SearchOptions { cross_line: false, ..ordered.clone() };
+            assert_eq!(passing(&index, &off, &texts), vec![(4, false)]);
+            // gaps across the break count words on both lines
+            let gap = SearchOptions {
+                query: format!("{XA} {XC}"),
+                proximity: Some(ProximitySpec::Ordered { gaps: vec![1] }),
+                cross_line: true,
+                ..Default::default()
+            };
+            let got_gap = passing(&index, &gap, &texts);
+            assert!(got_gap.contains(&(0, true)) && got_gap.contains(&(2, true)), "positions={positions}");
+            let tight = SearchOptions { proximity: Some(ProximitySpec::Ordered { gaps: vec![0] }), ..gap };
+            assert!(!passing(&index, &tight, &texts).contains(&(0, true)));
+            // words anywhere, exact from the bitmaps
+            let anywhere = SearchOptions { query: q.clone(), cross_line: true, ..Default::default() };
+            let words = passing(&index, &anywhere, &texts);
+            assert!(words.contains(&(0, true)) && words.contains(&(4, false)));
+            assert!(!words.iter().any(|&(id, _)| id == 6 || id == 8), "no_cross / other book");
+            by_flavour.push((got, got_any, got_gap, words));
+        }
+        assert_eq!(by_flavour[0], by_flavour[1], "both flavours give the same hits");
+    }
+
+    #[test]
+    fn cross_line_deleted_next_line_and_in_line_wins() {
+        let texts: Vec<String> = vec![format!("{XF} {XA}"), format!("{XB} {XF}"), format!("{XA} {XB}"), format!("{XB}")];
+        let docs: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| xline(i as u64, 1, t, None, false)).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let index = build(dir.path(), IndexOptions::default(), &docs);
+        let o = SearchOptions {
+            query: format!("{XA} {XB}"),
+            proximity: Some(ProximitySpec::Ordered { gaps: vec![0] }),
+            cross_line: true,
+            ..Default::default()
+        };
+        // line 2 is in-line (its next line also continues: in-line wins)
+        assert_eq!(passing(&index, &o, &texts), vec![(0, true), (2, false)]);
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        w.delete(1);
+        w.commit(None).unwrap();
+        assert_eq!(passing(&index, &o, &texts), vec![(2, false)]);
+    }
+
+    #[test]
+    fn same_section_all_and_at_least_n_and_negative_scope() {
+        // section 1: lines 0..2 (A | B | F); section 2: lines 3..4 (A | C);
+        // section 3 (book 2): line 5 (A B C); line 6 no section (A B)
+        let texts: Vec<String> = vec![
+            XA.to_string(),
+            XB.to_string(),
+            XF.to_string(),
+            XA.to_string(),
+            XC.to_string(),
+            format!("{XA} {XB} {XC}"),
+            format!("{XA} {XB}"),
+        ];
+        let sections = [Some(1), Some(1), Some(1), Some(2), Some(2), Some(1), None];
+        let docs: Vec<LineDoc> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| xline(i as u64, if i == 5 { 2 } else { 1 }, t, sections[i], false))
+            .collect();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &docs);
+            let ids = |o: &SearchOptions| -> Vec<u64> { passing(&index, o, &texts).into_iter().map(|h| h.0).collect() };
+            let all = SearchOptions { query: format!("{XA} {XB}"), same_section: true, ..Default::default() };
+            assert_eq!(ids(&all), vec![0, 1, 5, 6], "positions={positions}");
+            let three = SearchOptions { query: format!("{XA} {XB} {XC}"), same_section: true, ..Default::default() };
+            assert_eq!(ids(&three), vec![5]);
+            let two = SearchOptions { word_match: Some(WordMatchSpec::AtLeast { count: 2 }), ..three.clone() };
+            assert_eq!(ids(&two), vec![0, 1, 3, 4, 5, 6]);
+            // negative scope: sections holding the negative word are dropped whole
+            let neg = SearchOptions {
+                query: XA.to_string(),
+                exclude: Some(ExcludeOptions { query: XB.to_string(), same_section: true, ..Default::default() }),
+                ..Default::default()
+            };
+            assert_eq!(ids(&neg), vec![3]);
+            assert!(!index.search_options(&neg).unwrap().count_needs_text());
         }
     }
 }

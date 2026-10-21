@@ -49,6 +49,18 @@ namespace SeforimSearch.Demo.SeforimDb
         /// <summary>One book's lines in reading order (lineIndex; id breaks a tie), from the
         /// @skip-th on — the catalog-order index feed, one book at a time. Served by
         /// idx_line_book_index.</summary>
+        /// <summary><see cref="FtsReadBookLines"/> plus each line's section for the engine's
+        /// same-section scope: its TOC entry from `line_toc` (the authoritative mapping), else
+        /// `line.tocEntryId`, else NULL (no section: the line is a section of its own).</summary>
+        internal static string FtsReadBookLinesWithSection(SeforimDbSchema schema) =>
+            "SELECT l.id, " + C_ContentColumn(schema, "l") + ", " +
+            (schema.HasLineTocTable ? "lt.tocEntryId"
+             : schema.HasLineTocEntryIdColumn ? "l.tocEntryId"
+             : "NULL") +
+            " FROM line l" + C_ContentJoin(schema, "l") +
+            (schema.HasLineTocTable ? " LEFT JOIN line_toc lt ON lt.lineId = l.id" : "") +
+            " WHERE l.bookId = @b ORDER BY l.lineIndex, l.id LIMIT -1 OFFSET @skip";
+
         internal static string FtsReadBookLines(SeforimDbSchema schema) =>
             "SELECT l.id, " + C_ContentColumn(schema, "l") +
             " FROM line l" + C_ContentJoin(schema, "l") +

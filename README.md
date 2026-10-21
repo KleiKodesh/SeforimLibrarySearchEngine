@@ -22,6 +22,12 @@ the index stores only what the engine itself needs:
 - on an index built with `keep_marks` only: a `marked` flag on the lines
   that carry a nikud / ta'am mark (one term; Otzaria's vocalized search
   sees only those lines, so the engine filters by it)
+- three small per-line fast fields, read only when their option is used
+  (user's decision): the line's **word count** (cross-line matching; the
+  engine counts it with the scanner that numbers the positions), its
+  **line flags** (bit 0: no phrase continues into or out of the line; the
+  host sets it for headings) and its **section id** (same-section scope;
+  the host's, from seforim.db)
 
 Nothing else: no text, and no data the host can read from SQLite by line id.
 Grouping, sections, line index, references, neighbour lines and the like are
@@ -401,6 +407,90 @@ are not printed), so upstream's query-parser tests stay as they are.
     passing lines. `exact` turns true when every hit is counted. This is
     the no-positions flavour's path, and FtsLib's text-based distance on
     either flavour.
+- **Cross-line matching** (Otzaria's `continues_to_next_line`,
+  `cross_line.rs`; `cross_line` in `SearchOptions` / `SearchRequest`, C#
+  `CrossLine`, Dart `crossLine`, Otzaria demo `--cross-line`; off by
+  default, so FtsLib mode is unchanged). A match may start at the end of
+  line L and end at the start of line L+1 of the same book (L+1 = the next
+  catalog position), at most one break, for every way of matching: the
+  main query's rule (Otzaria's ordered or any-order proximity, per-pair
+  gaps in order, FtsLib's distance / order, words anywhere, partial
+  matching) and each phrase alternative (so user-regex sequences too).
+  `seforim-engine/src/cross_line.rs`:
+  - The two lines are one virtual line: L's positions, then L+1's shifted
+    by L's word count; the rule must hold there with a matched word on
+    each line. A line with the no-cross flag (headings; the C# and Dart
+    builds set it for a line starting with `<h`, Otzaria's rule) takes part
+    in no cross-line match, into or out of it; an empty line has no words.
+  - Candidates by shift-and-AND over per-slot line bitmaps (catalog
+    positions), built from the terms the walks already matched (the
+    sinks: postings only, no second walk): in order, for each split s the
+    lines holding slots 0..s AND the lines holding slots s.. shifted down
+    one; in any order, each slot on L or L+1 with a slot on each line (a
+    per-line count for partial matching). Then L+1 alive in the same book,
+    neither line flagged, the book filter, the negative query and the
+    negative section scope on L (Otzaria applies its filters to the
+    attributed line).
+  - In-line wins: a line found in-line is not a cross-line hit (removed
+    from the candidates when the in-line hits are exact; otherwise the
+    text check tries the line alone first).
+  - Exact check: words anywhere and partial matching are exact from the
+    bitmaps; proximity, gaps and phrases are checked on the postings'
+    positions of both lines on an index with positions (the locator's own
+    window rules over synthetic tokens, `proximity_across_positions`);
+    without positions, and for FtsLib's distance / order, the host's two
+    texts are checked by the locator over the joined text. Both flavours
+    give the same hits.
+  - A cross-line hit is reported on L with `next_line_id` (C ABI
+    `se_search_copy_next_lines`, `u64::MAX` = none; C# / Dart
+    `PlacedHit.NextLineId` / `nextLineId`). The host locates it with both
+    texts (`SnippetSession::locate_pair` / `try_locate_pairs`, C ABI
+    `se_search_locate_pairs`: per hit `[0]`, `[1, snippet]` in-line or
+    `[2, break, snippet]` cross-line; C# `LocatePairs`, Dart
+    `locatePairs`); counts take the pairs too (`count_batch_pairs`,
+    `se_search_count_batch_pairs`, `CountBatchPairs`, `countBatchPairs`).
+    A cross-line snippet's offsets are UTF-16 into `line + "\n" + next`
+    and `break_at` (C# `BreakAt`, Dart `breakAt`) is that `\n`'s offset
+    (render a line break there). Each line is tokenized on its own (no
+    word, paired reading or tag state crosses the break).
+  - Deviations, named: the word count is computed by the engine at
+    indexing, not supplied by the host (it must equal the index positions,
+    which only the engine's scanner numbers). Otzaria skips a leading or
+    trailing enumerator (`(ג)`-like markers) at the line edges; here the
+    match must reach L's last word and start at L+1's first word, an
+    enumerator being a word. Relevance order: cross-line hits score 0
+    (after every in-line hit; Otzaria scores them below typical in-line
+    hits). Per-pair `gaps` in either order (low-level request only) are
+    refused with cross-line. On an index with several segments the
+    candidates come from the union of the segments' matched terms (merged
+    indexes have one segment).
+  - Needs an index with the per-line fields (`se_index_info` `line_data`);
+    an older index returns a clear error.
+- **Same-section scope** (Otzaria's `SearchScope::SameSection`,
+  `section_scope.rs`; `same_section` in `SearchOptions`, C# `SameSection`,
+  Dart `sameSection`, Otzaria demo `--scope section`): every word (or
+  `word_match`'s count) anywhere in one section of the host's, the words
+  spread over its lines. One pass: each word's walk yields its lines
+  (filling its sink), each word's lines become the set of sections they
+  fall in (`(book_id, section_id)`, so ids may repeat across books; a line
+  without a section id is a section of its own), the sets are intersected
+  (or counted per section for at-least-N / most), and the hits are the
+  lines holding a word in a surviving section; one surviving word is
+  enough below 2 (Otzaria's flat OR). Distance, order and proximity do not
+  apply; phrase alternatives still add their own lines; `cross_line` is
+  ignored. Both index flavours; no text check (`count_needs_text` false).
+  Relevance: the count score (1 per slot the line holds).
+  - The negative query's scope (`exclude.same_section`, C# / Dart
+    `ExcludeOptions.SameSection` / `sameSection`, Otzaria demo
+    `--exclude-scope section`): a section holding every negative word
+    (each anywhere in it; a negative phrase alternative: its words
+    anywhere in it) is dropped whole, in the collector, through the same
+    section sets. This replaces the Dart demo's host-side multi-search
+    exclusion. A line without a section id is its own section (the old
+    host path never dropped such a hit).
+  - Sections come from the host at indexing (C# demo and Dart demo:
+    `line_toc.tocEntryId`, else `line.tocEntryId`; none = no section). An
+    index without the field returns a clear error.
 - **Cancellation and streaming** (Otzaria's cancel token / streamed pages):
   a `CancelToken` (Rust `LineIndex::search_cancellable` /
   `search_options_cancellable`; C ABI `se_cancel_token_new` / `_cancel` /
@@ -566,7 +656,7 @@ are not printed), so upstream's query-parser tests stay as they are.
   not applied in that case.
 - **Exclusion** (Otzaria's negative query): `exclude` in the request (C#
   `SearchRequest.Exclude`, Dart `exclude`, demo `--exclude "words"
-  [--exclude-scope distance|paragraph]`): the words to drop, as a query of their own
+  [--exclude-scope distance|paragraph|section]`): the words to drop, as a query of their own
   with its own distance, order and spacing, every word required (Otzaria's
   `apply_advanced_negative_query`, which builds it with the positive's
   builder). Options are PER WORD, as for the positive words: the global
@@ -585,13 +675,8 @@ are not printed), so upstream's query-parser tests stay as they are.
   distance/order limit, or per-pair spacing are excluded in the query
   itself (MustNot); several words bound by distance/order are checked on
   the line text at locate time, like the positive filters. Section-scoped
-  exclusion (Otzaria's sameSection / `scoped_words_query`) is host-side,
-  since the index holds no sections: one search per negative word, its
-  line ids mapped to sections with SQLite (`line_toc`), the sets
-  intersected, and the positive hits in those sections dropped (a hit
-  without a section is never dropped). The Dart demo does this for
-  `--exclude-scope section` (its per-word searches still use the global
-  options: section scope is on hold).
+  exclusion (Otzaria's sameSection) is the engine's: see the same-section
+  scope item.
 - **Phrase alternatives** (for Otzaria's ראשי תיבות): `phrase_alternatives`
   in the request (C# `PhraseAlternatives`, Dart `phraseAlternatives`). Each
   is a phrase ORed with the main query: its words adjacent, in order and all
@@ -888,11 +973,13 @@ what a page needs.
 - Otzaria gaps found by the Dart demo (see `dart/README.md`):
   - ראשי תיבות and תרגום ארמי are done host-side in the Dart demo
     (Otzaria's dictionary assets → phrase / word alternatives).
-  - Grouping (sameSection cards, identicalText merging) and sameSection
-    exclusion are done host-side in the Dart demo, with sections read from
-    SQLite (`line_toc`) by the hits' line ids.
-  - The positive query's sameSection scope (words spread over a section's
-    lines) is missing.
+  - Grouping (sameSection cards, identicalText merging) is done host-side
+    in the Dart demo, with sections read from SQLite (`line_toc`) by the
+    hits' line ids. The sameSection scope and its exclusion are the
+    engine's (section ids in the index).
+- Cross-line matching and the same-section scope are built, not yet
+  tested: their unit tests are written, the runs and a full rebuild
+  (index format `tantivy9`) are pending.
 - A full build compared side by side with FtsLib on the same queries.
 - Profiling: C# search is ~1.0 s (.NET 10) / ~1.5 s (net48), against 378 ms in
   the pure-Rust smoke test for the same query. That gap includes process start

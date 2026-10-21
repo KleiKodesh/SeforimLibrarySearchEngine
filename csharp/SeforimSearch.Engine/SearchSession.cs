@@ -44,14 +44,18 @@ namespace SeforimSearch.Engine
             if (count <= 0 || offset >= HitCount) return Array.Empty<PlacedHit>();
             count = (int)Math.Min(count, HitCount - offset);
             var raw = new ulong[count * 3];
+            var next = new ulong[count];
             ulong copied;
             fixed (ulong* r = raw)
                 copied = NativeMethods.se_search_copy_hits(_handle, (ulong)offset, (ulong)count, r);
+            fixed (ulong* n = next)
+                NativeMethods.se_search_copy_next_lines(_handle, (ulong)offset, (ulong)count, n);
             var hits = new PlacedHit[(int)copied];
             for (int i = 0; i < hits.Length; i++)
             {
                 int b = i * 3;
-                hits[i] = new PlacedHit((long)raw[b], (long)raw[b + 1], (long)raw[b + 2]);
+                long? nextLine = next[i] == ulong.MaxValue ? null : (long?)next[i];
+                hits[i] = new PlacedHit((long)raw[b], (long)raw[b + 1], (long)raw[b + 2], nextLine);
             }
             return hits;
         }
@@ -84,6 +88,76 @@ namespace SeforimSearch.Engine
                 results[i] = Snippet.Read(data, ref at);
             }
             return results;
+        }
+
+        /// <summary>
+        /// <see cref="LocateBatch"/> for hits given with their next line's text (cross-line
+        /// matching: null for a hit without <see cref="PlacedHit.NextLineId"/>). The line alone
+        /// is tried first; a cross-line snippet has <see cref="Snippet.BreakAt"/> and offsets
+        /// into <c>text + "\n" + next</c>.
+        /// </summary>
+        public Snippet?[] LocatePairs(IReadOnlyList<string> texts, IReadOnlyList<string?> nextTexts)
+        {
+            int n = texts.Count;
+            var results = new Snippet?[n];
+            if (n == 0) return results;
+            uint[] data = WithPairs(texts, nextTexts, (p, l, np, nl) =>
+                Interop.TakeBuffer(NativeMethods.se_search_locate_pairs(_handle, p, l, np, nl, (UIntPtr)n)));
+            int at = 0;
+            for (int i = 0; i < n; i++)
+            {
+                uint kind = data[at++];
+                if (kind == 0) continue;
+                int? brk = kind == 2 ? (int?)data[at++] : null;
+                var s = Snippet.Read(data, ref at);
+                s.BreakAt = brk;
+                results[i] = s;
+            }
+            return results;
+        }
+
+        /// <summary><see cref="CountBatch"/> for hits given with their next line's text.</summary>
+        public long CountBatchPairs(IReadOnlyList<string> texts, IReadOnlyList<string?> nextTexts)
+        {
+            long passed = WithPairs(texts, nextTexts, (p, l, np, nl) =>
+                NativeMethods.se_search_count_batch_pairs(_handle, p, l, np, nl, (UIntPtr)texts.Count));
+            if (passed < 0) throw Interop.Fail(Interop.LastError());
+            return passed;
+        }
+
+        private delegate T PairsCall<T>(IntPtr* texts, UIntPtr* lens, IntPtr* nextTexts, UIntPtr* nextLens);
+
+        private static T WithPairs<T>(IReadOnlyList<string> texts, IReadOnlyList<string?> nextTexts, PairsCall<T> call)
+        {
+            if (nextTexts.Count != texts.Count) throw new ArgumentException("one next text (or null) per text");
+            int n = nextTexts.Count;
+            var pins = new GCHandle[n];
+            var ptrs = new IntPtr[n];
+            var lens = new UIntPtr[n];
+            try
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    if (nextTexts[i] == null) continue;
+                    byte[] bytes = Interop.ToUtf8(nextTexts[i]!);
+                    if (bytes.Length == 0) bytes = new byte[1] { 0 };
+                    pins[i] = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+                    ptrs[i] = pins[i].AddrOfPinnedObject();
+                    lens[i] = (UIntPtr)(nextTexts[i]!.Length == 0 ? 0 : bytes.Length);
+                }
+                fixed (IntPtr* np = ptrs)
+                fixed (UIntPtr* nl = lens)
+                {
+                    IntPtr* npp = np;
+                    UIntPtr* nll = nl;
+                    return WithTexts(texts, (p, l) => call(p, l, npp, nll));
+                }
+            }
+            finally
+            {
+                foreach (var pin in pins)
+                    if (pin.IsAllocated) pin.Free();
+            }
         }
 
         private delegate T TextsCall<T>(IntPtr* texts, UIntPtr* lens);

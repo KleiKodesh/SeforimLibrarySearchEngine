@@ -109,6 +109,13 @@ pub struct SearchOptions {
     /// For `"generation"`: `[[book_id, generation_order], ...]` from the
     /// host (Otzaria's per-book `generationOrder`); books absent come last.
     pub book_generations: Vec<(u64, u32)>,
+    /// Cross-line matching: a match may continue from the end of a line onto
+    /// the start of the next line of the same book (see
+    /// `SearchRequest::cross_line`). Off by default (FtsLib).
+    pub cross_line: bool,
+    /// Otzaria's SameSection scope for the query (see
+    /// `SearchRequest::same_section`). Off by default.
+    pub same_section: bool,
 }
 
 impl Default for SearchOptions {
@@ -146,6 +153,8 @@ impl Default for SearchOptions {
             user_regex: false,
             order: ResultsOrder::Catalog,
             book_generations: Vec::new(),
+            cross_line: false,
+            same_section: false,
         }
     }
 }
@@ -202,6 +211,9 @@ pub struct ExcludeOptions {
     pub require_ordered: bool,
     /// Per typed word of `query`, as [`SearchOptions::proximity`].
     pub proximity: Option<ProximitySpec>,
+    /// Otzaria's SameSection negative scope: a section holding every
+    /// negative word is dropped whole (see `ExcludeSpec::same_section`).
+    pub same_section: bool,
 }
 
 /// A whole-phrase alternative: its words adjacent, in order, all required,
@@ -265,6 +277,7 @@ impl SearchOptions {
                         books: self.books.clone(),
                         order: self.order,
                         book_generations: self.book_generations.clone(),
+                        cross_line: self.cross_line,
                         ..Default::default()
                     });
                 }
@@ -316,6 +329,7 @@ impl SearchOptions {
                     // Otzaria: `voc.or(options_vocalized_flags(negative_search_options))`
                     vocalized: global_vocalized
                         || e.words.values().any(|w| w.match_nikud == Some(true) || w.match_teamim == Some(true)),
+                    same_section: e.same_section,
                 })
             }
             None => None,
@@ -335,6 +349,8 @@ impl SearchOptions {
             order: self.order,
             book_generations: self.book_generations.clone(),
             vocalized,
+            cross_line: self.cross_line,
+            same_section: self.same_section,
         })
     }
 }

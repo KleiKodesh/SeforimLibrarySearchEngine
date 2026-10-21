@@ -40,14 +40,20 @@ final class SearchSession implements Finalizable {
     if (count <= 0 || offset >= hitCount) return const [];
     if (count > hitCount - offset) count = hitCount - offset;
     final raw = calloc<Uint64>(count * 3);
+    final next = calloc<Uint64>(count);
     try {
       final copied = _n.searchCopyHits(_h, offset, count, raw);
+      _n.searchCopyNextLines(_h, offset, count, next);
       final v = raw.asTypedList(copied * 3);
+      // u64::MAX (no next line) reads as -1 in a Dart int
+      final nx = next.asTypedList(copied);
       return [
-        for (var i = 0; i < copied; i++) PlacedHit(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]),
+        for (var i = 0; i < copied; i++)
+          PlacedHit(v[i * 3], v[i * 3 + 1], v[i * 3 + 2], nx[i] == -1 ? null : nx[i]),
       ];
     } finally {
       calloc.free(raw);
+      calloc.free(next);
     }
   }
 
@@ -73,6 +79,58 @@ final class SearchSession implements Finalizable {
       at = next;
     }
     return out;
+  }
+
+  /// [locateBatch] for hits given with their next line's text (cross-line
+  /// matching; null for a hit without [PlacedHit.nextLineId]). The line
+  /// alone is tried first; a cross-line snippet has [Snippet.breakAt] and
+  /// offsets into `text + "\n" + next`.
+  List<Snippet?> locatePairs(List<String> texts, List<String?> nextTexts) {
+    final n = texts.length;
+    final out = List<Snippet?>.filled(n, null);
+    if (n == 0) return out;
+    final data = _withPairs(texts, nextTexts,
+        (p, l, np, nl) => _n.takeBuffer(_n.locatePairs(_h, p, l, np, nl, n)));
+    var at = 0;
+    for (var i = 0; i < n; i++) {
+      final kind = data[at++];
+      if (kind == 0) continue;
+      final brk = kind == 2 ? data[at++] : null;
+      final (s, next) = Snippet.read(data, at, brk);
+      out[i] = s;
+      at = next;
+    }
+    return out;
+  }
+
+  /// [countBatch] for hits given with their next line's text.
+  int countBatchPairs(List<String> texts, List<String?> nextTexts) {
+    final passed =
+        _withPairs(texts, nextTexts, (p, l, np, nl) => _n.countBatchPairs(_h, p, l, np, nl, texts.length));
+    if (passed < 0) throw _n.error();
+    return passed;
+  }
+
+  static T _withPairs<T>(List<String> texts, List<String?> nextTexts,
+      T Function(Pointer<Pointer<Uint8>>, Pointer<Size>, Pointer<Pointer<Uint8>>, Pointer<Size>) call) {
+    if (nextTexts.length != texts.length) throw ArgumentError('one next text (or null) per text');
+    return using((a) {
+      final n = nextTexts.length;
+      final ptrs = a<Pointer<Uint8>>(n == 0 ? 1 : n);
+      final lens = a<Size>(n == 0 ? 1 : n);
+      for (var i = 0; i < n; i++) {
+        final t = nextTexts[i];
+        if (t == null) {
+          ptrs[i] = nullptr;
+          lens[i] = 0;
+        } else {
+          final (p, l) = utf8Native(t, a);
+          ptrs[i] = p;
+          lens[i] = l;
+        }
+      }
+      return _withTexts(texts, (p, l) => call(p, l, ptrs, lens));
+    });
   }
 
   /// Passes [texts] as UTF-8 pointer + length arrays.

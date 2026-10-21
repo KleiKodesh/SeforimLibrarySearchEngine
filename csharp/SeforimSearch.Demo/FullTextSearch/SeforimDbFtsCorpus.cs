@@ -121,6 +121,16 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         public IEnumerable<(int Id, string Text, int BookId)> ReadDocumentsWithBookInResultOrder(long skip,
                                                                                                CancellationToken ct = default)
         {
+            foreach (var d in ReadDocumentsWithSectionInResultOrder(skip, ct))
+                yield return (d.Id, d.Text, d.BookId);
+        }
+
+        /// <summary><see cref="ReadDocumentsWithBookInResultOrder"/> plus each line's section
+        /// (its TOC entry; null when it has none), which the engine keeps for the same-section
+        /// scope. Not in Core.</summary>
+        public IEnumerable<(int Id, string Text, int BookId, long? SectionId)> ReadDocumentsWithSectionInResultOrder(long skip,
+                                                                                               CancellationToken ct = default)
+        {
             var treeOrder = SeforimDbBookTreeOrder.Load(_connection);
 
             var lineCounts = new Dictionary<int, long>();
@@ -140,7 +150,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             });
 
             using var command = _connection.CreateCommand();
-            command.CommandText = SeforimDbSqlStrings.FtsReadBookLines(_schema);
+            command.CommandText = SeforimDbSqlStrings.FtsReadBookLinesWithSection(_schema);
             var pBook = command.Parameters.Add("@b", SqliteType.Integer);
             var pSkip = command.Parameters.Add("@skip", SqliteType.Integer);
             foreach (int bookId in bookOrder)
@@ -154,7 +164,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 while (reader.Read())
                 {
                     ct.ThrowIfCancellationRequested();
-                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1), bookId);
+                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1), bookId,
+                                  reader.IsDBNull(2) ? null : (long?)reader.GetInt64(2));
                 }
             }
         }

@@ -66,6 +66,21 @@ final class SeforimNative {
         writerAdd = lib.lookupFunction<
             Int32 Function(Pointer<Void>, Uint64, Uint64, Uint64, Pointer<Uint8>, Size),
             int Function(Pointer<Void>, int, int, int, Pointer<Uint8>, int)>('se_writer_add'),
+        writerAddLine = lib.lookupFunction<
+            Int32 Function(Pointer<Void>, Uint64, Uint64, Uint64, Uint64, Uint32, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, int, int, int, int, int, Pointer<Uint8>, int)>('se_writer_add_line'),
+        searchCopyNextLines = lib.lookupFunction<Uint64 Function(Pointer<Void>, Uint64, Uint64, Pointer<Uint64>),
+            int Function(Pointer<Void>, int, int, Pointer<Uint64>)>('se_search_copy_next_lines'),
+        locatePairs = lib.lookupFunction<
+            SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Pointer<Pointer<Uint8>>,
+                Pointer<Size>, Size),
+            SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Pointer<Pointer<Uint8>>,
+                Pointer<Size>, int)>('se_search_locate_pairs'),
+        countBatchPairs = lib.lookupFunction<
+            Int64 Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Pointer<Pointer<Uint8>>,
+                Pointer<Size>, Size),
+            int Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Pointer<Pointer<Uint8>>,
+                Pointer<Size>, int)>('se_search_count_batch_pairs'),
         writerDelete = lib.lookupFunction<Int32 Function(Pointer<Void>, Uint64),
             int Function(Pointer<Void>, int)>('se_writer_delete'),
         writerCommit = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint8>, Size),
@@ -125,6 +140,12 @@ final class SeforimNative {
   final Pointer<Void> Function(Pointer<Void>, int, int) writerOpen;
   final int Function(Pointer<Void>, int, int, int, Pointer<Uint8>, int) writerAdd;
   final int Function(Pointer<Void>, int) writerDelete;
+  final int Function(Pointer<Void>, int, int, int, int, int, Pointer<Uint8>, int) writerAddLine;
+  final int Function(Pointer<Void>, int, int, Pointer<Uint64>) searchCopyNextLines;
+  final SeBuffer Function(
+      Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) locatePairs;
+  final int Function(
+      Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) countBatchPairs;
   final int Function(Pointer<Void>, Pointer<Uint8>, int) writerCommit;
   final int Function(Pointer<Void>) writerRollback;
   final int Function(Pointer<Void>) writerMergeAndClose;

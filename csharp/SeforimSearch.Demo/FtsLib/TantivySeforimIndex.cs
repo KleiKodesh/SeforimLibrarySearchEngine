@@ -103,7 +103,7 @@ namespace FtsLib.Fts5
         public const int DefaultContextWords = 8;
 
         /// <summary>Bumped when the indexing pipeline changes; part of the provenance stamp.</summary>
-        public const string IndexFormatVersion = "tantivy8"; // 2: trailing quotes dropped from terms; 3: bare-minimum schema (no line_index/toc_entry_id); 5: one-letter (and 30+ letter) words indexed with positions; 6: FtsLib word model = Otzaria's (digit runs are words, ב5 one word); 7: Otzaria's remaining tokenizer rules (. [ ] bidi chars join, no script split, geresh kept as ', trailing geresh, quote and presentation-form folding, paired readings share a position, a term of 128 bytes or more not indexed); 8: a keep_marks index keeps marks in canonical order, flags the lines carrying a mark, measures the 128-byte limit without marks
+        public const string IndexFormatVersion = "tantivy9"; // 9: per-line word count, line flags (headings: no cross-line phrase) and section id (TOC entry); 2: trailing quotes dropped from terms; 3: bare-minimum schema (no line_index/toc_entry_id); 5: one-letter (and 30+ letter) words indexed with positions; 6: FtsLib word model = Otzaria's (digit runs are words, ב5 one word); 7: Otzaria's remaining tokenizer rules (. [ ] bidi chars join, no script split, geresh kept as ', trailing geresh, quote and presentation-form folding, paired readings share a position, a term of 128 bytes or more not indexed); 8: a keep_marks index keeps marks in canonical order, flags the lines carrying a mark, measures the 128-byte limit without marks
 
         private readonly string _indexPath;
         private readonly Func<SeforimDbFtsCorpus> _openCorpus;
@@ -489,7 +489,7 @@ namespace FtsLib.Fts5
             bool verifyFirst = resume, sawFirst = false, capped = false;
             int sinceCommit = 0;
 
-            foreach (var (id, text, bookId) in corpus.ReadDocumentsWithBookInResultOrder(skip, ct))
+            foreach (var (id, text, bookId, sectionId) in corpus.ReadDocumentsWithSectionInResultOrder(skip, ct))
             {
                 if (verifyFirst)
                 {
@@ -501,7 +501,12 @@ namespace FtsLib.Fts5
                 }
                 if (maxLines > 0 && state.LinesDone >= maxLines) { capped = true; break; }
 
-                writer.Add(new LineDocument { LineId = id, Position = state.LinesDone, BookId = bookId, Text = text });
+                // Otzaria's rule: a heading interrupts the text, no phrase continues into or out of it.
+                writer.Add(new LineDocument
+                {
+                    LineId = id, Position = state.LinesDone, BookId = bookId, Text = text,
+                    SectionId = sectionId, NoCross = text.StartsWith("<h", StringComparison.Ordinal),
+                });
                 state.LinesDone++;
                 state.LastLineId = id;
                 if (++sinceCommit >= linesPerCommit)

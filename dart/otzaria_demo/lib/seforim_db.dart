@@ -133,8 +133,13 @@ class SeforimDb {
 
   /// One book's lines in reading order.
   Iterable<DbLine> bookLines(int bookId) sync* {
-    final stmt = _db.prepare('SELECT l.id, l.lineIndex, COALESCE(l.tocEntryId, 0), $_contentCol FROM line l'
-        '$_contentJoin WHERE l.bookId = ? ORDER BY l.lineIndex, l.id');
+    // the section: `line_toc` (the authoritative map) when the DB has it
+    final hasLineToc =
+        _db.select("SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_toc'").isNotEmpty;
+    final toc = hasLineToc ? 'COALESCE(lt.tocEntryId, 0)' : 'COALESCE(l.tocEntryId, 0)';
+    final tocJoin = hasLineToc ? ' LEFT JOIN line_toc lt ON lt.lineId = l.id' : '';
+    final stmt = _db.prepare('SELECT l.id, l.lineIndex, $toc, $_contentCol FROM line l'
+        '$_contentJoin$tocJoin WHERE l.bookId = ? ORDER BY l.lineIndex, l.id');
     try {
       final cur = stmt.selectCursor([bookId]);
       while (cur.moveNext()) {

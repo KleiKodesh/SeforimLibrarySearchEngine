@@ -17,7 +17,9 @@ use tantivy::query::{
 };
 use tantivy::{DocId, Score, SegmentOrdinal, SegmentReader};
 
+use crate::cross_line::{self, CrossInput, CrossMatcher, CrossRule};
 use crate::fm_expand;
+use crate::section_scope::{self, DocSetQuery, SectionColumns, SectionKey};
 use crate::fm_index::FmIndex;
 use crate::index::LineIndex;
 use crate::options::SearchOptions;
@@ -323,6 +325,22 @@ pub struct SearchRequest {
     /// query and the phrase alternatives. Needs an index built with
     /// `keep_marks` (it flags those lines).
     pub vocalized: bool,
+    /// Cross-line matching (see `cross_line`): a match may also start at
+    /// the end of a line and end at the start of the next line of the same
+    /// book, at most one line break, for every way of matching (the main
+    /// query's rule and each phrase alternative). A line found in-line is
+    /// never a cross-line hit (in-line wins). A cross-line hit is reported
+    /// on its first line with `next_line_id` set; the host locates it with
+    /// both lines' texts. Needs an index with per-line data. Off: unchanged.
+    pub cross_line: bool,
+    /// The same-section scope (Otzaria's SameSection, see `section_scope`):
+    /// every slot (or `min_groups` of them) anywhere in one section of the
+    /// host's, the words spread over its lines; the hits are the lines
+    /// holding a query word in such a section. Distance, order, gaps and
+    /// proximity do not apply (as Otzaria); phrase alternatives still add
+    /// their own lines; `cross_line` has no meaning here and is ignored.
+    /// Needs an index with section ids.
+    pub same_section: bool,
 }
 
 impl Default for SearchRequest {
@@ -341,6 +359,8 @@ impl Default for SearchRequest {
             order: ResultsOrder::Catalog,
             book_generations: Vec::new(),
             vocalized: false,
+            cross_line: false,
+            same_section: false,
         }
     }
 }
@@ -357,11 +377,9 @@ impl Default for SearchRequest {
 /// located (the same way the positive filters work), so such lines are
 /// still in `hits` and come back as `None` from `locate`.
 ///
-/// Section-scoped exclusion (Otzaria's SameSection scope) is the HOST's job,
-/// since the index holds no sections: run each negative word as its own
-/// search (it returns line ids), map those to sections with SQLite
-/// (`line_toc`), intersect the section sets, and drop the positive hits in
-/// the remaining sections.
+/// Section-scoped exclusion (Otzaria's SameSection negative scope):
+/// `same_section` drops every line of a section that holds every negative
+/// word (each anywhere in it), through the index's section ids.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExcludeSpec {
@@ -389,6 +407,12 @@ pub struct ExcludeSpec {
     /// carries an attached mark is excluded (its phrase alternatives too).
     /// Needs `keep_marks`.
     pub vocalized: bool,
+    /// Otzaria's SameSection negative scope: a section holding every
+    /// negative word (each anywhere in it; a phrase alternative: its words
+    /// anywhere in it) is dropped whole: none of its lines is a hit.
+    /// Distance, order, gaps and proximity do not apply then. A line with
+    /// no section id is a section of its own. Needs an index with section ids.
+    pub same_section: bool,
 }
 
 /// One matching line (hits come in the requested order, catalog by default): only the ids the index keeps. The
@@ -399,6 +423,12 @@ pub struct PlacedHit {
     pub position: u64,
     pub line_id: u64,
     pub book_id: u64,
+    /// Cross-line matching: the next line's id when the match may continue
+    /// onto it (a cross-line hit, or an in-line candidate the text decides).
+    /// The host then locates the hit with both texts
+    /// ([`SnippetSession::locate_pair`]). None otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_line_id: Option<u64>,
 }
 
 /// Snippet flag: "…" before the window.
@@ -425,6 +455,12 @@ pub struct Snippet {
     /// (start, length, termId) triples; termId indexes the session's term table.
     pub marks: Vec<u32>,
     pub flags: u32,
+    /// A cross-line snippet: the offsets are into the two lines joined as
+    /// `line + "\n" + next_line`, and this is the UTF-16 offset of that
+    /// `\n` (the line break; a renderer shows it as `<br>`). None: an
+    /// in-line snippet, offsets into the line itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub break_at: Option<usize>,
 }
 
 impl Snippet {
@@ -482,6 +518,9 @@ pub struct SnippetSession {
     count_needs_text: bool,
     /// The search's cancel token (None: not cancellable).
     cancel: Option<CancelToken>,
+    /// Cross-line matching is on: a next line's text given with a hit may
+    /// complete its match (see [`locate_pair`](Self::locate_pair)).
+    cross_line: bool,
 }
 
 /// One way a line can match: prepared terms plus the filters to apply.
@@ -493,12 +532,22 @@ struct Matcher {
     min_groups: usize,
     /// Otzaria's proximity: replaces the three FtsLib filters above.
     proximity: Option<Proximity>,
+    /// Across a line break, the rule a span query applied in-line (per-pair
+    /// gaps, a phrase alternative) is checked on the joined text: the
+    /// locator's own proximity, so both index flavours give the same
+    /// cross-line hits. None: the in-line rule.
+    cross_proximity: Option<Proximity>,
 }
 
 impl Matcher {
     /// A passing snippet with marks holding THIS matcher's term ordinals,
-    /// over the text the locator last tokenized.
-    fn locate(&self, locator: &mut SnippetWindowLocator) -> Option<Snippet> {
+    /// over the text the locator last tokenized (`crossing`: two lines
+    /// joined by `tokenize_pair`; the window must cross the break).
+    fn locate(&self, locator: &mut SnippetWindowLocator, crossing: bool) -> Option<Snippet> {
+        if let Some(proximity) = self.cross_proximity.as_ref().filter(|_| crossing) {
+            let d = locator.locate_proximity_tokenized(&self.prepared, proximity);
+            return SnippetSession::raw(d, usize::MAX);
+        }
         if let Some(proximity) = &self.proximity {
             let d = locator.locate_proximity_tokenized(&self.prepared, proximity);
             return SnippetSession::raw(d, usize::MAX);
@@ -509,12 +558,20 @@ impl Matcher {
     }
 }
 
-/// First matcher that passes, with its index.
+/// One hit's texts: the line, and the next line's when the match may
+/// continue onto it (cross-line matching).
+type HitText<'a> = (&'a str, Option<&'a str>);
+
+/// First matcher that passes, with its index. The line alone first (an
+/// in-line match wins); then, given the next line's text and cross-line
+/// matching on, the two lines joined (the snippet's `break_at` set). The
+/// negative filter reads the line alone (the hit's line, as the index-level
+/// negative query).
 fn locate_with(
     matchers: &[Matcher],
     negative: &[NegativeFilter],
     locator: &mut SnippetWindowLocator,
-    text: &str,
+    (text, next): HitText<'_>,
 ) -> Option<(usize, Snippet)> {
     if text.is_empty() {
         return None; // the locator never matches an empty text
@@ -529,10 +586,17 @@ fn locate_with(
     }) {
         return None;
     }
-    matchers
-        .iter()
-        .enumerate()
-        .find_map(|(i, m)| m.locate(locator).map(|s| (i, s)))
+    if let Some(found) = matchers.iter().enumerate().find_map(|(i, m)| m.locate(locator, false).map(|s| (i, s))) {
+        return Some(found);
+    }
+    let next = next.filter(|n| !n.is_empty())?;
+    let at = locator.tokenize_pair(text, next);
+    matchers.iter().enumerate().find_map(|(i, m)| {
+        m.locate(locator, true).map(|mut s| {
+            s.break_at = Some(at);
+            (i, s)
+        })
+    })
 }
 
 /// The excluded words checked on the line text: a line where they appear
@@ -569,7 +633,17 @@ impl SnippetSession {
     /// pass (not all groups present, wrong order, too far apart, or the
     /// excluded words present).
     pub fn locate(&mut self, text: &str) -> Option<Snippet> {
-        let (i, mut s) = locate_with(&self.matchers, &self.negative, &mut self.locator, text)?;
+        self.locate_pair(text, None)
+    }
+
+    /// [`locate`](Self::locate) for a hit whose match may continue onto the
+    /// next line (`next`: that line's text, for a hit with `next_line_id`;
+    /// ignored unless the search has cross-line matching on). The line
+    /// alone is tried first; a cross-line snippet's offsets are into
+    /// `text + "\n" + next` and its `break_at` is the `\n`'s offset.
+    pub fn locate_pair(&mut self, text: &str, next: Option<&str>) -> Option<Snippet> {
+        let next = next.filter(|_| self.cross_line);
+        let (i, mut s) = locate_with(&self.matchers, &self.negative, &mut self.locator, (text, next))?;
         let prepared = &self.matchers[i].prepared;
         for m in s.marks.chunks_exact_mut(3) {
             m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
@@ -588,6 +662,32 @@ impl SnippetSession {
         self.try_locate_many(texts).unwrap_or_else(|_| vec![None; n])
     }
 
+    /// [`try_locate_many`](Self::try_locate_many) for hits given with their
+    /// next line's text when they have one (see [`locate_pair`](Self::locate_pair)).
+    pub fn try_locate_pairs(&mut self, texts: &[(&str, Option<&str>)]) -> Result<Vec<Option<Snippet>>> {
+        if self.matchers.is_empty() {
+            return Ok(vec![None; texts.len()]);
+        }
+        let items: Vec<HitText<'_>> = if self.cross_line {
+            texts.to_vec()
+        } else {
+            texts.iter().map(|&(t, _)| (t, None)).collect()
+        };
+        let located = self.run_many(&items, locate_with)?;
+        Ok(located
+            .into_iter()
+            .map(|r| {
+                r.map(|(i, mut s)| {
+                    let prepared = &self.matchers[i].prepared;
+                    for m in s.marks.chunks_exact_mut(3) {
+                        m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
+                    }
+                    s
+                })
+            })
+            .collect())
+    }
+
     /// [`locate_many`](Self::locate_many), stopping with
     /// [`Error::Cancelled`] when the search's token is cancelled (checked
     /// per chunk of work).
@@ -596,7 +696,8 @@ impl SnippetSession {
             return Ok(vec![None; texts.len()]);
         }
         // Snippets with marks still holding the query's term ORDINALS.
-        let located = self.run_many(texts, locate_with)?;
+        let items: Vec<HitText<'_>> = texts.iter().map(|&t| (t, None)).collect();
+        let located = self.run_many(&items, locate_with)?;
         // Ordinals -> search-wide term ids, in document order (deterministic).
         Ok(located
             .into_iter()
@@ -615,10 +716,22 @@ impl SnippetSession {
     /// Whether each text passes (the same test as [`locate`](Self::locate)
     /// returning Some), across all cores; the term table is not touched.
     pub fn passes_many(&mut self, texts: &[&str]) -> Result<Vec<bool>> {
+        let items: Vec<HitText<'_>> = texts.iter().map(|&t| (t, None)).collect();
+        self.passes_pairs(&items)
+    }
+
+    /// [`passes_many`](Self::passes_many) for hits given with their next
+    /// line's text when they have one.
+    pub fn passes_pairs(&mut self, texts: &[(&str, Option<&str>)]) -> Result<Vec<bool>> {
         if self.matchers.is_empty() {
             return Ok(vec![false; texts.len()]);
         }
-        self.run_many(texts, |m, n, l, t| locate_with(m, n, l, t).is_some())
+        let items: Vec<HitText<'_>> = if self.cross_line {
+            texts.to_vec()
+        } else {
+            texts.iter().map(|&(t, _)| (t, None)).collect()
+        };
+        self.run_many(&items, |m, n, l, t| locate_with(m, n, l, t).is_some())
     }
 
     /// True when an exact count needs the hits' texts (see
@@ -632,8 +745,8 @@ impl SnippetSession {
     /// [`Error::Cancelled`] when the token is cancelled (checked per chunk).
     fn run_many<T: Send>(
         &mut self,
-        texts: &[&str],
-        f: impl Fn(&[Matcher], &[NegativeFilter], &mut SnippetWindowLocator, &str) -> T + Sync,
+        texts: &[HitText<'_>],
+        f: impl Fn(&[Matcher], &[NegativeFilter], &mut SnippetWindowLocator, HitText<'_>) -> T + Sync,
     ) -> Result<Vec<T>> {
         let cancel = self.cancel.as_ref();
         CancelToken::check(cancel)?;
@@ -645,7 +758,7 @@ impl SnippetSession {
             .min(texts.len().max(1));
         let mut located: Vec<T> = Vec::with_capacity(texts.len());
         if threads <= 1 || texts.len() < 32 {
-            for t in texts {
+            for &t in texts {
                 located.push(f(matchers, negative, &mut self.locator, t));
             }
             CancelToken::check(cancel)?;
@@ -657,12 +770,13 @@ impl SnippetSession {
             // their results are reassembled by chunk index, so the output
             // order — and with it the term-id numbering below — is exactly
             // the sequential one.
-            let total: usize = texts.iter().map(|t| t.len()).sum();
+            let size = |t: &HitText<'_>| t.0.len() + t.1.map_or(0, str::len);
+            let total: usize = texts.iter().map(size).sum();
             let target = (total / (threads * 8)).max(1);
             let mut bounds = vec![0usize];
             let mut acc = 0usize;
             for (i, t) in texts.iter().enumerate() {
-                acc += t.len();
+                acc += size(t);
                 if acc >= target && i + 1 < texts.len() {
                     bounds.push(i + 1);
                     acc = 0;
@@ -697,7 +811,7 @@ impl SnippetSession {
                                 }
                                 let part = &texts[bounds[c]..bounds[c + 1]];
                                 let res: Vec<_> =
-                                    part.iter().map(|t| f(matchers, negative, locator, t)).collect();
+                                    part.iter().map(|&t| f(matchers, negative, locator, t)).collect();
                                 done.push((c, res));
                             }
                             done
@@ -732,6 +846,7 @@ impl SnippetSession {
             marks: d.mark_ranges.iter().map(|&v| v as u32).collect(),
             flags: (if d.leading_ellipsis { SNIPPET_FLAG_LEADING_ELLIPSIS } else { 0 })
                 | (if d.trailing_ellipsis { SNIPPET_FLAG_TRAILING_ELLIPSIS } else { 0 }),
+            break_at: None,
         })
     }
 
@@ -864,6 +979,13 @@ impl SearchResult {
     /// exactly [`SnippetSession::locate`]'s. When no text is needed the
     /// texts are not read (every hit passes).
     pub fn count_batch(&mut self, texts: &[&str]) -> Result<usize> {
+        let items: Vec<HitText<'_>> = texts.iter().map(|&t| (t, None)).collect();
+        self.count_batch_pairs(&items)
+    }
+
+    /// [`count_batch`](Self::count_batch) for hits given with their next
+    /// line's text when they have `next_line_id` (cross-line matching).
+    pub fn count_batch_pairs(&mut self, texts: &[(&str, Option<&str>)]) -> Result<usize> {
         let start = self.tally.validated;
         let end = start + texts.len();
         if end > self.hits.len() {
@@ -875,7 +997,7 @@ impl SearchResult {
             )));
         }
         let pass = if self.session.count_needs_text {
-            self.session.passes_many(texts)?
+            self.session.passes_pairs(texts)?
         } else {
             CancelToken::check(self.session.cancel.as_ref())?;
             vec![true; texts.len()]
@@ -922,6 +1044,8 @@ impl SearchResult {
 struct PlacedCollector {
     /// Book filter (see `SearchRequest::books`).
     books: Option<Arc<std::collections::HashSet<u64>>>,
+    /// Sections the negative query's section scope dropped.
+    drop_sections: Option<Arc<std::collections::HashSet<SectionKey>>>,
     /// Keep each hit's doc id (relevance order scores them after the search).
     keep_docs: bool,
 }
@@ -929,6 +1053,7 @@ struct PlacedCollector {
 struct PlacedSegmentCollector {
     columns: [Column<u64>; 3],
     books: Option<Arc<std::collections::HashSet<u64>>>,
+    drop_sections: Option<(Arc<std::collections::HashSet<SectionKey>>, SectionColumns)>,
     out: Vec<PlacedHit>,
     /// Relevance order only: each kept hit's doc id (aligned with `out`).
     docs: Option<Vec<DocId>>,
@@ -951,6 +1076,13 @@ impl Collector for PlacedCollector {
                 ff.u64("book_id")?,
             ],
             books: self.books.clone(),
+            drop_sections: match &self.drop_sections {
+                Some(d) => Some((d.clone(), SectionColumns::open(segment).map_err(|e| match e {
+                    Error::Tantivy(t) => t,
+                    other => tantivy::TantivyError::InternalError(other.to_string()),
+                })?)),
+                None => None,
+            },
             out: Vec::new(),
             docs: self.keep_docs.then(Vec::new),
         })
@@ -974,10 +1106,16 @@ impl SegmentCollector for PlacedSegmentCollector {
         if self.books.as_ref().is_some_and(|b| !b.contains(&book_id)) {
             return;
         }
+        if let Some((drop, sections)) = &self.drop_sections {
+            if drop.contains(&sections.key(doc)) {
+                return;
+            }
+        }
         self.out.push(PlacedHit {
             position: get(&self.columns[0]),
             line_id: get(&self.columns[1]),
             book_id,
+            next_line_id: None,
         });
         if let Some(docs) = &mut self.docs {
             docs.push(doc);
@@ -1425,10 +1563,19 @@ impl LineIndex {
             .map(|k| k.max(1));
         let partial = partial_min.is_some();
         // Otzaria's proximity (partial matching wins over it).
-        let proximity = match (&request.proximity, partial) {
+        // The same-section scope: no distance, order or proximity (Otzaria).
+        let section = request.same_section;
+        let proximity = match (&request.proximity, partial || section) {
             (Some(p), false) if !request.groups.is_empty() => Some(p.resolve(request.groups.len())?),
             _ => None,
         };
+        // Cross-line: per-pair gaps cross the break in order only.
+        let cross = request.cross_line && !section;
+        if cross && request.gaps.is_some() && !partial && proximity.is_none() && !request.require_ordered {
+            return Err(Error::Unsupported(
+                "cross-line matching with per-pair gaps needs the words in order (require_ordered)".into(),
+            ));
+        }
         let mut session = SnippetSession {
             matchers: Vec::new(),
             original_group_count: request.groups.len(),
@@ -1443,7 +1590,12 @@ impl LineIndex {
             pool: Vec::new(),
             count_needs_text: false,
             cancel: cancel.clone(),
+            cross_line: cross,
         };
+        if section {
+            session.require_ordered = false;
+            session.max_word_distance = usize::MAX;
+        }
 
         let reader = self.index.reader()?;
         let searcher = reader.searcher();
@@ -1455,7 +1607,40 @@ impl LineIndex {
         // (the plain AND skips the slots that cannot search).
         let mut main_slot_ids: Option<Vec<usize>> = None;
 
-        let main_query: Option<Box<dyn Query>> = if let Some(prox) = &proximity {
+        let main_query: Option<Box<dyn Query>> = if section {
+            // Same-section scope: each word's walk gives its lines (and
+            // fills its sink); sections holding all (or `min`) of the words
+            // survive; the hits are their lines holding a word.
+            section_scope::require(self)?;
+            let mut per_word = Vec::new();
+            let mut searched = Vec::new();
+            for (gi, group) in request.groups.iter().enumerate() {
+                let sink = MatchedTermsSink::new();
+                if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                    let w = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
+                    per_word.push(section_scope::docs_of(w.as_ref(), &searcher, cancel.as_ref())?);
+                    sinks.push(sink);
+                    searched.push(gi);
+                }
+            }
+            main_slot_ids = Some(searched);
+            if per_word.is_empty() {
+                None
+            } else {
+                let columns: Vec<SectionColumns> =
+                    searcher.segment_readers().iter().map(SectionColumns::open).collect::<Result<_>>()?;
+                let n = per_word.len();
+                let min = partial_min.map_or(n, |m| m.min(n));
+                let allowed = (min > 1).then(|| {
+                    section_scope::surviving(
+                        per_word.iter().map(|d| section_scope::sections_of(d, &columns)).collect(),
+                        min,
+                    )
+                });
+                let lines = section_scope::lines_in(&per_word, &columns, allowed.as_ref(), columns.len());
+                Some(Box::new(DocSetQuery::new(&searcher, lines)) as Box<dyn Query>)
+            }
+        } else if let Some(prox) = &proximity {
             if self.options.positions && request.groups.len() > 1 {
                 // One span query: the rule checked on each candidate's positions.
                 let (gaps, window) = match prox {
@@ -1562,7 +1747,7 @@ impl LineIndex {
         };
         let shape = relevance::Shape::of(
             main_slots.len(),
-            partial,
+            partial || section,
             proximity.as_ref(),
             request.gaps.as_deref(),
             request.require_ordered,
@@ -1620,7 +1805,36 @@ impl LineIndex {
             }
             Ok(())
         };
-        if let Some(ex) = &request.exclude {
+        let mut drop_sections: Option<Arc<std::collections::HashSet<SectionKey>>> = None;
+        if let Some(ex) = request.exclude.as_ref().filter(|e| e.same_section) {
+            // Otzaria's SameSection negative scope: every line of a section
+            // holding every negative word (or a phrase alternative's words)
+            // is dropped.
+            section_scope::require(self)?;
+            let columns: Vec<SectionColumns> =
+                searcher.segment_readers().iter().map(SectionColumns::open).collect::<Result<_>>()?;
+            let sections_all = |groups: &[GroupSpec]| -> Result<std::collections::HashSet<SectionKey>> {
+                let mut per_word = Vec::new();
+                for group in groups {
+                    let sink = MatchedTermsSink::new();
+                    if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                        let w = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
+                        let docs = section_scope::docs_of(w.as_ref(), &searcher, cancel.as_ref())?;
+                        per_word.push(section_scope::sections_of(&docs, &columns));
+                    }
+                }
+                let n = per_word.len();
+                Ok(section_scope::surviving(per_word, n))
+            };
+            let mut blocked = sections_all(&ex.groups)?;
+            for phrase in &ex.phrase_alternatives {
+                blocked.extend(sections_all(phrase)?);
+            }
+            if !blocked.is_empty() {
+                drop_sections = Some(Arc::new(blocked));
+            }
+        }
+        if let Some(ex) = request.exclude.as_ref().filter(|e| !e.same_section) {
             let mut negative_sinks: Vec<MatchedTermsSink> = Vec::new();
             let ex_proximity = match &ex.proximity {
                 Some(p) if ex.groups.len() > 1 => Some(p.resolve(ex.groups.len())?),
@@ -1714,6 +1928,15 @@ impl LineIndex {
                 }
             }
         }
+        // The query-level negatives, for the cross-line pass (applied to its line L).
+        let negative_union: Option<Box<dyn Query>> = match query_negatives.len() {
+            0 => None,
+            1 if cross => Some(query_negatives[0].box_clone()),
+            _ if cross => Some(Box::new(BooleanQuery::new(
+                query_negatives.iter().map(|q| (Occur::Should, q.box_clone())).collect(),
+            ))),
+            _ => None,
+        };
         let query: Box<dyn Query> = if query_negatives.is_empty() {
             query
         } else {
@@ -1736,8 +1959,11 @@ impl LineIndex {
         let mut hits = Vec::new();
         // Relevance order only: each hit's (segment, doc), aligned with `hits`.
         let mut keys: Vec<(u32, DocId)> = Vec::new();
+        let books: Option<Arc<std::collections::HashSet<u64>>> =
+            request.books.as_ref().map(|b| Arc::new(b.iter().copied().collect()));
         let collector = PlacedCollector {
-            books: request.books.as_ref().map(|b| Arc::new(b.iter().copied().collect())),
+            books: books.clone(),
+            drop_sections: drop_sections.clone(),
             keep_docs: relevance,
         };
         for (ord, segment) in searcher.segment_readers().iter().enumerate() {
@@ -1789,13 +2015,6 @@ impl LineIndex {
         }
         // The walks ran inside scorer creation: their caps are known now.
         let truncated = watched.iter().any(|s| s.is_truncated());
-        // Relevance keeps the collection order (aligned with `keys`) until
-        // the hits are scored, below.
-        if !relevance {
-            // (relevance turned off for want of positions sorts by catalog order)
-            let order = if request.order == ResultsOrder::Relevance { ResultsOrder::Catalog } else { request.order };
-            relevance::sort_hits(&mut hits, order, &request.book_generations);
-        }
         for (sinks, max_word_distance, require_ordered, proximity) in text_negatives {
             let negative_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
             // a word with no indexed form can never be present: no exclusion
@@ -1820,8 +2039,13 @@ impl LineIndex {
             // a group that matched no indexed word simply cannot be one of
             // the `min`; the others still can
             group_terms.retain(|g| !g.is_empty());
-            session.min_groups = min;
+            session.min_groups = if section { 1 } else { min };
             group_terms.len() >= min
+        } else if section {
+            // a line holding any word of a surviving section is a hit
+            group_terms.retain(|g| !g.is_empty());
+            session.min_groups = 1;
+            !group_terms.is_empty()
         } else {
             // a group that matched no indexed word: the main query cannot match
             group_terms.iter().all(|g| !g.is_empty())
@@ -1834,9 +2058,16 @@ impl LineIndex {
                 max_word_distance: session.max_word_distance,
                 min_groups: session.min_groups,
                 proximity: proximity.clone(),
+                cross_proximity: match (&proximity, &request.gaps) {
+                    (Some(p), _) => Some(p.clone()),
+                    (None, Some(gaps)) if !partial => Some(Proximity::Ordered { gaps: gaps.clone() }),
+                    _ => None,
+                },
             });
         }
         let mut phrase_plans: Vec<(&[GroupSpec], Vec<Vec<String>>)> = Vec::new();
+        // each phrase matcher's slot terms (cross-line pass)
+        let mut phrase_terms: Vec<Vec<Vec<String>>> = Vec::new();
         for ((alt_sinks, _), groups) in alternatives.iter().zip(&alternative_groups) {
             let terms: Vec<Vec<String>> = alt_sinks.iter().map(|s| s.take_strings()).collect();
             if terms.iter().all(|g| !g.is_empty()) {
@@ -1850,12 +2081,15 @@ impl LineIndex {
                     max_word_distance: 0,
                     min_groups: 0,
                     proximity: None,
+                    cross_proximity: Some(Proximity::Ordered { gaps: vec![0; terms.len().saturating_sub(1)] }),
                 });
+                phrase_terms.push(terms);
             }
         }
         // Which hits the locator can still reject (see `count_needs_text`).
         // One group: no distance or order to check.
         let main_needs_text = main_ok
+            && !section
             && request.groups.len() > 1
             && match &proximity {
                     // the span query already checked the rule on the positions
@@ -1871,6 +2105,77 @@ impl LineIndex {
         session.count_needs_text = main_needs_text || phrase_needs_text || !session.negative.is_empty();
         if session.matchers.is_empty() {
             return Ok(SearchResult::new(Vec::new(), session).with_notices(notices).with_truncated(truncated));
+        }
+
+        // Cross-line matching (see `cross_line`): after the in-line hits.
+        let mut cross_keys: Vec<(u32, DocId)> = Vec::new();
+        if cross {
+            let t = std::time::Instant::now();
+            let main_rule = if let Some(p) = &proximity {
+                CrossRule::Proximity(p.clone())
+            } else if let Some(min) = partial_min {
+                CrossRule::Cover { min }
+            } else if let Some(gaps) = &request.gaps {
+                CrossRule::Proximity(Proximity::Ordered { gaps: gaps.clone() })
+            } else if request.max_word_distance.is_none() && !request.require_ordered {
+                CrossRule::Cover { min: usize::MAX }
+            } else {
+                CrossRule::Text { ordered: request.require_ordered }
+            };
+            let mut matchers = Vec::new();
+            let mut m_index = 0;
+            if main_ok {
+                matchers.push(CrossMatcher {
+                    terms: &group_terms,
+                    prepared: &session.matchers[0].prepared,
+                    rule: main_rule,
+                });
+                m_index = 1;
+            }
+            for (i, terms) in phrase_terms.iter().enumerate() {
+                matchers.push(CrossMatcher {
+                    terms,
+                    prepared: &session.matchers[m_index + i].prepared,
+                    rule: CrossRule::Proximity(Proximity::Ordered { gaps: vec![0; terms.len().saturating_sub(1)] }),
+                });
+            }
+            let negative_weight = match &negative_union {
+                Some(q) => Some(q.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?),
+                None => None,
+            };
+            let out = cross_line::find(
+                self,
+                &searcher,
+                &CrossInput {
+                    matchers,
+                    inline: &hits,
+                    inline_exact: !session.count_needs_text,
+                    books: books.as_deref(),
+                    negative: negative_weight.as_deref(),
+                    drop_sections: drop_sections.as_deref(),
+                    cancel: cancel.as_ref(),
+                },
+            )?;
+            for h in &mut hits {
+                if let Some(&next) = out.inline_next.get(&h.position) {
+                    h.next_line_id = Some(next);
+                }
+            }
+            session.count_needs_text |= out.needs_text;
+            for (hit, key) in out.hits {
+                hits.push(hit);
+                cross_keys.push(key);
+            }
+            if timing {
+                eprintln!("  [timing] cross-line: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        // Relevance keeps the collection order (aligned with `keys`) until
+        // the hits are scored, below.
+        if !relevance {
+            // (relevance turned off for want of positions sorts by catalog order)
+            let order = if request.order == ResultsOrder::Relevance { ResultsOrder::Catalog } else { request.order };
+            relevance::sort_hits(&mut hits, order, &request.book_generations);
         }
         if let Some(main_terms) = main_terms {
             CancelToken::check(cancel.as_ref())?;
@@ -1892,7 +2197,9 @@ impl LineIndex {
                 phrases_as_count: relevance::phrases_as_count(shape, main_slots_len),
                 phrases: phrase_plans,
             };
-            let scores = relevance::scores(&searcher, &plan, &keys, cancel.as_ref())?;
+            let mut scores = relevance::scores(&searcher, &plan, &keys, cancel.as_ref())?;
+            // cross-line hits rank after every in-line hit (score 0)
+            scores.extend(cross_keys.iter().map(|_| 0.0));
             let (hits, scores) = relevance::sort_by_score(hits, scores);
             if timing {
                 eprintln!("  [timing] relevance {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);

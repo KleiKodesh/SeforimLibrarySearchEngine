@@ -174,9 +174,10 @@ namespace SeforimSearch.Engine
         public void Add(in LineDocument line)
         {
             byte[] text = Interop.ToUtf8(line.Text);
+            uint flags = (line.NoCross ? 1u : 0u) | (line.SectionId.HasValue ? 2u : 0u);
             fixed (byte* t = text)
-                Interop.Check(NativeMethods.se_writer_add(_handle, (ulong)line.LineId, (ulong)line.Position,
-                    (ulong)line.BookId, t, (UIntPtr)text.Length));
+                Interop.Check(NativeMethods.se_writer_add_line(_handle, (ulong)line.LineId, (ulong)line.Position,
+                    (ulong)line.BookId, (ulong)(line.SectionId ?? 0), flags, t, (UIntPtr)text.Length));
         }
 
         /// <summary>Queues deletion of a line. An update is Delete + Add.</summary>

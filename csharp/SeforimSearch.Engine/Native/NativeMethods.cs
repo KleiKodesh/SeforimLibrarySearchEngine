@@ -70,6 +70,10 @@ namespace SeforimSearch.Engine.Native
                                                byte* text, UIntPtr textLen);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_writer_add_line(WriterHandle writer, ulong lineId, ulong position, ulong bookId,
+                                                    ulong sectionId, uint flags, byte* text, UIntPtr textLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern int se_writer_delete(WriterHandle writer, ulong lineId);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
@@ -96,6 +100,17 @@ namespace SeforimSearch.Engine.Native
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern SeBuffer se_search_locate_batch(SearchHandle search, IntPtr* texts, UIntPtr* lens, UIntPtr count);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ulong se_search_copy_next_lines(SearchHandle search, ulong offset, ulong count, ulong* output);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern SeBuffer se_search_locate_pairs(SearchHandle search, IntPtr* texts, UIntPtr* lens,
+                                                             IntPtr* nextTexts, UIntPtr* nextLens, UIntPtr count);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern long se_search_count_batch_pairs(SearchHandle search, IntPtr* texts, UIntPtr* lens,
+                                                              IntPtr* nextTexts, UIntPtr* nextLens, UIntPtr count);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr se_search_take_new_terms(SearchHandle search);

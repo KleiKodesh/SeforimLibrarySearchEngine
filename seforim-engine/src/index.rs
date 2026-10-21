@@ -12,6 +12,13 @@
 //! lines. Positions in the text postings are optional: without them the
 //! index is smaller and word distance is validated by the snippet locator
 //! on the line text (FtsLib's way); with them, span queries also work.
+//!
+//! Three small per-line fast fields serve cross-line matching and the
+//! same-section scope, read only when those options are used: the line's
+//! word count (computed here, from the same scanner that numbers the
+//! positions), its line flags (bit 0: no phrase continues into or out of
+//! the line; the host sets it for headings) and its section id (the host's,
+//! from seforim.db; absent = the line is a section of its own).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -66,7 +73,19 @@ pub struct LineFields {
     /// vocalized field `textVocalized` holds). None on a mark-stripped index
     /// or a marks index built before the flag existed.
     pub marked: Option<Field>,
+    /// Word positions in the line (cross-line matching). None: an index
+    /// built before the field existed.
+    pub word_count: Option<Field>,
+    /// [`LINE_FLAG_NO_CROSS`] and future per-line bits.
+    pub line_flags: Option<Field>,
+    /// The host's section id (same-section scope); absent on a line = a
+    /// section of its own.
+    pub section_id: Option<Field>,
 }
+
+/// Line flag: no phrase continues into or out of this line (Otzaria: a
+/// heading, `<h...>`, interrupts the text).
+pub const LINE_FLAG_NO_CROSS: u64 = 1;
 
 /// The `marked` field's one term.
 pub const MARKED_LINE: u64 = 1;
@@ -93,6 +112,10 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
         .set_index_option(record);
     let text = b.add_text_field("text", TextOptions::default().set_indexing_options(indexing));
     let marked = options.keep_marks.then(|| b.add_u64_field("marked", INDEXED));
+    // after `text`: the older fields keep their ids in an older index
+    let word_count = b.add_u64_field("word_count", FAST);
+    let line_flags = b.add_u64_field("line_flags", FAST);
+    let section_id = b.add_u64_field("section_id", FAST);
     (
         b.build(),
         LineFields {
@@ -101,6 +124,9 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
             book_id,
             text,
             marked,
+            word_count: Some(word_count),
+            line_flags: Some(line_flags),
+            section_id: Some(section_id),
         },
     )
 }
@@ -114,6 +140,17 @@ pub struct LineDoc {
     pub book_id: u64,
     /// Raw line text (HTML allowed).
     pub text: String,
+    /// The host's section of the line (same-section scope): one id per
+    /// heading block (seforim.db: its TOC entry). Ids may repeat across
+    /// books (the engine keys sections by book). None: the line is a
+    /// section of its own.
+    #[serde(default)]
+    pub section_id: Option<u64>,
+    /// No phrase continues into or out of this line (cross-line matching):
+    /// set by the host for headings (Otzaria's rule). Empty lines need no
+    /// flag: they have no words.
+    #[serde(default)]
+    pub no_cross: bool,
 }
 
 /// An open line index.
@@ -179,6 +216,11 @@ impl LineIndex {
         let (_, mut fields) = line_schema(options);
         // a marks index built before the line flag has no `marked` field
         fields.marked = index.schema().get_field("marked").ok();
+        // an index built before the per-line fields has none of them
+        let schema = index.schema();
+        fields.word_count = schema.get_field("word_count").ok();
+        fields.line_flags = schema.get_field("line_flags").ok();
+        fields.section_id = schema.get_field("section_id").ok();
         Ok(Self::wrap(index, fields, options, dir))
     }
 
@@ -230,6 +272,12 @@ impl LineIndex {
         self.fields.text
     }
 
+    /// True when the index has the per-line fields (word count, line flags,
+    /// section id) that cross-line matching and the same-section scope read.
+    pub fn has_line_data(&self) -> bool {
+        self.fields.word_count.is_some() && self.fields.line_flags.is_some() && self.fields.section_id.is_some()
+    }
+
     /// Number of lines in the index (as of the last commit).
     pub fn num_lines(&self) -> Result<u64> {
         let reader = self.index.reader()?;
@@ -269,6 +317,15 @@ impl LineWriter {
             if hebrew_fts::chars::contains_attached_marks(&line.text) {
                 document.add_u64(marked, MARKED_LINE);
             }
+        }
+        if let Some(field) = f.word_count {
+            document.add_u64(field, hebrew_fts::word_count(&line.text) as u64);
+        }
+        if let Some(field) = f.line_flags {
+            document.add_u64(field, if line.no_cross { LINE_FLAG_NO_CROSS } else { 0 });
+        }
+        if let (Some(field), Some(section)) = (f.section_id, line.section_id) {
+            document.add_u64(field, section);
         }
         self.writer.add_document(document)?;
         Ok(())

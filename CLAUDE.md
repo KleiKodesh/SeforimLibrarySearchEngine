@@ -25,7 +25,8 @@ in one or two lines. Remove entries that turn out to be wrong.
   always used together with the seforim.db SQLite DB, so the index stores only the
   postings (+freqs/positions when built with positions, for span/slop) plus
   `line_id`, `position` and `book_id` (book_id only because the engine must support
-  FILTERED SEARCH by book). No text, nothing the host can get from SQLite by line id.
+  FILTERED SEARCH by book), plus (user's decision 2026-10-21, for cross-line and
+  sameSection) per-line `word_count`, `line_flags` (no-cross bit) and `section_id`. No text, nothing the host can get from SQLite by line id.
   Grouping, sections, line index, references, neighbours: the HOST does them with
   SQLite on the returned line ids ("easy sqlite super speed"). Applies to C# and Dart
   too, and to any similar future need.
@@ -238,9 +239,9 @@ seforim.db knowledge).
   BuildLines keeps the stale index.
 - The section of a line is `line_toc.tocEntryId` (covers ~all lines); `line.tocEntryId`
   is mostly NULL. Hosts read it from SQLite by line id (Dart `SeforimDb.sectionsOf`).
-- Storing placement (line index, toc/section) in the index, and doing sameSection
-  exclusion in the engine, was a mistake the user corrected: the index keeps only
-  line_id, position, book_id; sections/line index come from SQLite on the host.
+- Line index stays out of the index (host reads it from SQLite). Sections were
+  first kept out too; the user later decided a per-line section id fast field so the
+  sameSection scope (and its negative) runs in the engine in one pass.
 - PowerShell 5.1 strips quotes from JSON arguments to native exes: pass via a file.
 - Git Bash rewrites an argument that starts with `/` into a Windows path (MSYS path
   conversion): a regex query `/.../` silently became a path. Set `MSYS_NO_PATHCONV=1`
@@ -262,22 +263,20 @@ seforim.db knowledge).
 ## Open decisions / next
 
 - **User's goal: every search feature Otzaria's current engine has that we lack gets
-  added** (from the feature matrix of otzaria_search_engine v5.0.0): positive sameSection scope and
-  cross-line phrases (both ON HOLD: anything matching across lines is designed with
-  the user first), vocalized matching without a keep-marks index. Semantic search:
+  added** (from the feature matrix of otzaria_search_engine v5.0.0): vocalized matching
+  without a keep-marks index. (sameSection scope and cross-line: built, see above.) Semantic search:
   ask the user first.
 - **Reuse Otzaria's tests**: its engine has ~309 inline-line search tests
   (`rust/src/api/search_engine.rs`) and ~92 query tests (`hebrew_query.rs`); plan in
   scratchpad `logs/otzaria-test-cases.md` (first 30 cases already translated to our
   API). Paired readings: done (engine rule; hosts call
   se_reduce_paired_readings). Suspected gap to verify: maqaf counted as two words for distance.
-- **REMIND THE USER: matching across lines (a phrase spanning a line break, Otzaria's
-  `continues_to_next_line`) still needs real work.** Whenever the user asks whether
-  everything is ready, say this explicitly. Today only snippet widening crosses lines.
+- **REMIND THE USER: matching across lines (`cross_line`) and the sameSection scope are
+  BUILT but NOT YET TESTED** (unit tests written, not run; full rebuild `tantivy9`
+  pending). Whenever the user asks whether everything is ready, say this explicitly.
 
 - Benchmark span query vs FtsLib-style post-filter for very broad expansions.
 - Profile the C# search path (1.0 s net10 / 1.5 s net48 vs 0.38 s pure Rust).
-- Otzaria gaps still open: the positive query's sameSection scope.
 - Relevance / generation order (`relevance.rs`) is scored AFTER the search, for the hits
   only, from the sinks' terms: the walks run inside scorer creation, so the terms exist
   only after collection. Otzaria's score depends on its query shape (tiers, phrase BM25,

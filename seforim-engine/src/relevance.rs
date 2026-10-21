@@ -950,7 +950,7 @@ mod tests {
         let index = LineIndex::create(dir.path(), options).unwrap();
         let mut w = index.writer(50_000_000, 1).unwrap();
         for (i, (book, text)) in texts.iter().enumerate() {
-            w.add(&LineDoc { line_id: 100 + i as u64, position: i as u64, book_id: *book, text: (*text).into() })
+            w.add(&LineDoc { line_id: 100 + i as u64, position: i as u64, book_id: *book, text: (*text).into(), section_id: None, no_cross: false })
                 .unwrap();
         }
         w.commit(None).unwrap();

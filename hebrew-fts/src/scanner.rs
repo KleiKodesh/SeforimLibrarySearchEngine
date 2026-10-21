@@ -571,6 +571,35 @@ pub struct TextToken {
     norm_len: usize,
 }
 
+impl TextToken {
+    /// A token standing for an index position only (no text): the
+    /// cross-line check on an index with positions runs the locator's rules
+    /// over the postings' positions. Raw offsets are the position itself.
+    pub(crate) fn at_position(position: usize) -> TextToken {
+        TextToken {
+            raw_start: position,
+            raw_end: position + 1,
+            utf16_start: position,
+            utf16_end: position + 1,
+            visible_start: position,
+            letters: 1,
+            position,
+            norm_start: 0,
+            norm_len: 0,
+        }
+    }
+}
+
+/// The number of word positions in `text` (the last position + 1; 0 for a
+/// text with no word): exactly the positions the index gives the line, from
+/// the same scanner. The cross-line join places the next line's first word
+/// at this position.
+pub fn word_count(text: &str) -> usize {
+    let mut count = 0;
+    scan_with(text, false, |_, span| count = span.position + 1);
+    count
+}
+
 /// Produces [`TextToken`]s from an HTML string, preserving each word's raw
 /// character positions alongside its normalized form. The normalized text of
 /// every token is packed into one reused buffer, so tokenizing a line
@@ -617,6 +646,40 @@ impl TextTokens {
             });
         });
         &self.tokens
+    }
+
+    /// Tokenizes two consecutive lines as ONE text, `left + "\n" + right`
+    /// (the cross-line join): each line is scanned on its own, so no word,
+    /// paired reading or tag state crosses the break, and `right`'s tokens
+    /// are shifted past `left` and the one-unit break (raw offsets) and past
+    /// `left`'s words (positions: `right`'s first word is `left`'s word
+    /// count, as the two lines' index positions joined). Returns the index
+    /// of `right`'s first token.
+    pub fn tokenize_pair(&mut self, left: &str, right: &str) -> usize {
+        self.tokenize(left);
+        let split = self.tokens.len();
+        let words = self.tokens.last().map_or(0, |t| t.position + 1);
+        let visible = self.tokens.last().map_or(0, |t| t.visible_start + t.letters) + 1;
+        let (bytes, utf16) = (left.len() + 1, self.raw_utf16_len + 1);
+        let norm = &mut self.norm;
+        let tokens = &mut self.tokens;
+        let right_len = scan_with(right, self.keep_marks, |word, span| {
+            let norm_start = norm.len();
+            norm.push_str(word);
+            tokens.push(TextToken {
+                raw_start: span.byte_start + bytes,
+                raw_end: span.byte_end + bytes,
+                utf16_start: span.utf16_start + utf16,
+                utf16_end: span.utf16_end + utf16,
+                visible_start: span.visible_start + visible,
+                letters: span.letters,
+                position: span.position + words,
+                norm_start,
+                norm_len: word.len(),
+            });
+        });
+        self.raw_utf16_len = utf16 + right_len;
+        split
     }
 
     /// The tokens from the last [`tokenize`](Self::tokenize) call.

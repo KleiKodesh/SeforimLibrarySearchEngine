@@ -58,7 +58,7 @@ fn located_with(
     let index = LineIndex::create(dir.path(), IndexOptions { positions, keep_marks: false }).unwrap();
     let mut wr = index.writer(30_000_000, 1).unwrap();
     for (i, t) in lines.iter().enumerate() {
-        wr.add(&LineDoc { line_id: i as u64 + 1, position: i as u64, book_id: 1, text: (*t).into() })
+        wr.add(&LineDoc { line_id: i as u64 + 1, position: i as u64, book_id: 1, text: (*t).into(), section_id: None, no_cross: false })
             .unwrap();
     }
     wr.commit(None).unwrap();

@@ -1,5 +1,4 @@
 import 'package:otzaria_demo/grouping.dart';
-import 'package:otzaria_demo/otzaria_query.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -36,12 +35,5 @@ void main() {
       [4],
       [5],
     ]);
-  });
-
-  test('sameSection exclusion blocks sections holding every negative word', () {
-    expect(blockedSections([]), isEmpty);
-    expect(blockedSections([{1, 2, 3}]), {1, 2, 3});
-    expect(blockedSections([{1, 2, 3}, {2, 3, 4}, {3, 2}]), {2, 3});
-    expect(blockedSections([{1}, {2}]), isEmpty);
   });
 }

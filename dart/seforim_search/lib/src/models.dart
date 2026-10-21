@@ -44,8 +44,18 @@ class LineDocument {
     required this.position,
     required this.bookId,
     required this.text,
+    this.sectionId,
+    this.noCross = false,
   });
   final int lineId;
+
+  /// The host's section of the line (same-section scope; seforim.db: its TOC
+  /// entry). Ids may repeat across books. Null: a section of its own.
+  final int? sectionId;
+
+  /// No phrase continues into or out of this line (cross-line matching): set
+  /// for headings (Otzaria's rule). The word count is computed by the engine.
+  final bool noCross;
 
   /// Rank in the library's catalog order: results are returned in it by default.
   final int position;
@@ -444,10 +454,14 @@ class HitCounts {
 /// A matching line (in the search's order, catalog by default): only the ids the index keeps. Any
 /// other placement (line index, section) comes from SQLite by line id.
 class PlacedHit {
-  const PlacedHit(this.position, this.lineId, this.bookId);
+  const PlacedHit(this.position, this.lineId, this.bookId, [this.nextLineId]);
   final int position;
   final int lineId;
   final int bookId;
+
+  /// Cross-line matching: the next line's id when the match may continue
+  /// onto it; locate the hit with both texts ([SearchSession.locatePairs]).
+  final int? nextLineId;
   @override
   String toString() => 'PlacedHit(pos $position, line $lineId, book $bookId)';
 }
@@ -473,9 +487,14 @@ class Snippet {
     required this.end,
     required this.flags,
     required this.marks,
+    this.breakAt,
   });
 
   static const int flagLeadingEllipsis = 1;
+
+  /// A cross-line snippet: offsets are into `line + "\n" + nextLine` and this
+  /// is the offset of that "\n" (render it as a line break). Null: in-line.
+  final int? breakAt;
   static const int flagTrailingEllipsis = 2;
 
   /// Raw span of the tightest window (smaller = closer).
@@ -501,7 +520,7 @@ class Snippet {
   static const int _maxInt32 = 0x7fffffff;
 
   /// Reads one record of the native flat format at [at]; returns it and the next index.
-  static (Snippet, int) read(Uint32List d, int at) {
+  static (Snippet, int) read(Uint32List d, int at, [int? breakAt]) {
     final markCount = d[at + 6];
     final marks = <SnippetMark>[
       for (var m = 0; m < markCount; m++)
@@ -515,6 +534,7 @@ class Snippet {
       end: d[at + 4],
       flags: d[at + 5],
       marks: marks,
+      breakAt: breakAt,
     );
     return (s, at + 7 + markCount * 3);
   }
@@ -560,6 +580,8 @@ class SearchOptions {
     this.userRegex = false,
     this.order = ResultsOrder.catalog,
     Map<int, int>? bookGenerations,
+    this.crossLine = false,
+    this.sameSection = false,
   })  : words = words ?? {},
         phraseAlternatives = phraseAlternatives ?? [],
         bookGenerations = bookGenerations ?? {};
@@ -569,6 +591,15 @@ class SearchOptions {
   /// Otzaria's user regex: a query wrapped in `/.../` is a regex. Off (the
   /// default, FtsLib's behaviour): the query is plain text.
   bool userRegex;
+
+  /// Cross-line matching: a match may continue from the end of a line onto
+  /// the start of the next line of the same book (one break at most). Such
+  /// a hit has [PlacedHit.nextLineId]. Off by default (FtsLib).
+  bool crossLine;
+
+  /// Otzaria's SameSection scope: every word (or [wordMatch]'s count)
+  /// anywhere in one section; the hits are its lines holding a word.
+  bool sameSection;
 
   // Word options: every word, unless [words] overrides (see [WalkOptions]
   // for each one's meaning).
@@ -632,6 +663,8 @@ class SearchOptions {
   Map<String, Object?> toJson() => {
         'query': query,
         if (userRegex) 'user_regex': true,
+        if (crossLine) 'cross_line': true,
+        if (sameSection) 'same_section': true,
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
             matchNikud, matchTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,
@@ -760,7 +793,8 @@ class ExcludeOptions {
       List<PhraseOptions>? phraseAlternatives,
       this.maxWordDistance,
       this.requireOrdered = false,
-      this.proximity})
+      this.proximity,
+      this.sameSection = false})
       : words = words ?? {},
         phraseAlternatives = phraseAlternatives ?? [];
   String query;
@@ -776,8 +810,13 @@ class ExcludeOptions {
   bool requireOrdered;
   Proximity? proximity;
 
+  /// Otzaria's SameSection negative scope: a section holding every negative
+  /// word is dropped whole.
+  bool sameSection;
+
   Map<String, Object?> toJson() => {
         'query': query,
+        if (sameSection) 'same_section': true,
         if (words.isNotEmpty) 'words': {for (final e in words.entries) '${e.key}': e.value.toJson()},
         if (phraseAlternatives.isNotEmpty) 'phrase_alternatives': [for (final p in phraseAlternatives) p.toJson()],
         if (maxWordDistance != null) 'max_word_distance': maxWordDistance,

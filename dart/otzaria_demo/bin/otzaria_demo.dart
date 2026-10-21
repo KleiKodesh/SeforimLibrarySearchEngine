@@ -29,7 +29,9 @@ search options (Otzaria names):
   --exclude "words"   negative query (same distance/order; a,b = alternatives of a negative word)
   --exclude-options grammar-prefixes,ktiv,...   the negative words' own options (Otzaria's
                       negative options, on every negative word; "" = none). Absent: the options above
-  --exclude-scope distance|paragraph|section   (negativeScope; default distance)
+  --exclude-scope distance|paragraph|section   (negativeScope; default distance; section: in the engine)
+  --scope section     Otzaria's SameSection scope (words anywhere under one heading)
+  --cross-line        a match may continue onto the next line (Otzaria's continues_to_next_line)
   --book TEXT         only books whose title/category contains TEXT
   --group section|identical  (Otzaria's grouping; limit/offset then count groups)
   --group-scan N      identical: hits read for signatures (default 20000)
@@ -46,7 +48,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
     'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd', 'spacing', 'match',
     'match-count', 'exclude', 'exclude-scope', 'exclude-options', 'dictionary', 'acronyms', 'group', 'group-scan',
-    'order',
+    'order', 'scope',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -109,7 +111,11 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
             lineId: line.id,
             position: position++,
             bookId: line.bookId,
-            text: line.text));
+            text: line.text,
+            // the section (TOC entry; 0 = none: a section of its own) and
+            // Otzaria's rule: a heading interrupts the text (no cross-line phrase)
+            sectionId: line.tocEntryId == 0 ? null : line.tocEntryId,
+            noCross: line.text.startsWith('<h')));
         if (position % 100000 == 0) stdout.writeln('  $position lines, ${sw.elapsed.inSeconds}s');
       }
     }
@@ -249,6 +255,8 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     final other => throw ArgumentError('--order: catalog or relevance, not "$other"'),
   };
   req.warnings.toSet().forEach((w) => stderr.writeln('warning: $w'));
+  request.crossLine = o.containsKey('cross-line');
+  request.sameSection = o['scope'] == 'section';
 
   final limit = _int(o, 'limit') ?? 100, offset = _int(o, 'offset') ?? 0;
   final titles = db.bookTitles();
@@ -261,28 +269,12 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   }
   if (searchInfo.truncated) stderr.writeln('truncated: a walk hit its expansion cap');
 
-  // Negative scope sameSection, host-side (the index holds no sections):
-  // one search per negative word → line ids → sections via SQLite →
-  // intersect → drop positive hits in those sections. A hit without a
-  // section is never dropped.
-  final sectionSearches = req.sectionNegativeSearches(books: request.books);
-  var hits = session.allHits().toList();
-  if (sectionSearches.isNotEmpty) {
-    final perWord = <Set<int>>[];
-    for (final w in sectionSearches) {
-      final s = index.search(w);
-      perWord.add(db.sectionsOf(s.allHits().map((h) => h.lineId)).values.toSet());
-      s.close();
-    }
-    final blocked = blockedSections(perWord);
-    if (blocked.isNotEmpty) {
-      final own = db.sectionsOf(hits.map((h) => h.lineId));
-      hits = [for (final h in hits) if (!blocked.contains(own[h.lineId])) h];
-    }
-  }
+  // The negative sameSection scope is the engine's (the index keeps each
+  // line's section id): the hits come back already filtered.
+  final hits = session.allHits().toList();
 
   (String, Snippet) widen(PlacedHit h, String text, Snippet s) {
-    if (!s.isShort(contextWords)) return (text, s);
+    if (!s.isShort(contextWords) || s.breakAt != null) return (text, s);
     // Widen over up to 2 neighbouring lines per side (as the C# demo):
     // previous + ' ' + line + ' ' + next, empty sides dropped (FtsLib's
     // JoinWithNeighbourLines); the engine just locates the longer text. The
@@ -322,14 +314,17 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
       batch.add(it.current);
     }
     if (batch.isEmpty) break;
-    final texts = db.lineTexts(batch.map((h) => h.lineId));
+    final texts = db.lineTexts([...batch.map((h) => h.lineId), for (final h in batch) if (h.nextLineId != null) h.nextLineId!]);
     final lineTexts = [for (final h in batch) texts[h.lineId] ?? ''];
-    final snippets = session.locateBatch(lineTexts);
+    final nextTexts = [for (final h in batch) h.nextLineId == null ? null : texts[h.nextLineId] ?? ''];
+    // a cross-line hit is located over its line and the next one (joined at a line break)
+    final snippets = session.locatePairs(lineTexts, nextTexts);
     for (var i = 0; i < batch.length && results.length < limit; i++) {
       final s = snippets[i];
       if (s == null) continue;
       if (passed++ < offset) continue;
-      final (text, shown) = widen(batch[i], lineTexts[i], s);
+      final joined = s.breakAt == null ? lineTexts[i] : '${lineTexts[i]}\n${nextTexts[i]}';
+      final (text, shown) = widen(batch[i], joined, s);
       results.add((batch[i], text, shown));
     }
   }
@@ -337,7 +332,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   final terms = session.takeNewTerms();
 
   stdout.writeln('Query: ${request.query}, matching lines: ${session.hitCount}'
-      '${hits.length != session.hitCount ? ' (${hits.length} after section exclusion)' : ''}, search ${searchMs}ms, '
+      ', search ${searchMs}ms, '
       'page ${sw.elapsedMilliseconds}ms');
   stdout.writeln('Matched words: ${terms.take(30).join(', ')}${terms.length > 30 ? ' …' : ''}');
   if (o.containsKey('count')) _printCounts(db, session, titles);
@@ -352,15 +347,16 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
 
 /// Exact totals (Otzaria's count / countByBook) from the engine: when no
 /// text-level check applies the hit list is the answer, otherwise the texts
-/// are fed in hit order and the engine validates them. Before any
-/// host-side section exclusion.
+/// are fed in hit order (a hit's next line too, cross-line) and the engine
+/// validates them.
 void _printCounts(SeforimDb db, SearchSession session, Map<int, String> titles) {
   final sw = Stopwatch()..start();
   if (session.countNeedsText) {
     for (var o = 0; o < session.hitCount; o += 4096) {
       final batch = session.hits(o, 4096);
-      final texts = db.lineTexts(batch.map((h) => h.lineId));
-      session.countBatch([for (final h in batch) texts[h.lineId] ?? '']);
+      final texts = db.lineTexts([...batch.map((h) => h.lineId), for (final h in batch) if (h.nextLineId != null) h.nextLineId!]);
+      session.countBatchPairs([for (final h in batch) texts[h.lineId] ?? ''],
+          [for (final h in batch) h.nextLineId == null ? null : texts[h.nextLineId] ?? '']);
     }
   }
   final c = session.counts();

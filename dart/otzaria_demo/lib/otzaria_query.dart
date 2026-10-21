@@ -288,7 +288,6 @@ class OtzariaSearch {
   /// alternatives (negativeAlternativeWords, Aramaic translations); the
   /// acronym option ORs the negative query's acronym phrases into it.
   ExcludeOptions? _exclude() {
-    if (negativeScope == NegativeScope.sameSection) return null; // host-side, see sectionNegativeSearches
     final words = _negativeWords();
     if (words.isEmpty) return null;
     final global = _globalSet();
@@ -312,10 +311,13 @@ class OtzariaSearch {
     final limits = negativeScope == NegativeScope.wordDistance && words.length > 1;
     // the demo has no separate negative spacing (Otzaria's
     // negativeCustomSpacing): the positive distance and order
+    // sameSection: the engine drops every line of a section holding every
+    // negative word (the index keeps each line's section id)
     return ExcludeOptions(words.join(' '),
         words: perWord,
         phraseAlternatives: _phraseAlternatives(words, (i) => options[i]),
-        proximity: limits ? _proximity(words.length, null) : null);
+        proximity: limits ? _proximity(words.length, null) : null,
+        sameSection: negativeScope == NegativeScope.sameSection);
   }
 
   /// Otzaria's `resolve_gaps` + `resolve_proximity` (hebrew_query.rs) for
@@ -341,16 +343,6 @@ class OtzariaSearch {
           for (final w in splitQueryWords(negativeQuery))
             if (w.replaceAll(RegExp('[|%]'), '').isNotEmpty) _queryWord(w.replaceAll(RegExp('[|%]'), ''))
         ]
-      : const [];
-
-  /// Negative scope sameSection (Otzaria's scoped_words_query) is the HOST's
-  /// job, since the index holds no sections: run each of these searches (one
-  /// per negative word, global options) for its line ids, map them to
-  /// sections with SQLite (`line_toc`), intersect the per-word section sets
-  /// ([blockedSections]) and drop the positive hits in them. Empty unless the
-  /// scope is sameSection.
-  List<SearchOptions> sectionNegativeSearches({List<int>? books}) => negativeScope == NegativeScope.sameSection
-      ? [for (final w in _negativeWords()) _withOptions(SearchOptions(w, books: books), _globalSet())]
       : const [];
 
   /// The engine search: the query string with the global options, and per
@@ -403,16 +395,4 @@ class OtzariaSearch {
     if (words.length > 1) s.proximity = _proximity(words.length, customSpacing);
     return s;
   }
-}
-
-/// Otzaria's SameSection negative scope: a section is blocked when it holds
-/// EVERY negative word, each anywhere in it. [perWord] = the sections each
-/// word's lines fall in. No words = nothing blocked.
-Set<int> blockedSections(List<Set<int>> perWord) {
-  if (perWord.isEmpty) return {};
-  var blocked = perWord.first;
-  for (final s in perWord.skip(1)) {
-    blocked = blocked.intersection(s);
-  }
-  return blocked;
 }

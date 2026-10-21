@@ -197,7 +197,9 @@ pub unsafe extern "C" fn se_index_close(index: *mut LineIndex) {
     }
 }
 
-/// JSON: `{"num_lines":N,"positions":bool,"keep_marks":bool,"payload":string|null}`.
+/// JSON: `{"num_lines":N,"positions":bool,"keep_marks":bool,"line_data":bool,"payload":string|null}`
+/// (`line_data`: the per-line word count, flags and section id exist, for
+/// cross-line matching and the same-section scope).
 /// The payload is what the host committed with its last commit.
 ///
 /// # Safety
@@ -211,6 +213,7 @@ pub unsafe extern "C" fn se_index_info(index: *const LineIndex) -> *mut c_char {
             "num_lines": index.num_lines().map_err(err)?,
             "positions": options.positions,
             "keep_marks": options.keep_marks,
+            "line_data": index.has_line_data(),
             "payload": index.committed_payload().map_err(err)?,
         });
         Ok(out_string(info.to_string()))
@@ -285,6 +288,48 @@ pub unsafe extern "C" fn se_writer_add(
             position,
             book_id,
             text: str_arg(text, text_len)?.to_string(),
+            section_id: None,
+            no_cross: false,
+        };
+        writer.add(&doc).map_err(err)?;
+        Ok(0)
+    })
+}
+
+/// Line flag for `se_writer_add_line`: no phrase continues into or out of
+/// the line (a heading).
+pub const SE_LINE_NO_CROSS: u32 = 1;
+/// Line flag for `se_writer_add_line`: `section_id` is set.
+pub const SE_LINE_HAS_SECTION: u32 = 2;
+
+/// `se_writer_add` with the host's per-line data: `flags` =
+/// `SE_LINE_NO_CROSS` (1) for a line no phrase may continue into or out of
+/// (a heading), `SE_LINE_HAS_SECTION` (2) when `section_id` is the line's
+/// section (same-section scope; without it the line is a section of its
+/// own). The line's word count is computed by the engine.
+///
+/// # Safety
+/// As `se_writer_add`.
+#[no_mangle]
+pub unsafe extern "C" fn se_writer_add_line(
+    writer: *mut LineWriter,
+    line_id: u64,
+    position: u64,
+    book_id: u64,
+    section_id: u64,
+    flags: u32,
+    text: *const u8,
+    text_len: usize,
+) -> i32 {
+    guard(-1, || {
+        let writer = writer.as_mut().ok_or("null writer")?;
+        let doc = LineDoc {
+            line_id,
+            position,
+            book_id,
+            text: str_arg(text, text_len)?.to_string(),
+            section_id: (flags & SE_LINE_HAS_SECTION != 0).then_some(section_id),
+            no_cross: flags & SE_LINE_NO_CROSS != 0,
         };
         writer.add(&doc).map_err(err)?;
         Ok(0)
@@ -512,6 +557,35 @@ pub unsafe extern "C" fn se_search_copy_hits(
     })
 }
 
+/// Copies the next line ids of hits `[offset, offset+count)` into `out`, one
+/// u64 per hit: the next line's id when the hit's match may continue onto
+/// it (cross-line matching; locate it with `se_search_locate_pairs`),
+/// `u64::MAX` otherwise. Returns how many were copied.
+///
+/// # Safety
+/// `out` must hold `count` u64.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_copy_next_lines(
+    search: *const SearchResult,
+    offset: u64,
+    count: u64,
+    out: *mut u64,
+) -> u64 {
+    guard(0, || {
+        let search = search.as_ref().ok_or("null search")?;
+        let start = (offset as usize).min(search.hits.len());
+        let end = start.saturating_add(count as usize).min(search.hits.len());
+        if end == start || out.is_null() {
+            return Ok(0);
+        }
+        let out = std::slice::from_raw_parts_mut(out, end - start);
+        for (o, h) in out.iter_mut().zip(&search.hits[start..end]) {
+            *o = h.next_line_id.unwrap_or(u64::MAX);
+        }
+        Ok((end - start) as u64)
+    })
+}
+
 /// Number of u32 a located snippet occupies in the flat form, beyond its marks:
 /// score, word_distance, window_word_count, start, end, flags, mark_count.
 pub const SNIPPET_HEADER_U32: usize = 7;
@@ -639,6 +713,101 @@ pub unsafe extern "C" fn se_search_locate_batch(
             );
         }
         Ok(SeBuffer::from_vec(out))
+    })
+}
+
+/// Hits with their next line's text: `texts` as for `se_search_locate_batch`,
+/// `next_texts` / `next_lens` parallel to them, a null pointer for a hit
+/// with no next line. Pairs of texts as `(line, next)`.
+unsafe fn pair_args<'a>(
+    texts: *const *const u8,
+    lens: *const usize,
+    next_texts: *const *const u8,
+    next_lens: *const usize,
+    count: usize,
+) -> std::result::Result<Vec<(&'a str, Option<&'a str>)>, String> {
+    let lines = text_args(texts, lens, count)?;
+    if count == 0 || next_texts.is_null() || next_lens.is_null() {
+        return Ok(lines.into_iter().map(|t| (t, None)).collect());
+    }
+    let ptrs = std::slice::from_raw_parts(next_texts, count);
+    let nlens = std::slice::from_raw_parts(next_lens, count);
+    Ok(lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let next = (!ptrs[i].is_null())
+                .then(|| std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptrs[i], nlens[i])));
+            (t, next)
+        })
+        .collect())
+}
+
+/// `se_search_locate_batch` for hits given with their next line's text
+/// (cross-line matching): the line alone is tried first. Output per hit:
+/// `[0]` (no pass), `[1, snippet...]` (in-line, offsets into the line) or
+/// `[2, break, snippet...]` (cross-line: offsets into `line + "\n" + next`,
+/// `break` = the UTF-16 offset of that `\n`).
+///
+/// # Safety
+/// As `se_search_locate_batch`; `next_texts` / `next_lens` hold `count`
+/// entries (or are null: no next lines).
+#[no_mangle]
+pub unsafe extern "C" fn se_search_locate_pairs(
+    search: *mut SearchResult,
+    texts: *const *const u8,
+    lens: *const usize,
+    next_texts: *const *const u8,
+    next_lens: *const usize,
+    count: usize,
+) -> SeBuffer {
+    let empty = SeBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    guard(empty, || {
+        let search = search.as_mut().ok_or("null search")?;
+        let items = pair_args(texts, lens, next_texts, next_lens, count)?;
+        let located = search.session.try_locate_pairs(&items).map_err(err)?;
+        let mut out = Vec::with_capacity(count * 16);
+        for snippet in located {
+            match snippet {
+                Some(s) => {
+                    match s.break_at {
+                        Some(at) => {
+                            out.push(2);
+                            out.push(at as u32);
+                        }
+                        None => out.push(1),
+                    }
+                    write_snippet(&s, &mut out);
+                }
+                None => out.push(0),
+            }
+        }
+        Ok(SeBuffer::from_vec(out))
+    })
+}
+
+/// `se_search_count_batch` for hits given with their next line's text (as
+/// `se_search_locate_pairs` takes them).
+///
+/// # Safety
+/// As `se_search_locate_pairs`.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_count_batch_pairs(
+    search: *mut SearchResult,
+    texts: *const *const u8,
+    lens: *const usize,
+    next_texts: *const *const u8,
+    next_lens: *const usize,
+    count: usize,
+) -> i64 {
+    guard(-1, || {
+        let search = search.as_mut().ok_or("null search")?;
+        let items = pair_args(texts, lens, next_texts, next_lens, count)?;
+        Ok(search.count_batch_pairs(&items).map_err(err)? as i64)
     })
 }
 

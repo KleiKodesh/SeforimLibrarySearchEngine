@@ -458,6 +458,8 @@ are not printed), so upstream's query-parser tests stay as they are.
     around it merge: `a x b` with `[g0, g1]` -> `g0 + g1` words between `a`
     and `b`. A word of 128 bytes or more keeps its one position, as in the
     text: it leaves the query (no term) and `a x b` -> `g0 + 1 + g1`.
+    Deliberate deviation (user's choice): Otzaria returns no hits for such
+    a query (its literal matches no term); we keep the slot and search the rest.
     Without a proximity it stays a skipped slot (`GroupSpec::Unindexed`)
     that counts toward word distance, as FtsLib's skipped wildcard. Any
     order: Otzaria's window `(n-1)(distance+1)` for its n words, minus one

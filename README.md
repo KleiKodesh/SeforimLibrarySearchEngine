@@ -139,6 +139,9 @@ is clean, and CHANGELOG.md has the entry.
      PreparedQueryGroups). Keeping them costs one copy per matched word,
      outside the per-document loop, and avoids a second query or re-walk to
      learn them.
+   - The sink also says when a capped expansion left terms out
+     (`is_truncated`; `mark_truncated` for callers that cap an expansion
+     themselves), at no cost unless a cap is hit.
 
 2. **Shortest-first term dictionary walk.**
    (`termdict/fst_termdict/shortest_first.rs`, `termdict/mod.rs`)
@@ -337,7 +340,7 @@ are not printed), so upstream's query-parser tests stay as they are.
   - Deviations, named: the cap is ours (2000 per segment, shortest first,
     like every walk) where Otzaria takes up to 10000 terms (a sequence
     8192 per word) in dictionary order under postings budgets, and reports
-    `truncated`; we report no truncation flag. Narrowing to Otzaria's term
+    `truncated`; ours reports the cap through the search's truncation flag. Narrowing to Otzaria's term
     alphabet means a letter outside it, literal or class (an accented
     Latin letter, Cyrillic, Greek), never matches (as Otzaria). A byte
     class (`(?-u:...)`) is invalid, as Otzaria. The low-level request's
@@ -734,6 +737,16 @@ are not printed), so upstream's query-parser tests stay as they are.
     relevance (no positions 104 / 262 ms); phrase gap 0, 15,228 hits: 32 /
     38 ms; any order: 32 / 47 ms; `word~1`, 599,323 hits: 95 / 243 ms; two
     words anywhere: 22 / 30 ms.
+- **Truncation flag** (Otzaria's `truncated`): a search reports when any
+  of its walks (a word, an alternative, a negative word, the FM-sidecar
+  expansions too) hit its expansion cap (2000 per segment), so matching
+  terms past the cap were not searched. Rust `SearchResult::truncated`,
+  C ABI `se_search_info` (`"truncated"`), C# `SearchInfo.Truncated`, Dart
+  `SearchInfo.truncated`; both demos print it. Cost: none when no cap is
+  hit (tantivy's `MatchedTermsSink::is_truncated`, set by the capped walk;
+  only a cap filled exactly at the end of a length level searches depth
+  first for one more match, stopping at the first; with none left it may
+  visit the rest of the matching subtree).
 - **C ABI conventions:** objects are opaque handles; strings cross as UTF-8
   pointer + length; errors are `0/-1` status codes with a per-thread
   `se_last_error`; hot paths are binary (no JSON).

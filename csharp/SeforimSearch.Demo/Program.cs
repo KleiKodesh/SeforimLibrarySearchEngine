@@ -160,6 +160,8 @@ namespace SeforimSearch.Demo
                                     (sw.Elapsed.TotalSeconds < 1 ? $"{sw.Elapsed.TotalMilliseconds:F0} ms" : $"{sw.Elapsed.TotalMinutes:F2} min"));
             foreach (var notice in info.Notices)
                 Console.Error.WriteLine($"notice: {notice}");
+            if (info.Truncated)
+                Console.Error.WriteLine("truncated: a walk hit its expansion cap");
             foreach (var kv in counts.ByBook.OrderByDescending(kv => kv.Value).Take(5))
                 Console.WriteLine($"book {kv.Key}: {kv.Value:N0}");
             return 0;

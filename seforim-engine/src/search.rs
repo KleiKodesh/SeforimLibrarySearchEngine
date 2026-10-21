@@ -774,6 +774,8 @@ pub struct SearchResult {
     scores: Option<Vec<Score>>,
     /// Notices about how the search was served (see [`notices`](Self::notices)).
     notices: Vec<String>,
+    /// A walk hit its expansion cap (see [`truncated`](Self::truncated)).
+    truncated: bool,
 }
 
 /// How a search was served (see [`SearchResult::info`]).
@@ -781,6 +783,8 @@ pub struct SearchResult {
 pub struct SearchInfo {
     /// See [`SearchResult::notices`].
     pub notices: Vec<String>,
+    /// See [`SearchResult::truncated`].
+    pub truncated: bool,
 }
 
 /// Exact totals of a search: the lines that pass every filter (including
@@ -807,12 +811,25 @@ struct CountTally {
 
 impl SearchResult {
     fn new(hits: Vec<PlacedHit>, session: SnippetSession) -> SearchResult {
-        SearchResult { hits, session, tally: CountTally::default(), scores: None, notices: Vec::new() }
+        SearchResult { hits, session, tally: CountTally::default(), scores: None, notices: Vec::new(), truncated: false }
     }
 
     fn with_notices(mut self, notices: Vec<String>) -> SearchResult {
         self.notices = notices;
         self
+    }
+
+    fn with_truncated(mut self, truncated: bool) -> SearchResult {
+        self.truncated = truncated;
+        self
+    }
+
+    /// True when a walk of this search (any word, alternative or negative
+    /// word, FM-sidecar expansions included) hit its expansion cap (2000 per
+    /// segment): matching terms beyond the cap were not searched. Costs
+    /// nothing when no cap is hit.
+    pub fn truncated(&self) -> bool {
+        self.truncated
     }
 
     /// Notices about how the search was served, not errors. Today one:
@@ -825,7 +842,7 @@ impl SearchResult {
 
     /// How the search was served (the C ABI's `se_search_info`).
     pub fn info(&self) -> SearchInfo {
-        SearchInfo { notices: self.notices.clone() }
+        SearchInfo { notices: self.notices.clone(), truncated: self.truncated() }
     }
 
     /// The relevance score of each hit (aligned with `hits`), when the
@@ -1003,7 +1020,10 @@ impl LineIndex {
         fm: Option<&FmIndex>,
     ) -> Result<Option<Arc<dyn SpanTermSource>>> {
         let field = self.fields.text;
-        if let Some(terms) = self.fm_terms(fm, searcher, group)? {
+        if let Some((terms, truncated)) = self.fm_terms(fm, searcher, group)? {
+            if truncated {
+                sink.mark_truncated();
+            }
             let mut q = ExactTermsQuery::new(field, terms);
             q.set_matched_terms_sink(sink.clone());
             return Ok(Some(q.span_slot()));
@@ -1128,7 +1148,10 @@ impl LineIndex {
         searcher: &tantivy::Searcher,
         fm: Option<&FmIndex>,
     ) -> Result<Option<Box<dyn Query>>> {
-        if let Some(terms) = self.fm_terms(fm, searcher, group)? {
+        if let Some((terms, truncated)) = self.fm_terms(fm, searcher, group)? {
+            if truncated {
+                sink.mark_truncated();
+            }
             let mut q = ExactTermsQuery::new(self.fields.text, terms);
             q.set_matched_terms_sink(sink.clone());
             return Ok(Some(Box::new(q)));
@@ -1266,13 +1289,14 @@ impl LineIndex {
 
     /// The exact terms for a group the sidecar can expand (a leading-`*`
     /// wildcard of FtsLib's FM shape, or a fuzzy word), verified and capped
-    /// like the walk. None: the group runs as a walk.
+    /// like the walk, and whether the cap left terms out. None: the group
+    /// runs as a walk.
     fn fm_terms(
         &self,
         fm: Option<&FmIndex>,
         searcher: &tantivy::Searcher,
         group: &GroupSpec,
-    ) -> Result<Option<Vec<Vec<u8>>>> {
+    ) -> Result<Option<(Vec<Vec<u8>>, bool)>> {
         let Some(fm) = fm else { return Ok(None) };
         let field = self.fields.text;
         let dict = || -> Result<_> { Ok(searcher.segment_readers()[0].inverted_index(field)?) };
@@ -1493,6 +1517,9 @@ impl LineIndex {
             }
         };
 
+        // Every sink of this search (main query, phrase alternatives, negative
+        // query): the result is truncated when any walk hit its cap.
+        let mut watched: Vec<MatchedTermsSink> = sinks.clone();
         // Phrase alternatives (Otzaria's acronym expansions): each an
         // adjacent, ordered, all-words phrase, ORed with the main query.
         let mut alternatives: Vec<(Vec<MatchedTermsSink>, Box<dyn Query>)> = Vec::new();
@@ -1521,6 +1548,7 @@ impl LineIndex {
                 (complete && !clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>)
             };
             if let Some(q) = q {
+                watched.extend(alt_sinks.iter().cloned());
                 alternatives.push((alt_sinks, q));
                 alternative_groups.push(phrase.as_slice());
             }
@@ -1620,6 +1648,7 @@ impl LineIndex {
                 (!clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>)
             };
             if let Some(negative) = negative {
+                watched.extend(negative_sinks.iter().cloned());
                 let needs_text = if ex_proximity.is_some() {
                     // without positions the rule is checked on the text; a
                     // skipped word would shift the pairs: no exclusion then
@@ -1657,6 +1686,7 @@ impl LineIndex {
                     {
                         query_negatives.push(Box::new(q));
                     }
+                    watched.extend(sinks.iter().cloned());
                     continue;
                 }
                 let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -1675,6 +1705,7 @@ impl LineIndex {
                     continue;
                 }
                 let q: Box<dyn Query> = Box::new(BooleanQuery::new(clauses));
+                watched.extend(sinks.iter().cloned());
                 if phrase.len() > 1 {
                     fill_sinks(q.as_ref())?;
                     text_negatives.push((sinks, 0, true, None));
@@ -1756,6 +1787,8 @@ impl LineIndex {
         if timing {
             eprintln!("  [timing] collect {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);
         }
+        // The walks ran inside scorer creation: their caps are known now.
+        let truncated = watched.iter().any(|s| s.is_truncated());
         // Relevance keeps the collection order (aligned with `keys`) until
         // the hits are scored, below.
         if !relevance {
@@ -1837,7 +1870,7 @@ impl LineIndex {
             !self.options.positions && request.phrase_alternatives.iter().any(|p| p.len() > 1);
         session.count_needs_text = main_needs_text || phrase_needs_text || !session.negative.is_empty();
         if session.matchers.is_empty() {
-            return Ok(SearchResult::new(Vec::new(), session).with_notices(notices));
+            return Ok(SearchResult::new(Vec::new(), session).with_notices(notices).with_truncated(truncated));
         }
         if let Some(main_terms) = main_terms {
             CancelToken::check(cancel.as_ref())?;
@@ -1864,10 +1897,10 @@ impl LineIndex {
             if timing {
                 eprintln!("  [timing] relevance {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);
             }
-            let mut result = SearchResult::new(hits, session).with_notices(notices);
+            let mut result = SearchResult::new(hits, session).with_notices(notices).with_truncated(truncated);
             result.scores = Some(scores);
             return Ok(result);
         }
-        Ok(SearchResult::new(hits, session).with_notices(notices))
+        Ok(SearchResult::new(hits, session).with_notices(notices).with_truncated(truncated))
     }
 }

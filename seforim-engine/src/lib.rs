@@ -392,6 +392,39 @@ mod tests {
         assert_eq!(result.hits.len(), 1);
     }
 
+    /// The truncated flag: a walk that hits its 2000-term cap reports it, on
+    /// the walk and on the FM-sidecar path alike; a walk under it does not.
+    #[test]
+    fn truncated_when_a_walk_hits_its_cap() {
+        let letters: Vec<char> = ('a'..='z').collect();
+        let mut words = Vec::new();
+        'outer: for a in &letters {
+            for b in &letters {
+                for c in &letters {
+                    words.push(format!("ab{a}{b}{c}"));
+                    if words.len() == 2100 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        let lines: Vec<LineDoc> = words.chunks(10).enumerate().map(|(i, w)| line(i as u64, i as u64, 1, &w.join(" "))).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let index = build(dir.path(), IndexOptions::default(), &lines);
+        let q = |s: &str| index.search_options(&SearchOptions { query: s.into(), ..Default::default() }).unwrap();
+        let r = q("ab*");
+        assert!(r.truncated());
+        assert!(r.info().truncated);
+        assert!(!q("abaa*").truncated());
+        assert!(!q("abaaa").truncated());
+        // the FM sidecar path (leading star) reports it too
+        let w = index.writer(50_000_000, 1).unwrap();
+        w.merge_all().unwrap();
+        index.build_fm_sidecar().unwrap();
+        assert!(q("*ab*").truncated());
+        assert!(!q("*abaa").truncated());
+    }
+
     #[test]
     fn min_groups_partial_matching() {
         let dir = tempfile::tempdir().unwrap();

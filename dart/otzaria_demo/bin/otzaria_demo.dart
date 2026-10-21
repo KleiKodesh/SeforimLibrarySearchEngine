@@ -259,6 +259,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   for (final n in searchInfo.notices) {
     stderr.writeln('notice: $n');
   }
+  if (searchInfo.truncated) stderr.writeln('truncated: a walk hit its expansion cap');
 
   // Negative scope sameSection, host-side (the index holds no sections):
   // one search per negative word → line ids → sections via SQLite →

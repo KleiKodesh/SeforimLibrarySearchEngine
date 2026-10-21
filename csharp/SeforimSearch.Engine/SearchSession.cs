@@ -161,13 +161,14 @@ namespace SeforimSearch.Engine
         }
 
         /// <summary>How the search was served: its <see cref="SearchInfo.Notices"/>
-        /// (not errors; e.g. <see cref="SearchInfo.RelevanceNeedsPositions"/>).</summary>
+        /// (not errors; e.g. <see cref="SearchInfo.RelevanceNeedsPositions"/>) and
+        /// whether a walk hit its cap (<see cref="SearchInfo.Truncated"/>).</summary>
         public SearchInfo GetInfo()
         {
             var o = (Dictionary<string, object?>)Json.Parse(Interop.TakeString(NativeMethods.se_search_info(_handle)))!;
             var notices = new List<string>();
             foreach (var n in (List<object?>)o["notices"]!) notices.Add((string)n!);
-            return new SearchInfo(notices);
+            return new SearchInfo(notices, (bool)o["truncated"]!);
         }
 
         /// <summary>Locates one matched line's snippet (see <see cref="LocateBatch"/>).</summary>
@@ -200,12 +201,17 @@ namespace SeforimSearch.Engine
         /// catalog order.</summary>
         public const string RelevanceNeedsPositions = "relevance_needs_positions";
 
-        public SearchInfo(IReadOnlyList<string> notices)
+        public SearchInfo(IReadOnlyList<string> notices, bool truncated)
         {
             Notices = notices;
+            Truncated = truncated;
         }
 
         /// <summary>Notices about the search (not errors), e.g. <see cref="RelevanceNeedsPositions"/>.</summary>
         public IReadOnlyList<string> Notices { get; }
+
+        /// <summary>A walk (any word, alternative or negative word) hit its expansion
+        /// cap (2000 per segment): terms beyond it were not searched.</summary>
+        public bool Truncated { get; }
     }
 }

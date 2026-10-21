@@ -689,10 +689,12 @@ pub unsafe extern "C" fn se_search_counts(search: *const SearchResult) -> *mut c
     })
 }
 
-/// How the search was served, as JSON: `{"notices":["..."]}`. `notices`
-/// are not errors: `"relevance_needs_positions"` = relevance order was asked
-/// for a phrase / proximity / multi-word fuzzy query on an index without
-/// positions, so the hits are in catalog order. Free with `se_string_free`.
+/// How the search was served, as JSON: `{"notices":["..."],"truncated":false}`.
+/// `notices` are not errors: `"relevance_needs_positions"` = relevance order
+/// was asked for a phrase / proximity / multi-word fuzzy query on an index
+/// without positions, so the hits are in catalog order. `truncated`: a walk
+/// hit its expansion cap (2000 per segment), so terms beyond it were not
+/// searched. Free with `se_string_free`.
 ///
 /// # Safety
 /// `search` must be live.

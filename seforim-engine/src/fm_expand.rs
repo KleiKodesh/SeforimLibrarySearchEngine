@@ -58,13 +58,14 @@ fn term_of(dict: &TermDictionary, rowid: u32, buf: &mut Vec<u8>) -> Result<bool>
 /// them), then highest doc count, then the stripped bytes. As in the walk's
 /// cap, a term and its quoted or vocalized variants are ONE slot (FtsLib's
 /// index stored only the quote-free term), ranked by their summed doc count;
-/// a kept slot keeps all of them.
+/// a kept slot keeps all of them. Also returns whether the cap left out a
+/// matching term (the walk's truncation flag).
 fn cap_like_the_walk(
     dict: &TermDictionary,
     mut ranked: Vec<(u32, Vec<u8>)>,
     cap: usize,
     marked_terms: bool,
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<(Vec<Vec<u8>>, bool)> {
     let zero_width = zero_width_chars(marked_terms);
     let mut forms: std::collections::HashMap<Vec<u8>, (u32, usize, u64, Vec<Vec<u8>>)> =
         std::collections::HashMap::new();
@@ -78,7 +79,7 @@ fn cap_like_the_walk(
     }
     if forms.len() <= cap {
         ranked.sort_unstable_by(|a, b| a.1.cmp(&b.1));
-        return Ok(ranked.into_iter().map(|(_, t)| t).collect());
+        return Ok((ranked.into_iter().map(|(_, t)| t).collect(), false));
     }
     let mut slots: Vec<(u32, usize, Reverse<u64>, Vec<u8>, Vec<Vec<u8>>)> = Vec::with_capacity(forms.len());
     for (form, (rank, chars, _, terms)) in forms {
@@ -92,7 +93,7 @@ fn cap_like_the_walk(
     slots.truncate(cap);
     let mut terms: Vec<Vec<u8>> = slots.into_iter().flat_map(|s| s.4).collect();
     terms.sort_unstable();
-    Ok(terms)
+    Ok((terms, true))
 }
 
 /// FtsLib `ExpandWildcardWithFm`, verified: the terms the wildcard walk
@@ -108,7 +109,7 @@ pub fn expand_wildcard(
     suffix_only: bool,
     cap: usize,
     marked_terms: bool,
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<(Vec<Vec<u8>>, bool)> {
     let mut buf = Vec::new();
     let mut kept = Vec::new();
     for rowid in fm.find_row_ids(core, suffix_only) {
@@ -138,7 +139,7 @@ pub fn expand_fuzzy(
     max_distance: u8,
     cap: usize,
     marked_terms: bool,
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<(Vec<Vec<u8>>, bool)> {
     let mut buf = Vec::new();
     let mut kept = Vec::new();
     for (rowid, _) in fm.find_fuzzy(&text_form(word), max_distance as usize) {
@@ -189,7 +190,7 @@ pub fn expand_fuzzy_quote_free(
     max_distance: u8,
     cap: usize,
     marked_terms: bool,
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<(Vec<Vec<u8>>, bool)> {
     let query: Vec<char> = text_form(word).chars().collect();
     let mut buf = Vec::new();
     let mut kept = Vec::new();

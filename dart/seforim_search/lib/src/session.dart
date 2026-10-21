@@ -114,7 +114,7 @@ final class SearchSession implements Finalizable {
       HitCounts.fromJson(jsonDecode(_n.takeString(_n.searchCounts(_h))) as Map<String, dynamic>);
 
   /// How the search was served: its [SearchInfo.notices] (not errors; e.g.
-  /// [SearchInfo.relevanceNeedsPositions]).
+  /// [SearchInfo.relevanceNeedsPositions]) and [SearchInfo.truncated].
   SearchInfo info() =>
       SearchInfo.fromJson(jsonDecode(_n.takeString(_n.searchInfo(_h))) as Map<String, dynamic>);
 
@@ -136,7 +136,7 @@ final class SearchSession implements Finalizable {
 
 /// How a search was served ([SearchSession.info]).
 class SearchInfo {
-  const SearchInfo(this.notices);
+  const SearchInfo(this.notices, {this.truncated = false});
 
   /// Notice: relevance order was asked for a phrase / proximity / multi-word
   /// fuzzy query on an index without positions; the hits are in catalog order.
@@ -145,5 +145,10 @@ class SearchInfo {
   /// Notices about the search (not errors), e.g. [relevanceNeedsPositions].
   final List<String> notices;
 
-  static SearchInfo fromJson(Map<String, dynamic> j) => SearchInfo((j['notices'] as List).cast<String>());
+  /// A walk (any word, alternative or negative word) hit its expansion cap
+  /// (2000 per segment): terms beyond it were not searched.
+  final bool truncated;
+
+  static SearchInfo fromJson(Map<String, dynamic> j) =>
+      SearchInfo((j['notices'] as List).cast<String>(), truncated: j['truncated'] as bool);
 }

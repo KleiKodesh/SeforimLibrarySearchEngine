@@ -304,14 +304,23 @@ are not printed), so upstream's query-parser tests stay as they are.
     `suffix_max_letters`, `part_of_word_max_letters`,
     `grammar_prefix_max_letters`. Wildcard, fuzzy and `%` words take only
     `ignore_quotes` (as FtsLib's parser).
-  - `words`: per-word overrides by word index (the n-th word token of the
-    query, from 0; `|` is not a word): the same fields, each optional
+  - `words`: per-word overrides by word index. **Word index rule:** the
+    place, from 0, of the word as the user typed it: the query cut on
+    space / tab / CR / LF and `|` (`|` is never a word, spaced or not; a
+    word the engine drops, e.g. one letter or `,`, keeps its place). When
+    FtsLib's separators split a typed word (maqaf, punctuation, a
+    Hebrew/Latin boundary: `abcשלום` → `abc`, `שלום`), its override and
+    alternatives go to every part, so indexes never shift. The same fields, each optional
     (null = inherit), plus `alternatives` (extra words ORed into that
     word's slot, searched with its options; if the word itself cannot
     search, e.g. one letter, its alternatives stand in for it). This is Otzaria's
     `wordOptions` / `alternativeWords`.
   - Query level: `max_word_distance`, `require_ordered`, `min_groups`,
-    `context_words`, `proximity`, `exclude` (`{query, max_word_distance,
+    `word_match` (`{"mode":"all"|"any_word"|"most_words"}` /
+    `{"mode":"at_least","count":N}`: Otzaria's wordMatchMode, the engine
+    counts the slots it searches, a dropped word not counted; wins over
+    `min_groups`), `context_words`, `proximity` (per TYPED word, see the
+    proximity item), `exclude` (`{query, max_word_distance,
     require_ordered, proximity}`; its words use the global options),
     `books`, `phrase_alternatives` (`[{query, ignore_quotes}]`).
   - JSON: `{"query":"משה תורה","grammar_prefixes":true,
@@ -406,6 +415,21 @@ are not printed), so upstream's query-parser tests stay as they are.
     `require_ordered` and `gaps` for the main query (FtsLib's rule, kept
     unchanged when it is None); `min_groups` below the group count wins
     over it (as Otzaria); every word must be searchable, else no hits.
+  - In `SearchOptions` (and its `exclude`) the proximity is given per
+    TYPED word: `gaps[i]` between typed words i and i+1, one entry per
+    pair, dropped words included. A word the engine drops (one letter,
+    30+ letters, no letters) has no term and no token position, so it is
+    cut out and the gaps around it merge: `a x b` with `[g0, g1]` →
+    `g0 + g1` words between `a` and `b`. Otzaria (`resolve_gaps`) keeps `x`
+    as a word at one position, at most `g0` words before it and `g1` after
+    it; with `x` invisible that is at most `g0 + g1` between `a` and `b`
+    (known difference: `x` itself is not checked). Any order: Otzaria's
+    window `(n-1)(distance+1)` for its n words, minus one per dropped word
+    (each took one of its positions), sent as `window { max_span }`.
+    Sub-words of one typed word are adjacent (gap 0); an OR slot takes the
+    gap before its first word and after its last. A dropped word inside an
+    OR slot (`a|ו b`) is still counted as a dropped word (Otzaria has no
+    `|`; the Otzaria demo turns `|` into a space).
 - **Per-pair spacing** (FtsLib-style request field, positions only): `gaps` in the request (C#
   `SearchRequest.Gaps`, Dart `SearchRequest.gaps`, demo `--spacing 2,5`).
   - `gaps[i]` is the maximum number of words between query word i and i+1.

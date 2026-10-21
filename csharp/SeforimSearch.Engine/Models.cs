@@ -272,6 +272,35 @@ namespace SeforimSearch.Engine
         }
     }
 
+    /// <summary>Otzaria's <c>WordMatchMode</c> for <see cref="SearchOptions.WordMatch"/>: how
+    /// many slots a line needs, counted by the engine over the slots it searches (a word it
+    /// drops is not counted). All = every slot, AnyWord = 1, MostWords = n/2 + 1, AtLeast =
+    /// count (at least 1).</summary>
+    public sealed class WordMatch
+    {
+        private readonly string _mode;
+        private readonly int _count;
+
+        private WordMatch(string mode, int count)
+        {
+            _mode = mode;
+            _count = count;
+        }
+
+        public static WordMatch All() => new WordMatch("all", 0);
+        public static WordMatch AnyWord() => new WordMatch("any_word", 0);
+        public static WordMatch MostWords() => new WordMatch("most_words", 0);
+        public static WordMatch AtLeast(int count) => new WordMatch("at_least", count < 0 ? 0 : count);
+
+        internal void WriteJson(StringBuilder sb)
+        {
+            sb.Append("{\"mode\":\"").Append(_mode).Append('"');
+            if (_mode == "at_least")
+                sb.Append(",\"count\":").Append(_count.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            sb.Append('}');
+        }
+    }
+
     /// <summary>Otzaria's word proximity, an engine rule of its own (see the engine's
     /// <c>ProximitySpec</c>). With positions it runs in the query; without, the snippet
     /// locator validates it on the line text: both return the same lines.</summary>
@@ -529,8 +558,10 @@ namespace SeforimSearch.Engine
         public int? PartOfWordMaxLetters { get; set; }
         public int? GrammarPrefixMaxLetters { get; set; }
 
-        /// <summary>Per-word overrides by word index (the n-th word of <see cref="Query"/>,
-        /// from 0; <c>|</c> is not a word).</summary>
+        /// <summary>Per-word overrides by word index: the place, from 0, of the word as typed
+        /// (<see cref="Query"/> cut on whitespace and <c>|</c>; <c>|</c> is not a word; a word
+        /// the engine drops keeps its place). A typed word the separators split (maqaf,
+        /// punctuation, Hebrew/Latin) gives its override to every part.</summary>
         public Dictionary<int, WordOptions> Words { get; } = new Dictionary<int, WordOptions>();
 
         // query level
@@ -538,11 +569,17 @@ namespace SeforimSearch.Engine
         public int? MaxWordDistance { get; set; }
         /// <summary>FtsLib: the words in query order.</summary>
         public bool RequireOrdered { get; set; }
-        /// <summary>Partial matching (Otzaria's wordMatchMode): slots a line needs. Null = all.</summary>
+        /// <summary>Partial matching as a slot count: slots a line needs. Null = all.
+        /// WordMatch wins when set.</summary>
         public int? MinGroups { get; set; }
+        /// <summary>Partial matching (Otzaria's wordMatchMode), counted by the engine over the
+        /// slots it searches.</summary>
+        public WordMatch? WordMatch { get; set; }
         /// <summary>Words of context per side of the snippet.</summary>
         public int ContextWords { get; set; } = 8;
-        /// <summary>Otzaria's proximity; when set, MaxWordDistance / RequireOrdered are not used.</summary>
+        /// <summary>Otzaria's proximity, per TYPED word (gaps[i] between typed words i and i+1,
+        /// words the engine drops included: it cuts them out and merges the gaps around them).
+        /// When set, MaxWordDistance / RequireOrdered are not used.</summary>
         public Proximity? Proximity { get; set; }
         /// <summary>Otzaria's negative query (its words use the global word options).</summary>
         public ExcludeOptions? Exclude { get; set; }
@@ -576,6 +613,7 @@ namespace SeforimSearch.Engine
             if (MaxWordDistance.HasValue) sb.Append(",\"max_word_distance\":").Append(MaxWordDistance.Value.ToString(inv));
             if (RequireOrdered) sb.Append(",\"require_ordered\":true");
             if (MinGroups.HasValue) sb.Append(",\"min_groups\":").Append(MinGroups.Value.ToString(inv));
+            if (WordMatch != null) { sb.Append(",\"word_match\":"); WordMatch.WriteJson(sb); }
             sb.Append(",\"context_words\":").Append(ContextWords.ToString(inv));
             if (Proximity != null) { sb.Append(",\"proximity\":"); Proximity.WriteJson(sb); }
             if (Exclude != null) { sb.Append(",\"exclude\":"); Exclude.WriteJson(sb); }

@@ -173,6 +173,11 @@ pub enum ProximitySpec {
     /// ignores any order when customSpacing is set; the host sends
     /// `Ordered` then.
     AnyOrder { distance: u32 },
+    /// Groups in any order, each at its own word, all inside one window of
+    /// `max_span` positions (last minus first): what `AnyOrder` resolves
+    /// to. [`SearchOptions`](crate::SearchOptions) lowers its typed-word
+    /// `AnyOrder` to this when the query has words the engine drops.
+    Window { max_span: u32 },
 }
 
 impl ProximitySpec {
@@ -196,6 +201,7 @@ impl ProximitySpec {
                     max_span: pairs.saturating_mul(distance.saturating_add(1)),
                 }
             }
+            ProximitySpec::Window { max_span } => Proximity::AnyOrder { max_span: *max_span },
         })
     }
 }
@@ -244,7 +250,9 @@ pub struct SearchRequest {
     /// are FtsLib's rule, unchanged when this is None). Partial matching
     /// (`min_groups` below the group count) wins over it, as in Otzaria.
     /// Every group must be searchable (a skipped slot would shift the
-    /// pairs): otherwise the main query matches nothing. Phrase
+    /// pairs): otherwise the main query matches nothing. (`SearchOptions`
+    /// takes the rule per typed word and lowers it here with the dropped
+    /// words already cut out.) Phrase
     /// alternatives and the negative query keep their own rules.
     pub proximity: Option<ProximitySpec>,
     /// Filtered search by book: only lines whose `book_id` is in this set
@@ -975,7 +983,7 @@ impl LineIndex {
     /// string is parsed by FtsLib's rules and each word becomes one walk with
     /// its options (global, overridden per word).
     pub fn search_options(&self, options: &SearchOptions) -> Result<SearchResult> {
-        self.search(&options.to_request(self.options.keep_marks))
+        self.search(&options.to_request(self.options.keep_marks)?)
     }
 
     /// Runs `request`. Every matching line comes back in catalog order;

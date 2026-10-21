@@ -20,7 +20,7 @@ pub mod search;
 
 pub use fm_index::FmIndex;
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter};
-pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordOptions};
+pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, WordOptions};
 pub use search::{
     ExcludeSpec, GroupSpec, PlacedHit, ProximitySpec, SearchRequest, SearchResult, Snippet, SnippetSession,
     TypoModeSpec, WalkOptionsSpec, SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,

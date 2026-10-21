@@ -35,11 +35,12 @@ abstract final class OtzariaOption {
   static const unsupported = <String>{};
 }
 
-/// Otzaria's query sanitizer: ״/׳ → "/', maqaf and hyphen → space, collapse
+/// Otzaria's query sanitizer: ״/׳ → "/', maqaf, hyphen and `|` → space
+/// (Otzaria: `|` separates; the engine cuts typed words there too), collapse
 /// spaces; `"` at a word edge separates, between letters it stays (רמב"ם);
 /// `''` → `"`.
 List<String> splitQueryWords(String query) {
-  var q = query.replaceAll('״', '"').replaceAll('׳', "'").replaceAll("''", '"').replaceAll(RegExp('[־-]'), ' ');
+  var q = query.replaceAll('״', '"').replaceAll('׳', "'").replaceAll("''", '"').replaceAll(RegExp('[־|-]'), ' ');
   final words = <String>[];
   for (var w in q.split(RegExp(r'\s+'))) {
     w = w.replaceAll(RegExp(r'^"+|"+$'), '').replaceAll(RegExp(r"^'+"), '');
@@ -98,17 +99,14 @@ class OtzariaSearch {
   final WordMatchMode wordMatchMode;
   final int wordMatchCount;
 
-  /// Otzaria `WordMatch::min_words`: all = n, anyWord = 1, mostWords =
-  /// n/2 + 1, atLeast = count (at least 1); never more than n.
-  int minWords(int n) {
-    final min = switch (wordMatchMode) {
-      WordMatchMode.all => n,
-      WordMatchMode.anyWord => 1,
-      WordMatchMode.mostWords => n ~/ 2 + 1,
-      WordMatchMode.atLeast => wordMatchCount < 1 ? 1 : wordMatchCount,
-    };
-    return min < n ? min : n;
-  }
+  /// The mode as the engine's [WordMatch]; the engine counts the words
+  /// itself (Otzaria `WordMatch::min_words` over the slots it searches).
+  WordMatch get wordMatch => switch (wordMatchMode) {
+        WordMatchMode.all => const WordMatch.all(),
+        WordMatchMode.anyWord => const WordMatch.anyWord(),
+        WordMatchMode.mostWords => const WordMatch.mostWords(),
+        WordMatchMode.atLeast => WordMatch.atLeast(wordMatchCount),
+      };
 
   final int? prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters, grammarPrefixMaxLetters;
 
@@ -319,20 +317,12 @@ class OtzariaSearch {
       ),
       global,
     );
-    // Partial matching: at least minWords of the words; order, distance and
-    // spacing do not apply (Otzaria: the match is at line resolution).
-    // the engine drops words of under 2 or 30+ letters (no such terms in the
-    // index): count the slots it keeps
-    final n = words.where((w) {
-      final l = RegExp('[a-zA-Zא-ת]').allMatches(w).length;
-      return l >= 2 && l < 30;
-    }).length;
-    final min = mode == SearchMode.advanced ? minWords(n) : n;
-    if (min < n) {
-      s.minGroups = min;
-    } else if (n > 1 && n == words.length) {
-      s.proximity = _proximity(n, customSpacing);
-    }
+    // The user's settings as they are: the engine counts the words for
+    // partial matching (which wins over proximity: the match is at line
+    // resolution) and cuts the words it drops out of the proximity, merging
+    // their gaps.
+    if (mode == SearchMode.advanced) s.wordMatch = wordMatch;
+    if (words.length > 1) s.proximity = _proximity(words.length, customSpacing);
     return s;
   }
 }

@@ -3,7 +3,7 @@
 //! The query is a string in FtsLib's syntax (`*` `?` `%` `~N` `|` stay in
 //! it); every word option is a plain field that applies to every word, and
 //! [`SearchOptions::words`] overrides any of them for one word (by its place
-//! in the query, from 0) and adds alternative words for its slot: Otzaria's
+//! in the query as typed, from 0) and adds alternative words for its slot: Otzaria's
 //! `wordOptions` / `alternativeWords`. The engine builds the walks itself, one
 //! per word with all its options; callers never pick walks or slot kinds.
 //!
@@ -16,6 +16,7 @@ use hebrew_fts::{tokenize_query, QueryTerm, QueryToken, DEFAULT_CONTEXT_WORDS};
 use serde::{Deserialize, Serialize};
 
 use crate::search::{ExcludeSpec, GroupSpec, ProximitySpec, SearchRequest, TypoModeSpec, WalkOptionsSpec};
+use crate::{Error, Result};
 
 /// A search: the query string and the options of every word.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,8 +60,12 @@ pub struct SearchOptions {
     pub part_of_word_max_letters: Option<u32>,
     pub grammar_prefix_max_letters: Option<u32>,
 
-    /// Per-word overrides by word index (the n-th word token of `query`,
-    /// from 0; `|` is not a word). JSON keys are strings: `{"1": {...}}`.
+    /// Per-word overrides by word index: the place, from 0, of the word as
+    /// the user typed it (`query` cut on space / tab / CR / LF and `|`; `|`
+    /// is not a word; a word the engine drops keeps its place). A typed word
+    /// the separators split (maqaf, punctuation, Hebrew/Latin) gives its
+    /// override and alternatives to every part. JSON keys are strings:
+    /// `{"1": {...}}`.
     pub words: BTreeMap<usize, WordOptions>,
 
     // ── Query-level ──
@@ -68,13 +73,19 @@ pub struct SearchOptions {
     pub max_word_distance: Option<usize>,
     /// FtsLib: the words in query order.
     pub require_ordered: bool,
-    /// Partial matching (Otzaria's wordMatchMode): a line needs this many of
-    /// the slots. None = all.
+    /// Partial matching as a slot count: a line needs this many of the
+    /// slots. None = all. `word_match` wins when set.
     pub min_groups: Option<usize>,
+    /// Partial matching (Otzaria's wordMatchMode), counted by the engine
+    /// over the slots it searches (see [`WordMatchSpec`]). None = `min_groups`.
+    pub word_match: Option<WordMatchSpec>,
     /// Words of context per side of the snippet.
     pub context_words: usize,
-    /// Otzaria's proximity (in order with per-pair gaps, or any order). When
-    /// set, `max_word_distance` / `require_ordered` are not used.
+    /// Otzaria's proximity (in order with per-pair gaps, or any order),
+    /// given per TYPED word: `gaps[i]` is between typed words i and i+1,
+    /// dropped words included; the engine cuts the dropped words out and
+    /// merges the gaps around them (see `Slots::lower`). When set,
+    /// `max_word_distance` / `require_ordered` are not used.
     pub proximity: Option<ProximitySpec>,
     /// Otzaria's negative query: lines with these words are dropped.
     pub exclude: Option<ExcludeOptions>,
@@ -110,6 +121,7 @@ impl Default for SearchOptions {
             max_word_distance: None,
             require_ordered: false,
             min_groups: None,
+            word_match: None,
             context_words: DEFAULT_CONTEXT_WORDS,
             proximity: None,
             exclude: None,
@@ -155,6 +167,7 @@ pub struct ExcludeOptions {
     pub query: String,
     pub max_word_distance: Option<usize>,
     pub require_ordered: bool,
+    /// Per typed word of `query`, as [`SearchOptions::proximity`].
     pub proximity: Option<ProximitySpec>,
 }
 
@@ -194,41 +207,85 @@ impl SearchOptions {
     }
 
     /// Lowers to the low-level request. `keep_marks`: the index keeps
-    /// nikud / te'amim, so plain words keep the marks typed.
-    pub fn to_request(&self, keep_marks: bool) -> SearchRequest {
+    /// nikud / te'amim, so plain words keep the marks typed. Errors when a
+    /// proximity's `gaps` does not have one entry per consecutive pair of
+    /// typed words.
+    pub fn to_request(&self, keep_marks: bool) -> Result<SearchRequest> {
         let global = self.global();
-        let groups = slots(&self.query, keep_marks, |i| match self.words.get(&i) {
+        let main = slots(&self.query, keep_marks, |i| match self.words.get(&i) {
             Some(w) => (w.apply(global), w.alternatives.as_slice()),
             None => (global, &[]),
         });
-        let exclude = self.exclude.as_ref().map(|e| ExcludeSpec {
-            groups: slots(&e.query, keep_marks, |_| (global, &[])),
-            max_word_distance: e.max_word_distance,
-            require_ordered: e.require_ordered,
-            gaps: None,
-            proximity: e.proximity.clone(),
-        });
+        let proximity = self.proximity.as_ref().map(|p| main.lower(p)).transpose()?;
+        let min_groups = match self.word_match {
+            Some(m) => m.min_groups(main.groups.len()),
+            None => self.min_groups,
+        };
+        let exclude = match &self.exclude {
+            Some(e) => {
+                let ex = slots(&e.query, keep_marks, |_| (global, &[]));
+                Some(ExcludeSpec {
+                    proximity: e.proximity.as_ref().map(|p| ex.lower(p)).transpose()?,
+                    groups: ex.groups,
+                    max_word_distance: e.max_word_distance,
+                    require_ordered: e.require_ordered,
+                    gaps: None,
+                })
+            }
+            None => None,
+        };
         let phrase_alternatives = self
             .phrase_alternatives
             .iter()
             .map(|p| {
                 let o = WalkOptionsSpec { ignore_quotes: p.ignore_quotes, ..Default::default() };
-                slots(&p.query, keep_marks, |_| (o, &[]))
+                slots(&p.query, keep_marks, |_| (o, &[])).groups
             })
             .filter(|p| !p.is_empty())
             .collect();
-        SearchRequest {
-            groups,
+        Ok(SearchRequest {
+            groups: main.groups,
             max_word_distance: self.max_word_distance,
             require_ordered: self.require_ordered,
             context_words: self.context_words,
             gaps: None,
-            min_groups: self.min_groups,
+            min_groups,
             exclude,
             phrase_alternatives,
-            proximity: self.proximity.clone(),
+            proximity,
             books: self.books.clone(),
-        }
+        })
+    }
+}
+
+/// Otzaria's `WordMatchMode`: how many of the query's slots a line needs.
+/// The engine counts the slots it searches: a word it drops is not
+/// counted, and a typed word the separators split counts each part (as
+/// Otzaria counts its own split words).
+///
+/// JSON: `{"mode":"all"}` / `{"mode":"any_word"}` / `{"mode":"most_words"}` /
+/// `{"mode":"at_least","count":2}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum WordMatchSpec {
+    All,
+    AnyWord,
+    MostWords,
+    AtLeast { count: usize },
+}
+
+impl WordMatchSpec {
+    /// Otzaria `WordMatch::min_words` for `n` slots (all = n, any = 1, most
+    /// = n/2 + 1, at least = count but at least 1; never more than n), as
+    /// `min_groups`: None when it is all of them.
+    pub fn min_groups(self, n: usize) -> Option<usize> {
+        let min = match self {
+            WordMatchSpec::All => n,
+            WordMatchSpec::AnyWord => 1,
+            WordMatchSpec::MostWords => n / 2 + 1,
+            WordMatchSpec::AtLeast { count } => count.max(1),
+        };
+        (min < n).then_some(min)
     }
 }
 
@@ -271,17 +328,91 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
     }
 }
 
+/// The slots of a query and where each typed word went.
+struct Slots {
+    groups: Vec<GroupSpec>,
+    /// Per typed word (see [`tokenize_query`]): the first and last slot its
+    /// sub-words joined, or None when the engine dropped it.
+    typed: Vec<Option<(usize, usize)>>,
+}
+
+impl Slots {
+    /// A proximity given per typed word, as the slots' own proximity.
+    ///
+    /// A dropped word (one letter, 30+ letters, no letters) has no term in
+    /// the index, and the text tokenizer gives such a word no position
+    /// either, so it is cut out of the rule and the gaps around it merge:
+    /// `a x b` with gaps `[g0, g1]` → `a b` with `g0 + g1`. In Otzaria
+    /// (`resolve_gaps`) `x` is a word of its own, at one position, with at
+    /// most `g0` words before it and `g1` after it up to `b`; with `x`
+    /// invisible that leaves at most `g0 + g1` words between `a` and `b`:
+    /// the same lines, except that `x` itself is not checked. Sub-words of
+    /// one typed word (`אשר־שמע` typed as one word) are adjacent: gap 0. The
+    /// gap before an OR slot (`a | b`) is the one before its first word, the
+    /// gap after it the one after its last word. Any order: Otzaria's window
+    /// for its `n` words is `(n - 1) * (distance + 1)` positions; each
+    /// dropped word took one of them, so the window over the kept words is
+    /// that minus the dropped count.
+    fn lower(&self, p: &ProximitySpec) -> Result<ProximitySpec> {
+        let n = self.typed.len();
+        let k = self.groups.len();
+        Ok(match p {
+            ProximitySpec::Ordered { gaps } => {
+                if gaps.len() + 1 != n.max(1) {
+                    return Err(Error::Tantivy(tantivy::TantivyError::InvalidArgument(format!(
+                        "proximity gaps must have one entry per consecutive pair of typed words: {} words, {} gaps",
+                        n,
+                        gaps.len()
+                    ))));
+                }
+                // first / last typed word of each slot
+                let mut span = vec![(usize::MAX, 0usize); k];
+                for (t, r) in self.typed.iter().enumerate() {
+                    if let Some((first, last)) = *r {
+                        for s in &mut span[first..=last] {
+                            s.0 = s.0.min(t);
+                            s.1 = s.1.max(t);
+                        }
+                    }
+                }
+                let lowered = (1..k)
+                    .map(|g| {
+                        let (a, b) = (span[g - 1].1, span[g].0);
+                        if a >= b {
+                            0 // sub-words of one typed word
+                        } else {
+                            gaps[a..b].iter().fold(0u32, |acc, &x| acc.saturating_add(x))
+                        }
+                    })
+                    .collect();
+                ProximitySpec::Ordered { gaps: lowered }
+            }
+            ProximitySpec::AnyOrder { distance } => {
+                let dropped = self.typed.iter().filter(|t| t.is_none()).count();
+                if dropped == 0 {
+                    p.clone()
+                } else {
+                    let words = u32::try_from(k + dropped).unwrap_or(u32::MAX);
+                    let window = words.saturating_sub(1).saturating_mul(distance.saturating_add(1));
+                    ProximitySpec::Window {
+                        max_span: window.saturating_sub(u32::try_from(dropped).unwrap_or(u32::MAX)),
+                    }
+                }
+            }
+            ProximitySpec::Window { .. } => p.clone(),
+        })
+    }
+}
+
 /// FtsLib's grouping of the tokens (`QueryParser.Parse`): a `|` joins its
 /// neighbours into one OR slot; a word that cannot search is skipped
-/// without breaking a pending `|`. `word(i)` gives word i's options and
-/// alternatives; the alternatives join the word's slot (and stand for it
-/// when the word itself cannot search).
-fn slots<'a>(
-    query: &str,
-    keep_marks: bool,
-    word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String]),
-) -> Vec<GroupSpec> {
+/// without breaking a pending `|`. `word(i)` gives typed word i's options
+/// and alternatives, which go to every sub-word cut from it; the
+/// alternatives join the sub-word's slot (and stand for the word when it
+/// cannot search itself).
+fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String])) -> Slots {
     let mut groups = Vec::new();
+    let mut typed: Vec<Option<(usize, usize)>> = Vec::new();
     let mut pending: Vec<GroupSpec> = Vec::new();
     let mut last_was_pipe = false;
     let flush = |pending: &mut Vec<GroupSpec>, groups: &mut Vec<GroupSpec>| match pending.len() {
@@ -297,6 +428,9 @@ fn slots<'a>(
             }
             QueryToken::Word { index, term } => (index, term),
         };
+        if typed.len() <= index {
+            typed.resize(index + 1, None);
+        }
         let (o, alternatives) = word(index);
         let mut members: Vec<GroupSpec> = term.into_iter().map(|t| group(t, o)).collect();
         for alt in alternatives {
@@ -312,11 +446,17 @@ fn slots<'a>(
         if !last_was_pipe {
             flush(&mut pending, &mut groups);
         }
+        // the slot `pending` becomes
+        let slot = groups.len();
+        typed[index] = Some(match typed[index] {
+            Some((first, _)) => (first, slot),
+            None => (slot, slot),
+        });
         pending.extend(members);
         last_was_pipe = false;
     }
     flush(&mut pending, &mut groups);
-    groups
+    Slots { groups, typed }
 }
 
 #[cfg(test)]
@@ -349,7 +489,7 @@ mod tests {
             words,
             ..Default::default()
         };
-        let r = o.to_request(false);
+        let r = o.to_request(false).unwrap();
         assert_eq!(r.groups.len(), 3);
         let (w, opts) = word_of(&r.groups[0]);
         assert_eq!(w, "משה");
@@ -374,12 +514,91 @@ mod tests {
                "phrase_alternatives":[{"query":"רבי משה"}]}"#,
         )
         .unwrap();
-        let r = o.to_request(false);
+        let r = o.to_request(false).unwrap();
         let GroupSpec::Any { alternatives } = &r.groups[0] else { panic!() };
         assert!(!word_of(&alternatives[0]).1.ktiv_male_haser);
         assert!(word_of(&r.groups[1]).1.ktiv_male_haser);
         assert_eq!(r.exclude.unwrap().groups.len(), 1);
         assert_eq!(r.phrase_alternatives[0].len(), 2);
         assert_eq!(r.context_words, DEFAULT_CONTEXT_WORDS);
+    }
+
+    #[test]
+    fn typed_word_index_reaches_every_sub_word() {
+        // word 1 is typed as one word and split in two (maqaf); word 2 is
+        // split at the Latin/Hebrew boundary; the override of word 3 must
+        // not shift onto a sub-word
+        let mut words = BTreeMap::new();
+        words.insert(1, WordOptions { part_of_word: Some(true), ..Default::default() });
+        words.insert(3, WordOptions { ktiv_male_haser: Some(true), ..Default::default() });
+        let o = SearchOptions { query: "משה אשר־שמע abcשלום תורה".into(), words, ..Default::default() };
+        let r = o.to_request(false).unwrap();
+        let got: Vec<_> = r.groups.iter().map(|g| { let (w, o) = word_of(g); (w.to_string(), o.part_of_word, o.ktiv_male_haser) }).collect();
+        assert_eq!(
+            got,
+            [
+                ("משה".into(), false, false),
+                ("אשר".into(), true, false),
+                ("שמע".into(), true, false),
+                ("abc".into(), false, false),
+                ("שלום".into(), false, false),
+                ("תורה".into(), false, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn dropped_words_merge_their_gaps() {
+        let prox = |q: &str, p: ProximitySpec| {
+            SearchOptions { query: q.into(), proximity: Some(p), ..Default::default() }.to_request(false).map(|r| r.proximity.unwrap())
+        };
+        // one-letter word in the middle: g0 + g1
+        assert_eq!(
+            prox("משה ו תורה", ProximitySpec::Ordered { gaps: vec![2, 3] }).unwrap(),
+            ProximitySpec::Ordered { gaps: vec![5] }
+        );
+        // leading / trailing dropped words take their gap with them; a split
+        // typed word is adjacent; an OR slot uses the gap after its last word
+        assert_eq!(
+            prox("א משה|תורה אשר־שמע , ספר ב", ProximitySpec::Ordered { gaps: vec![9, 9, 1, 4, 2, 9] }).unwrap(),
+            ProximitySpec::Ordered { gaps: vec![1, 0, 6] }
+        );
+        // wrong gap count (per typed word) is an error
+        assert!(prox("משה ו תורה", ProximitySpec::Ordered { gaps: vec![2] }).is_err());
+        // any order: Otzaria's window for 3 words minus the dropped word
+        assert_eq!(
+            prox("משה ו תורה", ProximitySpec::AnyOrder { distance: 2 }).unwrap(),
+            ProximitySpec::Window { max_span: 2 * 3 - 1 }
+        );
+        assert_eq!(
+            prox("משה תורה", ProximitySpec::AnyOrder { distance: 2 }).unwrap(),
+            ProximitySpec::AnyOrder { distance: 2 }
+        );
+        // the negative query lowers its own proximity the same way
+        let o = SearchOptions {
+            query: "משה".into(),
+            exclude: Some(ExcludeOptions {
+                query: "סיני ה הר".into(),
+                proximity: Some(ProximitySpec::Ordered { gaps: vec![0, 1] }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(o.to_request(false).unwrap().exclude.unwrap().proximity, Some(ProximitySpec::Ordered { gaps: vec![1] }));
+    }
+
+    #[test]
+    fn word_match_counts_searched_slots() {
+        let min = |q: &str, m: WordMatchSpec| {
+            SearchOptions { query: q.into(), word_match: Some(m), ..Default::default() }.to_request(false).unwrap().min_groups
+        };
+        // the one-letter word is not a slot: most of 3 slots = 2
+        assert_eq!(min("משה ו תורה ספר", WordMatchSpec::MostWords), Some(2));
+        assert_eq!(min("משה ו תורה ספר", WordMatchSpec::AnyWord), Some(1));
+        assert_eq!(min("משה ו תורה ספר", WordMatchSpec::All), None);
+        assert_eq!(min("משה ו תורה ספר", WordMatchSpec::AtLeast { count: 3 }), None);
+        assert_eq!(min("משה ו תורה ספר", WordMatchSpec::AtLeast { count: 0 }), Some(1));
+        let j: SearchOptions = serde_json::from_str(r#"{"query":"א ב","word_match":{"mode":"at_least","count":2}}"#).unwrap();
+        assert_eq!(j.word_match, Some(WordMatchSpec::AtLeast { count: 2 }));
     }
 }

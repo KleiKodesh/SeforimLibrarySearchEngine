@@ -253,6 +253,22 @@ class Proximity {
         };
 }
 
+/// Otzaria's `WordMatchMode` for [SearchOptions.wordMatch]: how many slots a
+/// line needs, counted by the engine over the slots it searches (a dropped
+/// word is not counted). all = every slot, anyWord = 1, mostWords = n/2 + 1,
+/// atLeast = [count] (at least 1).
+class WordMatch {
+  const WordMatch.all() : mode = 'all', count = 0;
+  const WordMatch.anyWord() : mode = 'any_word', count = 0;
+  const WordMatch.mostWords() : mode = 'most_words', count = 0;
+  const WordMatch.atLeast(this.count) : mode = 'at_least';
+
+  final String mode;
+  final int count;
+
+  Map<String, Object?> toJson() => {'mode': mode, if (mode == 'at_least') 'count': count < 0 ? 0 : count};
+}
+
 /// A search.
 class SearchRequest {
   SearchRequest(
@@ -476,6 +492,7 @@ class SearchOptions {
     this.maxWordDistance,
     this.requireOrdered = false,
     this.minGroups,
+    this.wordMatch,
     this.contextWords = 8,
     this.proximity,
     this.exclude,
@@ -497,8 +514,10 @@ class SearchOptions {
   TypoMode typoMode;
   int? prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters, grammarPrefixMaxLetters;
 
-  /// Per-word overrides by word index (the n-th word of [query], from 0;
-  /// `|` is not a word).
+  /// Per-word overrides by word index: the place, from 0, of the word as
+  /// typed ([query] cut on whitespace and `|`; `|` is not a word; a word the
+  /// engine drops keeps its place). A typed word the separators split
+  /// (maqaf, punctuation, Hebrew/Latin) gives its override to every part.
   final Map<int, WordOptions> words;
 
   /// FtsLib's word distance. Null = no limit.
@@ -507,13 +526,21 @@ class SearchOptions {
   /// FtsLib: the words in query order.
   bool requireOrdered;
 
-  /// Partial matching (Otzaria's wordMatchMode): slots a line needs. Null = all.
+  /// Partial matching as a slot count: slots a line needs. Null = all.
+  /// [wordMatch] wins when set.
   int? minGroups;
+
+  /// Partial matching (Otzaria's wordMatchMode), counted by the engine over
+  /// the slots it searches.
+  WordMatch? wordMatch;
 
   /// Words of context per side of the snippet.
   int contextWords;
 
-  /// Otzaria's proximity; when set, [maxWordDistance] / [requireOrdered] are not used.
+  /// Otzaria's proximity, per TYPED word (gaps[i] between typed words i and
+  /// i+1, words the engine drops included: it cuts them out and merges the
+  /// gaps around them). When set, [maxWordDistance] / [requireOrdered] are
+  /// not used.
   Proximity? proximity;
 
   /// Otzaria's negative query (its words use the global word options).
@@ -535,6 +562,7 @@ class SearchOptions {
         if (maxWordDistance != null) 'max_word_distance': maxWordDistance,
         if (requireOrdered) 'require_ordered': true,
         if (minGroups != null) 'min_groups': minGroups,
+        if (wordMatch != null) 'word_match': wordMatch!.toJson(),
         'context_words': contextWords,
         if (proximity != null) 'proximity': proximity!.toJson(),
         if (exclude != null) 'exclude': exclude!.toJson(),

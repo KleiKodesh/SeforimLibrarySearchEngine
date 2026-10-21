@@ -430,3 +430,22 @@ fn proximity_positions_equal_text_validation() {
     assert_eq!(matches(LINES, true, &ordered(ab(), 2)), [1, 3, 4, 7, 8, 9, 10, 12]);
     assert_eq!(matches(LINES, false, &any_order(ab(), 2)), [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13]);
 }
+
+/// A word the engine drops (one letter) keeps its place in the typed
+/// query: its proximity gaps merge (`g0 + g1` in order; the any-order window
+/// minus one), on both index flavours.
+#[test]
+fn dropped_word_proximity_through_search_options() {
+    let lines: &[&str] = &["משה ו תורה", "משה אמר ו תורה", "משה אמר לו ו תורה", "תורה ו משה"];
+    let mut o = SearchOptions {
+        query: "משה ו תורה".into(),
+        proximity: Some(ProximitySpec::Ordered { gaps: vec![0, 1] }),
+        ..Default::default()
+    };
+    for positions in [true, false] {
+        o.proximity = Some(ProximitySpec::Ordered { gaps: vec![0, 1] });
+        assert_eq!(matches_options(lines, positions, &o), vec![1, 2], "ordered positions={positions}");
+        o.proximity = Some(ProximitySpec::AnyOrder { distance: 0 });
+        assert_eq!(matches_options(lines, positions, &o), vec![1, 4], "any order positions={positions}");
+    }
+}

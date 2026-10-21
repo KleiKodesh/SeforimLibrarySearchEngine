@@ -32,10 +32,10 @@ pub const MAX_FUZZY_DISTANCE: u8 = 2;
 pub enum QueryToken {
     /// A bare `|` (one or more pipes): ORs its neighbours.
     Pipe,
-    /// A word token. `index` counts the word tokens from 0 (pipes excluded,
-    /// dropped words included), so it is the word's place as the user typed
-    /// it. `term` is None when the token cannot search (no letters, too
-    /// short / long).
+    /// A word token. `index` is the place, from 0, of the word as the user
+    /// typed it (see [`tokenize_query`]); the sub-words FtsLib's separators
+    /// cut from one typed word share it. `term` is None when the token
+    /// cannot search (no letters, too short / long).
     Word { index: usize, term: Option<QueryTerm> },
 }
 
@@ -53,21 +53,47 @@ pub enum QueryTerm {
 }
 
 /// Tokenizes `query` by FtsLib's rules.
+///
+/// Word index rule: the query is first cut into the words AS TYPED, on
+/// space / tab / CR / LF and `|` (a `|` is never a word); [`QueryToken::Word::index`]
+/// is the typed word's place. FtsLib's separator rules then split a typed
+/// word into sub-words (maqaf, punctuation, a Hebrew/Latin boundary:
+/// `ABC־תורה` → `abc`, `תורה`); every sub-word carries its typed word's
+/// index, so per-word options keyed by index never shift. The split is the
+/// same as on the whole string: these cuts already reset the separator
+/// state. A typed word with nothing searchable (`,`, `א`) still takes its
+/// index.
 pub fn tokenize_query(query: &str, keep_marks: bool) -> Vec<QueryToken> {
-    let split = split_on_index_separators(query).replace('|', " | ");
     let mut out = Vec::new();
     let mut index = 0;
-    for raw in split.split([' ', '\t', '\r', '\n']).filter(|t| !t.is_empty()) {
-        if raw.chars().all(|c| c == '|') {
-            out.push(QueryToken::Pipe);
-            continue;
+    let mut start = 0;
+    let mut push_typed = |out: &mut Vec<QueryToken>, typed: &str| {
+        if typed.is_empty() {
+            return;
         }
-        out.push(QueryToken::Word {
-            index,
-            term: parse_term(raw, keep_marks),
-        });
+        let split = split_on_index_separators(typed);
+        let mut any = false;
+        for raw in split.split(' ').filter(|t| !t.is_empty()) {
+            out.push(QueryToken::Word { index, term: parse_term(raw, keep_marks) });
+            any = true;
+        }
+        if !any {
+            // Nothing left after the separators (e.g. `,`): still the
+            // user's word, it holds its index and cannot search.
+            out.push(QueryToken::Word { index, term: None });
+        }
         index += 1;
+    };
+    for (i, c) in query.char_indices() {
+        if matches!(c, '|' | ' ' | '\t' | '\r' | '\n') {
+            push_typed(&mut out, &query[start..i]);
+            if c == '|' && !matches!(out.last(), Some(QueryToken::Pipe)) {
+                out.push(QueryToken::Pipe);
+            }
+            start = i + c.len_utf8();
+        }
     }
+    push_typed(&mut out, &query[start..]);
     out
 }
 
@@ -221,7 +247,17 @@ mod tests {
                 other => panic!("{other:?}"),
             })
             .collect();
-        assert_eq!(words, ["0:רמב\"ם", "|", "1:abc", "2:תורה", "3:יצחק", "4:abc", "5:שלום"]);
+        assert_eq!(words, ["0:רמב\"ם", "|", "1:abc", "1:תורה", "2:יצחק", "3:abc", "3:שלום"]);
+        // typed-word index: `|` (spaced or not) is no word; a dropped word
+        // and a separator-only word keep their index
+        let idx: Vec<_> = tokenize_query("אב|גד א , הו־זח", false)
+            .iter()
+            .map(|t| match t {
+                QueryToken::Pipe => "|".to_string(),
+                QueryToken::Word { index, term } => format!("{index}{}", if term.is_some() { "" } else { "-" }),
+            })
+            .collect();
+        assert_eq!(idx, ["0", "|", "1", "2-", "3-", "4", "4"]);
         // keep_marks keeps a plain word's marks
         let t = tokenize_query("תּוֹרָה", true);
         assert_eq!(

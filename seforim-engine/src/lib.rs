@@ -874,7 +874,26 @@ mod tests {
                     },
                     3,
                 ),
+                (
+                    SearchRequest {
+                        groups: two(),
+                        proximity: Some(ProximitySpec::Ordered { gaps: vec![1] }),
+                        ..Default::default()
+                    },
+                    2,
+                ),
+                (
+                    SearchRequest {
+                        groups: two(),
+                        proximity: Some(ProximitySpec::AnyOrder { distance: 0 }),
+                        ..Default::default()
+                    },
+                    2,
+                ),
                 (SearchRequest { groups: vec![word(B, false)], ..Default::default() }, 5),
+                // one group: a distance has nothing to check, no text needed
+                (SearchRequest { groups: vec![word(B, false)], max_word_distance: Some(0), ..Default::default() }, 5),
+                (SearchRequest { groups: vec![word(B, false)], require_ordered: true, ..Default::default() }, 5),
             ];
             for (req, want) in cases {
                 let mut r = index.search(&req).unwrap();
@@ -887,6 +906,11 @@ mod tests {
                 }
                 let reference: u64 = by_book.values().sum();
                 assert_eq!(reference, want, "positions={positions} {req:?}");
+                // no text-level check left: plain AND, one group, spans on positions
+                let no_text = req.max_word_distance.is_none() && !req.require_ordered && req.exclude.is_none()
+                    && (req.proximity.is_none() || positions)
+                    || req.groups.len() == 1;
+                assert_eq!(r.count_needs_text(), !no_text, "positions={positions} {req:?}");
                 let hit_texts: Vec<&str> = r.hits.iter().map(|h| texts[h.line_id as usize].as_str()).collect();
                 if r.count_needs_text() {
                     assert!(!r.counts().exact);

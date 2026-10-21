@@ -208,7 +208,7 @@ namespace FtsLib.Fts5
         /// filter, in all and per book id. When the engine says no text is needed
         /// (no text-level check) the hit list is the answer and no text is read;
         /// otherwise the texts are fetched in catalog order and validated by the
-        /// engine, multi-core, batch by batch. A line gone from the DB is not counted.
+        /// engine, multi-core, batch by batch (there, a line gone from the DB is not counted).
         /// </summary>
         public HitCounts CountByBook(string query, TantivySearchOptions? options = null,
                                      CancellationToken ct = default, int batchSize = 4096)

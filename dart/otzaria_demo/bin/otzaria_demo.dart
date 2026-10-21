@@ -330,7 +330,8 @@ void _printCounts(SeforimDb db, SearchSession session, Map<int, String> titles) 
   }
   final c = session.counts();
   stdout.writeln('Exact count: ${c.total} lines in ${c.byBook.length} books '
-      '(${session.countNeedsText ? 'texts validated' : 'no text needed'}, ${sw.elapsedMilliseconds}ms)');
+      '(${session.countNeedsText ? 'texts validated' : 'no text needed'}, '
+      '${sw.elapsedMilliseconds < 1000 ? '${sw.elapsedMilliseconds} ms' : '${(sw.elapsedMilliseconds / 60000).toStringAsFixed(2)} min'})');
   final top = c.byBook.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
   for (final e in top.take(5)) {
     stdout.writeln('  ${titles[e.key] ?? e.key}: ${e.value}');

@@ -382,8 +382,6 @@ class ExcludeSpec {
       };
 }
 
-/// A matching line, in catalog order: only the ids the index keeps. Any
-/// other placement (line index, section) comes from SQLite by line id.
 /// Exact totals of a search (Otzaria's count / countByBook): the lines that
 /// pass every filter, in all and per book id.
 class HitCounts {
@@ -409,6 +407,8 @@ class HitCounts {
       );
 }
 
+/// A matching line, in catalog order: only the ids the index keeps. Any
+/// other placement (line index, section) comes from SQLite by line id.
 class PlacedHit {
   const PlacedHit(this.position, this.lineId, this.bookId);
   final int position;

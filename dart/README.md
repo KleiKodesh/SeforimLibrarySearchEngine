@@ -52,6 +52,7 @@ final s = index.search(SearchOptions('תורה שלו* שבת~1 משה | אהר�
 // low-level form (slots built by hand): index.searchRequest(SearchRequest(groups: [...]))
 s.hitCount; s.hits(offset, count); s.allHits();          // PlacedHit(position, lineId, bookId), catalog order
 s.locateBatch(texts); s.locate(text);                    // Snippet? (null = filtered out)
+s.countNeedsText; s.countBatch(texts); s.counts();       // exact totals: HitCounts(total, byBook, validated, exact)
 s.takeNewTerms();                                        // term table, indexed by SnippetMark.termId
 s.close(); index.close();
 ```
@@ -100,8 +101,10 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 
 - **Scope `sameSection` for the positive query** (all words under one heading, spread over lines).
 - **Relevance ordering.** Results come in catalog order only.
-- **Regex queries** (`/…/`), the semantic and smart query modes, per-book counts (`countByBook`) and cancellation.
-- **Totals.** `hitCount` counts lines *before* the distance/order filter. An exact total needs locating every hit.
+- **Regex queries** (`/…/`), the semantic and smart query modes, and cancellation.
+- **Totals.** `hitCount` counts lines *before* the distance/order filter. The exact total and per-book counts
+  come from `counts()`: exact at once when no text-level check applies (`countNeedsText` false), else after
+  feeding every hit's text with `countBatch` (the demo's `--count`).
 - **Exact-nikud matching** works only on a `--keep-marks` index. The default index strips marks.
 
 ## Demo specifics and simplifications

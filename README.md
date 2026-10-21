@@ -328,7 +328,7 @@ are not printed), so upstream's query-parser tests stay as they are.
   `countNeedsText` / `countBatch` / `counts()` (demo `--count`).
   - When no check is left for the text (no FtsLib distance/order, the
     proximity or phrases already ran as span queries on positions, no
-    text-level negative), the hit list IS the answer: counted from the
+    text-level negative; or a one-word query), the hit list IS the answer: counted from the
     `book_id` fast column, no text read.
   - Otherwise the host feeds the hits' texts in catalog order (any batch
     size); the engine validates each batch across all cores with exactly

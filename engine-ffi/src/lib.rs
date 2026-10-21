@@ -529,7 +529,6 @@ pub unsafe extern "C" fn se_search_locate_batch(
         let timing = std::env::var_os("SEFORIM_ENGINE_TIMING").is_some();
         let t0 = std::time::Instant::now();
         let strs = text_args(texts, lens, count)?;
-        let lens = std::slice::from_raw_parts(lens, count);
         let t1 = std::time::Instant::now();
         let located = search.session.locate_many(&strs);
         let t2 = std::time::Instant::now();
@@ -544,7 +543,7 @@ pub unsafe extern "C" fn se_search_locate_batch(
             }
         }
         if timing {
-            let bytes: usize = lens.iter().sum();
+            let bytes: usize = strs.iter().map(|s| s.len()).sum();
             eprintln!(
                 "  [ffi] locate_batch {count} texts ({bytes} bytes): utf8 check {:.2} ms, locate {:.2} ms, pack {:.2} ms",
                 (t1 - t0).as_secs_f64() * 1000.0,

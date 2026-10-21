@@ -758,8 +758,6 @@ namespace SeforimSearch.Engine
         }
     }
 
-    /// <summary>A matching line, in catalog order: only the ids the index keeps. Any
-    /// other placement (line index, section) comes from SQLite by line id.</summary>
     /// <summary>
     /// Exact totals of a search (Otzaria's count / countByBook): the lines that
     /// pass every filter, in all and per book id.
@@ -780,6 +778,8 @@ namespace SeforimSearch.Engine
         public bool Exact { get; }
     }
 
+    /// <summary>A matching line, in catalog order: only the ids the index keeps. Any
+    /// other placement (line index, section) comes from SQLite by line id.</summary>
     public readonly struct PlacedHit
     {
         public PlacedHit(long position, long lineId, long bookId)

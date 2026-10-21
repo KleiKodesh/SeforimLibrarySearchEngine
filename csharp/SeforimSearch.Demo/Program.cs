@@ -139,7 +139,8 @@ namespace SeforimSearch.Demo
             var sw = Stopwatch.StartNew();
             var counts = engine.Index.CountByBook(query, options);
             Console.Error.WriteLine($"count: {counts.Total:N0} lines in {counts.ByBook.Count:N0} books " +
-                                    $"(hits validated {counts.Validated:N0}, exact={counts.Exact}) in {sw.Elapsed.TotalMilliseconds:F0} ms");
+                                    $"(hits validated {counts.Validated:N0}, exact={counts.Exact}) in " +
+                                    (sw.Elapsed.TotalSeconds < 1 ? $"{sw.Elapsed.TotalMilliseconds:F0} ms" : $"{sw.Elapsed.TotalMinutes:F2} min"));
             foreach (var kv in counts.ByBook.OrderByDescending(kv => kv.Value).Take(5))
                 Console.WriteLine($"book {kv.Key}: {kv.Value:N0}");
             return 0;

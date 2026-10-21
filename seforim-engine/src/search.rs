@@ -944,9 +944,12 @@ impl LineIndex {
             ))));
         }
         let mut span: Option<SpanQuery> = None;
+        let first_sink = sinks.len();
         for (i, group) in groups.iter().enumerate() {
             let sink = MatchedTermsSink::new();
             let Some(slot) = self.group_slot(group, &sink, searcher, fm)? else {
+                // no partial matcher over the groups before this one
+                sinks.truncate(first_sink);
                 return Ok(None);
             };
             sinks.push(sink);
@@ -1425,16 +1428,18 @@ impl LineIndex {
             }
         }
         // Which hits the locator can still reject (see `count_needs_text`).
+        // One group: no distance or order to check.
         let main_needs_text = main_ok
+            && request.groups.len() > 1
             && match &proximity {
-                // the span query already checked the rule on the positions
-                Some(_) => !(self.options.positions && request.groups.len() > 1),
-                None => {
-                    !partial
-                        && (request.max_word_distance.is_some()
-                            || (request.require_ordered && request.gaps.is_none()))
-                }
-            };
+                    // the span query already checked the rule on the positions
+                    Some(_) => !self.options.positions,
+                    None => {
+                        !partial
+                            && (request.max_word_distance.is_some()
+                                || (request.require_ordered && request.gaps.is_none()))
+                    }
+                };
         let phrase_needs_text =
             !self.options.positions && request.phrase_alternatives.iter().any(|p| p.len() > 1);
         session.count_needs_text = main_needs_text || phrase_needs_text || session.negative.is_some();

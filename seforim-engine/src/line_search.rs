@@ -284,7 +284,9 @@ impl LineIndex {
             Some(query) => {
                 let collector = PlacedCollector { books: books.clone().map(Arc::new), drop_sections: None, keep_docs: false };
                 let mut hits = searcher.search(query.as_ref(), &collector)?;
-                hits.sort_unstable_by_key(|h| h.position);
+                if !self.catalog_ordered(&searcher) {
+                    hits.sort_unstable_by_key(|h| h.position);
+                }
                 let n = hits.len() as u64;
                 (hits, false, n)
             }

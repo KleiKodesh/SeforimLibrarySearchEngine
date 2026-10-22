@@ -72,18 +72,24 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// </summary>
     public sealed class SeforimDbFtsEngine : System.IDisposable
     {
-        private readonly string _seforimDbPath;
+        /// <summary>The seforim.db kept open across searches (see SeforimDbFtsCorpusPool).</summary>
+        private readonly SeforimDbFtsCorpusPool _corpora;
 
         public SeforimDbFtsEngine(string indexPath, string seforimDbPath)
         {
-            _seforimDbPath = seforimDbPath;
+            _corpora = new SeforimDbFtsCorpusPool(seforimDbPath);
             Index = new TantivySeforimIndex(indexPath, seforimDbPath, OpenCorpus);
         }
 
         public TantivySeforimIndex Index { get; }
 
-        public SeforimDbFtsCorpus OpenCorpus() => new SeforimDbFtsCorpus(_seforimDbPath);
+        /// <summary>An open corpus from the pool; Dispose returns it (the database stays open).</summary>
+        public SeforimDbFtsCorpus OpenCorpus() => _corpora.Rent();
 
-        public void Dispose() => Index.Dispose();
+        public void Dispose()
+        {
+            Index.Dispose();
+            _corpora.Dispose();
+        }
     }
 }

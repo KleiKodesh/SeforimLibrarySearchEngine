@@ -767,6 +767,66 @@ mod tests {
         assert!(index.search(&req("שלו*")).unwrap().hits.is_empty());
     }
 
+    /// Doc order = catalog order: lines fed out of order to several
+    /// indexing threads come out of the merge sorted by position, so the
+    /// search skips its sort; an update (extra segment) turns that off until
+    /// the next merge, and the hits stay identical either way.
+    #[test]
+    fn merged_index_is_catalog_ordered() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let n = 3000u64;
+        // a scrambled feed order (7919 is prime to n)
+        let pos = |i: u64| (i * 7919) % n;
+        let text = |p: u64| if p % 3 == 0 { "alpha beta" } else { "gamma alpha" };
+        let mut w = index.writer(120_000_000, 4).unwrap();
+        for i in 0..n {
+            let p = pos(i);
+            w.add(&line(p + 1, p, p / 100, text(p))).unwrap();
+            if i % 500 == 499 {
+                w.commit(None).unwrap();
+            }
+        }
+        w.commit(None).unwrap();
+        let req = |p: &str| SearchRequest {
+            groups: vec![GroupSpec::Wildcard { pattern: p.into(), ignore_quotes: false }],
+            ..Default::default()
+        };
+        let positions = |r: SearchResult| r.hits.iter().map(|h| h.position).collect::<Vec<_>>();
+        let searcher = || index.index.reader().unwrap().searcher();
+        assert!(!index.catalog_ordered(&searcher()), "several segments");
+        let before = positions(index.search(&req("alph*")).unwrap());
+        assert_eq!(before, (0..n).collect::<Vec<_>>());
+        let w = {
+            w.merge_all().unwrap();
+            index.writer(50_000_000, 1).unwrap()
+        };
+        assert!(index.catalog_ordered(&searcher()));
+        // the raw doc order of the merged segment is ascending position
+        let s = searcher();
+        let col = s.segment_reader(0).fast_fields().u64("position").unwrap();
+        let raw: Vec<u64> = (0..n as u32).map(|d| col.first(d).unwrap()).collect();
+        assert_eq!(raw, (0..n).collect::<Vec<_>>());
+        assert_eq!(positions(index.search(&req("alph*")).unwrap()), before);
+        assert_eq!(positions(index.search(&req("bet*")).unwrap()), (0..n).step_by(3).collect::<Vec<_>>());
+        // an update adds a segment: no longer ordered, hits still sorted
+        let mut w = w;
+        w.delete(1);
+        w.add(&line(1, 0, 0, "gamma alpha")).unwrap();
+        w.delete(n);
+        w.add(&line(n, n - 1, (n - 1) / 100, "beta")).unwrap();
+        w.commit(None).unwrap();
+        assert!(!index.catalog_ordered(&searcher()));
+        let mut want: Vec<u64> = (0..n - 1).collect();
+        assert_eq!(positions(index.search(&req("alph*")).unwrap()), want);
+        want = (0..n).step_by(3).skip(1).chain([n - 1]).collect();
+        let bet = positions(index.search(&req("bet*")).unwrap());
+        assert_eq!(bet, want);
+        w.merge_all().unwrap();
+        assert!(index.catalog_ordered(&searcher()));
+        assert_eq!(positions(index.search(&req("bet*")).unwrap()), bet);
+    }
+
     /// The parity diff that found the bug: FtsLib's quote-free index has
     /// יציק, one edit from יצחק; ours keeps יצי"ק, which the DFA counted as two
     /// edits. With the quote transparent it is one edit on both paths.

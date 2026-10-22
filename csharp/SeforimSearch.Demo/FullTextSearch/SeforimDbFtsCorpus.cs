@@ -18,10 +18,11 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// <c>Fts5SeforimIndex(indexPath, () => new SeforimDbFtsCorpus(dbPath))</c> and opens no
     /// content database of its own.
     ///
-    /// ONE CONNECTION PER INSTANCE, ONE INSTANCE PER OPERATION — that is the seam's contract
-    /// (see IFtsCorpus: lazy result sequences need the corpus to outlive the call, and
-    /// concurrent searches must never share a connection). Construction is cheap: the corpus
-    /// is read-only so pooling stays on, and "open" is a pooled-handle checkout.
+    /// ONE CONNECTION PER INSTANCE, ONE USER AT A TIME (concurrent searches must never share
+    /// a connection). The database is kept OPEN across searches and batches: instances come
+    /// from a <see cref="SeforimDbFtsCorpusPool"/>, and Dispose hands the instance back to its
+    /// pool (connection, schema probe, zstd dictionary and prepared statements kept) instead
+    /// of closing it. A corpus made without a pool closes on Dispose.
     ///
     /// NOT part of <see cref="SeforimDbQueries"/>, although it reads the same file: that class
     /// opens a connection per method and returns lists, which is right for request/response
@@ -46,8 +47,21 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         private readonly SeforimDbSchema _schema;
         private readonly SeforimDbLineContentCodec _codec;
 
+        /// <summary>The pool this corpus returns to on Dispose (null: Dispose closes it), and
+        /// the database file's stamp when it was opened (the pool drops a stale corpus).</summary>
+        internal SeforimDbFtsCorpusPool? Pool;
+        internal SeforimDbFileStamp Stamp;
+
+        /// <summary>Prepared statements kept with the connection, by SQL text (the IN-list
+        /// statements differ only by their chunk size). A statement in use (a lazy sequence
+        /// still reading it) is not handed out twice: the caller gets a one-off instead.</summary>
+        private readonly Dictionary<string, (SqliteCommand Command, string[] Names)> _statements =
+            new Dictionary<string, (SqliteCommand, string[])>();
+        private readonly HashSet<SqliteCommand> _busy = new HashSet<SqliteCommand>();
+
         public SeforimDbFtsCorpus(string databasePath)
         {
+            Stamp = SeforimDbFileStamp.Of(databasePath);
             _connection = SqliteConnectionFactory.OpenCorpusRead(databasePath);
             _schema = SeforimDbSchema.ForDatabase(_connection, databasePath);
             _codec = SeforimDbLineContentCodec.Create(_connection);
@@ -202,39 +216,66 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         {
             var chunk = new List<int>(SqliteInListChunkSize);
 
-            using var command = _connection.CreateCommand();
-            string[] parameterNames = AddChunkParameters(command, SqliteInListChunkSize);
-
             foreach (int id in ids)
             {
                 chunk.Add(id);
                 if (chunk.Count == SqliteInListChunkSize)
                 {
-                    foreach (var row in FetchPlacedChunk(command, parameterNames, chunk)) yield return row;
+                    foreach (var row in FetchPlacedChunk(chunk)) yield return row;
                     chunk.Clear();
                 }
             }
 
             if (chunk.Count > 0)
-                foreach (var row in FetchPlacedChunk(command, parameterNames, chunk)) yield return row;
+                foreach (var row in FetchPlacedChunk(chunk)) yield return row;
         }
 
-        private IEnumerable<(int Id, string Text, FtsDocumentPlacement Placement)> FetchPlacedChunk(
-            SqliteCommand command, string[] parameterNames, List<int> ids)
+        private IEnumerable<(int Id, string Text, FtsDocumentPlacement Placement)> FetchPlacedChunk(List<int> ids)
         {
-            command.CommandText = SeforimDbSqlStrings.FtsFetchPlacedLines(_schema, ids.Count);
-            for (int i = 0; i < ids.Count; i++)
-                command.Parameters[parameterNames[i]].Value = ids[i];
-
-            using var reader = command.ExecuteReader();
-            while (reader.Read())
+            var (command, parameterNames, cached) =
+                Statement(SeforimDbSqlStrings.FtsFetchPlacedLines(_schema, ids.Count), ids.Count);
+            try
             {
-                var placement = new FtsDocumentPlacement(
-                    bookId: reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                    lineIndex: reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
-                    tocEntryId: reader.GetInt32(4));
-                yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1), placement);
+                for (int i = 0; i < ids.Count; i++)
+                    command.Parameters[parameterNames[i]].Value = ids[i];
+
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    var placement = new FtsDocumentPlacement(
+                        bookId: reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                        lineIndex: reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                        tocEntryId: reader.GetInt32(4));
+                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1), placement);
+                }
             }
+            finally
+            {
+                Release(command, cached);
+            }
+        }
+
+        /// <summary>The prepared statement for <paramref name="sql"/> with @p0..@p(n-1), kept
+        /// with the connection; a one-off (cached = false) while the kept one is in use.</summary>
+        private (SqliteCommand Command, string[] Names, bool Cached) Statement(string sql, int parameterCount)
+        {
+            if (!_statements.TryGetValue(sql, out var entry))
+            {
+                var command = _connection.CreateCommand();
+                command.CommandText = sql;
+                entry = (command, AddChunkParameters(command, parameterCount));
+                _statements[sql] = entry;
+            }
+            if (_busy.Add(entry.Command)) return (entry.Command, entry.Names, true);
+            var oneOff = _connection.CreateCommand();
+            oneOff.CommandText = sql;
+            return (oneOff, AddChunkParameters(oneOff, parameterCount), false);
+        }
+
+        private void Release(SqliteCommand command, bool cached)
+        {
+            if (cached) _busy.Remove(command);
+            else command.Dispose();
         }
 
         /// <summary>
@@ -251,13 +292,14 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             if (positions == null || positions.Count == 0) return lines;
 
             const int positionsPerStatement = SqliteInListChunkSize / 2;
-            using var command = _connection.CreateCommand();
-            string[] parameterNames = AddChunkParameters(command, positionsPerStatement * 2);
 
             for (int start = 0; start < positions.Count; start += positionsPerStatement)
             {
                 int count = Math.Min(positionsPerStatement, positions.Count - start);
-                command.CommandText = SeforimDbSqlStrings.FtsFetchLinesAtBookPositions(_schema, count);
+                var (command, parameterNames, cached) =
+                    Statement(SeforimDbSqlStrings.FtsFetchLinesAtBookPositions(_schema, count), count * 2);
+                try
+                {
                 for (int i = 0; i < count; i++)
                 {
                     command.Parameters[parameterNames[2 * i]].Value = positions[start + i].BookId;
@@ -272,6 +314,11 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                         bookId: reader.GetInt32(1),
                         lineIndex: reader.GetInt32(2),
                         text: _codec.DecodeColumnOrEmpty(reader, 3)));
+                }
+                }
+                finally
+                {
+                    Release(command, cached);
                 }
             }
             return lines;
@@ -369,12 +416,115 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             return names;
         }
 
+        /// <summary>Back to the pool (kept open), or closed when there is no pool or the pool
+        /// does not take it back (disposed, full, or the database file changed).</summary>
         public void Dispose()
         {
+            if (Pool != null && Pool.Return(this)) return;
+            Close();
+        }
+
+        internal void Close()
+        {
+            foreach (var entry in _statements.Values) entry.Command.Dispose();
+            _statements.Clear();
             // The codec holds the database's zstd dictionary, which is megabytes - release it
             // with the connection it belongs to rather than waiting for a collection.
             _codec.Dispose();
             _connection.Dispose();
+        }
+    }
+
+    /// <summary>The database file's identity for "did it change": size and last write time
+    /// of the main file. The -wal file is not stamped: a reader alone can create or touch it,
+    /// which would make every corpus look stale. Rent once per caller and Dispose once.</summary>
+    internal readonly struct SeforimDbFileStamp : IEquatable<SeforimDbFileStamp>
+    {
+        private readonly long _length, _ticks;
+
+        private SeforimDbFileStamp(long length, long ticks)
+        {
+            _length = length; _ticks = ticks;
+        }
+
+        public static SeforimDbFileStamp Of(string path)
+        {
+            var file = new System.IO.FileInfo(path);
+            return new SeforimDbFileStamp(
+                file.Exists ? file.Length : -1, file.Exists ? file.LastWriteTimeUtc.Ticks : 0);
+        }
+
+        public bool Equals(SeforimDbFileStamp o) =>
+            _length == o._length && _ticks == o._ticks;
+        public override bool Equals(object? obj) => obj is SeforimDbFileStamp o && Equals(o);
+        public override int GetHashCode() => (_length, _ticks).GetHashCode();
+    }
+
+    /// <summary>
+    /// Keeps the seforim.db open across searches: corpora (each one connection, its schema
+    /// probe, zstd dictionary and prepared statements) are rented, used by one caller at a
+    /// time, and returned on Dispose. Concurrent searches rent different corpora (a new one
+    /// is opened when none is idle; up to <see cref="MaxIdle"/> stay open). When the database
+    /// file changes (size or write time of the main file), idle corpora are closed and
+    /// the next rent opens a fresh one; one rented before the change closes when returned.
+    /// </summary>
+    public sealed class SeforimDbFtsCorpusPool : IDisposable
+    {
+        private const int MaxIdle = 4;
+
+        private readonly string _databasePath;
+        private readonly Stack<SeforimDbFtsCorpus> _idle = new Stack<SeforimDbFtsCorpus>();
+        private readonly object _lock = new object();
+        private bool _disposed;
+
+        public SeforimDbFtsCorpusPool(string databasePath)
+        {
+            _databasePath = databasePath ?? throw new ArgumentNullException(nameof(databasePath));
+        }
+
+        /// <summary>An open corpus for one caller; Dispose returns it here.</summary>
+        public SeforimDbFtsCorpus Rent()
+        {
+            var stamp = SeforimDbFileStamp.Of(_databasePath);
+            List<SeforimDbFtsCorpus>? stale = null;
+            SeforimDbFtsCorpus? corpus = null;
+            lock (_lock)
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(SeforimDbFtsCorpusPool));
+                while (_idle.Count > 0)
+                {
+                    var c = _idle.Pop();
+                    if (c.Stamp.Equals(stamp)) { corpus = c; break; }
+                    (stale ??= new List<SeforimDbFtsCorpus>()).Add(c);
+                }
+            }
+            if (stale != null) foreach (var c in stale) c.Close();
+            corpus ??= new SeforimDbFtsCorpus(_databasePath);
+            corpus.Pool = this;
+            return corpus;
+        }
+
+        internal bool Return(SeforimDbFtsCorpus corpus)
+        {
+            bool current = corpus.Stamp.Equals(SeforimDbFileStamp.Of(_databasePath));
+            lock (_lock)
+            {
+                if (_disposed || !current || _idle.Count >= MaxIdle || _idle.Contains(corpus)) return false;
+                _idle.Push(corpus);
+                return true;
+            }
+        }
+
+        public void Dispose()
+        {
+            SeforimDbFtsCorpus[] idle;
+            lock (_lock)
+            {
+                _disposed = true;
+                idle = _idle.ToArray();
+                _idle.Clear();
+            }
+            foreach (var c in idle) c.Close();
         }
     }
 

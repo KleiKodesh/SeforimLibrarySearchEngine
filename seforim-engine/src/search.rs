@@ -2525,7 +2525,17 @@ impl LineIndex {
         if !relevance {
             // (relevance turned off for want of positions sorts by catalog order)
             let order = if request.order == ResultsOrder::Relevance { ResultsOrder::Catalog } else { request.order };
-            if self.options.positions && keys.len() + cross_keys.len() == hits.len() {
+            // A catalog-ordered index (sorted by position, one segment) yields
+            // the in-line hits already in catalog order: no sort. Cross-line
+            // hits are appended after them, so they still need it.
+            let presorted =
+                order == ResultsOrder::Catalog && cross_keys.is_empty() && self.catalog_ordered(&searcher);
+            debug_assert!(!presorted || hits.windows(2).all(|w| w[0].position <= w[1].position));
+            if presorted {
+                if self.options.positions && keys.len() == hits.len() {
+                    session.set_hit_docs(&hits, std::mem::take(&mut keys));
+                }
+            } else if self.options.positions && keys.len() + cross_keys.len() == hits.len() {
                 // the hits' docs follow them (positioned snippet location)
                 let mut pairs: Vec<(PlacedHit, (u32, DocId))> =
                     hits.into_iter().zip(keys.iter().chain(&cross_keys).copied()).collect();

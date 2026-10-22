@@ -28,7 +28,7 @@ use tantivy::directory::MmapDirectory;
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED,
 };
-use tantivy::{doc, Index, IndexWriter, Term};
+use tantivy::{doc, Index, IndexSettings, IndexSortByField, IndexWriter, Order, Searcher, Term};
 
 use crate::Result;
 
@@ -196,7 +196,15 @@ impl LineIndex {
             fs::create_dir_all(dir)?;
         }
         let (schema, fields) = line_schema(options);
-        let index = Index::create(MmapDirectory::open(dir)?, schema, Default::default())?;
+        // Doc order = catalog order: every segment is sorted by `position`
+        // when it is written and the merge keeps that order, so the merged
+        // single segment needs no sort at search time (see
+        // [`LineIndex::catalog_ordered`]). Recorded in meta.json's settings.
+        let settings = IndexSettings {
+            sort_by_field: Some(IndexSortByField { field: "position".to_string(), order: Order::Asc }),
+            ..Default::default()
+        };
+        let index = Index::create(MmapDirectory::open(dir)?, schema, settings)?;
         hebrew_fts::register_hebrew_tokenizer(index.tokenizers());
         fs::write(
             dir.join(OPTIONS_FILE),
@@ -251,6 +259,18 @@ impl LineIndex {
     pub fn has_fm_sidecar(&self) -> bool {
         let Ok(reader) = self.index.reader() else { return false };
         self.fm.get(&self.dir, &reader.searcher(), self.fields.text).is_some()
+    }
+
+    /// True when the docs of `searcher` are in ascending catalog `position`
+    /// order: the index is sorted by position (meta.json settings) and has a
+    /// single segment. An update (delete + add) adds a segment, which turns
+    /// this off until the next [`LineWriter::merge_all`]; deletes alone keep
+    /// it. Older indexes (no sort setting) are never catalog-ordered.
+    pub fn catalog_ordered(&self, searcher: &Searcher) -> bool {
+        let sorted = self.index.settings().sort_by_field.as_ref().is_some_and(|s| {
+            s.field == "position" && s.order == Order::Asc
+        });
+        sorted && searcher.segment_readers().len() <= 1
     }
 
     /// True when `dir` holds an index.

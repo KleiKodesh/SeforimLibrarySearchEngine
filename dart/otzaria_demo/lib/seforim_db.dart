@@ -30,20 +30,48 @@ class DbLine {
 
 /// Read-only access to seforim.db: schema probe, content codec, catalog
 /// order and the line feed.
+///
+/// Kept OPEN for the life of the object: one connection, its schema probe,
+/// zstd dictionary and prepared statements (by SQL text) serve every search
+/// and batch, the neighbour widening included. When the file changes (size
+/// or write time of the main file) the next query closes everything and
+/// reopens. Single-isolate use: sqlite3 handles do not cross isolates.
 class SeforimDb {
-  SeforimDb._(this.path, this._db, this.splitContent, this.compressed, this._zstd);
+  SeforimDb._(this.path, this._zstdLib, _Open o)
+      : _db = o.db,
+        splitContent = o.split,
+        compressed = o.compressed,
+        _zstd = o.zstd,
+        _stamp = o.stamp;
 
   final String path;
-  final Database _db;
+  final String? _zstdLib;
+  Database _db;
 
   /// `line_content` exists and `line` has no `content` column (schema 6+).
-  final bool splitContent;
+  bool splitContent;
 
   /// `zstd_dict` exists.
-  final bool compressed;
-  final ZstdDictDecoder? _zstd;
+  bool compressed;
+  ZstdDictDecoder? _zstd;
+  String _stamp;
 
-  static SeforimDb open(String path, {String? zstdLib}) {
+  /// Prepared statements kept with the connection, by SQL text.
+  final _statements = <String, PreparedStatement>{};
+
+  static SeforimDb open(String path, {String? zstdLib}) => SeforimDb._(path, zstdLib, _open(path, zstdLib));
+
+  static String _fileStamp(String path) {
+    String one(String p) {
+      final s = File(p).statSync();
+      return s.type == FileSystemEntityType.notFound ? '-' : '${s.size}@${s.modified.microsecondsSinceEpoch}';
+    }
+
+    return one(path); // not the -wal: a reader alone can create or touch it
+  }
+
+  static _Open _open(String path, String? zstdLib) {
+    final stamp = _fileStamp(path);
     final db = sqlite3.open(path, mode: OpenMode.readOnly);
     db.execute('PRAGMA cache_size=-65536; PRAGMA mmap_size=268435456; PRAGMA temp_store=MEMORY;');
     bool table(String t) =>
@@ -60,7 +88,33 @@ class SeforimDb {
       if (dicts.isEmpty) throw StateError('zstd_dict table is empty: compressed content cannot be decoded');
       dec = ZstdDictDecoder(Zstd.load(zstdLib), dicts);
     }
-    return SeforimDb._(path, db, split, compressed, dec);
+    return _Open(db, split, compressed, dec, stamp);
+  }
+
+  /// Reopens when the database file changed since it was opened.
+  void _ensureCurrent() {
+    if (_fileStamp(path) == _stamp) return;
+    _closeAll();
+    final o = _open(path, _zstdLib);
+    _db = o.db;
+    splitContent = o.split;
+    compressed = o.compressed;
+    _zstd = o.zstd;
+    _stamp = o.stamp;
+  }
+
+  /// Runs [sql] through its kept prepared statement.
+  ResultSet _select(String sql, [List<Object?> params = const []]) {
+    _ensureCurrent();
+    if (_statements.length >= 64 && !_statements.containsKey(sql)) {
+      // IN-lists of every remainder size: bound the cache
+      for (final stmt in _statements.values) {
+        stmt.close();
+      }
+      _statements.clear();
+    }
+    final stmt = _statements[sql] ??= _db.prepare(sql);
+    return stmt.select(params);
   }
 
   String get _contentCol => splitContent ? 'lc.content' : 'l.content';
@@ -72,7 +126,7 @@ class SeforimDb {
     if (v is String) {
       if (_zstd != null && v.length >= 8 && v.startsWith('KLUv')) {
         try {
-          return utf8.decode(_zstd.decode(base64.decode(v)), allowMalformed: true);
+          return utf8.decode(_zstd!.decode(base64.decode(v)), allowMalformed: true);
         } catch (_) {/* genuinely text */}
       }
       return v;
@@ -129,10 +183,15 @@ class SeforimDb {
     return order;
   }
 
-  Database get db => _db;
+  /// The open connection (reopened first if the file changed).
+  Database get db {
+    _ensureCurrent();
+    return _db;
+  }
 
   /// One book's lines in reading order.
   Iterable<DbLine> bookLines(int bookId) sync* {
+    _ensureCurrent();
     // the section: `line_toc` (the authoritative map) when the DB has it
     final hasLineToc =
         _db.select("SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_toc'").isNotEmpty;
@@ -157,7 +216,7 @@ class SeforimDb {
     final list = ids.toList();
     for (var i = 0; i < list.length; i += 500) {
       final chunk = list.sublist(i, i + 500 > list.length ? list.length : i + 500);
-      final rs = _db.select(
+      final rs = _select(
           'SELECT l.id, $_contentCol FROM line l$_contentJoin WHERE l.id IN (${List.filled(chunk.length, '?').join(',')})',
           chunk);
       for (final r in rs) {
@@ -169,7 +228,7 @@ class SeforimDb {
 
   /// Lines of [bookId] with lineIndex in [from, to], keyed by lineIndex.
   Map<int, String> linesAround(int bookId, int from, int to) {
-    final rs = _db.select(
+    final rs = _select(
         'SELECT l.lineIndex, $_contentCol FROM line l$_contentJoin WHERE l.bookId = ? AND l.lineIndex BETWEEN ? AND ?',
         [bookId, from, to]);
     return {for (final r in rs) r.columnAt(0) as int: decode(r.columnAt(1))};
@@ -177,7 +236,7 @@ class SeforimDb {
 
   /// [linesAround] with each line's id: lineIndex -> (id, text).
   Map<int, (int, String)> lineIdsAround(int bookId, int from, int to) {
-    final rs = _db.select(
+    final rs = _select(
         'SELECT l.lineIndex, l.id, $_contentCol FROM line l$_contentJoin WHERE l.bookId = ? AND l.lineIndex BETWEEN ? AND ?',
         [bookId, from, to]);
     return {for (final r in rs) r.columnAt(0) as int: (r.columnAt(1) as int, decode(r.columnAt(2)))};
@@ -190,7 +249,7 @@ class SeforimDb {
     final list = ids.toList();
     for (var i = 0; i < list.length; i += 900) {
       final chunk = list.sublist(i, i + 900 > list.length ? list.length : i + 900);
-      final rs = _db.select(
+      final rs = _select(
           'SELECT id, lineIndex FROM line WHERE id IN (${List.filled(chunk.length, '?').join(',')})', chunk);
       for (final r in rs) {
         out[r.columnAt(0) as int] = r.columnAt(1) as int;
@@ -204,13 +263,13 @@ class SeforimDb {
   /// (`line.tocEntryId` is NULL for most lines). Lines without one are absent.
   Map<int, int> sectionsOf(Iterable<int> ids) {
     final hasLineToc =
-        _db.select("SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_toc'").isNotEmpty;
+        _select("SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_toc'").isNotEmpty;
     final out = <int, int>{};
     final list = ids.toList();
     for (var i = 0; i < list.length; i += 900) {
       final chunk = list.sublist(i, i + 900 > list.length ? list.length : i + 900);
       final marks = List.filled(chunk.length, '?').join(',');
-      final rs = _db.select(
+      final rs = _select(
           hasLineToc
               ? 'SELECT lineId, tocEntryId FROM line_toc WHERE lineId IN ($marks)'
               : 'SELECT id, tocEntryId FROM line WHERE tocEntryId IS NOT NULL AND id IN ($marks)',
@@ -226,17 +285,17 @@ class SeforimDb {
   Map<int, String> heRefs(Iterable<int> ids) {
     final list = ids.toList();
     if (list.isEmpty) return {};
-    final rs = _db.select(
+    final rs = _select(
         'SELECT id, heRef FROM line WHERE id IN (${List.filled(list.length, '?').join(',')})', list);
     return {for (final r in rs) r['id'] as int: (r['heRef'] as String?) ?? ''};
   }
 
   Map<int, String> bookTitles() =>
-      {for (final r in _db.select('SELECT id, title FROM book')) r['id'] as int: r['title'] as String};
+      {for (final r in _select('SELECT id, title FROM book')) r['id'] as int: r['title'] as String};
 
   /// Book ids whose title, or an ancestor category's title, contains [needle].
   Set<int> booksMatching(String needle) {
-    final rs = _db.select('''
+    final rs = _select('''
       SELECT b.id FROM book b WHERE b.title LIKE ?1
       UNION SELECT b.id FROM book b
         JOIN category_closure cc ON cc.descendantId = b.categoryId
@@ -244,7 +303,7 @@ class SeforimDb {
     return {for (final r in rs) r.columnAt(0) as int};
   }
 
-  int countLines() => _db.select('SELECT COUNT(*) FROM line').first.columnAt(0) as int;
+  int countLines() => _select('SELECT COUNT(*) FROM line').first.columnAt(0) as int;
 
   /// File identity, stored as the index payload to detect a replaced DB.
   String fingerprint() {
@@ -252,8 +311,23 @@ class SeforimDb {
     return '${s.size}|${s.modified.toUtc().toIso8601String()}';
   }
 
-  void close() {
+  void close() => _closeAll();
+
+  void _closeAll() {
+    for (final stmt in _statements.values) {
+      stmt.close();
+    }
+    _statements.clear();
     _zstd?.close();
     _db.close();
   }
+}
+
+/// One opening of the database: connection, schema probe, decoder, file stamp.
+class _Open {
+  _Open(this.db, this.split, this.compressed, this.zstd, this.stamp);
+  final Database db;
+  final bool split, compressed;
+  final ZstdDictDecoder? zstd;
+  final String stamp;
 }

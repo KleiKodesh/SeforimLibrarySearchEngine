@@ -10,7 +10,7 @@ import json, os, re, statistics, sys, datetime
 SP = sys.argv[1]
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(ROOT, "FTS-SPECS-AND-COMPARISONS.md")
-INDEX_FORMAT = "tantivy10"   # C# TantivySeforimIndex.IndexFormatVersion
+INDEX_FORMAT = "tantivy11"   # C# TantivySeforimIndex.IndexFormatVersion
 FTSLIB_FORMAT = "fts9"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
 STALE = [
@@ -18,6 +18,9 @@ STALE = [
     "`tantivy10` / `fts9` changed indexing (an unterminated `<` no longer swallows the rest of the line; "
     "per-line content edges for cross-line) and fuzzy (a swap of two adjacent letters is one edit): "
     "the full-DB rebuilds, parity sets and the Otzaria hit-count comparison need a rerun.",
+    "`tantivy11` sorts the index by catalog position (search skips its sort on the merged segment) and the "
+    "C# / Dart hosts keep seforim.db open across searches: index build time and size, and the first-page "
+    "profile, need a full-DB rerun.",
     "Hit-count comparison: the rows classified as our bugs (unterminated `<`, cross-line enumerators) "
     "and the fuzzy transposition rows are expected to change; not rerun yet.",
 ]
@@ -232,10 +235,11 @@ cost; the Otzaria driver opens its index and configures its line source before t
 
 A rare word (20 hits): ours 186-345 ms (engine 6-18 ms; the rest is corpus open, cold fetch and first-use
 costs), Otzaria 37-58 ms. Page size is not the cause (both 256; Otzaria's call costs about the same for
-1, 16 or 256 rows, +55 ms at 2048). Proposed: keep the SQLite corpus open on the engine (not per search /
-per widening); sort only the (position, index) keys or index lines in catalog order so the hits arrive
-sorted; first page from a top-K pass with the full hit list built lazily; measure warm in-process (second
-query) alongside the cold numbers.
+1, 16 or 256 rows, +55 ms at 2048). Built since (`tantivy11`, not yet measured on the full DB): the hosts
+keep the SQLite corpus open across searches and widenings (C# corpus pool, Dart kept connection with
+prepared statements; reopened when the file changes), and the index is sorted by catalog position so the
+merged segment's hits arrive sorted and the sort is skipped. Still proposed: first page from a top-K pass
+with the full hit list built lazily; measure warm in-process (second query) alongside the cold numbers.
 """)
 
 md.append("## Hit-count comparison with Otzaria\n")

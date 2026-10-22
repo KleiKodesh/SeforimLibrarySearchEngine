@@ -5,7 +5,7 @@ parity, search speed, Otzaria hit counts, and the generated report
 ([FTS-SPECS-AND-COMPARISONS.md](../../FTS-SPECS-AND-COMPARISONS.md), README / CLAUDE.md Specs blocks).
 
 ```
-git clone --recursive https://github.com/KleiKodesh/SeforimdbSerachEngine.git
+git clone --recursive https://github.com/KleiKodesh/SeforimLibrarySearchEngine.git
 cd SeforimdbSerachEngine
 tools/bench/run-all.sh --steps detect           # inventory + plan, changes nothing
 tools/bench/run-all.sh --steps bootstrap        # install missing prerequisites

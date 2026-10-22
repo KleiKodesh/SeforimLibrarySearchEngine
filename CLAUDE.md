@@ -38,6 +38,9 @@ in one or two lines. Remove entries that turn out to be wrong.
   the locator on an index without positions — NOT "search by pairs" or remapping it onto
   a different distance rule. Same for every other gap (cross-line phrases, sameSection
   scope, quote-free matching, ...).
+- **Quick tests only by default** (user's rule): unit tests, otzaria_cases, small fixtures,
+  builds. Full-DB rebuilds, full parity sets, speed benchmarks and hit-count reruns run ONLY
+  when the user explicitly asks; meanwhile mark the affected report sections as stale.
 - **Long runs: progress + full log + error tracking, always.** Any build, index
   build, parity dump or benchmark that takes more than a few seconds writes its FULL
   output to a log file (`2>&1 | tee <scratchpad>/logs/<name>.log`), shows its progress

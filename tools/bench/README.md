@@ -5,8 +5,9 @@ parity, search speed, Otzaria hit counts, and the generated report
 ([FTS-SPECS-AND-COMPARISONS.md](../../FTS-SPECS-AND-COMPARISONS.md), README / CLAUDE.md Specs blocks).
 
 ```
-git clone --recursive https://github.com/KleiKodesh/SeforimLibrarySearchEngine.git
-cd SeforimdbSerachEngine
+git clone https://github.com/KleiKodesh/SeforimLibrarySearchEngine.git
+cd SeforimLibrarySearchEngine
+git submodule update --init --depth 1 tantivy external/KleiKodeshProject     # not --recursive (a nested submodule has no url)
 tools/bench/run-all.sh --steps detect           # inventory + plan, changes nothing
 tools/bench/run-all.sh --steps bootstrap        # install missing prerequisites
 tools/bench/run-all.sh                          # everything (resume-safe)
@@ -32,7 +33,7 @@ Feature specs and the latest numbers: [FTS-SPECS-AND-COMPARISONS.md](../../FTS-S
 | Step | What | Why |
 |---|---|---|
 | `detect` | OS/arch, CPU/RAM/disk, tools, submodules, seforim.db, built binaries, indexes (with their format), finished results; then the plan | never redo work; reuse what exists |
-| `bootstrap` | installs git, Rust (rustup), .NET 10 SDK, Python 3, zstd (brew / apt / dnf / winget); `git submodule update --init --recursive` | clean machine |
+| `bootstrap` | installs git, Rust (rustup), .NET 10 SDK, Python 3, zstd (brew / apt / dnf / winget); `git submodule update --init --depth 1 tantivy external/KleiKodeshProject` | clean machine |
 | `db` | finds seforim.db or downloads it (below) | the corpus |
 | `build-tools` | `cargo build --release -p engine-ffi`, C# demo, FtsLibDump, Otzaria driver | |
 | `build-indexes` | ours pos, nopos, keep_marks; FtsLib; Otzaria, one at a time; each log has total time, stage times (indexing, merge, FM sidecar) and size per file type | build cost and index size |
@@ -66,7 +67,7 @@ phrases have no Otzaria equivalent and are `n/a`.
   needs `pip install zstandard` or the zstd CLI). Windows only: the .NET Framework 4.8
   targeting pack (the demo also builds net48) and the MSVC C++ build tools for Rust.
 - Submodules: `tantivy` (our modified copy) and `external/KleiKodeshProject` (KitveiHakodesh:
-  FtsLib + Core, ~0.8 GB history; `git clone --recursive --shallow-submodules` saves space).
+  FtsLib + Core, ~0.8 GB history; `--depth 1` saves space).
 - seforim.db: found at `--db` / `DB_PATH`, else Otzaria's location
   (Windows `%APPDATA%\otzaria\books`, macOS `~/Library/Application Support/otzaria/books`,
   Linux `~/.local/share/otzaria/books`), else Zayit's, else `<out>/data`; otherwise
@@ -80,7 +81,7 @@ phrases have no Otzaria equivalent and are `n/a`.
 ```sh
 xcode-select --install                      # clang + SDK for Rust's C deps (zstd-sys)
 # Homebrew from https://brew.sh, then:
-git clone --recursive --shallow-submodules https://github.com/KleiKodesh/SeforimLibrarySearchEngine.git
+git clone https://github.com/KleiKodesh/SeforimLibrarySearchEngine.git
 cd SeforimLibrarySearchEngine
 tools/bench/run-all.sh --steps bootstrap    # git, python, zstd, rustup, .NET 10 SDK
 tools/bench/run-all.sh --steps detect       # inventory: OS, CPU, cores, RAM, disk, tools

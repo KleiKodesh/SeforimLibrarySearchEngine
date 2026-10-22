@@ -57,6 +57,13 @@ def load(set_, pattern):
     return {"rows": {r["n"]: r for r in rows}, "all": d.get("rows", [])}
 
 
+def indexed_lines():
+    """Lines of the index, from the positions build log ("build: N lines"); the DB may have more."""
+    p = os.path.join(SP, "logs", P + "build-pos.log")
+    m = re.search(r"build: ([\d,]+) lines", open(p, encoding="utf-8", errors="replace").read()) if os.path.exists(p) else None
+    return m.group(1) if m else "unknown number of"
+
+
 def build(log):
     p = os.path.join(SP, "logs", log)
     if not os.path.exists(p):
@@ -123,7 +130,7 @@ md.append("""## Engines compared
 | ours, positions | this repo: modified tantivy + hebrew-fts walks, index with positions (span queries) |
 | ours, no positions | same engine, index without positions; distance/order checked on the text by the locator |
 | FtsLib | KitveiHakodesh FtsLib (SQLite FTS5, `detail=none`, index fts9) |
-| Otzaria | otzaria_search_engine v5.0.0 (tantivy), driven by the scratchpad driver |
+| Otzaria | otzaria_search_engine v5.0.0 (tantivy), driven by `tools/bench/otzaria-driver` |
 
 ## Feature specs (ours)
 
@@ -146,7 +153,7 @@ md.append("""## Engines compared
 | Snippets from index positions (`locate_lines`, per-batch cost rule) | done |
 """)
 
-md.append("## Index builds (full DB, 7,080,797 lines)\n")
+md.append(f"## Index builds (full DB, {indexed_lines()} lines)\n")
 bl = [(name, build(log)) for name, log in BUILDS]
 
 
@@ -216,8 +223,8 @@ md.append("")
 
 md.append("## Search speed (every hit read, median of 3 runs after one warm-up)\n")
 md.append("Stages per query: walks + collect (engine), host (text fetch + locate + widening), first batch, total. "
-          "Otzaria runs only the queries it has an equivalent for (no `*`, `?`, `%`, `|`, phrase); its large-set "
-          "timings come from an earlier run on a busier machine, so treat them as indicative.\n")
+          "Otzaria runs only the queries it has an equivalent for (no `*`, `?`, `%`, `|`, phrase); where its hit count "
+          "differs from ours the two did not do the same work (see the analysis below).\n")
 for set_, title in SETS:
     data = [(name, load(set_, pat)) for name, pat in ENGINES]
     md.append(f"### {title}\n")
@@ -272,31 +279,9 @@ for name, before, after in SNIPPETS:
         md.append(f"| {name} | {t(before)} | {t(after)} | {100 * (before - after) / before:.0f}% |")
 md.append("")
 
-md.append("""## First-page latency (profiled 2026-10-22)
-
-One single common word (802,677 hits), first page of 256 in both engines, fresh process per run, positions
-index (no-positions in brackets). What each tool's "first batch" measures differs: ours (C# demo) starts its
-clock before the search call, so it includes the per-search SQLite corpus open and every first-use (JIT)
-cost; the Otzaria driver opens its index and configures its line source before the clock.
-
-| Stage | Ours | Otzaria |
-|---|---|---|
-| Engine search: collect every hit (3 fast fields x 802k) | 72-98 ms | count + top-256 over 8 segments, with texts and snippets: 55-65 ms |
-| Sort of all hits by catalog position (943 runs, nearly sorted) | 105-120 ms (55-70 ms) | none (top-K) |
-| C# / FFI / JSON around the call | 5-50 ms | none |
-| SQLite corpus open per search (provider init 40 ms, schema 10 ms, zstd dict 35 ms) | 80-120 ms cold | before the clock |
-| Text fetch, 256 lines | 41-58 ms cold (6 ms warm) | in the 55-65 ms |
-| Locate 256 / build hits (Parallel.For start) / neighbour widening | 10 / 13-16 / 20 ms cold (2 / 0.2 / 2 ms warm) | in the 55-65 ms |
-| First batch | 350-420 ms | 55-110 ms |
-
-A rare word (20 hits): ours 186-345 ms (engine 6-18 ms; the rest is corpus open, cold fetch and first-use
-costs), Otzaria 37-58 ms. Page size is not the cause (both 256; Otzaria's call costs about the same for
-1, 16 or 256 rows, +55 ms at 2048). Built since (`tantivy11`, not yet measured on the full DB): the hosts
-keep the SQLite corpus open across searches and widenings (C# corpus pool, Dart kept connection with
-prepared statements; reopened when the file changes), and the index is sorted by catalog position so the
-merged segment's hits arrive sorted and the sort is skipped. Still proposed: first page from a top-K pass
-with the full hit list built lazily; measure warm in-process (second query) alongside the cold numbers.
-""")
+# Hand-written analysis of the latest run (which engine is slower at what stage, and why); regenerate it by hand
+# after a new speed run: tools/report/slowness-analysis.md.
+md.append(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "slowness-analysis.md"), encoding="utf-8").read())
 
 md.append("## Hit-count comparison with Otzaria\n")
 hc_path = os.path.join(SP, "otz-hitcount.json")
@@ -370,7 +355,7 @@ readme_block = "\n".join([
     stale_md,
     *feature_rows,
     "",
-    "**Index builds (full DB, 7,080,797 lines):**", "",
+    f"**Index builds (full DB, {indexed_lines()} lines):**", "",
     "| Build | Total | Size |", "|---|---|---|", *build_lines(), "",
     "**Parity with FtsLib** (identical lines, first 20,000 hits): " + parity_summary() + ".", "",
     *([f"**Machine:** {MACHINE_LINE}", ""] if MACHINE_LINE else []),

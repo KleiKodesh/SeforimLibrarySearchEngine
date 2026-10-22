@@ -1,7 +1,9 @@
 {
- "note": "Hand classification from the analysis of 2026-10-22 (scratchpad run on tantivy9/fts8). Applied by hitcount.py only to rows whose diff is non-zero; re-check after any engine change.",
- "method": "Every query Otzaria ran (`otz_report.py`: one word = exact, several words = advanced with the TAB distance or 1000, `w~k` = fuzzy), against ours on the positions index (full-index-v8) with Otzaria-mode options: one word plain; several words `proximity: ordered, gaps = distance` and `cross_line: true` (Otzaria's advanced mode is ordered and crosses one line break); fuzzy with `ignore_quotes: true` (Otzaria's quote is transparent). Hits = matching lines. Each difference was diffed line by line (Otzaria book+segment mapped to line ids), sample lines read, and every differing line tagged by cause (scratchpad `hc_diff.py`, `hc_class.py`, `hc_fz.py`, logs `hc-*.log`).",
+ "note": "Classification of the run on Apple M4 / macOS (seforim.db of Zayit, 7,019,636 lines, tantivy11): rows that differ are diffed line by line by tools/bench/hitdiff.py (ours-only and Otzaria-only lines, Otzaria's tag-stripping rule replayed on each); rows it does not cover keep the earlier hand classification. Applied by hitcount.py only to rows whose diff is non-zero; re-check after any engine change or other DB.",
+ "method": "Every query Otzaria ran (`otz_report.py`: one word = exact, several words = advanced with the TAB distance or 1000, `w~k` = fuzzy), against ours on the positions index (tantivy11) with Otzaria-mode options: one word plain; several words `proximity: ordered, gaps = distance` and `cross_line: true` (Otzaria's advanced mode is ordered and crosses one line break); fuzzy with `ignore_quotes: true` (Otzaria's quote is transparent). Hits = matching lines. Each difference was diffed line by line (Otzaria book+segment mapped to line ids), sample lines read, and every differing line tagged by cause (scratchpad `hc_diff.py`, `hc_class.py`, `hc_fz.py`, logs `hc-*.log`).",
  "notes": [
+  "Quote-free matching (deliberate deviation, FtsLib's rule): a query word with a quote or geresh (`\"`, `'`, gershayim, geresh) matches the word with the quote missing, in another place or of another kind (`ר\"שי`, `רש׳י`, `רש'י`); Otzaria needs the quote of the query. Rows `large q11..q17`, `rules q11`, `rules q14` (numbers as shown): every ours-only line checked (tools/bench/hitdiff.py); with the footnote glue they account for all but a handful of lines.",
+  "Footnote marker glue, exact numbers of this run: every ours-only line of the plain single-word rows (large q2..q10, q18..q20 and the rules rows) is a line where Otzaria's `strip_html_for_indexing` glues a `<sup>` marker to the word on either side or across punctuation (`word.<sup>30</sup>` -> `word30`, `</sup><i>word` -> `5word`): 100% of the lines checked, no Otzaria-only line.",
   "Footnote markers (most rows, ours +0.02..0.1%): Otzaria removes inline tags with no separator (`strip_html_for_indexing`; `sup` is inline), so `word<sup>5</sup>` indexes as one token `word5` and the word is lost; ours ends a word at `<sup>`/`<sub>` (FtsLib's scanner rule). Every ours-only line of the exact rows has a `<sup>` (checked all; samples 8576169, 7692606, 2451902).",
   "Cross-line enumerators (our bug): Otzaria's `cross_line::content_range` skips a leading `(b)`, `[yg]`, `{x}` and a trailing `(49)` / `(dp\"d):` when it joins two lines; ours counts them as words, so a gap is one too wide (Otzaria-only, e.g. 6175732, 6199135, 8985366) or a one-letter query word matches the enumerator (ours-only, e.g. 6172879, 6185728).",
   "Unterminated `<` (our bug): line 5850708 has `...ayy< rbynw...` with no `>` after it; our scanner skips to the end of the line as if in a tag, so every word after it is unindexed. Otzaria keeps the `<` and indexes the rest.",
@@ -11,28 +13,28 @@
  ],
  "classes": {
   "large:0": [
-   "mixed",
-   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule); 1 line lost by ours: unterminated `<` drops the rest of the line"
+   "Otzaria bug",
+   "74 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
   ],
   "large:13": [
    "mixed",
-   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule); 1 line lost by ours: unterminated `<`"
+   "200 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 495 ours-only lines: quote-free matching (ours matches the word with the query's quote missing, moved or of another kind; Otzaria needs it)"
   ],
   "large:19": [
-   "mixed",
-   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule); 1 line lost by ours: unterminated `<`"
+   "Otzaria bug",
+   "200 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
   ],
   "large:29": [
    "our bug",
-   "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (all 34 lines)"
+   "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (all 34 lines) | this run (tools/bench/hitdiff.py, line by line): ours-only 0 lines (footnote glue 0, unexplained 0), Otzaria-only 1 lines"
   ],
   "large:32": [
    "mixed",
-   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+86); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-2)"
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+86); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-2) | this run (tools/bench/hitdiff.py, line by line): ours-only 59 lines (footnote glue 29, unexplained 30), Otzaria-only 0 lines"
   ],
   "large:34": [
    "mixed",
-   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+4); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-3)"
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+4); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-3) | this run (tools/bench/hitdiff.py, line by line): ours-only 3 lines (footnote glue 3, unexplained 0), Otzaria-only 0 lines"
   ],
   "large:50": [
    "deliberate deviation",
@@ -60,7 +62,7 @@
   ],
   "words:3": [
    "our bug",
-   "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words: the one-letter word matches a leading enumerator letter of the next line"
+   "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words: the one-letter word matches a leading enumerator letter of the next line | this run (tools/bench/hitdiff.py, line by line): ours-only 423 lines (footnote glue 382, unexplained 41), Otzaria-only 0 lines"
   ],
   "words:4": [
    "our bug",
@@ -68,11 +70,11 @@
   ],
   "words:6": [
    "Otzaria bug",
-   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits)"
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits) | this run (tools/bench/hitdiff.py, line by line): ours-only 71 lines (footnote glue 49, unexplained 22), Otzaria-only 0 lines"
   ],
   "words:7": [
    "Otzaria bug",
-   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits)"
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits) | this run (tools/bench/hitdiff.py, line by line): ours-only 50 lines (footnote glue 16, unexplained 34), Otzaria-only 0 lines"
   ],
   "words:11": [
    "Otzaria bug",
@@ -80,15 +82,15 @@
   ],
   "words:12": [
    "mixed",
-   "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (29 lines, the one-letter word = an enumerator); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (7)"
+   "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (29 lines, the one-letter word = an enumerator); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (7) | this run (tools/bench/hitdiff.py, line by line): ours-only 6 lines (footnote glue 4, unexplained 2), Otzaria-only 1 lines"
   ],
   "rules:5": [
    "Otzaria bug",
-   "Otzaria strips a bare `&` through the next `;` (entity rule), deleting the words between"
+   "1 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
   ],
   "rules:11": [
    "mixed",
-   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+26); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-5)"
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+26); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-5) | this run (tools/bench/hitdiff.py, line by line): ours-only 5 lines (footnote glue 4, unexplained 1), Otzaria-only 0 lines"
   ],
   "rules:17": [
    "equal",
@@ -101,6 +103,158 @@
   "rules:20": [
    "our bug",
    "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (1 line)"
+  ],
+  "large:1": [
+   "Otzaria bug",
+   "130 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:2": [
+   "Otzaria bug",
+   "162 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:3": [
+   "Otzaria bug",
+   "97 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:4": [
+   "Otzaria bug",
+   "69 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:5": [
+   "Otzaria bug",
+   "61 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:6": [
+   "Otzaria bug",
+   "17 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:7": [
+   "Otzaria bug",
+   "4 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:8": [
+   "Otzaria bug",
+   "1 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:9": [
+   "Otzaria bug",
+   "2 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:10": [
+   "mixed",
+   "173 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 1422 ours-only lines: quote-free matching (ours matches the word with the query's quote missing, moved or of another kind; Otzaria needs it)"
+  ],
+  "large:11": [
+   "mixed",
+   "42 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 56 ours-only lines: quote-free matching (ours matches the word with the query's quote missing, moved or of another kind; Otzaria needs it)"
+  ],
+  "large:12": [
+   "mixed",
+   "17 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 20 ours-only lines: quote-free matching (ours matches the word with the query's quote missing, moved or of another kind; Otzaria needs it)"
+  ],
+  "large:14": [
+   "mixed",
+   "162 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 1030 ours-only lines: quote-free matching (ours matches the word with the query's quote missing, moved or of another kind; Otzaria needs it)"
+  ],
+  "large:15": [
+   "mixed",
+   "27 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 28 ours-only lines: quote-free matching (ours matches the word with the query's quote missing, moved or of another kind; Otzaria needs it)"
+  ],
+  "large:16": [
+   "mixed",
+   "61 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 106 ours-only lines: quote-free matching (ours matches the word with the query's quote missing, moved or of another kind; Otzaria needs it); 1 ours-only and 0 Otzaria-only lines not explained by these two causes (open; sample ids [5992919])"
+  ],
+  "large:17": [
+   "Otzaria bug",
+   "42 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:18": [
+   "Otzaria bug",
+   "172 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "rules:0": [
+   "Otzaria bug",
+   "151 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "rules:1": [
+   "Otzaria bug",
+   "151 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "rules:2": [
+   "Otzaria bug",
+   "21 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "rules:3": [
+   "Otzaria bug",
+   "5 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "rules:10": [
+   "mixed",
+   "61 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 106 ours-only lines: quote-free matching (ours matches the word with the query's quote missing, moved or of another kind; Otzaria needs it); 1 ours-only and 0 Otzaria-only lines not explained by these two causes (open; sample ids [5992919])"
+  ],
+  "rules:13": [
+   "mixed",
+   "173 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 1422 ours-only lines: quote-free matching (ours matches the word with the query's quote missing, moved or of another kind; Otzaria needs it)"
+  ],
+  "rules:16": [
+   "Otzaria bug",
+   "20 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:20": [
+   "Otzaria bug",
+   "2 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:21": [
+   "Otzaria bug",
+   "7 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:22": [
+   "Otzaria bug",
+   "7 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:23": [
+   "Otzaria bug",
+   "1 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:24": [
+   "Otzaria bug",
+   "4 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:25": [
+   "Otzaria bug",
+   "8 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:26": [
+   "mixed",
+   "10 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 1 ours-only and 0 Otzaria-only lines not explained by these two causes (open; sample ids [697743])"
+  ],
+  "large:27": [
+   "mixed",
+   "15 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 5 ours-only and 0 Otzaria-only lines not explained by these two causes (open; sample ids [3649958, 3650065, 3650217])"
+  ],
+  "large:30": [
+   "Otzaria bug",
+   "2 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "large:33": [
+   "mixed",
+   "5 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 1 ours-only and 0 Otzaria-only lines not explained by these two causes (open; sample ids [6918511])"
+  ],
+  "words:0": [
+   "mixed",
+   "7 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 5 ours-only and 0 Otzaria-only lines not explained by these two causes (open; sample ids [350351, 3649025, 6917776])"
+  ],
+  "words:1": [
+   "Otzaria bug",
+   "4 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line)"
+  ],
+  "rules:12": [
+   "mixed",
+   "14 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 8 ours-only and 0 Otzaria-only lines not explained by these two causes (open; sample ids [7426882, 7430870, 7440551])"
+  ],
+  "rules:15": [
+   "mixed",
+   "18 ours-only lines: a footnote marker is glued to the word by Otzaria's tag stripping (`<sup>5</sup>word`, `word.<sup>5</sup>`; Otzaria's rule replayed line by line); 4 ours-only and 0 Otzaria-only lines not explained by these two causes (open; sample ids [1962692, 1967060, 1968980])"
   ]
  }
 }

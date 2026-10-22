@@ -25,6 +25,11 @@ cd "$ROOT"
 source "$HERE/bench.env"
 [ -f "$HERE/bench.local.env" ] && source "$HERE/bench.local.env"
 
+# .NET formats numbers with the user's culture. On a machine with a Hebrew locale (he-IL / he-US) a negative
+# number gets an invisible U+200E before the minus, so the pinned FtsLib's `"PRAGMA cache_size=" + -8192`
+# is a SQLite syntax error and every build / search through it dies. English numbers for every child process.
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) export LC_ALL=en_US.UTF-8;; esac
+
 FORCE=0; DRY=0; ARG_STEPS=""; ARG_DB=""; ARG_OUT=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -111,7 +116,7 @@ detect() {
   echo "dotnet SDKs: $(command -v dotnet >/dev/null && dotnet --list-sdks | awk '{print $1}' | tr '\n' ' ' || echo MISSING)"
   echo "python: $(ver "$PY" --version)"
   echo "zstd: $(ver zstd --version) (only needed to unpack a downloaded DB on Python < 3.14 without the zstandard module)"
-  echo "submodule tantivy: $([ -f tantivy/Cargo.toml ] && echo ok || echo 'NOT INITIALISED (git submodule update --init --recursive)')"
+  echo "submodule tantivy: $([ -f tantivy/Cargo.toml ] && echo ok || echo 'NOT INITIALISED (git submodule update --init --depth 1 tantivy external/KleiKodeshProject)')"
   echo "KitveiHakodesh: $([ -d "$KITVEI_DIR/CSharpBackend" ] && echo "ok ($KITVEI_DIR)" || echo "MISSING ($KITVEI_DIR)")"
   local db; db="$("$PY" -I "$(wp "$HERE/get_db.py")" "$(wp "$OUT_DIR/data")" --db "$DB_PATH" --find-only | tail -n1)"
   echo "seforim.db: $db"
@@ -144,7 +149,8 @@ bootstrap() {
       echo "  Microsoft.VisualStudio.2022.BuildTools (C++ build tools for Rust; .NET Framework 4.8 targeting pack for the net48 demo)."
       for p in Git.Git Rustlang.Rustup Microsoft.DotNet.SDK.10 Python.Python.3.14; do winget install -e --id $p --accept-package-agreements --accept-source-agreements || true; done;;
   esac
-  git submodule update --init --recursive
+  # not --recursive: KleiKodeshProject's nested SearchExpansion has no url in .gitmodules and nothing here needs it
+  git submodule update --init --depth 1 tantivy external/KleiKodeshProject
 }
 
 # ---------------- steps ----------------

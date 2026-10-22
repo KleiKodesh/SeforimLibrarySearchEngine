@@ -14,7 +14,7 @@ Background: [README.md](README.md) (what is tested and why). Repo rules: `CLAUDE
 
 ## Steps
 
-1. `git submodule update --init --recursive` (if `detect` says a submodule is missing).
+1. `git submodule update --init --depth 1 tantivy external/KleiKodeshProject` (if `detect` says a submodule is missing; not `--recursive`, see the notes below).
 2. `tools/bench/run-all.sh --steps detect` -> read the inventory and plan. Missing tools: `--steps bootstrap` (or install by hand, see README section 3).
 3. `tools/bench/run-all.sh --steps db` (finds or downloads seforim.db; ~1.9 GB download, resumable).
 4. `tools/bench/run-all.sh --steps build-tools` (15-25 min first time). Must end with `all requested steps done`.
@@ -33,9 +33,21 @@ Recovery: rerun the same command; finished units are skipped (`OUT_DIR/.done/`).
 - Profile the first page: `SeforimSearch.Demo search --index <idx> --db <db> --repeat 3 <query>` with `SEFORIM_ENGINE_TIMING=1` (cold vs warm: search 1 vs later), and the stage split collect / sort / host / locate.
 - Find the cause with evidence (numbers, logs), write it in an analysis section of the report, propose fixes. Do NOT change engine code without the user's OK.
 
-## TODO for the next agent (not finished in the first version)
+## Notes from the first full run on a Mac (Apple M4, macOS, 2026-10-22)
 
-- Not yet run on a real Mac/Linux (cross-checked from Windows only: `dotnet build -r osx-arm64 / osx-x64 / linux-x64` of the demo and the portable FtsLibDump compile; the portable FtsLibDump gives the same dump as the Windows one; `cargo check --target aarch64-apple-darwin` needs Apple's clang for `zstd-sys`, so the Rust side was not compiled for macOS; no `cfg(windows)` code exists in our crates or the driver, and the rust-lld setting is scoped to the Windows target): bootstrap (brew/apt), cargo builds, `.dylib/.so` loading by the demo, Otzaria driver build, DB download + zstd unpack (tested only the find path). First Mac run: report anything that breaks here.
+The whole chain ran end to end on macOS arm64: build-tools, build-indexes, parity (all sets identical), speed (1.5 h), hitcount, report.
+What broke and how it was solved:
+
+- **Hebrew locale (`he-US` / `he-IL`)**: .NET formats `-8192` as U+200E + `-8192`, so `"PRAGMA cache_size=" + -8192` is a SQLite syntax error (`near "-"`) in our demo and in the pinned FtsLib (all four index builds died in 0 min, exit 134). `run-all.sh` now exports `LC_ALL=en_US.UTF-8` (not on Windows); our `SqliteConnectionFactory` formats with `InvariantCulture`. The FtsLib submodule is left untouched (it still has the bug: fix it upstream with `CultureInfo.InvariantCulture`).
+- **Submodules**: `git submodule update --init --recursive` fails on `external/KleiKodeshProject` (its nested `SearchExpansion` has no url in `.gitmodules`); use `git submodule update --init --depth 1 tantivy external/KleiKodeshProject` (non-recursive; nothing needs the nested one). If a first update was interrupted, `tantivy/` can be checked out empty (all files "deleted" in its index): `git -C tantivy reset --hard HEAD`.
+- **.NET 10**: `bootstrap` installs it with `brew install --cask dotnet-sdk` (needs sudo, also upgrades git / python / zstd). Without sudo: `dotnet-install.sh --channel 10.0 --install-dir ~/.dotnet10`, then `export DOTNET_ROOT=~/.dotnet10 PATH=~/.dotnet10:$PATH`.
+- **seforim.db**: found Zayit's (8 GB, 7,019,636 lines in the index), not Otzaria's; the numbers are not comparable with runs on another DB or machine.
+- `tools/bench/hitdiff.py` classifies every differing hit-count row line by line (ours-only / Otzaria-only lines against Otzaria's own tag-stripping rule); rerun it after a new hitcount run and update `hitcount-classes.json` from its output.
+- The slowness analysis is `tools/report/slowness-analysis.md` (included by the report generator); rewrite its numbers after every speed run.
+
+## TODO for the next agent
+
+- Not yet run on Linux (the Rust side compiles for macOS and Windows; `cfg(windows)` code does not exist in our crates).
 - `get_db.py` download path not run end to end (needs 1.9 GB); the split-manifest branch untested.
-- hitcount: the old classification was made on tantivy9/fts8; rows may change.
-- Not yet verified: a full run through run-all (only `detect`, `build-tools` and `--dry-run` were run).
+- The pinned FtsLib culture bug (above) should be fixed upstream and the submodule bumped; the `LC_ALL` export can then stay as a safety net.
+- Speed: ours has no top-K first page (first batch grows with the hit count) and the host path checks distance on text instead of using the positions index; both are proposals in `tools/report/slowness-analysis.md`, no engine change made.

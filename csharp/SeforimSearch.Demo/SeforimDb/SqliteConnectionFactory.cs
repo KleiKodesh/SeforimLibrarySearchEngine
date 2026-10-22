@@ -80,8 +80,8 @@ namespace SeforimSearch.Demo.Common
 
             // Per-connection, and only meaningful once open.
             Execute(connection,
-                "PRAGMA cache_size=" + CorpusCacheSizeKib + ";" +
-                "PRAGMA mmap_size=" + CorpusMmapSizeBytes + ";");
+                "PRAGMA cache_size=" + CorpusCacheSizeKib.ToString(System.Globalization.CultureInfo.InvariantCulture) + ";" +
+                "PRAGMA mmap_size=" + CorpusMmapSizeBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) + ";");
 
             return connection;
         }
@@ -150,7 +150,7 @@ namespace SeforimSearch.Demo.Common
             // own SQLITE_BUSY retry loop and seeds sqlite3_busy_timeout at Open. Setting the
             // PRAGMA explicitly costs nothing and keeps the intent visible at the call site.
             Execute(connection,
-                "PRAGMA busy_timeout=" + (BundledWriteBusyTimeoutSeconds * 1000) + ";");
+                "PRAGMA busy_timeout=" + (BundledWriteBusyTimeoutSeconds * 1000).ToString(System.Globalization.CultureInfo.InvariantCulture) + ";");
 
             return connection;
         }
@@ -200,7 +200,7 @@ namespace SeforimSearch.Demo.Common
             // harmless; busy_timeout is per-connection and must be set every time.
             Execute(connection,
                 "PRAGMA journal_mode=WAL;" +
-                "PRAGMA busy_timeout=" + (UserDataBusyTimeoutSeconds * 1000) + ";");
+                "PRAGMA busy_timeout=" + (UserDataBusyTimeoutSeconds * 1000).ToString(System.Globalization.CultureInfo.InvariantCulture) + ";");
 
             return connection;
         }

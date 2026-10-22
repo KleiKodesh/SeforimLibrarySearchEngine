@@ -198,7 +198,7 @@ pub unsafe extern "C" fn se_index_close(index: *mut LineIndex) {
 }
 
 /// JSON: `{"num_lines":N,"positions":bool,"keep_marks":bool,"line_data":bool,"payload":string|null}`
-/// (`line_data`: the per-line word count, flags and section id exist, for
+/// (`line_data`: the per-line content edges, flags and section id exist, for
 /// cross-line matching and the same-section scope).
 /// The payload is what the host committed with its last commit.
 ///
@@ -306,7 +306,7 @@ pub const SE_LINE_HAS_SECTION: u32 = 2;
 /// `SE_LINE_NO_CROSS` (1) for a line no phrase may continue into or out of
 /// (a heading), `SE_LINE_HAS_SECTION` (2) when `section_id` is the line's
 /// section (same-section scope; without it the line is a section of its
-/// own). The line's word count is computed by the engine.
+/// own). The line's content edges (cross-line) are computed by the engine.
 ///
 /// # Safety
 /// As `se_writer_add`.

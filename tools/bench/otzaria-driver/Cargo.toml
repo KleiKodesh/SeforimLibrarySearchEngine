@@ -1,0 +1,27 @@
+[package]
+name = "otzaria-driver"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace: not a member of the repo's workspace, so normal engine builds
+# never compile Otzaria's engine. Built by tools/bench/run-all.sh (step build-tools).
+[workspace]
+
+[dependencies]
+# Otzaria's search engine, unmodified, pinned to tag v5.0.0 (fetched by cargo).
+search_engine = { git = "https://github.com/Otzaria/otzaria_search_engine", tag = "v5.0.0", default-features = false, features = ["sqlite-bundled"] }
+# Same version/features as the Otzaria crate (it does not re-export rusqlite); the
+# bundled SQLite comes through its `sqlite-bundled` feature (rusqlite/bundled).
+rusqlite = { version = "0.32", default-features = false }
+serde_json = "1.0.150"
+
+# [patch] only applies at the root of a build, so the Otzaria crate's own patches are
+# repeated here, or the driver would build a different tantivy / tantivy-fst than the
+# app. tantivy-fst = the copy vendored in the same tag (rust/vendor/tantivy-fst).
+[patch.crates-io]
+tantivy-fst = { git = "https://github.com/Otzaria/otzaria_search_engine", tag = "v5.0.0" }
+tantivy = { git = "https://github.com/Otzaria/tantivy", rev = "8b8832069b871e11fe0fd0da1c4c2de8c270596f" }
+
+[profile.release]
+lto = "thin"

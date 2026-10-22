@@ -83,7 +83,7 @@ namespace SeforimSearch.Demo
         private static int Search(SeforimDbFtsEngine engine, string[] args)
         {
             var words = args.Skip(1).Where((a, i) => !a.StartsWith("--", StringComparison.Ordinal)
-                && (i == 0 || !new[] { "--db", "--index", "--distance" }.Contains(args[i]))).ToArray();
+                && (i == 0 || !new[] { "--db", "--index", "--distance", "--repeat" }.Contains(args[i]))).ToArray();
             string query = string.Join(" ", words);
             int distance = int.TryParse(Option(args, "--distance"), out var d) ? d : int.MaxValue;
             var wordOptions = new WalkOptions
@@ -94,10 +94,21 @@ namespace SeforimSearch.Demo
                 GrammarSuffixes = args.Contains("--suffixes"),
             };
 
+            // First batch = from the search call to the first page (256 hits with line text
+            // and snippet) in the caller's hands, the index already open (the same definition
+            // as FtsLibDump search and the Otzaria driver; see tools/report/search_report.py).
+            // The seforim.db connection is opened (pooled) inside the first search.
+            // --repeat N: N searches in this process (search 1 = cold, then warm).
+            var openSw = Stopwatch.StartNew();
+            bool built = engine.Index.IsBuilt;
+            Console.Error.WriteLine($"open: index {openSw.Elapsed.TotalMilliseconds:F0} ms (built={built})");
+            int repeat = int.TryParse(Option(args, "--repeat"), out var rp) && rp > 1 ? rp : 1;
+            for (int run = 1; run <= repeat; run++)
+            {
             var terms = new FtsTermTable();
             var sw = Stopwatch.StartNew();
             TimeSpan? first = null;
-            int total = 0, shown = 0;
+            int total = 0, shown = run == 1 ? 0 : 10;
             foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
                          engine, query, distance, requireOrdered: false, contextWords: 8, wordOptions, terms))
             {
@@ -116,6 +127,7 @@ namespace SeforimSearch.Demo
             if (FtsLib.Fts5.HostTiming.Enabled) Console.Error.WriteLine(FtsLib.Fts5.HostTiming.Report());
             Console.Error.WriteLine($"search: {total:N0} hits in {sw.Elapsed.TotalMilliseconds:F0} ms " +
                                     $"(first batch {first?.TotalMilliseconds:F0} ms); terms: {string.Join(", ", terms.All())}");
+            }
             return 0;
         }
 

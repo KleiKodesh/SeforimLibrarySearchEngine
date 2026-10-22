@@ -979,6 +979,8 @@ are not printed), so upstream's query-parser tests stay as they are.
 
 ## Build and search reports
 
+Full comparison on any machine (index builds, parity, speed, Otzaria hit counts, report) with one command: [tools/bench/README.md](tools/bench/README.md) (`tools/bench/run-all.sh`).
+
 - `SeforimSearch.Demo build` prints progress, then each stage's time
   (indexing, merge into one segment, FM-index sidecar), the total, and the
   index size in total and per file type.

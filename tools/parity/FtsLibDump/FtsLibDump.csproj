@@ -4,17 +4,45 @@
     Parity reference: runs KitveiHakodesh Core's OWN searcher (FtsLib engine) on an
     existing FtsLib index and dumps every hit as one JSON line, in the same format
     as SeforimSearch.Demo's `dump` command, for a side-by-side diff.
+
+    KitveiHakodesh comes from the submodule external/KleiKodeshProject (pinned commit);
+    override with -p:KitveiHakodeshDir=<...\KitveiHakodesh>.
+    Windows: references KitveiHakodesh.Core (net10.0-windows) as is.
+    Other OSes (or -p:FtsLibDumpPortable=true): Core targets Windows only, so the FTS
+    part of Core (SeforimDbFullTextSearch + the seforim.db reader it uses) is compiled
+    from Core's own source files into this exe, on plain net10.0, with FtsLib.
   -->
   <PropertyGroup>
+    <KitveiHakodeshDir Condition="'$(KitveiHakodeshDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\external\KleiKodeshProject\KitveiHakodesh</KitveiHakodeshDir>
+    <CoreDir>$(KitveiHakodeshDir)\CSharpBackend\KitveiHakodesh.Core</CoreDir>
+    <FtsLibDumpPortable Condition="'$(FtsLibDumpPortable)' == '' And '$(OS)' != 'Windows_NT'">true</FtsLibDumpPortable>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="C:\Users\Public\Documents\KleiKodeshProject\KitveiHakodesh\CSharpBackend\KitveiHakodesh.Core\KitveiHakodesh.Core.csproj" />
+  <PropertyGroup Condition="'$(FtsLibDumpPortable)' != 'true'">
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(FtsLibDumpPortable)' != 'true'">
+    <ProjectReference Include="$(CoreDir)\KitveiHakodesh.Core.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(FtsLibDumpPortable)' == 'true'">
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(FtsLibDumpPortable)' == 'true'">
+    <Compile Include="$(CoreDir)\SeforimDbFullTextSearch\**\*.cs" LinkBase="Core\SeforimDbFullTextSearch" />
+    <Compile Include="$(CoreDir)\SeforimDb\**\*.cs" LinkBase="Core\SeforimDb" Exclude="$(CoreDir)\SeforimDb\SeforimDbIndexRefreshWatcher.cs" />
+    <Compile Include="$(CoreDir)\Common\**\*.cs" LinkBase="Core\Common" />
+    <ProjectReference Include="$(KitveiHakodeshDir)\CSharpBackend\FtsLib-Csharp\FtsLib\FtsLib.csproj" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.14" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+    <PackageReference Include="MessagePack" Version="3.1.8" />
   </ItemGroup>
 
 </Project>

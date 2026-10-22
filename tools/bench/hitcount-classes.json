@@ -1,0 +1,106 @@
+{
+ "note": "Hand classification from the analysis of 2026-10-22 (scratchpad run on tantivy9/fts8). Applied by hitcount.py only to rows whose diff is non-zero; re-check after any engine change.",
+ "method": "Every query Otzaria ran (`otz_report.py`: one word = exact, several words = advanced with the TAB distance or 1000, `w~k` = fuzzy), against ours on the positions index (full-index-v8) with Otzaria-mode options: one word plain; several words `proximity: ordered, gaps = distance` and `cross_line: true` (Otzaria's advanced mode is ordered and crosses one line break); fuzzy with `ignore_quotes: true` (Otzaria's quote is transparent). Hits = matching lines. Each difference was diffed line by line (Otzaria book+segment mapped to line ids), sample lines read, and every differing line tagged by cause (scratchpad `hc_diff.py`, `hc_class.py`, `hc_fz.py`, logs `hc-*.log`).",
+ "notes": [
+  "Footnote markers (most rows, ours +0.02..0.1%): Otzaria removes inline tags with no separator (`strip_html_for_indexing`; `sup` is inline), so `word<sup>5</sup>` indexes as one token `word5` and the word is lost; ours ends a word at `<sup>`/`<sub>` (FtsLib's scanner rule). Every ours-only line of the exact rows has a `<sup>` (checked all; samples 8576169, 7692606, 2451902).",
+  "Cross-line enumerators (our bug): Otzaria's `cross_line::content_range` skips a leading `(b)`, `[yg]`, `{x}` and a trailing `(49)` / `(dp\"d):` when it joins two lines; ours counts them as words, so a gap is one too wide (Otzaria-only, e.g. 6175732, 6199135, 8985366) or a one-letter query word matches the enumerator (ours-only, e.g. 6172879, 6185728).",
+  "Unterminated `<` (our bug): line 5850708 has `...ayy< rbynw...` with no `>` after it; our scanner skips to the end of the line as if in a tag, so every word after it is unindexed. Otzaria keeps the `<` and indexes the rest.",
+  "Bare `&` (Otzaria bug): line 3760145 `Shiur & made ... pocket;` - Otzaria's entity rule `&[^;]+;` deletes everything up to the next `;`.",
+  "Fuzzy: Otzaria builds `FuzzyTermQuery(term, d, transposition=true)`; ours keeps FtsLib's Levenshtein (named deviation). Without `ignore_quotes` ours also misses quote words such as `wyc\"xq` (quote counted as an edit), which Otzaria matches by the quote-free form.",
+  "Without `cross_line` our multi-word counts are lower by up to 39% (e.g. words q4: 87,256 vs 143,836): Otzaria's advanced mode always crosses one line break."
+ ],
+ "classes": {
+  "large:0": [
+   "mixed",
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule); 1 line lost by ours: unterminated `<` drops the rest of the line"
+  ],
+  "large:13": [
+   "mixed",
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule); 1 line lost by ours: unterminated `<`"
+  ],
+  "large:19": [
+   "mixed",
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule); 1 line lost by ours: unterminated `<`"
+  ],
+  "large:29": [
+   "our bug",
+   "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (all 34 lines)"
+  ],
+  "large:32": [
+   "mixed",
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+86); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-2)"
+  ],
+  "large:34": [
+   "mixed",
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+4); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-3)"
+  ],
+  "large:50": [
+   "deliberate deviation",
+   "Otzaria fuzzy is Damerau (transposition = 1 edit), ours FtsLib's plain Levenshtein (-3); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+16)"
+  ],
+  "large:51": [
+   "deliberate deviation",
+   "Otzaria fuzzy is Damerau (transposition = 1 edit), ours FtsLib's plain Levenshtein (-1); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+25)"
+  ],
+  "large:52": [
+   "deliberate deviation",
+   "Otzaria fuzzy is Damerau (transposition = 1 edit), ours FtsLib's plain Levenshtein (-3,673); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+467)"
+  ],
+  "large:53": [
+   "deliberate deviation",
+   "Otzaria fuzzy is Damerau (transposition = 1 edit), ours FtsLib's plain Levenshtein (-1,707); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+409)"
+  ],
+  "large:54": [
+   "not equivalent query",
+   "quote word: Otzaria counts the gershayim as an edit on the query, ours (ignore_quotes) measures quote-free forms (1,031,823 hits); with the quote counted ours is 555,281; rest Otzaria fuzzy is Damerau (transposition = 1 edit), ours FtsLib's plain Levenshtein"
+  ],
+  "words:2": [
+   "mixed",
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+4); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-1)"
+  ],
+  "words:3": [
+   "our bug",
+   "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words: the one-letter word matches a leading enumerator letter of the next line"
+  ],
+  "words:4": [
+   "our bug",
+   "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (3 lines)"
+  ],
+  "words:6": [
+   "Otzaria bug",
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits)"
+  ],
+  "words:7": [
+   "Otzaria bug",
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits)"
+  ],
+  "words:11": [
+   "Otzaria bug",
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (not line-checked: 4.8M hits; magnitude as the other sup rows)"
+  ],
+  "words:12": [
+   "mixed",
+   "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (29 lines, the one-letter word = an enumerator); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (7)"
+  ],
+  "rules:5": [
+   "Otzaria bug",
+   "Otzaria strips a bare `&` through the next `;` (entity rule), deleting the words between"
+  ],
+  "rules:11": [
+   "mixed",
+   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+26); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-5)"
+  ],
+  "rules:17": [
+   "equal",
+   "paired reading (X) [Y] is one typed word: equal (229) once sent without a gap list"
+  ],
+  "rules:19": [
+   "deliberate deviation",
+   "a 128-byte word is unindexable: ours skips it and keeps its position (FtsLib/our rule), Otzaria requires it and finds nothing"
+  ],
+  "rules:20": [
+   "our bug",
+   "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (1 line)"
+  ]
+ }
+}

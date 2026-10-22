@@ -1,3 +1,6 @@
 [submodule "tantivy"]
 	path = tantivy
 	url = https://github.com/KleiKodesh/tantivy.git
+[submodule "external/KleiKodeshProject"]
+	path = external/KleiKodeshProject
+	url = https://github.com/KleiKodesh/KleiKodeshProject.git

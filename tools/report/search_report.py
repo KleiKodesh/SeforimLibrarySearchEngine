@@ -25,7 +25,17 @@ Stages per query (all in ms):
   host       host: the rest of the search call = fetch line texts from seforim.db
              in FtsLib's batch plan, locate snippets (engine, multi-core),
              neighbour widening (host SQL + locate)
-  first      time to the first batch of results (what the user waits for)
+  first      time to the first batch of results (what the user waits for).
+             One definition for every engine: from the search call to the first
+             page (256 hits with line text + snippet) in the caller's hands, in a
+             process that has already opened the index (ours: SeforimSearch.Demo
+             search opens it before the clock; FtsLib: FtsLibDump creates the
+             engine before the clock; Otzaria: the driver opens its index and
+             line source before the clock, first batch = a --limit 256 call).
+             The seforim.db connection is opened inside the first search where
+             the engine does so (ours: pooled, so only the first search pays).
+             --repeat N (demo, FtsLibDump, driver) runs N searches in one
+             process: search 1 = cold, later ones = warm.
   total      whole search call, from the host's side
 Every run's full stdout/stderr is in <out dir>/search-<n>.log; the exit code
 of each run is in the report, and a non-zero exit is flagged.

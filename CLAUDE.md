@@ -188,6 +188,15 @@ seforim.db knowledge).
 - FtsLib wildcard budgets: anchor ≥2, ≤4 `?`, leading `*` ≤3, trailing/internal ≤4,
   both ≤7. Cap 2000, shortest first, then doc count.
 
+## Benchmarks on any machine
+
+`tools/bench/run-all.sh` runs everything (builds, indexes, parity, speed, Otzaria hit counts,
+report); config `tools/bench/bench.env`. A request like "run the benchmarks" means following
+`tools/bench/AGENT-RUNBOOK.md` end to end. The inventory step (`--steps detect`) comes first:
+reuse the existing environment, DB, binaries, indexes of the current format and finished
+results; never redo work. KitveiHakodesh is the submodule `external/KleiKodeshProject`
+(pinned; bump it when FtsLib changes). Open items: the runbook's TODO list.
+
 ## Lessons learned (traps already hit)
 
 - **PowerShell 5.1 text pipes corrupt Hebrew** (reads UTF-8 as ANSI). Never edit source

@@ -55,30 +55,38 @@ if (args.Length > 0 && args[0] == "build")
 if (args.Length > 0 && args[0] == "search")
 {
     string sdb = args[1], sindex = args[2];
-    int dist = int.MaxValue;
+    int dist = int.MaxValue, repeat = 1;
     var words = new List<string>();
     for (int i = 3; i < args.Length; i++)
     {
         if (args[i] == "--distance") { dist = int.Parse(args[++i]); continue; }
+        if (args[i] == "--repeat") { repeat = Math.Max(1, int.Parse(args[++i])); continue; }
         words.Add(args[i]);
     }
+    // First batch = from the search call to the first page in the caller's hands, the
+    // engine object created before the clock (same definition as SeforimSearch.Demo
+    // search and the Otzaria driver). --repeat N: search 1 = cold, then warm.
     var open = System.Diagnostics.Stopwatch.StartNew();
     using var sengine = new SeforimDbFtsEngine(sindex, sdb);
-    var sw = System.Diagnostics.Stopwatch.StartNew();
-    TimeSpan? first = null;
-    int hits = 0;
-    foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(sengine, string.Join(" ", words), dist, false,
-                 SeforimDbFtsSearcher.DefaultContextWords, false, new FtsTermTable()))
+    Console.Error.WriteLine($"open: {open.Elapsed.TotalMilliseconds:F0} ms");
+    for (int run = 1; run <= repeat; run++)
     {
-        first ??= sw.Elapsed;
-        hits += batch.Hits.Count;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        TimeSpan? first = null;
+        int hits = 0;
+        foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(sengine, string.Join(" ", words), dist, false,
+                     SeforimDbFtsSearcher.DefaultContextWords, new FtsTermTable()))
+        {
+            first ??= sw.Elapsed;
+            hits += batch.Hits.Count;
+        }
+        Console.Error.WriteLine($"search: {hits:N0} hits in {sw.Elapsed.TotalMilliseconds:F0} ms " +
+                                $"(first batch {first?.TotalMilliseconds:F0} ms)");
     }
-    Console.Error.WriteLine($"search: {hits:N0} hits in {sw.Elapsed.TotalMilliseconds:F0} ms " +
-                            $"(first batch {first?.TotalMilliseconds:F0} ms)");
     return;
 }
 
-// --ketiv (anywhere): FtsLib's expandKetiv = true (KetivExpander variants).
+// --ketiv (anywhere): FtsLib's ketiv expansion on every word ('^' marker, KetivExpander variants).
 bool ketiv = args.Contains("--ketiv");
 args = args.Where(a => a != "--ketiv").ToArray();
 string db = args[0], index = args[1], queries = args[2], outDir = args[3];
@@ -93,6 +101,8 @@ foreach (var raw in File.ReadAllLines(queries, Encoding.UTF8))
     if (string.IsNullOrWhiteSpace(raw) || raw.StartsWith("#")) continue;
     var parts = raw.Split('\t');
     string query = parts[0];
+    // ketiv is query syntax since KitveiHakodesh 0d08ad1f: a leading '^' per word.
+    if (ketiv) query = string.Join(" ", query.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Select(w => "^" + w));
     int distance = parts.Length > 1 ? int.Parse(parts[1]) : int.MaxValue;
     var terms = new FtsTermTable();
     var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -100,7 +110,7 @@ foreach (var raw in File.ReadAllLines(queries, Encoding.UTF8))
     using var w = new StreamWriter(Path.Combine(outDir, $"{n}.jsonl"), false, new UTF8Encoding(false));
     w.WriteLine(Header(query, distance));
     foreach (var batch in searcher.SearchInBatches(engine, query, distance, false,
-                 SeforimDbFtsSearcher.DefaultContextWords, ketiv, terms))
+                 SeforimDbFtsSearcher.DefaultContextWords, terms))
     {
         var all = terms.All();
         foreach (var hit in batch.Hits)

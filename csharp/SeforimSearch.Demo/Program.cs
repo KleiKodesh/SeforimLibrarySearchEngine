@@ -12,6 +12,7 @@ namespace SeforimSearch.Demo
     /// Demo console:
     ///   build  [--db path] [--index dir] [--max-lines N] [--no-positions] [--keep-marks]
     ///   search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] query...
+    ///   selftest [--dir path]   (C# corpus-pool and end-to-end tests on a small fixture)
     ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] [--regex] [--order catalog|relevance|generation] [--cancel-after MS] query...
     /// The seforim.db path defaults to KitveiHakodesh's resolution order
     /// (registry choice, then Otzaria, then Zayit).
@@ -27,6 +28,7 @@ namespace SeforimSearch.Demo
                 return 2;
             }
             string command = args[0];
+            if (command == "selftest") return SelfTest.Run(args);
             string? db = Option(args, "--db") ?? ResolveSeforimDb();
             string index = Option(args, "--index") ?? Path.Combine(AppContext.BaseDirectory, "TantivyIndex");
             if (db == null || !File.Exists(db))
@@ -269,6 +271,8 @@ namespace SeforimSearch.Demo
             }
             return sb.ToString();
         }
+
+        internal static string? OptionOf(string[] args, string name) => Option(args, name);
 
         private static string? Option(string[] args, string name)
         {

@@ -1188,7 +1188,13 @@ every differing query.
   `SeforimDbFtsCorpusPool` (one connection each, with its schema probe, zstd
   dictionary and prepared statements; one user at a time, a second one
   opened for a concurrent search or the neighbour widening; up to 4 kept
-  idle); the Dart demo's `SeforimDb` keeps its one connection and prepared
+  idle). Each rent is a fresh lease: Dispose returns the connection exactly
+  once (a second Dispose does nothing, a disposed lease refuses calls), and a
+  lease that ends with a result sequence still open (an abandoned
+  enumerator) closes its connection instead of pooling it. Tested by the
+  demo's `selftest` command (double Dispose, abandoned enumerator,
+  concurrent rent, reopen on file change, and an end-to-end tantivy11 build
+  + search on a small seforim.db-shaped fixture; net10 and net48); the Dart demo's `SeforimDb` keeps its one connection and prepared
   statements. Both reopen when the database file changes size
   or write time.
 

@@ -18,11 +18,15 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// <c>Fts5SeforimIndex(indexPath, () => new SeforimDbFtsCorpus(dbPath))</c> and opens no
     /// content database of its own.
     ///
-    /// ONE CONNECTION PER INSTANCE, ONE USER AT A TIME (concurrent searches must never share
-    /// a connection). The database is kept OPEN across searches and batches: instances come
-    /// from a <see cref="SeforimDbFtsCorpusPool"/>, and Dispose hands the instance back to its
-    /// pool (connection, schema probe, zstd dictionary and prepared statements kept) instead
-    /// of closing it. A corpus made without a pool closes on Dispose.
+    /// ONE CONNECTION PER LEASE, ONE USER AT A TIME (concurrent searches must never share a
+    /// connection). The database is kept OPEN across searches and batches: a
+    /// <see cref="SeforimDbFtsCorpusPool"/> keeps <see cref="SeforimDbCorpusConnection"/>s
+    /// (connection, schema probe, zstd dictionary, prepared statements) and hands each one out
+    /// in a fresh lease, this class. The lease returns its connection EXACTLY ONCE (idempotent
+    /// Dispose), refuses every call after that, and its lazy sequences are counted: a
+    /// connection whose lease ends with a sequence still open (an abandoned enumerator) is
+    /// closed instead of pooled, so nothing can keep a pooled connection busy. A corpus made
+    /// with the public constructor owns a private connection, closed on Dispose.
     ///
     /// NOT part of <see cref="SeforimDbQueries"/>, although it reads the same file: that class
     /// opens a connection per method and returns lists, which is right for request/response
@@ -30,6 +34,87 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// Different lifetime, different class.
     /// </summary>
     public sealed class SeforimDbFtsCorpus : IDisposable
+    {
+        private readonly SeforimDbCorpusConnection _c;
+        private readonly SeforimDbFtsCorpusPool? _pool;
+        private int _disposed;
+
+        /// <summary>A corpus over its own connection, closed on Dispose (no pool).</summary>
+        public SeforimDbFtsCorpus(string databasePath) : this(new SeforimDbCorpusConnection(databasePath), null) { }
+
+        internal SeforimDbFtsCorpus(SeforimDbCorpusConnection connection, SeforimDbFtsCorpusPool? pool)
+        {
+            _c = connection;
+            _pool = pool;
+        }
+
+        /// <summary>The leased connection (tests: identity checks).</summary>
+        internal SeforimDbCorpusConnection Connection => _c;
+
+        private SeforimDbCorpusConnection C =>
+            Volatile.Read(ref _disposed) == 0 ? _c : throw new ObjectDisposedException(nameof(SeforimDbFtsCorpus));
+
+        /// <summary>Wraps a lazy sequence: counted open while enumerated (released in its
+        /// finally), and every step checks the lease is still live.</summary>
+        private IEnumerable<T> Guard<T>(IEnumerable<T> source)
+        {
+            var c = _c;
+            Interlocked.Increment(ref c.OpenSequences); // counted BEFORE the live check below
+            try
+            {
+                _ = C;
+                using var items = source.GetEnumerator();
+                while (true)
+                {
+                    _ = C; // checked BEFORE the step: a dead lease never touches the connection
+                    if (!items.MoveNext()) break;
+                    yield return items.Current;
+                }
+            }
+            finally
+            {
+                Interlocked.Decrement(ref c.OpenSequences);
+            }
+        }
+
+        public long CountDocuments() => C.CountDocuments();
+        public long CountDocumentsUpTo(int upToId) => C.CountDocumentsUpTo(upToId);
+        public string? GetDocumentText(int id) => C.GetDocumentText(id);
+        public IEnumerable<(int Id, string Text)> ReadDocuments(int limit, CancellationToken ct = default) =>
+            Guard(C.ReadDocuments(limit, ct));
+        public IEnumerable<(int Id, string Text)> ReadDocumentsInResultOrder(long skip, CancellationToken ct = default) =>
+            Guard(C.ReadDocumentsInResultOrder(skip, ct));
+        public IEnumerable<(int Id, string Text, int BookId)> ReadDocumentsWithBookInResultOrder(long skip,
+                                                                                               CancellationToken ct = default) =>
+            Guard(C.ReadDocumentsWithBookInResultOrder(skip, ct));
+        public IEnumerable<(int Id, string Text, int BookId, long? SectionId)> ReadDocumentsWithSectionInResultOrder(long skip,
+                                                                                               CancellationToken ct = default) =>
+            Guard(C.ReadDocumentsWithSectionInResultOrder(skip, ct));
+        public IEnumerable<(int Id, string Text)> ReadDocumentsAfter(int afterId, int limit = 0, CancellationToken ct = default) =>
+            Guard(C.ReadDocumentsAfter(afterId, limit, ct));
+        public IEnumerable<(int Id, string Text, string Title)> FetchDocuments(IEnumerable<int> ids) =>
+            Guard(C.FetchDocuments(ids));
+        public IEnumerable<(int Id, string Text, FtsDocumentPlacement Placement)> FetchPlacedDocuments(IEnumerable<int> ids) =>
+            Guard(C.FetchPlacedDocuments(ids));
+        public List<SeforimDbFtsLineAtPosition> FetchLinesAtBookPositions(
+            IReadOnlyList<(int BookId, int LineIndex)> positions) => C.FetchLinesAtBookPositions(positions);
+        public IDictionary<int, (string Previous, string Next)> FetchNeighbourText(IReadOnlyList<int> ids, int radius) =>
+            C.FetchNeighbourText(ids, radius);
+
+        /// <summary>Ends the lease, once: the connection goes back to the pool (kept open) or
+        /// is closed (no pool, pool full / disposed, file changed, or a sequence of this lease
+        /// was left open). A second Dispose does nothing.</summary>
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            if (_pool != null && _pool.Return(_c)) return;
+            _c.Close();
+        }
+    }
+
+    /// <summary>One open seforim.db: connection, schema, codec and prepared statements. Used
+    /// by one lease at a time; the pool keeps it between leases.</summary>
+    internal sealed class SeforimDbCorpusConnection
     {
         /// <summary>SQLite's default variable limit is 999; staying under it caps the IN-lists.
         /// How many ids a fetch is asked for at a time is the CALLER's decision (the searcher's
@@ -47,10 +132,10 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         private readonly SeforimDbSchema _schema;
         private readonly SeforimDbLineContentCodec _codec;
 
-        /// <summary>The pool this corpus returns to on Dispose (null: Dispose closes it), and
-        /// the database file's stamp when it was opened (the pool drops a stale corpus).</summary>
-        internal SeforimDbFtsCorpusPool? Pool;
-        internal SeforimDbFileStamp Stamp;
+        /// <summary>The database file's stamp when it was opened (the pool drops a stale
+        /// connection), and how many lazy sequences are open on it (see the lease's Guard).</summary>
+        internal readonly SeforimDbFileStamp Stamp;
+        internal int OpenSequences;
 
         /// <summary>Prepared statements kept with the connection, by SQL text (the IN-list
         /// statements differ only by their chunk size). A statement in use (a lazy sequence
@@ -59,7 +144,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             new Dictionary<string, (SqliteCommand, string[])>();
         private readonly HashSet<SqliteCommand> _busy = new HashSet<SqliteCommand>();
 
-        public SeforimDbFtsCorpus(string databasePath)
+        public SeforimDbCorpusConnection(string databasePath)
         {
             Stamp = SeforimDbFileStamp.Of(databasePath);
             _connection = SqliteConnectionFactory.OpenCorpusRead(databasePath);
@@ -416,13 +501,9 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             return names;
         }
 
-        /// <summary>Back to the pool (kept open), or closed when there is no pool or the pool
-        /// does not take it back (disposed, full, or the database file changed).</summary>
-        public void Dispose()
-        {
-            if (Pool != null && Pool.Return(this)) return;
-            Close();
-        }
+        /// <summary>True when nothing of the last lease is still running on the connection
+        /// (no prepared statement marked busy), so it can serve the next one.</summary>
+        internal bool IsIdle() => _busy.Count == 0;
 
         internal void Close()
         {
@@ -473,7 +554,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         private const int MaxIdle = 4;
 
         private readonly string _databasePath;
-        private readonly Stack<SeforimDbFtsCorpus> _idle = new Stack<SeforimDbFtsCorpus>();
+        private readonly Stack<SeforimDbCorpusConnection> _idle = new Stack<SeforimDbCorpusConnection>();
         private readonly object _lock = new object();
         private bool _disposed;
 
@@ -482,42 +563,47 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             _databasePath = databasePath ?? throw new ArgumentNullException(nameof(databasePath));
         }
 
-        /// <summary>An open corpus for one caller; Dispose returns it here.</summary>
+        /// <summary>How many connections are kept idle (tests).</summary>
+        internal int IdleCount { get { lock (_lock) return _idle.Count; } }
+
+        /// <summary>A fresh lease on an open connection; its Dispose returns it here, once.</summary>
         public SeforimDbFtsCorpus Rent()
         {
             var stamp = SeforimDbFileStamp.Of(_databasePath);
-            List<SeforimDbFtsCorpus>? stale = null;
-            SeforimDbFtsCorpus? corpus = null;
+            List<SeforimDbCorpusConnection>? stale = null;
+            SeforimDbCorpusConnection? connection = null;
             lock (_lock)
             {
                 if (_disposed) throw new ObjectDisposedException(nameof(SeforimDbFtsCorpusPool));
                 while (_idle.Count > 0)
                 {
                     var c = _idle.Pop();
-                    if (c.Stamp.Equals(stamp)) { corpus = c; break; }
-                    (stale ??= new List<SeforimDbFtsCorpus>()).Add(c);
+                    if (c.Stamp.Equals(stamp)) { connection = c; break; }
+                    (stale ??= new List<SeforimDbCorpusConnection>()).Add(c);
                 }
             }
             if (stale != null) foreach (var c in stale) c.Close();
-            corpus ??= new SeforimDbFtsCorpus(_databasePath);
-            corpus.Pool = this;
-            return corpus;
+            return new SeforimDbFtsCorpus(connection ?? new SeforimDbCorpusConnection(_databasePath), this);
         }
 
-        internal bool Return(SeforimDbFtsCorpus corpus)
+        /// <summary>Takes a connection back from its (ending) lease; false: the caller closes
+        /// it. Refused when a sequence is still open on it (abandoned enumerator), when the
+        /// file changed, the pool is full or disposed.</summary>
+        internal bool Return(SeforimDbCorpusConnection connection)
         {
-            bool current = corpus.Stamp.Equals(SeforimDbFileStamp.Of(_databasePath));
+            if (Volatile.Read(ref connection.OpenSequences) != 0 || !connection.IsIdle()) return false;
+            bool current = connection.Stamp.Equals(SeforimDbFileStamp.Of(_databasePath));
             lock (_lock)
             {
-                if (_disposed || !current || _idle.Count >= MaxIdle || _idle.Contains(corpus)) return false;
-                _idle.Push(corpus);
+                if (_disposed || !current || _idle.Count >= MaxIdle) return false;
+                _idle.Push(connection);
                 return true;
             }
         }
 
         public void Dispose()
         {
-            SeforimDbFtsCorpus[] idle;
+            SeforimDbCorpusConnection[] idle;
             lock (_lock)
             {
                 _disposed = true;

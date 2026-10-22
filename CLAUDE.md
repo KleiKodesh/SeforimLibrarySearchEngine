@@ -215,6 +215,9 @@ seforim.db knowledge).
   `position`, so the merged segment needs no hit sort (`LineIndex::catalog_ordered`:
   sorted setting AND one segment). Never skip the sort on several segments (an update's
   extra segment) or with cross-line hits appended. Costs ~50 % more indexing time.
+- C# corpus pool: `SeforimDbFtsCorpus` is a LEASE on a pooled `SeforimDbCorpusConnection`
+  (idempotent Dispose; lazy sequences counted, an abandoned one closes the connection).
+  Run `SeforimSearch.Demo selftest` (both TFMs) after touching it.
 - Index MUST be merged to one segment after a build: every walk repeats per segment
   (*יצח* 4.8 s on 37 segments → 1.1 s on 1), and the FM-index sidecar needs one segment.
 - **Deleted docs were hits.** Search collected through `weight.for_each_no_score`, which

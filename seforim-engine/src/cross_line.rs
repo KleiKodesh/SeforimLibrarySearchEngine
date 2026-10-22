@@ -5,10 +5,13 @@
 //! matching, phrase alternatives, user-regex sequences); at most one line
 //! break; a hit is reported on `L` with the next line's id attached.
 //!
-//! The two lines are one virtual line: `L`'s positions, then `L + 1`'s
-//! shifted by `L`'s word count (a small fast field written at indexing; the
-//! scanner that numbers the positions counts them). The rule of the search
-//! must hold on the joined positions with a matched word on each line.
+//! The two lines are one virtual line of their CONTENT words (Otzaria's
+//! `content_range`: a leading enumerator such as `(x)` of `L + 1` and a
+//! trailing one such as `{x}` or `(49)` of `L` are skipped): `L`'s positions
+//! up to its last content word, then `L + 1`'s from its first content word,
+//! right after it (`line_first` / `line_last`, small fast fields written at
+//! indexing by the scanner that numbers the positions). The rule of the
+//! search must hold on the joined positions with a matched word on each line.
 //! Lines carrying the host's no-cross flag (headings, Otzaria's rule) take
 //! part in no cross-line match, into or out of them.
 //!
@@ -42,7 +45,7 @@ use tantivy::query::Weight;
 use tantivy::schema::IndexRecordOption;
 use tantivy::{DocId, DocSet, Searcher, Term, TERMINATED};
 
-use crate::index::{LineIndex, LINE_FLAG_NO_CROSS};
+use crate::index::{LineIndex, LINE_FLAG_LEADING_MARKER, LINE_FLAG_NO_CROSS, LINE_FLAG_TRAILING_MARKER};
 use crate::search::{CancelToken, PlacedHit};
 use crate::section_scope::{SectionColumns, SectionKey};
 use crate::{Error, Result};
@@ -143,7 +146,9 @@ struct LineColumns {
     position: Column<u64>,
     line_id: Column<u64>,
     book_id: Column<u64>,
-    word_count: Column<u64>,
+    /// Position + 1 of the first / last content word (0: none).
+    first: Column<u64>,
+    last: Column<u64>,
     flags: Column<u64>,
     sections: Option<SectionColumns>,
 }
@@ -164,14 +169,16 @@ struct Pair {
 
 /// The cross-line pass (see the module docs).
 pub(crate) fn find(index: &LineIndex, searcher: &Searcher, input: &CrossInput<'_>) -> Result<CrossOutput> {
-    let (Some(wc_field), Some(flags_field)) = (index.fields.word_count, index.fields.line_flags) else {
+    let (Some(first_field), Some(last_field), Some(flags_field)) =
+        (index.fields.line_first, index.fields.line_last, index.fields.line_flags)
+    else {
         return Err(Error::Unsupported(
-            "cross-line matching needs an index built with per-line data (word count, line flags): rebuild the index"
+            "cross-line matching needs an index built with per-line data (content edges, line flags): rebuild the index"
                 .into(),
         ));
     };
     let field_name = |f| searcher.schema().get_field_name(f).to_string();
-    let (wc_name, flags_name) = (field_name(wc_field), field_name(flags_field));
+    let (first_name, last_name, flags_name) = (field_name(first_field), field_name(last_field), field_name(flags_field));
     let segments = searcher.segment_readers();
     let mut columns = Vec::with_capacity(segments.len());
     let mut max_position = 0u64;
@@ -183,7 +190,8 @@ pub(crate) fn find(index: &LineIndex, searcher: &Searcher, input: &CrossInput<'_
             position,
             line_id: ff.u64("line_id")?,
             book_id: ff.u64("book_id")?,
-            word_count: ff.u64(&wc_name)?,
+            first: ff.u64(&first_name)?,
+            last: ff.u64(&last_name)?,
             flags: ff.u64(&flags_name)?,
             sections: match input.drop_sections {
                 Some(_) => Some(SectionColumns::open(segment)?),
@@ -215,7 +223,9 @@ pub(crate) fn find(index: &LineIndex, searcher: &Searcher, input: &CrossInput<'_
         let pairs = drop_negative(pairs, searcher, input)?;
         check(input.cancel)?;
         match &m.rule {
-            CrossRule::Cover { .. } => mark(&mut found, pairs.into_iter().map(|p| (p, true))),
+            // exact from the bitmaps unless an edge enumerator sits at the
+            // break: its word may be the slot's only occurrence there
+            CrossRule::Cover { .. } => mark(&mut found, pairs.into_iter().map(|p| (p, plain_break(&columns, &p)))),
             CrossRule::Proximity(proximity) if index.options.positions => {
                 let passed = verify_positions(index, searcher, &columns, m, proximity, &pairs, &mut locator, input.cancel)?;
                 mark(&mut found, passed.into_iter().map(|p| (p, true)));
@@ -407,7 +417,13 @@ fn pairs(
             continue;
         }
         let flagged = |c: &LineColumns, d: DocId| c.flags.first(d).unwrap_or(0) & LINE_FLAG_NO_CROSS != 0;
-        if flagged(lc, left.1) || flagged(rc, right.1) || lc.word_count.first(left.1).unwrap_or(0) == 0 {
+        // both lines need a content word at the break (Otzaria: no lineLast /
+        // lineFirst, no crossing)
+        if flagged(lc, left.1)
+            || flagged(rc, right.1)
+            || lc.last.first(left.1).unwrap_or(0) == 0
+            || rc.first.first(right.1).unwrap_or(0) == 0
+        {
             continue;
         }
         if input.books.is_some_and(|b| !b.contains(&book)) {
@@ -421,6 +437,13 @@ fn pairs(
         out.push(Pair { position, left, right });
     }
     Ok(out)
+}
+
+/// True when no enumerator sits at the pair's break (`L` ends and `L + 1`
+/// starts with a content word).
+fn plain_break(columns: &[LineColumns], pair: &Pair) -> bool {
+    let flags = |(seg, doc): (u32, DocId)| columns[seg as usize].flags.first(doc).unwrap_or(0);
+    flags(pair.left) & LINE_FLAG_TRAILING_MARKER == 0 && flags(pair.right) & LINE_FLAG_LEADING_MARKER == 0
 }
 
 /// Drops the pairs whose line `L` the negative query finds.
@@ -513,13 +536,16 @@ fn verify_positions(
     let mut passed = Vec::new();
     let mut joined = Vec::new();
     for pair in pairs {
-        let words = columns[pair.left.0 as usize].word_count.first(pair.left.1).unwrap_or(0) as usize;
+        // content words only, joined at the break (Otzaria's content_range):
+        // L up to its last content word, L + 1 from its first, right after it
+        let words = columns[pair.left.0 as usize].last.first(pair.left.1).unwrap_or(0) as usize;
+        let skip = (columns[pair.right.0 as usize].first.first(pair.right.1).unwrap_or(1) as usize).saturating_sub(1);
         joined.clear();
         if let Some(left) = occurrences.get(&pair.left) {
-            joined.extend_from_slice(left);
+            joined.extend(left.iter().filter(|&&(p, _)| p < words));
         }
         if let Some(right) = occurrences.get(&pair.right) {
-            joined.extend(right.iter().map(|&(p, o)| (p + words, o)));
+            joined.extend(right.iter().filter(|&&(p, _)| p >= skip).map(|&(p, o)| (p - skip + words, o)));
         }
         if locator.proximity_across_positions(m.prepared, proximity, &mut joined, words) {
             passed.push(*pair);

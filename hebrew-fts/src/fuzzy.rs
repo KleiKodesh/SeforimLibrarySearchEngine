@@ -106,9 +106,9 @@ impl Automaton for SharedDfa {
     }
 }
 
-/// Fuzzy query for one word: every indexed term within `distance` plain
-/// Levenshtein edits (insert, delete, substitute; a transposition is two
-/// edits, as in FtsLib's `Levenshtein.Distance`).
+/// Fuzzy query for one word: every indexed term within `distance` edits
+/// (insert, delete, substitute, and a swap of two adjacent letters as ONE
+/// edit: Otzaria's `FuzzyTermQuery(.., true)`, FtsLib's `Levenshtein.Distance`).
 #[derive(Debug, Clone)]
 pub struct HebrewFuzzyQuery {
     field: Field,
@@ -189,7 +189,7 @@ impl HebrewFuzzyQuery {
         static BUILDERS: [OnceLock<LevenshteinAutomatonBuilder>; 4] =
             [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
         let builder = BUILDERS[self.distance as usize]
-            .get_or_init(|| LevenshteinAutomatonBuilder::new(self.distance, false));
+            .get_or_init(|| LevenshteinAutomatonBuilder::new(self.distance, true));
         let word: String = if self.ignore_quotes {
             self.word.chars().filter(|&c| !crate::chars::is_term_quote(c)).collect()
         } else {
@@ -264,6 +264,20 @@ mod tests {
         }
         writer.commit().unwrap();
         (index, field)
+    }
+
+    #[test]
+    fn adjacent_swap_is_one_edit() {
+        // Otzaria's FuzzyTermQuery(.., transposition = true); FtsLib's Levenshtein.Distance
+        let (index, field) = index_of(&["bacd", "abdc", "badc", "acbd"]);
+        let searcher = index.reader().unwrap().searcher();
+        let mut q = HebrewFuzzyQuery::new(field, "abcd", 1);
+        let sink = MatchedTermsSink::new();
+        q.set_matched_terms_sink(sink.clone());
+        assert_eq!(searcher.search(&q, &Count).unwrap(), 3); // badc is two swaps away
+        let dfa = q.automaton();
+        assert!(matches!(dfa.distance(b"bacd"), Distance::Exact(1)));
+        assert!(matches!(dfa.distance(b"badc"), Distance::AtLeast(_)));
     }
 
     #[test]

@@ -663,7 +663,8 @@ impl FmIndex {
 
     // ── Fuzzy ─────────────────────────────────────────────────────────
 
-    /// Every term within Levenshtein distance `max_distance` of `query`, as
+    /// Every term within edit distance `max_distance` of `query` (a swap of
+    /// two adjacent letters is one edit, FtsLib's `FindFuzzy`), as
     /// (rowid, distance), sorted by rowid.
     ///
     /// Backward search from SEP walks a trie of the REVERSED terms: the range
@@ -697,7 +698,7 @@ impl FmIndex {
         };
         let first_row: Vec<usize> = (0..=m).collect();
         let sep = SEPARATOR_CODE as usize;
-        search.visit(self.c[sep] as usize, self.c[sep + 1] as usize, &first_row, 0);
+        search.visit(self.c[sep] as usize, self.c[sep + 1] as usize, &first_row, 0, None, 0);
         let mut results = search.results;
         results.sort_unstable();
         results
@@ -718,7 +719,9 @@ struct FuzzySearch<'a> {
 }
 
 impl FuzzySearch<'_> {
-    fn visit(&mut self, lo: usize, hi: usize, row: &[usize], depth: usize) {
+    /// `parent`: the row one level up (None at the root); an adjacent swap
+    /// of `last` (the symbol that made `row`) and a child's symbol reads it.
+    fn visit(&mut self, lo: usize, hi: usize, row: &[usize], depth: usize, parent: Option<&[usize]>, last: Code) {
         let mut children = std::mem::take(&mut self.children[depth]);
         children.clear();
         self.enumerate_symbols(self.fm.root, lo, hi, &mut children);
@@ -763,11 +766,19 @@ impl FuzzySearch<'_> {
                 if insert < v {
                     v = insert;
                 }
+                // adjacent swap (the reversed strings: still an adjacent swap)
+                if let Some(parent) = parent {
+                    if j > 1 && self.query[j - 1] == last && self.query[j - 2] == code && parent[j - 2] + 1 < v {
+                        v = parent[j - 2] + 1;
+                    }
+                }
                 next[j] = v;
                 if v < min {
                     min = v;
                 }
             }
+            // Sound with swaps too: a grandchild's swap cell, row[j - 2] + 1,
+            // is never below next[j - 1] (<= row[j - 2] + 1).
             if min > self.max_distance {
                 continue;
             }
@@ -775,7 +786,7 @@ impl FuzzySearch<'_> {
             // The child's own children overwrite rows[depth + 2], never this
             // row, and siblings are processed after the child returns.
             let next_copy = next.clone();
-            self.visit(c + occ_lo, c + occ_hi, &next_copy, depth + 1);
+            self.visit(c + occ_lo, c + occ_hi, &next_copy, depth + 1, Some(row), code);
         }
 
         self.rows[depth + 1] = next;
@@ -839,6 +850,26 @@ mod tests {
         let hits2 = fm.find_fuzzy("שלום", 2);
         assert!(!hits2.iter().any(|&(r, _)| r == 3 || r == 4));
         assert!(fm.find_fuzzy("שלום", 3).contains(&(3, 3)));
+    }
+
+    #[test]
+    fn fuzzy_swap_is_one_edit() {
+        // rowid = index + 1
+        let terms = ["abcd", "bacd", "abdc", "badc", "dcba", "acbd", "abcdx", "zabcd"];
+        let fm = open(&terms);
+        assert_eq!(fm.find_fuzzy("abcd", 1), vec![(1, 0), (2, 1), (3, 1), (6, 1), (7, 1), (8, 1)]);
+        // the FM walk equals the plain distance on every term, every limit
+        for max in 0..=3 {
+            let want: Vec<(u32, u32)> = terms
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| {
+                    let (a, b): (Vec<char>, Vec<char>) = ("abcd".chars().collect(), t.chars().collect());
+                    crate::fm_expand::levenshtein_within(&a, &b, max).map(|d| (i as u32 + 1, d as u32))
+                })
+                .collect();
+            assert_eq!(fm.find_fuzzy("abcd", max), want, "max {max}");
+        }
     }
 
     #[test]

@@ -366,6 +366,9 @@ pub(crate) fn scan_until(
     let mut tag_len = 0usize;
     let mut in_tag = false;
     let mut tag_name_done = false;
+    // Byte of the text's last '>' (None: none), read at the first '<': a
+    // '<' after it is unterminated (see below).
+    let mut last_gt: Option<Option<usize>> = None;
     let mut visible = 0usize;
     let mut b = 0usize;
     let mut u = 0usize;
@@ -479,7 +482,10 @@ pub(crate) fn scan_until(
             continue;
         }
 
-        if c == '<' {
+        // An unterminated '<' (no '>' after it in the text) is no tag: it is a
+        // plain separator and the rest of the line is scanned (Otzaria's
+        // strip_html_for_indexing keeps it verbatim; FtsLib fts9).
+        if c == '<' && last_gt.get_or_insert_with(|| text.rfind('>')).is_some_and(|g| g > b) {
             // A tag: inline tags are transparent (the word continues across
             // them); the decision is taken at '>' once the name is known.
             in_tag = true;
@@ -731,8 +737,22 @@ impl TextTokens {
     /// `left`'s words (positions: `right`'s first word is `left`'s word
     /// count, as the two lines' index positions joined). Returns the index
     /// of `right`'s first token.
+    ///
+    /// The join is between CONTENT words (Otzaria's `content_range`, see
+    /// [`crate::line_edges`]): `left`'s trailing enumerator and `right`'s
+    /// leading one get no token, and `right`'s first content word follows
+    /// `left`'s last content word directly. When either line has no content
+    /// word, every word is kept.
     pub fn tokenize_pair(&mut self, left: &str, right: &str) -> usize {
+        let edges = crate::line_edges::line_edges(left).last.zip(crate::line_edges::line_edges(right).first);
         self.tokenize(left);
+        if let Some((last, _)) = edges {
+            // the trailing enumerator's words are the line's last tokens
+            while self.tokens.last().is_some_and(|t| t.position > last) {
+                self.tokens.pop();
+            }
+        }
+        let skip = edges.map_or(0, |(_, first)| first);
         let split = self.tokens.len();
         let words = self.tokens.last().map_or(0, |t| t.position + 1);
         // the left line's whole visible length (text after its last word
@@ -742,6 +762,9 @@ impl TextTokens {
         let norm = &mut self.norm;
         let tokens = &mut self.tokens;
         let (right_len, right_visible) = scan_counted(right, self.keep_marks, |word, span| {
+            if span.position < skip {
+                return; // the leading enumerator
+            }
             let norm_start = norm.len();
             norm.push_str(word);
             tokens.push(TextToken {
@@ -751,7 +774,7 @@ impl TextTokens {
                 utf16_end: span.utf16_end + utf16,
                 visible_start: span.visible_start + visible,
                 letters: span.letters,
-                position: span.position + words,
+                position: span.position - skip + words,
                 norm_start,
                 norm_len: word.len(),
             });
@@ -886,6 +909,17 @@ mod tests {
         let mut out = Vec::new();
         scan_with("\u{FB31}\u{05D9}", true, |w, _| out.push(w.to_string()));
         assert_eq!(out, ["\u{05D1}\u{05BC}\u{05D9}"]);
+    }
+
+    #[test]
+    fn unterminated_lt_is_a_plain_separator() {
+        // Otzaria keeps an unterminated '<' verbatim; the rest of the line is indexed
+        assert_eq!(words(&format!("{ALEF} <{BET} {GIMEL}")), vec![ALEF, BET, GIMEL]);
+        assert_eq!(words(&format!("{ALEF}<{BET}")), vec![ALEF, BET]);
+        // a '<' closed later is still a tag (transparent inline tag)
+        assert_eq!(words(&format!("{ALEF}<b {BET}>{GIMEL}")), vec![format!("{ALEF}{GIMEL}")]);
+        // only a '<' after the text's last '>' is plain
+        assert_eq!(words(&format!("{ALEF}<i>{BET}</i> <{GIMEL}")), vec![format!("{ALEF}{BET}"), GIMEL.to_string()]);
     }
 
     #[test]

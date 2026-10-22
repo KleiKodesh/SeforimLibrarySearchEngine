@@ -266,7 +266,7 @@ fn is_dropped_mark(c: char) -> bool {
 }
 
 /// Otzaria's `is_breaking_tag_name` on the text between `<` and `>`.
-fn is_breaking_tag_name(body: &str) -> bool {
+pub(crate) fn is_breaking_tag_name(body: &str) -> bool {
     let body = body.strip_prefix('/').unwrap_or(body);
     let len = body.bytes().take_while(u8::is_ascii_alphanumeric).count();
     (1..=10).contains(&len) && BREAKING_TAG_NAMES.iter().any(|name| name.eq_ignore_ascii_case(&body[..len]))

@@ -73,9 +73,13 @@ pub struct LineFields {
     /// vocalized field `textVocalized` holds). None on a mark-stripped index
     /// or a marks index built before the flag existed.
     pub marked: Option<Field>,
-    /// Word positions in the line (cross-line matching). None: an index
-    /// built before the field existed.
-    pub word_count: Option<Field>,
+    /// Position + 1 of the line's first CONTENT word, after a leading
+    /// enumerator such as `(x)` (Otzaria's `lineFirst`; 0: no content word).
+    /// Cross-line matching. None: an index built before the field existed.
+    pub line_first: Option<Field>,
+    /// Position + 1 of the line's last content word, before a trailing
+    /// enumerator such as `{x}` or `(49)` (Otzaria's `lineLast`; 0: none).
+    pub line_last: Option<Field>,
     /// [`LINE_FLAG_NO_CROSS`] and future per-line bits.
     pub line_flags: Option<Field>,
     /// The host's section id (same-section scope); absent on a line = a
@@ -86,6 +90,12 @@ pub struct LineFields {
 /// Line flag: no phrase continues into or out of this line (Otzaria: a
 /// heading, `<h...>`, interrupts the text).
 pub const LINE_FLAG_NO_CROSS: u64 = 1;
+
+/// Line flag: the line starts with an enumerator (`line_first` skips it).
+pub const LINE_FLAG_LEADING_MARKER: u64 = 2;
+
+/// Line flag: the line ends with an enumerator (`line_last` stops before it).
+pub const LINE_FLAG_TRAILING_MARKER: u64 = 4;
 
 /// The `marked` field's one term.
 pub const MARKED_LINE: u64 = 1;
@@ -113,7 +123,8 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
     let text = b.add_text_field("text", TextOptions::default().set_indexing_options(indexing));
     let marked = options.keep_marks.then(|| b.add_u64_field("marked", INDEXED));
     // after `text`: the older fields keep their ids in an older index
-    let word_count = b.add_u64_field("word_count", FAST);
+    let line_first = b.add_u64_field("line_first", FAST);
+    let line_last = b.add_u64_field("line_last", FAST);
     let line_flags = b.add_u64_field("line_flags", FAST);
     let section_id = b.add_u64_field("section_id", FAST);
     (
@@ -124,7 +135,8 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
             book_id,
             text,
             marked,
-            word_count: Some(word_count),
+            line_first: Some(line_first),
+            line_last: Some(line_last),
             line_flags: Some(line_flags),
             section_id: Some(section_id),
         },
@@ -218,7 +230,8 @@ impl LineIndex {
         fields.marked = index.schema().get_field("marked").ok();
         // an index built before the per-line fields has none of them
         let schema = index.schema();
-        fields.word_count = schema.get_field("word_count").ok();
+        fields.line_first = schema.get_field("line_first").ok();
+        fields.line_last = schema.get_field("line_last").ok();
         fields.line_flags = schema.get_field("line_flags").ok();
         fields.section_id = schema.get_field("section_id").ok();
         Ok(Self::wrap(index, fields, options, dir))
@@ -275,7 +288,10 @@ impl LineIndex {
     /// True when the index has the per-line fields (word count, line flags,
     /// section id) that cross-line matching and the same-section scope read.
     pub fn has_line_data(&self) -> bool {
-        self.fields.word_count.is_some() && self.fields.line_flags.is_some() && self.fields.section_id.is_some()
+        self.fields.line_first.is_some()
+            && self.fields.line_last.is_some()
+            && self.fields.line_flags.is_some()
+            && self.fields.section_id.is_some()
     }
 
     /// Number of lines in the index (as of the last commit).
@@ -318,11 +334,20 @@ impl LineWriter {
                 document.add_u64(marked, MARKED_LINE);
             }
         }
-        if let Some(field) = f.word_count {
-            document.add_u64(field, hebrew_fts::word_count(&line.text) as u64);
-        }
-        if let Some(field) = f.line_flags {
-            document.add_u64(field, if line.no_cross { LINE_FLAG_NO_CROSS } else { 0 });
+        if let (Some(first), Some(last), Some(flags)) = (f.line_first, f.line_last, f.line_flags) {
+            // the content words a phrase may continue from / into (Otzaria's
+            // content_range: line-edge enumerators skipped)
+            let edges = hebrew_fts::line_edges::line_edges(&line.text);
+            document.add_u64(first, edges.first.map_or(0, |p| p as u64 + 1));
+            document.add_u64(last, edges.last.map_or(0, |p| p as u64 + 1));
+            let mut bits = if line.no_cross { LINE_FLAG_NO_CROSS } else { 0 };
+            if edges.first.is_some_and(|p| p > 0) {
+                bits |= LINE_FLAG_LEADING_MARKER;
+            }
+            if edges.last.is_some_and(|p| p + 1 < edges.words) {
+                bits |= LINE_FLAG_TRAILING_MARKER;
+            }
+            document.add_u64(flags, bits);
         }
         if let (Some(field), Some(section)) = (f.section_id, line.section_id) {
             document.add_u64(field, section);

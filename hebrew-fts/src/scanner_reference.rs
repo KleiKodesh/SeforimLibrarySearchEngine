@@ -61,7 +61,8 @@ fn elements(text: &str) -> (Vec<Elem>, usize) {
             i += 1;
             continue;
         }
-        if c == '<' {
+        // unterminated '<' (no '>' after it): a plain character
+        if c == '<' && table[i + 1..len].iter().any(|e| e.2 == '>') {
             in_tag = true;
             tag_name.clear();
             tag_name_done = false;

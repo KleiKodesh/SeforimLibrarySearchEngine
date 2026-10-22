@@ -236,8 +236,14 @@ seforim.db knowledge).
   SEP rows in position order, which is NOT LF order. Never map into the SEP range;
   a fuzzy match reads its term off the term-start row (BWT == SEP) instead. FtsLib
   used a rank→rowid table for the same reason.
-- FtsLib's fuzzy is plain Levenshtein (`Levenshtein.Distance`, no transposition); the
-  DFA must be built with `transposition = false`.
+- Fuzzy counts a swap of two adjacent letters as ONE edit (user's decision 2026-10-22,
+  = Otzaria): DFA `transposition = true`, FtsLib `Levenshtein.Distance` / FM `FindFuzzy`
+  and our FM verify are optimal string alignment. A q-gram filter must allow n + 1 grams
+  lost per swap.
+- An unterminated `<` (no `>` later in the line) is a plain separator in both scanners
+  (Otzaria keeps it); it used to swallow the rest of the line.
+- Cross-line joins CONTENT words (Otzaria `content_range`): line-edge enumerators are
+  skipped via the `line_first` / `line_last` fields (`hebrew-fts/src/line_edges.rs`).
 - `%` is FtsLib's GrammarExpander (its own 34/32 tables), NOT the Otzaria walk options.
 - Parity is checked with `tools/parity` (FtsLibDump + `SeforimSearch.Demo dump` +
   compare.py) against the installed FtsLib index at

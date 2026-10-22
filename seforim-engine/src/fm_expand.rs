@@ -155,12 +155,14 @@ pub fn expand_fuzzy(
     cap_like_the_walk(dict, kept, cap, marked_terms)
 }
 
-/// Plain Levenshtein distance over chars (insert, delete, substitute: FtsLib's
+/// Edit distance over chars (insert, delete, substitute, and a swap of two
+/// adjacent chars as one edit: optimal string alignment, FtsLib's
 /// `Levenshtein.Distance`), or None when it exceeds `max`.
 pub fn levenshtein_within(a: &[char], b: &[char], max: usize) -> Option<usize> {
     if a.len().abs_diff(b.len()) > max {
         return None;
     }
+    let mut prev2 = vec![0usize; b.len() + 1]; // row i - 1 (swaps)
     let mut prev: Vec<usize> = (0..=b.len()).collect();
     let mut cur = vec![0usize; b.len() + 1];
     for (i, &ca) in a.iter().enumerate() {
@@ -169,11 +171,17 @@ pub fn levenshtein_within(a: &[char], b: &[char], max: usize) -> Option<usize> {
         for (j, &cb) in b.iter().enumerate() {
             let sub = prev[j] + usize::from(ca != cb);
             cur[j + 1] = sub.min(prev[j + 1] + 1).min(cur[j] + 1);
+            if i > 0 && j > 0 && ca == b[j - 1] && a[i - 1] == cb {
+                cur[j + 1] = cur[j + 1].min(prev2[j - 1] + 1);
+            }
             row_min = row_min.min(cur[j + 1]);
         }
+        // still sound with swaps: a swap cell of the next row, prev[j - 1] + 1,
+        // is never below cur[j] (<= prev[j - 1] + 1)
         if row_min > max {
             return None;
         }
+        std::mem::swap(&mut prev2, &mut prev);
         std::mem::swap(&mut prev, &mut cur);
     }
     (prev[b.len()] <= max).then_some(prev[b.len()])
@@ -212,10 +220,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn swap_is_one_edit() {
+        let c = |s: &str| s.chars().collect::<Vec<_>>();
+        assert_eq!(levenshtein_within(&c("abcd"), &c("bacd"), 2), Some(1));
+        assert_eq!(levenshtein_within(&c("abcd"), &c("abdc"), 2), Some(1));
+        assert_eq!(levenshtein_within(&c("abcd"), &c("badc"), 1), None);
+        assert_eq!(levenshtein_within(&c("abcd"), &c("badc"), 2), Some(2));
+        // optimal string alignment: no edit inside a swapped pair
+        assert_eq!(levenshtein_within(&c("ca"), &c("abc"), 3), Some(3));
+    }
+
+    #[test]
     fn levenshtein_is_ftslibs() {
         let c = |s: &str| s.chars().collect::<Vec<_>>();
         assert_eq!(levenshtein_within(&c("יצחק"), &c("יציק"), 1), Some(1));
-        assert_eq!(levenshtein_within(&c("יצחק"), &c("קחצי"), 3), None); // no transposition
+        assert_eq!(levenshtein_within(&c("יצחק"), &c("קחצי"), 2), None); // reversed: two ends substituted, the middle swapped = 3
         assert_eq!(levenshtein_within(&c("שלום"), &c("שלומות"), 3), Some(3));
         assert_eq!(levenshtein_within(&c("אב"), &c("אבגדה"), 2), None);
     }

@@ -1414,6 +1414,52 @@ mod tests {
     }
 
     #[test]
+    fn cross_line_skips_line_edge_enumerators() {
+        // Otzaria's content_range: the break joins content words; a trailing
+        // enumerator of L and a leading one of L + 1 are skipped, for gaps and
+        // for matching. One pair per book.
+        const Q: &str = "\u{05e7}";
+        let texts: Vec<String> = vec![
+            format!("{XF} {XA} {{{Q}}}"), // 0 | 1: phrase across {q} | (q)
+            format!("({Q}) {XB} {XC}"),
+            format!("{XF} {XA} (49):"), // 2 | 3: trailing number
+            format!("{XB} {XC}"),
+            format!("{XF} {XA}"), // 4 | 5: q only as an enumerator
+            format!("({Q}) {XF}"),
+            format!("{XF} {XA}"), // 6 | 7: q as a word (control)
+            format!("{XF} {Q}"),
+            format!("({Q})"), // 8 | 9: a line of only an enumerator
+            format!("{XA} {XB}"),
+        ];
+        let books = [1, 1, 2, 2, 3, 3, 4, 4, 5, 5];
+        let docs: Vec<LineDoc> =
+            texts.iter().enumerate().map(|(i, t)| xline(i as u64, books[i], t, None, false)).collect();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &docs);
+            let phrase = SearchOptions {
+                query: format!("{XA} {XB} {XC}"),
+                proximity: Some(ProximitySpec::Ordered { gaps: vec![0, 0] }),
+                cross_line: true,
+                ..Default::default()
+            };
+            assert_eq!(passing(&index, &phrase, &texts), vec![(0, true), (2, true)], "positions={positions}");
+            let gap = SearchOptions {
+                query: format!("{XA} {XC}"),
+                proximity: Some(ProximitySpec::Ordered { gaps: vec![1] }),
+                cross_line: true,
+                ..Default::default()
+            };
+            assert_eq!(passing(&index, &gap, &texts), vec![(0, true), (2, true)], "positions={positions}");
+            let anywhere = SearchOptions { query: format!("{XA} {Q}"), cross_line: true, ..Default::default() };
+            // line 0 holds q in-line (its own enumerator: in-line words are not edge-limited)
+            assert_eq!(passing(&index, &anywhere, &texts), vec![(0, false), (6, true)], "positions={positions}");
+            let none = SearchOptions { query: format!("{Q} {XA}"), cross_line: true, ..Default::default() };
+            assert!(!passing(&index, &none, &texts).iter().any(|&(id, _)| id == 8), "positions={positions}");
+        }
+    }
+
+    #[test]
     fn cross_line_deleted_next_line_and_in_line_wins() {
         let texts: Vec<String> = vec![format!("{XF} {XA}"), format!("{XB} {XF}"), format!("{XA} {XB}"), format!("{XB}")];
         let docs: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| xline(i as u64, 1, t, None, false)).collect();

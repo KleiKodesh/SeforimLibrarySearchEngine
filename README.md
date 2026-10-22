@@ -22,12 +22,16 @@ the index stores only what the engine itself needs:
 - on an index built with `keep_marks` only: a `marked` flag on the lines
   that carry a nikud / ta'am mark (one term; Otzaria's vocalized search
   sees only those lines, so the engine filters by it)
-- three small per-line fast fields, read only when their option is used
-  (user's decision): the line's **word count** (cross-line matching; the
-  engine counts it with the scanner that numbers the positions), its
-  **line flags** (bit 0: no phrase continues into or out of the line; the
-  host sets it for headings) and its **section id** (same-section scope;
-  the host's, from seforim.db)
+- small per-line fast fields, read only when their option is used
+  (user's decision): the line's **content edges** `line_first` /
+  `line_last` (position + 1 of its first / last content word, skipping a
+  leading or trailing enumerator such as `(x)`, `{x}`, `(49)`: Otzaria's
+  `lineFirst` / `lineLast`; 0 = no content word; cross-line matching; the
+  engine computes them with the scanner that numbers the positions), its
+  **line flags** (bit 0: no phrase continues into or out of the line, the
+  host sets it for headings; bits 1 / 2: the line starts / ends with an
+  enumerator) and its **section id** (same-section scope; the host's, from
+  seforim.db)
 
 Nothing else: no text, and no data the host can read from SQLite by line id.
 Grouping, sections, line index, references, neighbour lines and the like are
@@ -212,7 +216,9 @@ are not printed), so upstream's query-parser tests stay as they are.
 ### hebrew-fts
 - **Tokenizer.** A port of FtsLib's `HtmlWordScanner`:
   - HTML-aware: inline tags are transparent; block tags, entities and maqaf
-    split words.
+    split words. An unterminated `<` (no `>` after it in the line) is no
+    tag: a plain separator, and the rest of the line is indexed (Otzaria
+    keeps it verbatim; FtsLib `fts9`, ours `tantivy10`).
   - **Word rule = Otzaria's tokenizer** (`hebrew_tokenizer.rs`; FtsLib
     follows it since index `fts8`): a word starts at a letter or digit of
     any script (Hebrew, ASCII, and every other Unicode alphanumeric char:
@@ -457,11 +463,16 @@ are not printed), so upstream's query-parser tests stay as they are.
   gaps in order, FtsLib's distance / order, words anywhere, partial
   matching) and each phrase alternative (so user-regex sequences too).
   `seforim-engine/src/cross_line.rs`:
-  - The two lines are one virtual line: L's positions, then L+1's shifted
-    by L's word count; the rule must hold there with a matched word on
-    each line. A line with the no-cross flag (headings; the C# and Dart
+  - The two lines are one virtual line of their content words (Otzaria's
+    `content_range`, `hebrew-fts/src/line_edges.rs`): L's positions up to
+    its last content word, then L+1's from its first content word, right
+    after it; a trailing enumerator of L and a leading one of L+1 (`(x)`,
+    `[x]`, `{x}`, `(49):`; 1-5 letters, digits, quotes or `*`; a `(X) [Y]`
+    paired reading is content) take part neither in the gaps nor in the
+    matching. The rule must hold there with a matched word on each line. A line with the no-cross flag (headings; the C# and Dart
     builds set it for a line starting with `<h`, Otzaria's rule) takes part
-    in no cross-line match, into or out of it; an empty line has no words.
+    in no cross-line match, into or out of it; a line with no content word
+    (empty, or only an enumerator) neither.
   - Candidates by shift-and-AND over per-slot line bitmaps (catalog
     positions), built from the terms the walks already matched (the
     sinks: postings only, no second walk): in order, for each split s the
@@ -475,12 +486,14 @@ are not printed), so upstream's query-parser tests stay as they are.
     from the candidates when the in-line hits are exact; otherwise the
     text check tries the line alone first).
   - Exact check: words anywhere and partial matching are exact from the
-    bitmaps; proximity, gaps and phrases are checked on the postings'
+    bitmaps (unless an enumerator sits at the break: then the text check
+    decides, its word may be the slot's only occurrence there); proximity, gaps and phrases are checked on the postings'
     positions of both lines on an index with positions (the locator's own
     window rules over synthetic tokens, `proximity_across_positions`);
     without positions, and for FtsLib's distance / order, the host's two
-    texts are checked by the locator over the joined text. Both flavours
-    give the same hits.
+    texts are checked by the locator over the joined text (`tokenize_pair`
+    drops the break's enumerators the same way). Both flavours give the
+    same hits.
   - The host feeds the per-line data at indexing with
     `se_writer_add_line` (flags `SE_LINE_NO_CROSS` = 1 for a heading,
     `SE_LINE_HAS_SECTION` = 2 when `section_id` is set).
@@ -498,12 +511,9 @@ are not printed), so upstream's query-parser tests stay as they are.
     and `break_at` (C# `BreakAt`, Dart `breakAt`) is that `\n`'s offset
     (render a line break there). Each line is tokenized on its own (no
     word, paired reading or tag state crosses the break).
-  - Deviations, named: the word count is computed by the engine at
-    indexing, not supplied by the host (it must equal the index positions,
-    which only the engine's scanner numbers). Otzaria skips a leading or
-    trailing enumerator (`(ג)`-like markers) at the line edges; here the
-    match must reach L's last word and start at L+1's first word, an
-    enumerator being a word. Relevance order: cross-line hits score 0
+  - Deviations, named: the content edges are computed by the engine at
+    indexing, not supplied by the host (they must equal the index
+    positions, which only the engine's scanner numbers). Relevance order: cross-line hits score 0
     (after every in-line hit; Otzaria scores them below typical in-line
     hits). Per-pair `gaps` in either order (low-level request only) are
     refused with cross-line. On an index with several segments the
@@ -617,15 +627,17 @@ are not printed), so upstream's query-parser tests stay as they are.
   alternatives.
 - **Fuzzy** is hebrew-fts's own `HebrewFuzzyQuery` (the Levenshtein DFA
   tantivy uses, built here because tantivy's wrapper cannot be built from
-  outside): plain Levenshtein edits (a transposition is two, as FtsLib's
-  `Levenshtein.Distance`), cap 2000 per segment, closest edit distance first,
+  outside): edits are insert, delete, substitute and a swap of two
+  adjacent letters as ONE edit (Otzaria's `transposition = true`; FtsLib's
+  `Levenshtein.Distance` and FM `FindFuzzy` were changed to the same rule,
+  optimal string alignment), cap 2000 per segment, closest edit distance first,
   then shortest with the quote zero width, then most frequent. The plain
   query and the span slot are the same weight.
   - **`ignore_quotes`** (on by default in the FtsLib facade, like every other
     group kind): distances are measured on the quote-free forms, so the
     indexed יצי"ק is one edit from יצחק, as FtsLib's quote-free term יציק is.
-    With the FM sidecar the candidates are confirmed with the plain
-    Levenshtein distance on the quote-free forms (FtsLib's
+    With the FM sidecar the candidates are confirmed with the same edit
+    distance (swap = one edit) on the quote-free forms (FtsLib's
     `Levenshtein.Distance`); without it the DFA skips the quote byte.
   - **Distance 3** (FtsLib's maximum) runs through the FM sidecar; the walk
     path builds a distance-3 DFA, which is slower to build.
@@ -1113,9 +1125,10 @@ what a page needs.
     in the Dart demo, with sections read from SQLite (`line_toc`) by the
     hits' line ids. The sameSection scope and its exclusion are the
     engine's (section ids in the index).
-- Cross-line matching and the same-section scope are built, not yet
-  tested: their unit tests are written, the runs and a full rebuild
-  (index format `tantivy9`) are pending.
+- Full-DB rerun pending for index format `tantivy10` / FtsLib `fts9`
+  (unterminated `<`, cross-line content edges, fuzzy swap = one edit): the
+  unit tests pass; the rebuilds, parity sets and the Otzaria hit-count
+  comparison have not been rerun.
 - A full build compared side by side with FtsLib on the same queries.
 - Profiling: C# search is ~1.0 s (.NET 10) / ~1.5 s (net48), against 378 ms in
   the pure-Rust smoke test for the same query. That gap includes process start

@@ -293,16 +293,28 @@ namespace SeforimSearch.Demo
         }
 
         /// <summary>KitveiHakodesh's order: Otzaria, then Zayit (registry choice omitted
-        /// to stay cross-platform; pass --db to override).</summary>
+        /// to stay cross-platform; pass --db to override). Each app's data folder per OS:
+        /// %APPDATA% (Windows), ~/Library/Application Support (macOS),
+        /// ~/.local/share (Linux); the same list as tools/bench/get_db.py.</summary>
         private static string? ResolveSeforimDb()
         {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            foreach (var p in new[]
-                     {
-                         Path.Combine(appData, "otzaria", "books", "seforim.db"),
-                         Path.Combine(appData, "io.github.kdroidfilter.seforimapp", "databases", "seforim.db"),
-                     })
-                if (File.Exists(p)) return p;
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var bases = new List<string> { Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) };
+            if (!string.IsNullOrEmpty(home))
+            {
+                bases.Add(Path.Combine(home, "Library", "Application Support"));
+                bases.Add(Path.Combine(home, ".local", "share"));
+            }
+            foreach (string b in bases)
+            {
+                if (string.IsNullOrEmpty(b)) continue;
+                foreach (var p in new[]
+                         {
+                             Path.Combine(b, "otzaria", "books", "seforim.db"),
+                             Path.Combine(b, "io.github.kdroidfilter.seforimapp", "databases", "seforim.db"),
+                         })
+                    if (File.Exists(p)) return p;
+            }
             return null;
         }
     }

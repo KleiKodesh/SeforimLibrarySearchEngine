@@ -22,7 +22,7 @@ Background: [README.md](README.md) (what is tested and why). Repo rules: `CLAUDE
 6. `--steps parity` (~30 min). Every compare log must say identical; a difference is analysed (our gap or FtsLib bug) before anything is fixed, and reported.
 7. `--steps speed` (1-3 h). Nothing else on the machine.
 8. `--steps hitcount` (~10 min). New non-zero diffs come out `unclassified`: analyse (diff lines, read samples) and add the class + reason to `hitcount-classes.json`.
-9. `--steps report`. Add the machine (from `OUT_DIR/machine.txt`: CPU, cores, RAM, disk, OS) to FTS-SPECS-AND-COMPARISONS.md if the generator does not yet (TODO below).
+9. `--steps report`. The generator writes the machine (`OUT_DIR/machine.txt`: OS, CPU, cores, RAM, disk), the FtsLib / Otzaria build rows (from `logs/build-ftslib.log`, `logs/build-otzaria.log`; reference numbers only when a log is missing) and the parity table (from the compare logs) into FTS-SPECS-AND-COMPARISONS.md; check them.
 10. Commit FTS-SPECS-AND-COMPARISONS.md, README.md, CLAUDE.md (+ hitcount-classes.json if changed) and push.
 
 Recovery: rerun the same command; finished units are skipped (`OUT_DIR/.done/`). `--force` redoes all requested units; delete one marker to redo one unit. An index is rebuilt automatically when its format string changed.
@@ -35,11 +35,7 @@ Recovery: rerun the same command; finished units are skipped (`OUT_DIR/.done/`).
 
 ## TODO for the next agent (not finished in the first version)
 
-- macOS/Linux FtsLibDump: the portable mode (`-p:FtsLibDumpPortable=true`, default off Windows) compiles Core's `SeforimDbFullTextSearch`, `SeforimDb`, `Common` sources, but Core's `SeforimDb` uses `Settings` and `SeforimDbCatalog` namespaces: add the needed files (or stubs) until it builds on net10.0, exclude Windows-only files (registry, NTFS). Better: ask the user to make Core's FTS part a plain net10.0 project in KitveiHakodesh.
-- Not tested on a real Mac/Linux: bootstrap (brew/apt), `.dylib/.so` loading by the demo (`dotnet build -f net10.0 -p:PlatformTarget=AnyCPU`), the rust-lld linker setting (Windows-only target, should not apply), Otzaria driver build, DB download + zstd unpack (tested only the find path).
+- Not yet run on a real Mac/Linux (cross-checked from Windows only: `dotnet build -r osx-arm64 / osx-x64 / linux-x64` of the demo and the portable FtsLibDump compile; the portable FtsLibDump gives the same dump as the Windows one; `cargo check --target aarch64-apple-darwin` needs Apple's clang for `zstd-sys`, so the Rust side was not compiled for macOS; no `cfg(windows)` code exists in our crates or the driver, and the rust-lld setting is scoped to the Windows target): bootstrap (brew/apt), cargo builds, `.dylib/.so` loading by the demo, Otzaria driver build, DB download + zstd unpack (tested only the find path). First Mac run: report anything that breaks here.
 - `get_db.py` download path not run end to end (needs 1.9 GB); the split-manifest branch untested.
-- `specs_report.py`: record `machine.txt` (CPU, cores, RAM, OS) in the generated md; its FtsLib / Otzaria build rows are still hard-coded numbers: parse `logs/build-ftslib.log` and `logs/build-otzaria.log`.
-- `specs_report.py` parity line is hard-coded "all identical": read the compare logs.
-- `search_report.py` does not pass `--db` to the demo: ours then resolves the DB itself (Otzaria/Zayit under ApplicationData), which misses `--db` paths and the macOS location. Add a `--db` pass-through.
 - hitcount: the old classification was made on tantivy9/fts8; rows may change.
 - Not yet verified: a full run through run-all (only `detect`, `build-tools` and `--dry-run` were run).

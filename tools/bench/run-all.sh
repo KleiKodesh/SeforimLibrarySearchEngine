@@ -100,7 +100,11 @@ detect() {
   echo "OS: $PLAT ($(uname -sr)), arch: $ARCH"
   if [ $PLAT = mac ]; then echo "CPU: $(sysctl -n machdep.cpu.brand_string 2>/dev/null), cores $(sysctl -n hw.ncpu), RAM $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
   elif [ $PLAT = linux ]; then echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2), cores $(nproc), RAM $(free -g | awk '/Mem/{print $2}') GB"
-  else echo "CPU: ${PROCESSOR_IDENTIFIER:-?}, cores ${NUMBER_OF_PROCESSORS:-?}"; fi
+  else
+    local cpu ram
+    cpu="$(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name" 2>/dev/null | tr -d '\r')"
+    ram="$(powershell -NoProfile -Command "[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB)" 2>/dev/null | tr -d '\r')"
+    echo "CPU: ${cpu:-${PROCESSOR_IDENTIFIER:-?}}, cores ${NUMBER_OF_PROCESSORS:-?}, RAM ${ram:-?} GB"; fi
   echo "disk free at out dir: $(mkdir -p "$OUT_DIR" && df -h "$OUT_DIR" | awk 'NR==2{print $4}')"
   echo "git: $(ver git --version)"
   echo "cargo: $(ver cargo --version)"
@@ -211,8 +215,8 @@ step_speed() {
   for s in $SPEED_SETS; do
     local Q; Q="$(qfile "$s")"
     done_ok "speed-$s-otz" || { run "speed-$s-otz" "sb-$s-otz" "$PY" -I "$(wp "$HERE/otz_report.py")" "$OTZ" "$DB" "$(wp "$IDX_OTZARIA")" "$Q" "$(wp "$OUT_DIR/sb-$s-otz")" "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-otz"; }
-    done_ok "speed-$s-pos" || { run "speed-$s-pos" "sb-$s-pos" "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_POS")" "$Q" "$(wp "$OUT_DIR/sb-$s-pos")" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-pos"; }
-    done_ok "speed-$s-nopos" || { run "speed-$s-nopos" "sb-$s-nopos" "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_NOPOS")" "$Q" "$(wp "$OUT_DIR/sb-$s-nopos")" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-nopos"; }
+    done_ok "speed-$s-pos" || { run "speed-$s-pos" "sb-$s-pos" "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_POS")" "$Q" "$(wp "$OUT_DIR/sb-$s-pos")" --db "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-pos"; }
+    done_ok "speed-$s-nopos" || { run "speed-$s-nopos" "sb-$s-nopos" "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_NOPOS")" "$Q" "$(wp "$OUT_DIR/sb-$s-nopos")" --db "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-nopos"; }
     done_ok "speed-$s-fts" || { run "speed-$s-fts" "sb-$s-fts" "$PY" -I tools/report/search_report.py "$FTS" "$(wp "$IDX_FTSLIB")" "$Q" "$(wp "$OUT_DIR/sb-$s-fts")" --ftslib "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-fts"; }
   done
 }

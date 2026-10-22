@@ -8,9 +8,9 @@
     KitveiHakodesh comes from the submodule external/KleiKodeshProject (pinned commit);
     override with -p:KitveiHakodeshDir=<...\KitveiHakodesh>.
     Windows: references KitveiHakodesh.Core (net10.0-windows) as is.
-    Other OSes (or -p:FtsLibDumpPortable=true): Core targets Windows only, so the FTS
-    part of Core (SeforimDbFullTextSearch + the seforim.db reader it uses) is compiled
-    from Core's own source files into this exe, on plain net10.0, with FtsLib.
+    Other OSes (or -p:FtsLibDumpPortable=true): KitveiHakodesh.Core.Portable, the plain
+    net10.0 build of Core's own FTS / seforim.db / catalog sources (registry calls
+    guarded), so the same code runs on macOS and Linux.
   -->
   <PropertyGroup>
     <KitveiHakodeshDir Condition="'$(KitveiHakodeshDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\external\KleiKodeshProject\KitveiHakodesh</KitveiHakodeshDir>
@@ -31,18 +31,9 @@
 
   <PropertyGroup Condition="'$(FtsLibDumpPortable)' == 'true'">
     <TargetFramework>net10.0</TargetFramework>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <NoWarn>$(NoWarn);CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;CA1416</NoWarn>
   </PropertyGroup>
   <ItemGroup Condition="'$(FtsLibDumpPortable)' == 'true'">
-    <Compile Include="$(CoreDir)\SeforimDbFullTextSearch\**\*.cs" LinkBase="Core\SeforimDbFullTextSearch" />
-    <Compile Include="$(CoreDir)\SeforimDb\**\*.cs" LinkBase="Core\SeforimDb" Exclude="$(CoreDir)\SeforimDb\SeforimDbIndexRefreshWatcher.cs" />
-    <Compile Include="$(CoreDir)\Common\**\*.cs" LinkBase="Core\Common" />
-    <ProjectReference Include="$(KitveiHakodeshDir)\CSharpBackend\FtsLib-Csharp\FtsLib\FtsLib.csproj" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
-    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.14" />
-    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
-    <PackageReference Include="MessagePack" Version="3.1.8" />
+    <ProjectReference Include="$(KitveiHakodeshDir)\CSharpBackend\KitveiHakodesh.Core.Portable\KitveiHakodesh.Core.Portable.csproj" />
   </ItemGroup>
 
 </Project>

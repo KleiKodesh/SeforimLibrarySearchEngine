@@ -5,7 +5,8 @@ report with one row per query.
 Usage:
   python -I tools/report/search_report.py <demo exe> <index dir> <queries.txt> <out dir>
   python -I tools/report/search_report.py <FtsLibDump exe> <ftslib index> <queries.txt> <out dir> --ftslib <seforim.db>
-  either form takes [--runs N] (any position)
+  the demo form takes [--db <seforim.db>] (passed to the demo; without it the demo
+  looks in the Otzaria / Zayit data folders); either form takes [--runs N]
 
 With --ftslib the same queries run through KitveiHakodesh Core's own searcher on
 an FtsLib index (FtsLibDump search); FtsLib has no engine stage timing, so only
@@ -57,7 +58,7 @@ def median(values):
     return v[h] if len(v) % 2 else (v[h - 1] + v[h]) / 2
 
 
-def main(exe, index, queries, out, ftslib_db=None, runs=1):
+def main(exe, index, queries, out, ftslib_db=None, runs=1, db=None):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, SEFORIM_ENGINE_TIMING="1")
@@ -70,6 +71,8 @@ def main(exe, index, queries, out, ftslib_db=None, runs=1):
             args = [exe, "search", ftslib_db, index]
         else:
             args = [exe, "search", "--index", index]
+            if db:
+                args += ["--db", db]
         if dist.strip():
             args += ["--distance", dist.strip()]
         args += query.split()
@@ -141,10 +144,15 @@ def main(exe, index, queries, out, ftslib_db=None, runs=1):
 
 if __name__ == "__main__":
     a = sys.argv[1:]
-    db = None
+    ftslib_db = None
     if "--ftslib" in a:
         i = a.index("--ftslib")
-        db = a[i + 1]
+        ftslib_db = a[i + 1]
+        del a[i:i + 2]
+    demo_db = None
+    if "--db" in a:
+        i = a.index("--db")
+        demo_db = a[i + 1]
         del a[i:i + 2]
     runs = 1
     if "--runs" in a:
@@ -156,4 +164,4 @@ if __name__ == "__main__":
         if runs < 1:
             sys.exit("--runs needs a whole number >= 1")
         del a[i:i + 2]
-    sys.exit(main(*a[:4], ftslib_db=db, runs=runs))
+    sys.exit(main(*a[:4], ftslib_db=ftslib_db, runs=runs, db=demo_db))

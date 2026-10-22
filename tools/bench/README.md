@@ -75,6 +75,26 @@ phrases have no Otzaria equivalent and are `n/a`.
   ~1.9 GB), resumable, size and sha256 checked, unpacked to `<out>/data/seforim.db`. A
   downloaded DB may be newer than the one earlier results were measured on.
 
+### Clean Mac (Apple silicon or Intel)
+
+```sh
+xcode-select --install                      # clang + SDK for Rust's C deps (zstd-sys)
+# Homebrew from https://brew.sh, then:
+git clone --recursive --shallow-submodules https://github.com/KleiKodesh/SeforimLibrarySearchEngine.git
+cd SeforimLibrarySearchEngine
+tools/bench/run-all.sh --steps bootstrap    # git, python, zstd, rustup, .NET 10 SDK
+tools/bench/run-all.sh --steps detect       # inventory: OS, CPU, cores, RAM, disk, tools
+tools/bench/run-all.sh                      # everything (or step by step, see section 2)
+```
+
+What differs from Windows: the native engine is `libseforim_search_native.dylib` (copied
+next to the demo by the engine package); the demo builds only net10.0 (AnyCPU, so arm64 and
+x64 both run natively); FtsLibDump builds against `KitveiHakodesh.Core.Portable` (a plain
+net10.0 build of Core's own FTS / seforim.db / catalog sources, registry calls guarded) and
+lands in `bin/Release/net10.0/`; the DB is looked up under `~/Library/Application Support`.
+Measured runs stay sequential; close other apps and keep the laptop on power (macOS
+throttles on battery).
+
 ## 4. Running
 
 Configuration: `tools/bench/bench.env` (copy to `bench.local.env` for local overrides):
@@ -97,7 +117,8 @@ zip `OUT_DIR` without `indexes/` and `data/`.
 
 - `418 I'm a Teapot` / blocked downloads: the NetFree filter. Keep Hebrew out of agent output; download the DB in a browser and pass `--db`.
 - .NET Framework 4.8 is Windows-only; on macOS/Linux only net10.0 is built.
-- macOS / Linux: FtsLibDump builds in a portable mode that compiles Core's FTS sources on plain net10.0 (Core targets Windows). NOT finished, see the runbook TODO.
+- macOS / Linux: FtsLibDump references `KitveiHakodesh.Core.Portable` (net10.0); on Windows it references Core itself (`-p:FtsLibDumpPortable=true` forces the portable build there too; both give identical dumps).
+- macOS: `cargo` fails in `zstd-sys` without the Xcode command line tools (`xcode-select --install`).
 - Windows long paths: `git config --system core.longpaths true`.
 - Hebrew in consoles: scripts print ASCII; use `python -X utf8` for anything that prints Hebrew.
 - A failed unit: read its log in `OUT_DIR/logs`, fix, rerun the same command (finished units are skipped).

@@ -274,6 +274,10 @@ results; never redo work. KitveiHakodesh is the submodule `external/KleiKodeshPr
 - Cross-line joins CONTENT words (Otzaria `content_range`): line-edge enumerators are
   skipped via the `line_first` / `line_last` fields (`hebrew-fts/src/line_edges.rs`).
 - `%` is FtsLib's GrammarExpander (its own 34/32 tables), NOT the Otzaria walk options.
+- FtsLibDump off Windows uses `KitveiHakodesh.Core.Portable` (KitveiHakodesh repo: plain
+  net10.0 project linking Core's own FTS / seforim.db / catalog sources; registry and kernel32
+  calls behind `OperatingSystem.IsWindows()`). New Core code reached from the FTS path must keep
+  that guard, or the Mac benchmark breaks. The demo's `PlatformTarget` is x64 on Windows only.
 - Parity is checked with `tools/parity` (FtsLibDump + `SeforimSearch.Demo dump` +
   compare.py) against the installed FtsLib index at
   `%LOCALAPPDATA%\KleiKodesh\KitveiHakodeshService\FtsIndex`. Rerun it after any

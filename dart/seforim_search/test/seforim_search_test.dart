@@ -69,6 +69,26 @@ void main() {
     s.close();
   });
 
+  test('locateLines: same snippets as locateBatch on the joined lines', () {
+    final word = text.split(' ').first;
+    final a = index.searchRequest(SearchRequest(groups: [QueryGroup.word(word)]));
+    final b = index.searchRequest(SearchRequest(groups: [QueryGroup.word(word)]));
+    String k(List<Snippet?> l) => [
+          for (final s in l)
+            s == null
+                ? '-'
+                : '${s.score} ${s.wordDistance} ${s.windowWordCount} ${s.start} ${s.end} ${s.flags} '
+                    '${s.marks.map((m) => '${m.start}/${m.length}/${m.termId}').join(';')}'
+        ].join('|');
+    final hit = a.hits(0, 1).single;
+    expect(k(b.locateLines([HitLines(0, [(hit.lineId, text)])])), k(a.locateBatch([text])));
+    // a short window widened over a neighbour line (looked up by id), joined by a space
+    expect(k(b.locateLines([HitLines(-1, [(8, text2), (7, text), (99, '')])])), k(a.locateBatch(['$text2 $text'])));
+    expect(b.takeNewTerms(), a.takeNewTerms());
+    a.close();
+    b.close();
+  });
+
   test('catalog order and AND of groups', () {
     final s = index.searchRequest(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')]));
     expect(s.allHits().map((h) => h.lineId).toList(), [8]);

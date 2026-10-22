@@ -290,11 +290,16 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     // the engine returns line ids only: lineIndex comes from SQLite
     final lineIndex = db.lineIndexesOf([h.lineId])[h.lineId];
     if (lineIndex == null) return (text, s);
-    final around = db.linesAround(h.bookId, lineIndex - 2, lineIndex + 2);
-    String side(int a, int b) =>
-        [for (var d = a; d <= b; d++) around[lineIndex + d] ?? ''].where((t) => t.isNotEmpty).join(' ');
-    final joined = [side(-2, -1), text, side(1, 2)].where((t) => t.isNotEmpty).join(' ');
-    final wide = session.locate(joined);
+    final around = db.lineIdsAround(h.bookId, lineIndex - 2, lineIndex + 2);
+    // the lines go to the engine one by one (id + text); it joins them by
+    // single spaces and, on an index with positions, reads the matched words
+    // from the postings
+    final lines = <(int, String)>[
+      for (var d = -2; d <= 2; d++)
+        if (d == 0) (h.lineId, text) else if (around[lineIndex + d] case final l? when l.$2.isNotEmpty) l
+    ];
+    final joined = [for (final l in lines) if (l.$2.isNotEmpty) l.$2].join(' ');
+    final wide = session.locateLines([HitLines(-1, lines)])[0];
     return wide == null ? (text, s) : (joined, wide);
   }
 
@@ -314,18 +319,27 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   final results = <(PlacedHit, String, Snippet)>[];
   var passed = 0;
   final it = hits.iterator;
+  var hitNo = 0; // the next hit's index in the search's hits
   var more = true;
   while (more && results.length < limit) {
     final batch = <PlacedHit>[];
+    final batchStart = hitNo;
     while (batch.length < 256 && (more = it.moveNext())) {
       batch.add(it.current);
+      hitNo++;
     }
     if (batch.isEmpty) break;
     final texts = db.lineTexts([...batch.map((h) => h.lineId), for (final h in batch) if (h.nextLineId != null) h.nextLineId!]);
     final lineTexts = [for (final h in batch) texts[h.lineId] ?? ''];
     final nextTexts = [for (final h in batch) h.nextLineId == null ? null : texts[h.nextLineId] ?? ''];
-    // a cross-line hit is located over its line and the next one (joined at a line break)
-    final snippets = session.locatePairs(lineTexts, nextTexts);
+    // a cross-line hit is located over its line and the next one (joined at a
+    // line break); otherwise the hits go as their lines (positions index: the
+    // matched words come from the postings)
+    final snippets = batch.any((h) => h.nextLineId != null)
+        ? session.locatePairs(lineTexts, nextTexts)
+        : session.locateLines([
+            for (var i = 0; i < batch.length; i++) HitLines(batchStart + i, [(batch[i].lineId, lineTexts[i])])
+          ]);
     for (var i = 0; i < batch.length && results.length < limit; i++) {
       final s = snippets[i];
       if (s == null) continue;

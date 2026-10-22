@@ -81,6 +81,43 @@ final class SearchSession implements Finalizable {
     return out;
   }
 
+  /// Locates a batch of hits given as their LINES: each hit is its matched
+  /// line and, for a short window, its neighbour lines (document order),
+  /// located over the non-empty texts joined by single spaces (offsets into
+  /// that joined text). [HitLines.hitIndex] is the hit's index in this
+  /// search's hits (-1 when unknown). On an index with positions the engine
+  /// reads the matched words from the postings instead of searching every
+  /// word of the text (faster, same snippets); otherwise it is [locateBatch]
+  /// on the joined texts. Cross-line pairs go through [locatePairs].
+  List<Snippet?> locateLines(List<HitLines> hits) {
+    final n = hits.length;
+    final out = List<Snippet?>.filled(n, null);
+    if (n == 0) return out;
+    final texts = <String>[for (final h in hits) for (final l in h.lines) l.$2];
+    final data = using((a) {
+      final idx = a<Int64>(n);
+      final counts = a<Size>(n);
+      final ids = a<Uint64>(texts.isEmpty ? 1 : texts.length);
+      var k = 0;
+      for (var h = 0; h < n; h++) {
+        idx[h] = hits[h].hitIndex;
+        counts[h] = hits[h].lines.length;
+        for (final l in hits[h].lines) {
+          ids[k++] = l.$1;
+        }
+      }
+      return _withTexts(texts, (p, l) => _n.takeBuffer(_n.locateLines(_h, idx, counts, n, ids, p, l)));
+    });
+    var at = 0;
+    for (var i = 0; i < n; i++) {
+      if (data[at++] == 0) continue;
+      final (s, next) = Snippet.read(data, at);
+      out[i] = s;
+      at = next;
+    }
+    return out;
+  }
+
   /// [locateBatch] for hits given with their next line's text (cross-line
   /// matching; null for a hit without [PlacedHit.nextLineId]). The line
   /// alone is tried first; a cross-line snippet has [Snippet.breakAt] and

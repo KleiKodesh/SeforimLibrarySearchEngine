@@ -32,8 +32,10 @@ namespace FtsLib.SeforimDb
     /// </summary>
     public sealed class SearchResult
     {
-        internal SearchResult(int lineId, string content, FtsDocumentPlacement placement, Fts5.SearchSessionRef session)
+        internal SearchResult(int lineId, string content, FtsDocumentPlacement placement, Fts5.SearchSessionRef session,
+                              long hitIndex = -1)
         {
+            HitIndex = hitIndex;
             LineId = lineId;
             Content = content ?? string.Empty;
             Placement = placement;
@@ -53,6 +55,10 @@ namespace FtsLib.SeforimDb
         public FtsDocumentPlacement Placement { get; }
 
         internal Fts5.SearchSessionRef Session { get; }
+
+        /// <summary>The hit's index in its search's hits (-1 unknown): lets the engine
+        /// locate the snippet from the index positions without looking the line up.</summary>
+        internal long HitIndex { get; }
 
         /// <summary>The snippet located for this line in its batch (set by the
         /// batch locate; null when the line did not pass or was not located).</summary>

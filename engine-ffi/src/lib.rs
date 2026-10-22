@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::ptr;
 
 use seforim_engine::{
-    CancelToken, IndexOptions, LineDoc, LineIndex, LineWriter, SearchOptions, SearchRequest, SearchResult, Snippet,
+    CancelToken, HitLines, IndexOptions, LineDoc, LineIndex, LineWriter, SearchOptions, SearchRequest, SearchResult, Snippet,
 };
 
 thread_local! {
@@ -711,6 +711,77 @@ pub unsafe extern "C" fn se_search_locate_batch(
                 (t2 - t1).as_secs_f64() * 1000.0,
                 t2.elapsed().as_secs_f64() * 1000.0
             );
+        }
+        Ok(SeBuffer::from_vec(out))
+    })
+}
+
+/// Locates a batch of hits given as their LINES (`SnippetSession::try_locate_lines`):
+/// hit `h` is `line_counts[h]` consecutive entries of the flat `line_ids` /
+/// `texts` / `lens` arrays (the matched line, and for a short window its
+/// neighbour lines, in document order), located over the non-empty texts
+/// joined by single spaces (offsets into that joined text). `hit_indexes[h]`
+/// is the hit's index in the search's hits, or -1 (null array: all -1).
+/// On an index with positions the matched words come from the postings
+/// (no word of the text is hashed); otherwise, and for a line the index
+/// does not hold, the text is searched as by `se_search_locate_batch`. Same
+/// output as `se_search_locate_batch`, one entry per hit.
+///
+/// # Safety
+/// `hit_indexes` (if not null) and `line_counts` hold `hit_count` entries;
+/// `line_ids`, `texts` and `lens` hold the sum of `line_counts`; texts as
+/// for `se_search_locate_batch` (valid UTF-8).
+#[no_mangle]
+pub unsafe extern "C" fn se_search_locate_lines(
+    search: *mut SearchResult,
+    hit_indexes: *const i64,
+    line_counts: *const usize,
+    hit_count: usize,
+    line_ids: *const u64,
+    texts: *const *const u8,
+    lens: *const usize,
+) -> SeBuffer {
+    let empty = SeBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    guard(empty, || {
+        let search = search.as_mut().ok_or("null search")?;
+        if hit_count > 0 && line_counts.is_null() {
+            return Err("null line_counts".into());
+        }
+        let counts: &[usize] = if hit_count == 0 { &[] } else { std::slice::from_raw_parts(line_counts, hit_count) };
+        let total: usize = counts.iter().sum();
+        if total > 0 && line_ids.is_null() {
+            return Err("null line_ids".into());
+        }
+        let strs = text_args(texts, lens, total)?;
+        let ids: &[u64] = if total == 0 { &[] } else { std::slice::from_raw_parts(line_ids, total) };
+        let lines: Vec<(u64, &str)> = ids.iter().copied().zip(strs).collect();
+        let hit_of = |h: usize| -> Option<usize> {
+            if hit_indexes.is_null() {
+                return None;
+            }
+            let v = *hit_indexes.add(h);
+            (v >= 0).then_some(v as usize)
+        };
+        let mut items = Vec::with_capacity(hit_count);
+        let mut at = 0;
+        for (h, &n) in counts.iter().enumerate() {
+            items.push(HitLines { hit: hit_of(h), lines: &lines[at..at + n] });
+            at += n;
+        }
+        let located = search.session.try_locate_lines(&items).map_err(err)?;
+        let mut out = Vec::with_capacity(hit_count * 16);
+        for snippet in located {
+            match snippet {
+                Some(s) => {
+                    out.push(1);
+                    write_snippet(&s, &mut out);
+                }
+                None => out.push(0),
+            }
         }
         Ok(SeBuffer::from_vec(out))
     })

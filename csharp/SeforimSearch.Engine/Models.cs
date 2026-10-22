@@ -909,6 +909,21 @@ namespace SeforimSearch.Engine
         public bool Exact { get; }
     }
 
+    /// <summary>One hit for <see cref="SearchSession.LocateLines"/>: its index in the search's hits
+    /// (-1 when unknown) and its lines, document order: the matched line, and for a short
+    /// window its neighbour lines (empty texts are skipped).</summary>
+    public readonly struct HitLines
+    {
+        public HitLines(long hitIndex, IReadOnlyList<(long LineId, string Text)> lines)
+        {
+            HitIndex = hitIndex;
+            Lines = lines;
+        }
+
+        public long HitIndex { get; }
+        public IReadOnlyList<(long LineId, string Text)> Lines { get; }
+    }
+
     /// <summary>A matching line (in the search's order, catalog by default): only the ids the index keeps. Any
     /// other placement (line index, section) comes from SQLite by line id.</summary>
     public readonly struct PlacedHit

@@ -271,6 +271,14 @@ pub struct SnippetWindowLocator {
     break_utf16: usize,
     /// Synthetic tokens for [`proximity_across_positions`](Self::proximity_across_positions).
     synthetic: Vec<TextToken>,
+    /// After [`tokenize_positioned`](Self::tokenize_positioned): each
+    /// token's term id in the caller's term list (or `NO_TERM`), read off
+    /// the index positions instead of hashing the token. The locate calls
+    /// then need a term map (`*_mapped`).
+    token_terms: Vec<u32>,
+    positioned: bool,
+    /// Scratch for a matched token's word in `tokenize_positioned`.
+    word: String,
 }
 
 impl Default for SnippetWindowLocator {
@@ -304,6 +312,9 @@ impl SnippetWindowLocator {
             break_token: None,
             break_utf16: 0,
             synthetic: Vec::new(),
+            token_terms: Vec::new(),
+            positioned: false,
+            word: String::new(),
         }
     }
 
@@ -343,6 +354,96 @@ impl SnippetWindowLocator {
     pub fn tokenize(&mut self, raw_html: &str) {
         self.text_tokens.tokenize(raw_html);
         self.break_token = None;
+        self.positioned = false;
+    }
+
+    /// Tokenizes `text` for the `*_mapped` locate calls, taking each token's
+    /// term from the index positions instead of hashing it: one scan that
+    /// keeps no normalized text and stops once the words after the last
+    /// matched position can no longer reach a window or its context.
+    ///
+    /// `text` is one or more lines joined (`line_starts`: each line's byte
+    /// start, the first 0); `occurrences[k]` holds line k's matched
+    /// `(position, term id)` pairs from the postings (positions local to
+    /// the line, sorted), `terms[id]` the term's text. Every occurrence is
+    /// checked against the word the scanner finds there (paired readings
+    /// share a position: the word picks its own term). False when the text
+    /// and the positions disagree (a text that is not the indexed one): the
+    /// caller then falls back to [`tokenize`](Self::tokenize).
+    pub fn tokenize_positioned<T: AsRef<str>>(
+        &mut self,
+        text: &str,
+        line_starts: &[usize],
+        occurrences: &[&[(u32, u32)]],
+        terms: &[T],
+    ) -> bool {
+        debug_assert_eq!(line_starts.len(), occurrences.len());
+        self.break_token = None;
+        self.positioned = false;
+        let ctx = self.context_words;
+        let last_line = occurrences.iter().rposition(|o| !o.is_empty());
+        // the last position a window or its context can use, in the last
+        // line holding an occurrence (one more word keeps the end exact)
+        let limit = last_line.map(|k| occurrences[k].last().unwrap().0 as usize + ctx + 1);
+        let token_terms = &mut self.token_terms;
+        token_terms.clear();
+        let mut bad = false;
+        let (mut k, mut ptr, mut seen) = (0usize, 0usize, 0u64);
+        let mut base: Option<usize> = None;
+        let tt = &mut self.text_tokens;
+        let word = &mut self.word;
+        let keep = tt.keeps_marks();
+        tt.tokenize_light(text, |tok| {
+            while k + 1 < line_starts.len() && tok.raw_start >= line_starts[k + 1] {
+                if !close_rest(occurrences[k], &mut ptr, &mut seen) {
+                    bad = true;
+                    token_terms.push(NO_TERM);
+                    return false;
+                }
+                k += 1;
+                ptr = 0;
+                seen = 0;
+                base = None;
+            }
+            let local = tok.position - *base.get_or_insert(tok.position);
+            let o = occurrences[k];
+            while ptr < o.len() && (o[ptr].0 as usize) < local {
+                if !close_group(o, &mut ptr, &mut seen) || (ptr < o.len() && (o[ptr].0 as usize) < local) {
+                    bad = true; // an occurrence no word matched
+                    token_terms.push(NO_TERM);
+                    return false;
+                }
+            }
+            let mut id = NO_TERM;
+            let mut j = ptr;
+            if j < o.len() && o[j].0 as usize == local {
+                // the word, only where a matched term sits
+                if !word_of(text, tok, keep, word) {
+                    bad = true;
+                    token_terms.push(NO_TERM);
+                    return false;
+                }
+            }
+            while j < o.len() && o[j].0 as usize == local {
+                if terms[o[j].1 as usize].as_ref() == word.as_str() {
+                    id = o[j].1;
+                    seen |= 1u64 << (j - ptr).min(63);
+                    break;
+                }
+                j += 1;
+            }
+            token_terms.push(id);
+            !(Some(k) == last_line && limit.is_some_and(|l| local > l))
+        });
+        if bad || !close_rest(occurrences.get(k).copied().unwrap_or(&[]), &mut ptr, &mut seen) {
+            return false;
+        }
+        // lines the scan did not reach must hold no occurrence
+        if occurrences.iter().skip(k + 1).any(|o| !o.is_empty()) {
+            return false;
+        }
+        self.positioned = true;
+        true
     }
 
     /// Tokenizes two consecutive lines joined as `left + "\n" + right`
@@ -352,6 +453,7 @@ impl SnippetWindowLocator {
     /// and offsets are UTF-16 units into the joined text. Returns the UTF-16
     /// offset of the break.
     pub fn tokenize_pair(&mut self, left: &str, right: &str) -> usize {
+        self.positioned = false;
         let split = self.text_tokens.tokenize_pair(left, right);
         self.break_token = Some(split);
         self.break_utf16 = left.encode_utf16().count();
@@ -404,6 +506,20 @@ impl SnippetWindowLocator {
         require_ordered: bool,
         original_group_count: usize,
     ) -> SnippetDescriptor<'_> {
+        self.locate_tokenized_mapped(prepared, &[], require_ordered, original_group_count)
+    }
+
+    /// [`locate_tokenized`](Self::locate_tokenized) that also reads a text
+    /// tokenized by [`tokenize_positioned`](Self::tokenize_positioned):
+    /// `term_map[id]` is the ordinal in `prepared` of term id `id` (or
+    /// `u32::MAX`). The map is ignored after [`tokenize`](Self::tokenize).
+    pub fn locate_tokenized_mapped(
+        &mut self,
+        prepared: &PreparedQueryGroups,
+        term_map: &[u32],
+        require_ordered: bool,
+        original_group_count: usize,
+    ) -> SnippetDescriptor<'_> {
         if prepared.is_empty() {
             return SnippetDescriptor::NO_MATCH;
         }
@@ -416,6 +532,8 @@ impl SnippetWindowLocator {
             mark_ranges,
             min_groups,
             break_token,
+            token_terms,
+            positioned,
             ..
         } = self;
         let brk = *break_token;
@@ -425,10 +543,7 @@ impl SnippetWindowLocator {
         }
         let raw_len = text_tokens.raw_utf16_len();
 
-        ordinals.clear();
-        ordinals.extend(tokens.iter().map(|t| {
-            prepared.get(text_tokens.norm_of(t)).map_or(NO_TERM, |p| p.ordinal as u32)
-        }));
+        fill_ordinals(ordinals, text_tokens, prepared, positioned.then_some((&token_terms[..], term_map)));
         let ordinals = &ordinals[..];
 
         let all_groups = prepared.group_count();
@@ -495,6 +610,17 @@ impl SnippetWindowLocator {
         prepared: &PreparedQueryGroups,
         proximity: &Proximity,
     ) -> SnippetDescriptor<'_> {
+        self.locate_proximity_tokenized_mapped(prepared, &[], proximity)
+    }
+
+    /// [`locate_proximity_tokenized`](Self::locate_proximity_tokenized)
+    /// with a term map (see [`locate_tokenized_mapped`](Self::locate_tokenized_mapped)).
+    pub fn locate_proximity_tokenized_mapped(
+        &mut self,
+        prepared: &PreparedQueryGroups,
+        term_map: &[u32],
+        proximity: &Proximity,
+    ) -> SnippetDescriptor<'_> {
         if prepared.is_empty() {
             return SnippetDescriptor::NO_MATCH;
         }
@@ -505,6 +631,8 @@ impl SnippetWindowLocator {
             mark_ranges,
             proximity: scratch,
             break_token,
+            token_terms,
+            positioned,
             ..
         } = self;
         let brk = *break_token;
@@ -513,10 +641,7 @@ impl SnippetWindowLocator {
             return SnippetDescriptor::NO_MATCH;
         }
         let raw_len = text_tokens.raw_utf16_len();
-        ordinals.clear();
-        ordinals.extend(tokens.iter().map(|t| {
-            prepared.get(text_tokens.norm_of(t)).map_or(NO_TERM, |p| p.ordinal as u32)
-        }));
+        fill_ordinals(ordinals, text_tokens, prepared, positioned.then_some((&token_terms[..], term_map)));
         let ordinals = &ordinals[..];
         let k = prepared.group_count();
         let found = match proximity {
@@ -642,6 +767,70 @@ fn find_window(
 }
 
 // ── Proximity windows ─────────────────────────────────────────────────
+
+/// A token's normalized word, scanned from its own span (see
+/// [`TextTokens::word_at`]); false when the span is not one word.
+fn word_of(text: &str, token: &TextToken, keep_marks: bool, out: &mut String) -> bool {
+    out.clear();
+    // plain Hebrew letters (the common word): the word is the span itself
+    let raw = &text.as_bytes()[token.raw_start..token.raw_end];
+    if raw.len() % 2 == 0 && raw.chunks_exact(2).all(|c| c[0] == 0xD7 && (0x90..=0xAA).contains(&c[1])) {
+        out.push_str(&text[token.raw_start..token.raw_end]);
+        return true;
+    }
+    let mut words = 0;
+    crate::scanner::scan_with(&text[token.raw_start..token.raw_end], keep_marks, |w, _| {
+        words += 1;
+        if words == 1 {
+            out.push_str(w);
+        }
+    });
+    words == 1
+}
+
+/// Closes the occurrence group at `ptr` (one position): every occurrence
+/// there must have met its word (`seen`, one bit per occurrence).
+fn close_group(o: &[(u32, u32)], ptr: &mut usize, seen: &mut u64) -> bool {
+    let at = o[*ptr].0;
+    let mut n = 0;
+    while *ptr < o.len() && o[*ptr].0 == at {
+        if n >= 64 || *seen & (1u64 << n) == 0 {
+            return false;
+        }
+        *ptr += 1;
+        n += 1;
+    }
+    *seen = 0;
+    true
+}
+
+/// Closes the group at `ptr` (if any) and demands no occurrence after it.
+fn close_rest(o: &[(u32, u32)], ptr: &mut usize, seen: &mut u64) -> bool {
+    *ptr >= o.len() || (close_group(o, ptr, seen) && *ptr == o.len())
+}
+
+/// Each token's ordinal in `prepared`: hashed from its normalized text, or
+/// (`positioned`: token term ids and the term map) read off the ids.
+fn fill_ordinals(
+    ordinals: &mut Vec<u32>,
+    text_tokens: &TextTokens,
+    prepared: &PreparedQueryGroups,
+    positioned: Option<(&[u32], &[u32])>,
+) {
+    ordinals.clear();
+    match positioned {
+        Some((ids, map)) => ordinals.extend(
+            ids.iter()
+                .map(|&i| if i == NO_TERM { NO_TERM } else { map.get(i as usize).copied().unwrap_or(NO_TERM) }),
+        ),
+        None => ordinals.extend(
+            text_tokens
+                .tokens()
+                .iter()
+                .map(|t| prepared.get(text_tokens.norm_of(t)).map_or(NO_TERM, |p| p.ordinal as u32)),
+        ),
+    }
+}
 
 fn in_group(ordinals: &[u32], prepared: &PreparedQueryGroups, t: usize, g: usize) -> bool {
     ordinals[t] != NO_TERM && prepared.groups_at(ordinals[t] as usize).contains(&g)
@@ -1301,5 +1490,99 @@ mod tests {
         let d = loc.locate(text, &p, false, 0);
         let (start, len, _) = d.marks().next().unwrap();
         assert_eq!(slice16(text, start, start + len), "ורא<b>ה</b>");
+    }
+
+    /// The index's view of a text: each word's (position, term id) for the
+    /// words that are `terms`, as the postings give them (one per position
+    /// and term).
+    fn postings_of(text: &str, terms: &[String]) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        crate::scanner::scan_with(text, false, |w, s| {
+            if let Some(i) = terms.iter().position(|t| t == w) {
+                out.push((s.position as u32, i as u32));
+            }
+        });
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn positioned_locate_equals_hashed_locate() {
+        let a = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
+        let b = "\u{05D1}\u{05D9}\u{05EA}";
+        let c = "\u{05DE}\u{05E9}\u{05D4}";
+        let texts = [
+            format!("{a} x {b} {c} {a} y y {b}"),
+            format!("({a}) [{a}] {b} <b>{c}</b> &nbsp; {a}\u{05B8} {b}"),
+            format!("{c} {}", "z ".repeat(40) + b),
+            format!("{a}\"{b} {a}' {b},{c}. {a}"),
+            format!("{}{a} {b}", "w ".repeat(30)),
+            format!("{a} {b} {}", "q ".repeat(50)),
+            String::new(),
+            "x y z".to_string(),
+        ];
+        let groups = [vec![a.to_string()], vec![b.to_string()]];
+        let p = PreparedQueryGroups::from_groups(&groups);
+        let terms: Vec<String> = vec![a.into(), b.into(), c.into()];
+        let map: Vec<u32> = terms.iter().map(|t| p.get(t).map_or(u32::MAX, |x| x.ordinal as u32)).collect();
+        for ctx in [0, 1, 3, 10] {
+            for t in &texts {
+                let occ = postings_of(t, &terms);
+                let mut x = SnippetWindowLocator::new(ctx);
+                let mut y = SnippetWindowLocator::new(ctx);
+                x.tokenize(t);
+                assert!(y.tokenize_positioned(t, &[0], &[&occ], &terms), "{}", t.escape_unicode());
+                for ordered in [false, true] {
+                    let dx = x.locate_tokenized(&p, ordered, 0);
+                    let ex = (dx.is_match, dx.score, dx.word_distance, dx.window_word_count, dx.snap_start, dx.snap_end, dx.mark_ranges.to_vec());
+                    let dy = y.locate_tokenized_mapped(&p, &map, ordered, 0);
+                    let ey = (dy.is_match, dy.score, dy.word_distance, dy.window_word_count, dy.snap_start, dy.snap_end, dy.mark_ranges.to_vec());
+                    assert_eq!(ex, ey, "ctx {ctx} {}", t.escape_unicode());
+                }
+                for prox in [Proximity::Ordered { gaps: vec![1] }, Proximity::AnyOrder { max_span: 3 }] {
+                    let dx = x.locate_proximity_tokenized(&p, &prox);
+                    let ex = (dx.is_match, dx.score, dx.snap_start, dx.snap_end, dx.mark_ranges.to_vec());
+                    let dy = y.locate_proximity_tokenized_mapped(&p, &map, &prox);
+                    let ey = (dy.is_match, dy.score, dy.snap_start, dy.snap_end, dy.mark_ranges.to_vec());
+                    assert_eq!(ex, ey, "ctx {ctx} {}", t.escape_unicode());
+                }
+            }
+        }
+        // two lines joined by a space: positions local to each line
+        let (l1, l2) = (&texts[0], &texts[2]);
+        let joined = format!("{l1} {l2}");
+        let (o1, o2) = (postings_of(l1, &terms), postings_of(l2, &terms));
+        let mut x = SnippetWindowLocator::new(3);
+        let mut y = SnippetWindowLocator::new(3);
+        x.tokenize(&joined);
+        assert!(y.tokenize_positioned(&joined, &[0, l1.len() + 1], &[&o1, &o2], &terms));
+        let dx = x.locate_tokenized(&p, false, 0);
+        let ex = (dx.score, dx.snap_start, dx.snap_end, dx.mark_ranges.to_vec());
+        let dy = y.locate_tokenized_mapped(&p, &map, false, 0);
+        assert_eq!(ex, (dy.score, dy.snap_start, dy.snap_end, dy.mark_ranges.to_vec()));
+        // positions that do not match the text: refused (the caller falls back)
+        let wrong = postings_of(&texts[1], &terms);
+        assert!(!y.tokenize_positioned(&texts[0], &[0], &[&wrong], &terms));
+    }
+
+    #[test]
+    fn light_tokens_equal_full_tokens_and_the_scan_stops() {
+        let text = "\u{05D0}\u{05D1} (\u{05D2}) [\u{05D3}] <b>\u{05D4}</b>\u{05B8} &amp; 12 \u{05D5}\"\u{05D6} end";
+        let mut full = TextTokens::default();
+        let a: Vec<_> = full.tokenize(text).iter().map(|t| (t.utf16_start, t.utf16_end, t.visible_start, t.letters, t.position)).collect();
+        let len = full.raw_utf16_len();
+        let mut light = TextTokens::default();
+        let b: Vec<_> =
+            light.tokenize_light(text, |_| true).iter().map(|t| (t.utf16_start, t.utf16_end, t.visible_start, t.letters, t.position)).collect();
+        assert_eq!(a, b);
+        assert_eq!(len, light.raw_utf16_len());
+        let mut seen = 0;
+        let c = light.tokenize_light(text, |_| {
+            seen += 1;
+            seen < 3
+        });
+        assert_eq!(c.len(), 3);
+        assert_eq!(light.raw_utf16_len(), len, "the whole text's length even after a stop");
     }
 }

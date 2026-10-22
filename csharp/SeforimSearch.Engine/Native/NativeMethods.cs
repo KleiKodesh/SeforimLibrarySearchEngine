@@ -102,6 +102,10 @@ namespace SeforimSearch.Engine.Native
         public static extern SeBuffer se_search_locate_batch(SearchHandle search, IntPtr* texts, UIntPtr* lens, UIntPtr count);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern SeBuffer se_search_locate_lines(SearchHandle search, long* hitIndexes, UIntPtr* lineCounts,
+                                                             UIntPtr hitCount, ulong* lineIds, IntPtr* texts, UIntPtr* lens);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern ulong se_search_copy_next_lines(SearchHandle search, ulong offset, ulong count, ulong* output);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

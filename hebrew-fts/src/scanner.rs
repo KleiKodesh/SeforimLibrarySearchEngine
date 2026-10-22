@@ -86,8 +86,13 @@ enum State {
     Pending,
 }
 
-struct Scan<'f, F: FnMut(&str, WordSpan)> {
+struct Scan<'f, F: FnMut(&str, WordSpan) -> bool> {
     on_word: &'f mut F,
+    /// `on_word` returned false: the caller has every word it needs.
+    stopped: bool,
+    /// Light scan: the fast paths keep no normalized text (`on_word` then
+    /// gets a word that is not the token's; spans and counts are exact).
+    light: bool,
     normalizer: Normalizer,
     norm: Normalized,
     state: State,
@@ -111,7 +116,7 @@ struct Scan<'f, F: FnMut(&str, WordSpan)> {
     words: usize,
 }
 
-impl<F: FnMut(&str, WordSpan)> Scan<'_, F> {
+impl<F: FnMut(&str, WordSpan) -> bool> Scan<'_, F> {
     /// Feeds a visible element outside any word to the paired-reading checks.
     #[inline]
     fn after_word(&mut self, c: char) {
@@ -141,7 +146,7 @@ impl<F: FnMut(&str, WordSpan)> Scan<'_, F> {
                 self.words += 1;
                 self.words - 1
             };
-            (self.on_word)(&text, span);
+            self.stopped |= !(self.on_word)(&text, span);
         }
     }
 
@@ -183,7 +188,7 @@ impl<F: FnMut(&str, WordSpan)> Scan<'_, F> {
             self.held = Some((self.norm.text.clone(), span));
         } else {
             self.words += 1;
-            (self.on_word)(&self.norm.text, WordSpan { position: self.words - 1, ..span });
+            self.stopped |= !(self.on_word)(&self.norm.text, WordSpan { position: self.words - 1, ..span });
         }
         self.gap = if self.after_paren { Gap::Suffix } else { Gap::None };
     }
@@ -314,6 +319,21 @@ fn scan_counted(
     keep_marks: bool,
     mut on_word: impl FnMut(&str, WordSpan),
 ) -> (usize, usize) {
+    scan_until(text, keep_marks, false, |w, s| {
+        on_word(w, s);
+        true
+    })
+}
+
+/// [`scan_counted`] that stops once `on_word` returns false: no later word
+/// is reported, and the returned UTF-16 length is still the whole text's
+/// (the visible length then counts only up to the stop).
+pub(crate) fn scan_until(
+    text: &str,
+    keep_marks: bool,
+    light: bool,
+    mut on_word: impl FnMut(&str, WordSpan) -> bool,
+) -> (usize, usize) {
     let bytes = text.as_bytes();
     let n = bytes.len();
     if n == 0 {
@@ -321,6 +341,8 @@ fn scan_counted(
     }
     let mut s = Scan {
         on_word: &mut on_word,
+        stopped: false,
+        light,
         normalizer: Normalizer { keep_marks, wildcards: false },
         norm: Normalized { text: String::with_capacity(64), ..Normalized::default() },
         state: State::Outside,
@@ -349,11 +371,16 @@ fn scan_counted(
     let mut u = 0usize;
 
     while b < n {
+        if s.stopped {
+            return (u + utf16_len(&bytes[b..]), visible);
+        }
         if !in_tag {
             let x = bytes[b];
             // Fast path: a Hebrew letter (U+05D0..U+05EA) inside a word.
             if x == 0xD7 && (0x90..=0xAA).contains(&bytes[b + 1]) && s.state == State::InWord {
-                s.norm.text.push_str(&text[b..b + 2]);
+                if !s.light {
+                    s.norm.text.push_str(&text[b..b + 2]);
+                }
                 s.norm.term_bytes += 2;
                 s.norm.letters += 1;
                 s.prev = '\u{05D0}';
@@ -377,7 +404,9 @@ fn scan_counted(
                 s.after_paren = s.prev == '(';
                 s.second_reading = false;
                 s.norm.text.clear();
-                s.norm.text.push_str(&text[b..b + 2]);
+                if !s.light {
+                    s.norm.text.push_str(&text[b..b + 2]);
+                }
                 s.norm.term_bytes = 2;
                 s.norm.letters = 1;
                 s.prev = '\u{05D0}';
@@ -660,6 +689,39 @@ impl TextTokens {
                 });
             });
         &self.tokens
+    }
+
+    /// [`tokenize`](Self::tokenize) without normalized text (every token's
+    /// [`norm_of`](Self::norm_of) is empty; the scan builds none for plain
+    /// letters): `on_token` sees each token right after it is stored, and
+    /// stops the scan by returning false (the tokens then end there; the
+    /// UTF-16 length is still the whole text's). A token's normalized word,
+    /// when needed, is the scan of its own span.
+    pub fn tokenize_light(&mut self, text: &str, mut on_token: impl FnMut(&TextToken) -> bool) -> &[TextToken] {
+        self.norm.clear();
+        self.tokens.clear();
+        let tokens = &mut self.tokens;
+        (self.raw_utf16_len, self.visible_len) = scan_until(text, self.keep_marks, true, |_, span| {
+            let token = TextToken {
+                raw_start: span.byte_start,
+                raw_end: span.byte_end,
+                utf16_start: span.utf16_start,
+                utf16_end: span.utf16_end,
+                visible_start: span.visible_start,
+                letters: span.letters,
+                position: span.position,
+                norm_start: 0,
+                norm_len: 0,
+            };
+            tokens.push(token);
+            on_token(&token)
+        });
+        &self.tokens
+    }
+
+    /// True when the normalized words keep nikud/te'amim.
+    pub fn keeps_marks(&self) -> bool {
+        self.keep_marks
     }
 
     /// Tokenizes two consecutive lines as ONE text, `left + "\n" + right`

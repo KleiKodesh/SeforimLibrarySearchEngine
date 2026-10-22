@@ -298,6 +298,11 @@ seforim.db knowledge).
   negative query (`ExcludeSpec`); תרגום ארמי as a HOST lexicon (Dart demo
   `translation_lexicon.dart`) and ראשי תיבות (host `acronym_lexicon.dart` + engine
   `phrase_alternatives`): app assets/dictionaries stay out of the engine.
+- **Snippets from positions** (`positioned.rs`, `locate_lines`): the scan itself stays
+  (FtsLib scores windows by character span and needs UTF-16/visible offsets), so the
+  gain is bounded (15-24% on long lines, nothing on short ones); a cost rule picks the
+  path per batch. Postings hold a term TWICE at one position when a paired reading
+  repeats its word: dedup before matching words to positions.
 - Trap: Git Bash / PowerShell mangle an ASCII `"` in args to Windows exes (רמב"ם became
   3 words). Test acronyms with the Hebrew ״, which the sanitizer folds to `"`.
 - Otzaria's Acronyms.json has no רמב"ם entry (it has רמב"ן etc.); check the asset

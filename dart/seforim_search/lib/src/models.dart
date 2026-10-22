@@ -490,6 +490,16 @@ class SnippetMark {
   final int termId;
 }
 
+/// One hit for [SearchSession.locateLines]: its index in the search's hits
+/// (-1 when unknown) and its lines `(lineId, text)` in document order: the
+/// matched line, and for a short window its neighbour lines (empty texts
+/// are skipped).
+class HitLines {
+  const HitLines(this.hitIndex, this.lines);
+  final int hitIndex;
+  final List<(int, String)> lines;
+}
+
 /// A located snippet. Offsets are UTF-16 units into the located text, so
 /// they index Dart strings directly.
 class Snippet {

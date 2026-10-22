@@ -63,6 +63,24 @@ namespace FtsLib.Fts5
             }
         }
 
+        /// <summary><see cref="SearchSession.LocateLines"/> (hits given as their lines).</summary>
+        public Snippet?[] LocateLines(IReadOnlyList<HitLines> hits)
+        {
+            lock (_lock)
+            {
+                long t0 = HostTiming.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                var located = _session.LocateLines(hits);
+                _terms.AddRange(_session.TakeNewTerms());
+                if (HostTiming.Enabled)
+                {
+                    long dt = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+                    if (hits.Count == 1) { HostTiming.SingleTicks += dt; HostTiming.SingleCalls++; }
+                    else { HostTiming.BatchTicks += dt; HostTiming.BatchCalls++; HostTiming.BatchTexts += hits.Count; }
+                }
+                return located;
+            }
+        }
+
         public void Dispose() => _session.Dispose();
     }
 
@@ -162,6 +180,7 @@ namespace FtsLib.Fts5
                 ct.ThrowIfCancellationRequested();
                 int size = batchSizeAt(batchIndex++);
                 PlacedHit[] hits = session.Session.GetHits(offset, size);
+                long first = offset;
                 offset += hits.Length;
                 if (hits.Length == 0) break;
 
@@ -172,10 +191,11 @@ namespace FtsLib.Fts5
                 foreach (var (id, text, placement) in corpus.FetchPlacedDocuments(ids))
                     byId[id] = (text, placement);
 
-                foreach (int id in ids)
+                for (int i = 0; i < ids.Length; i++)
                 {
+                    int id = ids[i];
                     if (!byId.TryGetValue(id, out var row)) continue; // line gone from the DB
-                    yield return new SearchResult(id, row.Text, row.Placement, session);
+                    yield return new SearchResult(id, row.Text, row.Placement, session, first + i);
                 }
             }
         }
@@ -330,10 +350,16 @@ namespace FtsLib.Fts5
             }
             foreach (var kv in bySession)
             {
-                var texts = new string[kv.Value.Count];
-                for (int i = 0; i < texts.Length; i++) texts[i] = kv.Value[i].Content;
-                var located = kv.Key.LocateBatch(texts);
-                for (int i = 0; i < texts.Length; i++)
+                // as their lines: on a positions index the engine reads the matched words
+                // from the postings (same snippets as LocateBatch on the texts)
+                var hits = new HitLines[kv.Value.Count];
+                for (int i = 0; i < hits.Length; i++)
+                {
+                    var r = kv.Value[i];
+                    hits[i] = new HitLines(r.HitIndex, new[] { ((long)r.LineId, r.Content) });
+                }
+                var located = kv.Key.LocateLines(hits);
+                for (int i = 0; i < hits.Length; i++)
                 {
                     kv.Value[i].LocatedSnippet = located[i];
                     kv.Value[i].IsLocated = true;
@@ -407,6 +433,49 @@ namespace FtsLib.Fts5
                 }
                 var located = kv.Key.LocateBatch(texts);
                 for (int k = 0; k < texts.Length; k++)
+                {
+                    var snippet = located[k];
+                    if (snippet != null) output[kv.Value[k]] = new SnippetDescriptor(snippet, kv.Key.TermAt);
+                }
+            }
+            return output;
+        }
+
+        /// <summary>
+        /// <see cref="LocateSnippetWindowsOverNeighbourLines(IReadOnlyList{SearchResult}, IReadOnlyList{string}, IReadOnlyList{string})"/>
+        /// with the neighbour lines given one by one (id and text, document order) instead
+        /// of joined: the engine joins the result's line with them by single spaces (the
+        /// same text, the same offsets) and, on an index with positions, reads the matched
+        /// words from the postings instead of searching the joined text word by word.
+        /// </summary>
+        public SnippetDescriptor[] LocateSnippetWindowsOverNeighbourLines(IReadOnlyList<SearchResult> results,
+            IReadOnlyList<IReadOnlyList<(long LineId, string Text)>> previousLines,
+            IReadOnlyList<IReadOnlyList<(long LineId, string Text)>> nextLines)
+        {
+            var output = new SnippetDescriptor[results.Count];
+            var bySession = new Dictionary<SearchSessionRef, List<int>>();
+            for (int i = 0; i < results.Count; i++)
+            {
+                output[i] = SnippetDescriptor.NoMatch;
+                var r = results[i];
+                if (r == null || string.IsNullOrEmpty(r.Content)) continue;
+                if (!bySession.TryGetValue(r.Session, out var list)) bySession[r.Session] = list = new List<int>();
+                list.Add(i);
+            }
+            foreach (var kv in bySession)
+            {
+                var hits = new HitLines[kv.Value.Count];
+                for (int k = 0; k < hits.Length; k++)
+                {
+                    int i = kv.Value[k];
+                    var lines = new List<(long, string)>(previousLines[i].Count + 1 + nextLines[i].Count);
+                    lines.AddRange(previousLines[i]);
+                    lines.Add((results[i].LineId, results[i].Content));
+                    lines.AddRange(nextLines[i]);
+                    hits[k] = new HitLines(results[i].HitIndex, lines);
+                }
+                var located = kv.Key.LocateLines(hits);
+                for (int k = 0; k < hits.Length; k++)
                 {
                     var snippet = located[k];
                     if (snippet != null) output[kv.Value[k]] = new SnippetDescriptor(snippet, kv.Key.TermAt);

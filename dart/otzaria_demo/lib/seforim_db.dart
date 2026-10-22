@@ -175,6 +175,14 @@ class SeforimDb {
     return {for (final r in rs) r.columnAt(0) as int: decode(r.columnAt(1))};
   }
 
+  /// [linesAround] with each line's id: lineIndex -> (id, text).
+  Map<int, (int, String)> lineIdsAround(int bookId, int from, int to) {
+    final rs = _db.select(
+        'SELECT l.lineIndex, l.id, $_contentCol FROM line l$_contentJoin WHERE l.bookId = ? AND l.lineIndex BETWEEN ? AND ?',
+        [bookId, from, to]);
+    return {for (final r in rs) r.columnAt(0) as int: (r.columnAt(1) as int, decode(r.columnAt(2)))};
+  }
+
   /// Each line's lineIndex (its place in its book), from the DB: the engine
   /// returns line ids only.
   Map<int, int> lineIndexesOf(Iterable<int> ids) {

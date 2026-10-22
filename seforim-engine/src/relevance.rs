@@ -94,13 +94,21 @@ const FUZZY_PHRASE_SLOP: u32 = 1;
 /// Sorts `hits` (any order) by catalog position, or by `generations`
 /// (`(book_id, generation_order)`; a later pair for the same book wins)
 /// then catalog position.
-pub(crate) fn sort_hits(hits: &mut [PlacedHit], order: ResultsOrder, generations: &[(u64, u32)]) {
+pub(crate) fn sort_hits<T>(
+    hits: &mut [T],
+    hit: impl Fn(&T) -> &PlacedHit,
+    order: ResultsOrder,
+    generations: &[(u64, u32)],
+) {
     match order {
         ResultsOrder::Generation => {
             let rank: HashMap<u64, u32> = generations.iter().copied().collect();
-            hits.sort_unstable_by_key(|h| (rank.get(&h.book_id).map_or(u64::MAX, |&g| u64::from(g)), h.position));
+            hits.sort_unstable_by_key(|h| {
+                let h = hit(h);
+                (rank.get(&h.book_id).map_or(u64::MAX, |&g| u64::from(g)), h.position)
+            });
         }
-        _ => hits.sort_unstable_by_key(|h| h.position),
+        _ => hits.sort_unstable_by_key(|h| hit(h).position),
     }
 }
 
@@ -898,9 +906,13 @@ impl MainWeights {
 }
 
 /// Orders `hits` (aligned with `scores`) best first, ties by catalog position.
-pub(crate) fn sort_by_score(hits: Vec<PlacedHit>, scores: Vec<Score>) -> (Vec<PlacedHit>, Vec<Score>) {
-    let mut pairs: Vec<(PlacedHit, Score)> = hits.into_iter().zip(scores).collect();
-    pairs.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.position.cmp(&b.0.position)));
+pub(crate) fn sort_by_score<T>(
+    hits: Vec<T>,
+    scores: Vec<Score>,
+    hit: impl Fn(&T) -> &PlacedHit,
+) -> (Vec<T>, Vec<Score>) {
+    let mut pairs: Vec<(T, Score)> = hits.into_iter().zip(scores).collect();
+    pairs.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(hit(&a.0).position.cmp(&hit(&b.0).position)));
     pairs.into_iter().unzip()
 }
 

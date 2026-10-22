@@ -363,9 +363,15 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 pending.Add((i, previousIds, nextIds, previous, next));
             }
 
+            // The neighbour lines go to the engine one by one (id + text): it joins them
+            // exactly as JoinWithNeighbourLines does and, on an index with positions, reads
+            // the matched words from the postings.
+            var textById = new Dictionary<int, string>(linesByPosition.Count);
+            foreach (var line in linesByPosition.Values) textById[line.Id] = line.Text;
+            IReadOnlyList<(long, string)> Lines(List<int> ids) => ids.ConvertAll(id => ((long)id, textById[id]));
             var extendedAll = index.LocateSnippetWindowsOverNeighbourLines(
-                pending.ConvertAll(p => results[p.Index]), pending.ConvertAll(p => p.Previous),
-                pending.ConvertAll(p => p.Next));
+                pending.ConvertAll(p => results[p.Index]), pending.ConvertAll(p => Lines(p.PreviousIds)),
+                pending.ConvertAll(p => Lines(p.NextIds)));
 
             for (int k = 0; k < pending.Count; k++)
             {

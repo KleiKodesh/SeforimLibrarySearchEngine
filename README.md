@@ -880,6 +880,17 @@ are not printed), so upstream's query-parser tests stay as they are.
   only a cap filled exactly at the end of a length level searches depth
   first for one more match, stopping at the first; with none left it may
   visit the rest of the matching subtree).
+- **Snippets from the index positions** (`SnippetSession::try_locate_lines`,
+  C ABI `se_search_locate_lines`, C# `SearchSession.LocateLines`, Dart
+  `SearchSession.locateLines`): hits are given as their LINES, each hit its
+  matched line and, for a short window, its neighbour lines, each with its
+  `line_id` (plus the hit's index in the hits when known). The engine joins
+  the non-empty texts by single spaces (FtsLib's `JoinWithNeighbourLines`,
+  the same text and offsets as before) and, on an index with positions,
+  takes the matched words from the postings instead of hashing every word
+  of the text. See "Snippets from positions" below. The text-only calls
+  (`locate_batch`, `locate_pairs`) stay: an index without positions, the
+  line regex and cross-line pairs use them.
 - **C ABI conventions:** objects are opaque handles; strings cross as UTF-8
   pointer + length; errors are `0/-1` status codes with a per-thread
   `se_last_error`; hot paths are binary (no JSON).
@@ -895,7 +906,10 @@ are not printed), so upstream's query-parser tests stay as they are.
   as `SearchOptions`; FtsLib's `QueryParser` is ported in hebrew-fts), and
   `TantivySeforimIndex` (`Search`, `LocateSnippetWindow`,
   `LocateSnippetWindowOverNeighbourLines`, resumable `BuildLines`,
-  `GetResumeState`).
+  `GetResumeState`). Batches and the neighbour widening go to the engine
+  as lines (`LocateLines`: each result's hit index and line id, the
+  neighbours one by one), so a positions index locates them from the
+  postings.
 
 ## Build and search reports
 
@@ -920,6 +934,73 @@ byte-identical output (the old scanner is kept as a test-only reference and
 compared on ~65 edge cases plus 20,000 random strings). `locate_many` splits
 work by bytes across reused per-thread locators. An 802,736-hit search read
 in full went from 54.8 s to 29.0 s (C# demo, no-positions index).
+
+## Snippets from positions
+
+On an index with positions the engine already knows at which word
+positions of a line the matched terms sit, so `locate_lines` takes them
+from the postings instead of hashing every word of the text:
+
+1. Each line's doc: a hit's (segment, doc) is kept from the search
+   (aligned with the hits, carried through the sort); any other line (a
+   neighbour) is found by its `line_id` term. Deleted docs are skipped.
+2. Per batch and segment, every matched term of the session (the sinks'
+   terms of the main query, the phrase alternatives and the text-level
+   negatives, numbered once) is read from the postings ONCE, seeking
+   through the batch's sorted docs (split across cores by term and by doc
+   range on large batches). Each line gets its sorted `(position, term)`
+   list; a term repeated at one position (a paired reading `(X) [X]`) is
+   one entry.
+3. One light scan of the text (`SnippetWindowLocator::tokenize_positioned`):
+   the same scanner (word boundaries, positions, UTF-16 and visible
+   offsets), but no normalized text is built for plain letters and no word
+   is hashed; a word's text is read only where a matched term sits, to
+   check the term is that word (paired readings share a position). The
+   scan stops once the words after the last matched position can no longer
+   reach a window or its context.
+4. The window rules (FtsLib's tightest window, ties to the earliest, marks,
+   distance, order, proximity, partial matching, negatives, phrase
+   alternatives) are the SAME code as the text path, fed the term ids
+   through a per-matcher map, so the snippets are byte-identical.
+
+The window is chosen after the scan, not before: FtsLib scores a window by
+its span in characters, which positions alone do not give. A text that
+disagrees with its positions at a matched word (a line the index does not
+hold, a text that is not the indexed one) is located from the text. The
+texts given must be the indexed lines' texts: a text changed only away
+from the matched words is not detected (the index is stale then anyway).
+
+**When it is used.** Reading postings costs per matched term and per
+posting block; the work it saves grows with the line's length. Measured on
+the full library, it pays off on long lines with up to a few hundred terms
+and loses on short lines (a common single word) and broad expansions (a
+capped walk, a word with all its prefixes). So a batch takes the positions
+only when its texts average more than `1500 + 2 x terms` bytes
+(`PositionSource::pays_off`); otherwise the text path, same snippets.
+
+Measured (`cargo run --release -p seforim-engine --example positions_bench`,
+full-index-v8, the first 4000 hits of each query with their seforim.db
+texts, 8 cores, median of 15 runs; the same snippets checked on every run):
+
+| query | terms | avg line | text path | from positions | change |
+|---|---|---|---|---|---|
+| two words | 16 | 2444 B | 23.1 ms | 19.5 ms | -15% |
+| two words, distance 0 | 16 | 2444 B | 22.7 ms | 18.7 ms | -18% |
+| two words, proximity | 21 | 2713 B | 24.6 ms | 19.9 ms | -19% |
+| wildcard `*x*` | 245 | 2013 B | 19.8 ms | 15.1 ms | -24% |
+| fuzzy ~1 | 75 | 2100 B | 20.0 ms | 15.3 ms | -23% |
+| three words | 22 | 1271 B | 13.0 ms | 13.2 ms | text path |
+| one common word | 11 | 627 B | 6.2 ms | 6.6 ms | text path |
+| word with prefixes+suffixes | 462 | 1473 B | 13.1 ms | 13.0 ms | text path |
+| capped wildcard `xy*` | 3031 | 293 B | 3.7 ms | 3.7 ms | text path |
+
+In batches of 256 (FtsLib's first batches) the winners gain 10-15% (two
+words, distance 0: 35.7 -> 31.5 ms for 16 batches) and the wildcard breaks
+even. The first run of a process (the positions file first touched) shows
+the same gains (two words: 23.1 -> 19.8 ms); a cold OS file cache was not
+measured. Forcing the positions everywhere (`force_positions`) makes the
+losers slower: one common word +23%, three words +14%, the capped wildcard
++117% at 4000 lines.
 
 ## Parity with FtsLib (measured)
 

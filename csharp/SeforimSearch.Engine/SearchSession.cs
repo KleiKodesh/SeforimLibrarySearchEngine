@@ -91,6 +91,57 @@ namespace SeforimSearch.Engine
         }
 
         /// <summary>
+        /// Locates a batch of hits given as their LINES: each hit is its matched line and,
+        /// for a short window, its neighbour lines (document order), located over the
+        /// non-empty texts joined by single spaces (offsets into that joined text, as
+        /// FtsLib's JoinWithNeighbourLines). <see cref="HitLines.HitIndex"/> is the hit's
+        /// index in this search's hits (-1 when unknown). On an index with positions the
+        /// engine reads the matched words from the postings instead of searching every
+        /// word of the text (faster, same snippets); otherwise it is <see cref="LocateBatch"/>
+        /// on the joined texts. Cross-line pairs go through <see cref="LocatePairs"/>.
+        /// </summary>
+        public Snippet?[] LocateLines(IReadOnlyList<HitLines> hits)
+        {
+            int n = hits.Count;
+            var results = new Snippet?[n];
+            if (n == 0) return results;
+            var hitIndexes = new long[n];
+            var counts = new UIntPtr[n];
+            var texts = new List<string>();
+            var ids = new List<ulong>();
+            for (int h = 0; h < n; h++)
+            {
+                hitIndexes[h] = hits[h].HitIndex;
+                var lines = hits[h].Lines;
+                counts[h] = (UIntPtr)lines.Count;
+                foreach (var line in lines)
+                {
+                    ids.Add((ulong)line.LineId);
+                    texts.Add(line.Text ?? string.Empty);
+                }
+            }
+            var idArray = ids.ToArray();
+            uint[] data;
+            fixed (long* hp = hitIndexes)
+            fixed (UIntPtr* cp = counts)
+            fixed (ulong* ip = idArray)
+            {
+                long* hpp = hp;
+                UIntPtr* cpp = cp;
+                ulong* ipp = ip;
+                data = WithTexts(texts, (p, l) =>
+                    Interop.TakeBuffer(NativeMethods.se_search_locate_lines(_handle, hpp, cpp, (UIntPtr)n, ipp, p, l)));
+            }
+            int at = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (data[at++] == 0) continue;
+                results[i] = Snippet.Read(data, ref at);
+            }
+            return results;
+        }
+
+        /// <summary>
         /// <see cref="LocateBatch"/> for hits given with their next line's text (cross-line
         /// matching: null for a hit without <see cref="PlacedHit.NextLineId"/>). The line alone
         /// is tried first; a cross-line snippet has <see cref="Snippet.BreakAt"/> and offsets

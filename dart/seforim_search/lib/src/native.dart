@@ -95,6 +95,11 @@ final class SeforimNative {
             'se_search_hit_count'),
         searchCopyHits = lib.lookupFunction<Uint64 Function(Pointer<Void>, Uint64, Uint64, Pointer<Uint64>),
             int Function(Pointer<Void>, int, int, Pointer<Uint64>)>('se_search_copy_hits'),
+        locateLines = lib.lookupFunction<
+            SeBuffer Function(Pointer<Void>, Pointer<Int64>, Pointer<Size>, Size, Pointer<Uint64>,
+                Pointer<Pointer<Uint8>>, Pointer<Size>),
+            SeBuffer Function(Pointer<Void>, Pointer<Int64>, Pointer<Size>, int, Pointer<Uint64>,
+                Pointer<Pointer<Uint8>>, Pointer<Size>)>('se_search_locate_lines'),
         locateBatch = lib.lookupFunction<
             SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Size),
             SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int)>('se_search_locate_batch'),
@@ -164,6 +169,8 @@ final class SeforimNative {
   final int Function(Pointer<Void>) searchHitCount;
   final int Function(Pointer<Void>, int, int, Pointer<Uint64>) searchCopyHits;
   final SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) locateBatch;
+  final SeBuffer Function(Pointer<Void>, Pointer<Int64>, Pointer<Size>, int, Pointer<Uint64>,
+      Pointer<Pointer<Uint8>>, Pointer<Size>) locateLines;
   final Pointer<Utf8> Function(Pointer<Void>) takeNewTerms;
   final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>) searchCancellable;
   final int Function() lastErrorCancelled;

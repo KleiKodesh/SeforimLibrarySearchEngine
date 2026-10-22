@@ -20,6 +20,7 @@ pub mod options;
 pub mod relevance;
 pub(crate) mod section_scope;
 pub(crate) mod cross_line;
+pub(crate) mod positioned;
 pub mod search;
 
 pub use fm_index::FmIndex;
@@ -35,7 +36,7 @@ pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, W
 pub use relevance::{ResultsOrder, NOTICE_RELEVANCE_NEEDS_POSITIONS};
 pub use search::{
     CancelToken, ExcludeSpec, GroupSpec, HitCounts, PlacedHit, ProximitySpec, SearchInfo,
-    SearchRequest, SearchResult, Snippet, SnippetSession, KtivRulesSpec, TypoModeSpec, WalkOptionsSpec,
+    SearchRequest, SearchResult, Snippet, SnippetSession, HitLines, KtivRulesSpec, TypoModeSpec, WalkOptionsSpec,
     SNIPPET_FLAG_LEADING_ELLIPSIS, SNIPPET_FLAG_TRAILING_ELLIPSIS,
 };
 

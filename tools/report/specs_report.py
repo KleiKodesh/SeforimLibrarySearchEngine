@@ -174,9 +174,35 @@ for set_, title in SETS:
                       f"{t(r.get('first_ms'))} | {t(r.get('total_ms'))} |")
     md.append("\n</details>\n")
 
-md.append("""## Hit-count comparison with Otzaria
-
-Pending: filled in from the comparison run (same queries, equivalent options; differences analysed: whose bug).
-""")
+md.append("## Hit-count comparison with Otzaria\n")
+hc_path = os.path.join(SP, "otz-hitcount.json")
+if not os.path.exists(hc_path):
+    md.append("Pending: filled in from the comparison run (same queries, equivalent options; differences analysed: whose bug).\n")
+else:
+    hc = json.load(open(hc_path, encoding="utf-8"))
+    md.append(hc.get("method", "") + "\n")
+    classes = {}
+    for rows in hc["sets"].values():
+        for r in rows:
+            classes[r["class"]] = classes.get(r["class"], 0) + 1
+    md.append("| Class | Queries |\n|---|---|")
+    for c, k in sorted(classes.items(), key=lambda x: -x[1]):
+        md.append(f"| {c} | {k} |")
+    md.append("")
+    for set_, title in SETS:
+        rows = hc["sets"].get(set_)
+        if not rows:
+            continue
+        md.append(f"### {title}\n")
+        md.append("| q | Query | Otzaria mode | Otzaria hits | Ours hits | Diff | Class | Reason |\n|---|---|---|---|---|---|---|---|")
+        for r in rows:
+            d = r["ours"] - r["otz"]
+            md.append(f"| q{r['n'] + 1} | `{r['query']}` {r.get('dist') or ''} | {r['mode']} | {r['otz']:,} | {r['ours']:,} | "
+                      f"{d:+,} | {r['class']} | {r['reason']} |")
+        md.append("")
+    if hc.get("notes"):
+        md.append("**Causes, with evidence:**\n")
+        md.extend(f"- {x}" for x in hc["notes"])
+        md.append("")
 open(OUT, "w", encoding="utf-8", newline="\n").write("\n".join(md))
 print("wrote", OUT)

@@ -96,6 +96,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             Guard(C.FetchDocuments(ids));
         public IEnumerable<(int Id, string Text, FtsDocumentPlacement Placement)> FetchPlacedDocuments(IEnumerable<int> ids) =>
             Guard(C.FetchPlacedDocuments(ids));
+        public Dictionary<int, FtsDocumentPlacement> FetchPlacements(IReadOnlyList<int> ids) => C.FetchPlacements(ids);
         public List<SeforimDbFtsLineAtPosition> FetchLinesAtBookPositions(
             IReadOnlyList<(int BookId, int LineIndex)> positions) => C.FetchLinesAtBookPositions(positions);
         public IDictionary<int, (string Previous, string Next)> FetchNeighbourText(IReadOnlyList<int> ids, int radius) =>
@@ -284,13 +285,81 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             }
         }
 
-        /// <summary>Search-result content without placement - the plain corpus seam. The
-        /// Title slot is left empty on purpose: Core enriches hits with their book ID instead
-        /// and never reads the engine's title. The engine's own diagnostics run over the test
-        /// corpus, which does fill it.</summary>
+        /// <summary>Search-result content without placement - the plain corpus seam, and the
+        /// searcher's verification fetch: id and text only, by primary key from the table that
+        /// holds the text (<see cref="SeforimDbSqlStrings.FtsFetchLines"/>). The Title slot is
+        /// left empty on purpose: Core enriches hits with their book ID instead and never reads
+        /// the engine's title.</summary>
         public IEnumerable<(int Id, string Text, string Title)> FetchDocuments(IEnumerable<int> ids)
         {
-            foreach (var (id, text, _) in FetchPlacedDocuments(ids)) yield return (id, text, "");
+            var chunk = new List<int>(SqliteInListChunkSize);
+
+            foreach (int id in ids)
+            {
+                chunk.Add(id);
+                if (chunk.Count == SqliteInListChunkSize)
+                {
+                    foreach (var row in FetchTextChunk(chunk)) yield return row;
+                    chunk.Clear();
+                }
+            }
+
+            if (chunk.Count > 0)
+                foreach (var row in FetchTextChunk(chunk)) yield return row;
+        }
+
+        private IEnumerable<(int Id, string Text, string Title)> FetchTextChunk(List<int> ids)
+        {
+            var (command, parameterNames, cached) =
+                Statement(SeforimDbSqlStrings.FtsFetchLines(_schema, ids.Count), ids.Count);
+            try
+            {
+                for (int i = 0; i < ids.Count; i++)
+                    command.Parameters[parameterNames[i]].Value = ids[i];
+
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1), "");
+            }
+            finally
+            {
+                Release(command, cached);
+            }
+        }
+
+        /// <summary>
+        /// The placement (book id, lineIndex, own TOC entry) of each line, no text - what the
+        /// searcher reads AFTER verification, for the hits that passed
+        /// (<see cref="SeforimDbSqlStrings.FtsFetchPlacements"/>). An id with no line is absent.
+        /// </summary>
+        public Dictionary<int, FtsDocumentPlacement> FetchPlacements(IReadOnlyList<int> ids)
+        {
+            var placements = new Dictionary<int, FtsDocumentPlacement>(ids?.Count ?? 0);
+            if (ids == null || ids.Count == 0) return placements;
+
+            for (int start = 0; start < ids.Count; start += SqliteInListChunkSize)
+            {
+                int count = Math.Min(SqliteInListChunkSize, ids.Count - start);
+                var (command, parameterNames, cached) =
+                    Statement(SeforimDbSqlStrings.FtsFetchPlacements(_schema, count), count);
+                try
+                {
+                    for (int i = 0; i < count; i++)
+                        command.Parameters[parameterNames[i]].Value = ids[start + i];
+
+                    using var reader = command.ExecuteReader();
+                    while (reader.Read())
+                        placements[reader.GetInt32(0)] = new FtsDocumentPlacement(
+                            bookId: reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                            lineIndex: reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                            tocEntryId: reader.GetInt32(3));
+                }
+                finally
+                {
+                    Release(command, cached);
+                }
+            }
+            return placements;
         }
 
         /// <summary>Search-result content plus each line's placement (book id, lineIndex, own

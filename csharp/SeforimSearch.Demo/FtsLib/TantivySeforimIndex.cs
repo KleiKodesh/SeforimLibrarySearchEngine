@@ -154,7 +154,7 @@ namespace FtsLib.Fts5
         /// </summary>
         public IEnumerable<SearchResult> Search(string query, TantivySearchOptions? options = null,
                                                 CancellationToken ct = default, Action<string>? onStage = null,
-                                                Func<int, int>? batchSizeAt = null)
+                                                Func<int, int>? batchSizeAt = null, bool withPlacement = true)
         {
             if (!SeforimIndex.Exists(_indexPath)) yield break;
             options ??= new TantivySearchOptions();
@@ -187,9 +187,20 @@ namespace FtsLib.Fts5
                 if (firstFetch) { onStage?.Invoke("fetch"); firstFetch = false; }
                 var ids = new int[hits.Length];
                 for (int i = 0; i < hits.Length; i++) ids[i] = (int)hits[i].LineId;
+                // withPlacement: false = the text only (all the locate reads); the placement
+                // carries just the book id the index already returned, and the caller reads
+                // the rest for the hits it keeps (FtsLib's Search(withPlacement) contract).
                 var byId = new Dictionary<int, (string Text, FtsDocumentPlacement Placement)>(hits.Length);
-                foreach (var (id, text, placement) in corpus.FetchPlacedDocuments(ids))
-                    byId[id] = (text, placement);
+                if (withPlacement)
+                    foreach (var (id, text, placement) in corpus.FetchPlacedDocuments(ids))
+                        byId[id] = (text, placement);
+                else
+                {
+                    var bookOf = new Dictionary<int, int>(hits.Length);
+                    foreach (var h in hits) bookOf[(int)h.LineId] = (int)h.BookId;
+                    foreach (var (id, text, _) in corpus.FetchDocuments(ids))
+                        byId[id] = (text, new FtsDocumentPlacement(bookOf[id], 0, 0));
+                }
 
                 for (int i = 0; i < ids.Length; i++)
                 {
@@ -270,7 +281,7 @@ namespace FtsLib.Fts5
                 var ids = new int[hits.Length];
                 for (int i = 0; i < hits.Length; i++) ids[i] = (int)hits[i].LineId;
                 var byId = new Dictionary<int, string>(hits.Length);
-                foreach (var (id, text, _) in corpus.FetchPlacedDocuments(ids)) byId[id] = text;
+                foreach (var (id, text, _) in corpus.FetchDocuments(ids)) byId[id] = text;
                 var texts = new string[hits.Length];
                 for (int i = 0; i < ids.Length; i++) texts[i] = byId.TryGetValue(ids[i], out var t) ? t : string.Empty;
                 session.CountBatch(texts);
@@ -300,7 +311,7 @@ namespace FtsLib.Fts5
                     var ids = new int[hits.Length];
                     for (int i = 0; i < hits.Length; i++) ids[i] = (int)hits[i].LineId;
                     var byId = new Dictionary<int, string>(hits.Length);
-                    foreach (var (id, text, _) in corpus.FetchPlacedDocuments(ids)) byId[id] = text;
+                    foreach (var (id, text, _) in corpus.FetchDocuments(ids)) byId[id] = text;
                     var texts = new string[hits.Length];
                     for (int i = 0; i < ids.Length; i++) texts[i] = byId.TryGetValue(ids[i], out var t) ? t : string.Empty;
                     var found = session.LineMatchBatch(texts);

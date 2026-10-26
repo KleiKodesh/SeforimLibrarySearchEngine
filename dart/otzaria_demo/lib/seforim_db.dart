@@ -210,14 +210,17 @@ class SeforimDb {
     }
   }
 
-  /// Texts of the given line ids.
+  /// Texts of the given line ids: id + content only, by primary key from the table that
+  /// holds the text (`line_content` on a split database, no join), what verification reads.
+  /// A line with no text row is absent (callers read it as empty).
   Map<int, String> lineTexts(Iterable<int> ids) {
     final out = <int, String>{};
     final list = ids.toList();
+    final table = splitContent ? 'line_content' : 'line';
     for (var i = 0; i < list.length; i += 500) {
       final chunk = list.sublist(i, i + 500 > list.length ? list.length : i + 500);
       final rs = _select(
-          'SELECT l.id, $_contentCol FROM line l$_contentJoin WHERE l.id IN (${List.filled(chunk.length, '?').join(',')})',
+          'SELECT id, content FROM $table WHERE id IN (${List.filled(chunk.length, '?').join(',')})',
           chunk);
       for (final r in rs) {
         out[r.columnAt(0) as int] = decode(r.columnAt(1));

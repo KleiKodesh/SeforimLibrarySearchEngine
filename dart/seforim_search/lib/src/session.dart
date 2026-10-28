@@ -36,8 +36,11 @@ final class SearchSession implements Finalizable {
   }
 
   /// Hits [offset, offset+count), in the search's order ([SearchOptions.order]; catalog by default).
+  /// A negative [offset] or [count] throws [ArgumentError].
   List<PlacedHit> hits(int offset, int count) {
-    if (count <= 0 || offset >= hitCount) return const [];
+    if (offset < 0) throw RangeError.range(offset, 0, null, 'offset');
+    if (count < 0) throw RangeError.range(count, 0, null, 'count');
+    if (count == 0 || offset >= hitCount) return const [];
     if (count > hitCount - offset) count = hitCount - offset;
     final raw = calloc<Uint64>(count * 3);
     final next = calloc<Uint64>(count);
@@ -57,8 +60,14 @@ final class SearchSession implements Finalizable {
     }
   }
 
-  /// Every hit, in the search's order, paged.
-  Iterable<PlacedHit> allHits({int pageSize = 4096}) sync* {
+  /// Every hit, in the search's order, paged. [pageSize] must be positive:
+  /// anything else throws [ArgumentError] at the call, before iteration.
+  Iterable<PlacedHit> allHits({int pageSize = 4096}) {
+    if (pageSize <= 0) throw RangeError.range(pageSize, 1, null, 'pageSize');
+    return _allHits(pageSize);
+  }
+
+  Iterable<PlacedHit> _allHits(int pageSize) sync* {
     for (var o = 0; o < hitCount; o += pageSize) {
       yield* hits(o, pageSize);
     }

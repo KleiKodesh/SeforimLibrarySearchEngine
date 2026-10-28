@@ -93,6 +93,16 @@ void main() {
     final s = index.searchRequest(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')]));
     expect(s.allHits().map((h) => h.lineId).toList(), [8]);
     expect(s.hits(0, 1).single.bookId, 2);
+    // paging edges: a non-positive page size is rejected before iteration,
+    // negative offsets / counts throw, past-the-end and empty pages are empty
+    expect(() => s.allHits(pageSize: 0), throwsArgumentError);
+    expect(() => s.allHits(pageSize: -1), throwsArgumentError);
+    expect(s.allHits(pageSize: 1).map((h) => h.lineId).toList(), [8]);
+    expect(() => s.hits(-1, 1), throwsArgumentError);
+    expect(() => s.hits(0, -1), throwsArgumentError);
+    expect(s.hits(0, 0), isEmpty);
+    expect(s.hits(1, 5), isEmpty);
+    expect(s.hits(0, 1 << 40).length, 1);
     s.close();
     final inBook1 = index.searchRequest(SearchRequest(groups: [const QueryGroup.wildcard('ברא*')], books: [1]));
     expect(inBook1.hitCount, 0);

@@ -51,6 +51,7 @@ final s = index.search(SearchOptions('תורה שלו* שבת~1 משה | אהר�
     maxWordDistance: 5, requireOrdered: false, contextWords: 8));
 // low-level form (slots built by hand): index.searchRequest(SearchRequest(groups: [...]))
 s.hitCount; s.hits(offset, count); s.allHits();          // PlacedHit(position, lineId, bookId), in SearchOptions.order (catalog by default)
+// hits: negative offset / count throw ArgumentError; allHits(pageSize:) must be > 0 (checked at the call)
 s.locateBatch(texts); s.locate(text);                    // Snippet? (null = filtered out)
 s.countNeedsText; s.countBatch(texts); s.counts();       // exact totals: HitCounts(total, byBook, validated, exact)
 index.search(options, cancel: t);                       // t = SearchCancelToken(); t.cancel() -> SearchCancelledException

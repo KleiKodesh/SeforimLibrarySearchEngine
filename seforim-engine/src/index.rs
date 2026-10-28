@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tantivy::directory::MmapDirectory;
+use tantivy::indexer::IndexWriterOptions;
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED,
 };
@@ -349,11 +350,28 @@ impl LineIndex {
     /// Starts a writer. `heap_bytes` is the total budget; tantivy needs at
     /// least 15 MB per thread, so threads are capped by it.
     pub fn writer(&self, heap_bytes: usize, num_threads: usize) -> Result<LineWriter> {
+        self.writer_with(heap_bytes, num_threads, false)
+    }
+
+    /// [`Self::writer`] with `low_priority`: tantivy's indexing and merge
+    /// threads run below normal OS priority (a background build that keeps
+    /// the machine responsive; best effort per OS).
+    pub fn writer_with(
+        &self,
+        heap_bytes: usize,
+        num_threads: usize,
+        low_priority: bool,
+    ) -> Result<LineWriter> {
         const MIN_HEAP_PER_THREAD: usize = 15_000_000;
         let heap = heap_bytes.max(MIN_HEAP_PER_THREAD);
         let threads = num_threads.max(1).min(heap / MIN_HEAP_PER_THREAD).max(1);
+        let options = IndexWriterOptions::builder()
+            .num_worker_threads(threads)
+            .memory_budget_per_thread(heap / threads)
+            .low_priority_threads(low_priority)
+            .build();
         Ok(LineWriter {
-            writer: self.index.writer_with_num_threads(threads, heap)?,
+            writer: self.index.writer_with_options(options)?,
             fields: self.fields,
         })
     }

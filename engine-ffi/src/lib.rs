@@ -317,6 +317,33 @@ pub unsafe extern "C" fn se_writer_open(
     })
 }
 
+/// Flag of [`se_writer_open_ex`]: indexing and merge threads run below
+/// normal OS priority (background build; best effort per OS).
+pub const SE_WRITER_LOW_PRIORITY: u32 = 1;
+
+/// [`se_writer_open`] with `flags` (`SE_WRITER_LOW_PRIORITY`; other bits
+/// must be 0).
+///
+/// # Safety
+/// `index` must be a live index; it must outlive the writer.
+#[no_mangle]
+pub unsafe extern "C" fn se_writer_open_ex(
+    index: *const LineIndex,
+    heap_bytes: usize,
+    num_threads: usize,
+    flags: u32,
+) -> *mut LineWriter {
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        if flags & !SE_WRITER_LOW_PRIORITY != 0 {
+            return Err(format!("unknown writer flags {flags:#x}"));
+        }
+        let low = flags & SE_WRITER_LOW_PRIORITY != 0;
+        let writer = index.writer_with(heap_bytes, num_threads, low).map_err(err)?;
+        Ok(Box::into_raw(Box::new(writer)))
+    })
+}
+
 /// Queues one line. Not visible until commit.
 ///
 /// # Safety

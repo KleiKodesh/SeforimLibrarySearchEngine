@@ -118,10 +118,16 @@ final class SeforimIndex implements Finalizable {
   /// True when a sidecar matching the current single segment exists.
   bool get hasFmSidecar => _n.indexHasFmSidecar(handle) == 1;
 
-  /// Starts a writer. [heapBytes] is the total indexing memory (≥15 MB per thread).
-  IndexWriter openWriter({int heapBytes = 50000000, int threads = 0}) {
+  /// Starts a writer. [heapBytes] is the total indexing memory (≥15 MB per
+  /// thread); 0 (the default) gives 50 MB per thread, so [threads] (0 = cores,
+  /// at most 4) are always granted.
+  /// With [lowPriority], tantivy's indexing and merge threads run below
+  /// normal OS priority (a background build that keeps the machine usable).
+  IndexWriter openWriter({int heapBytes = 0, int threads = 0, bool lowPriority = false}) {
     if (threads <= 0) threads = Platform.numberOfProcessors.clamp(1, 4);
-    return IndexWriter._(this, _n.checkPtr(_n.writerOpen(handle, heapBytes, threads)));
+    if (heapBytes <= 0) heapBytes = threads * 50000000;
+    return IndexWriter._(
+        this, _n.checkPtr(_n.writerOpenEx(handle, heapBytes, threads, lowPriority ? 1 : 0)));
   }
 
   /// Runs a search (the public API): the query string is parsed by FtsLib's

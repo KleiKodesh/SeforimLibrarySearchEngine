@@ -104,12 +104,18 @@ namespace SeforimSearch.Engine
         public bool HasFmSidecar => NativeMethods.se_index_has_fm_sidecar(_handle) == 1;
 
         /// <summary>Starts a writer. <paramref name="heapBytes"/> is the total
-        /// indexing memory (at least 15 MB per thread; threads are capped by it).</summary>
-        public SeforimIndexWriter OpenWriter(long heapBytes = 50_000_000, int threads = 0)
+        /// indexing memory (at least 15 MB per thread; threads are capped by it);
+        /// 0 (the default) gives 50 MB per thread, so <paramref name="threads"/>
+        /// (0 = cores, at most 4) are always granted.
+        /// With <paramref name="lowPriority"/>, the indexing and merge threads run below
+        /// normal OS priority (a background build that keeps the machine usable).</summary>
+        public SeforimIndexWriter OpenWriter(long heapBytes = 0, int threads = 0, bool lowPriority = false)
         {
             if (threads <= 0) threads = Math.Min(Environment.ProcessorCount, 4);
-            return new SeforimIndexWriter(Interop.Check(
-                NativeMethods.se_writer_open(_handle, (UIntPtr)(ulong)heapBytes, (UIntPtr)(uint)threads)));
+            if (heapBytes <= 0) heapBytes = threads * 50_000_000L;
+            return new SeforimIndexWriter(Interop.Check(NativeMethods.se_writer_open_ex(
+                _handle, (UIntPtr)(ulong)heapBytes, (UIntPtr)(uint)threads,
+                lowPriority ? NativeMethods.SE_WRITER_LOW_PRIORITY : 0u)));
         }
 
         /// <summary>Runs a search: every matching line in the search's order (catalog by default), plus the

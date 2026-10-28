@@ -500,7 +500,11 @@ are not printed), so upstream's query-parser tests stay as they are.
   bare-minimum rule above) with a host payload (resume watermark,
   provenance stamp) committed atomically with the documents. C ABI:
   `se_index_create` / `_open` / `_exists` / `_info` / `_close`,
-  `se_writer_open`, `se_writer_add` / `se_writer_add_line` (per-line flags,
+  `se_writer_open` / `se_writer_open_ex` (flag `SE_WRITER_LOW_PRIORITY`:
+  tantivy's indexing and merge threads below normal OS priority, best effort
+  per OS; Dart `openWriter(lowPriority:)`, C# `OpenWriter(lowPriority:)`;
+  the SDKs' default heap is 50 MB per thread, so the default threads, cores
+  up to 4, are always granted), `se_writer_add` / `se_writer_add_line` (per-line flags,
   see cross-line below), `se_writer_add_lines` (a batch in one call:
   48-byte `SeLineRecord`s of `se_writer_add_line`'s fields + text length,
   the UTF-8 texts concatenated in one buffer; Dart `IndexWriter.addAll`),

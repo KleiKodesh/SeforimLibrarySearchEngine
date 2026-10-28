@@ -65,6 +65,9 @@ final class SeforimNative {
             'se_index_has_fm_sidecar'),
         writerOpen = lib.lookupFunction<Pointer<Void> Function(Pointer<Void>, Size, Size),
             Pointer<Void> Function(Pointer<Void>, int, int)>('se_writer_open'),
+        writerOpenEx = lib.lookupFunction<
+            Pointer<Void> Function(Pointer<Void>, Size, Size, Uint32),
+            Pointer<Void> Function(Pointer<Void>, int, int, int)>('se_writer_open_ex'),
         writerAdd = lib.lookupFunction<
             Int32 Function(Pointer<Void>, Uint64, Uint64, Uint64, Pointer<Uint8>, Size),
             int Function(Pointer<Void>, int, int, int, Pointer<Uint8>, int)>('se_writer_add'),
@@ -160,6 +163,7 @@ final class SeforimNative {
   final int Function(Pointer<Void>) indexBuildFmSidecar;
   final int Function(Pointer<Void>) indexHasFmSidecar;
   final Pointer<Void> Function(Pointer<Void>, int, int) writerOpen;
+  final Pointer<Void> Function(Pointer<Void>, int, int, int) writerOpenEx;
   final int Function(Pointer<Void>, int, int, int, Pointer<Uint8>, int) writerAdd;
   final int Function(Pointer<Void>, int) writerDelete;
   final int Function(Pointer<Void>, int, int, int, int, int, Pointer<Uint8>, int) writerAddLine;

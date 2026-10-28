@@ -10,6 +10,15 @@
 //!   thread). It never needs freeing.
 //! - Strings returned by the engine (JSON) are null-terminated UTF-8 and
 //!   must be freed with `se_string_free`.
+//! - Text the engine returns that may hold any character (a query's own
+//!   text, e.g. `se_reduce_paired_readings`) comes back as owned bytes
+//!   `ptr + out_len`, freed with `se_bytes_free`: an embedded NUL survives.
+//!   JSON results cannot hold a raw NUL (JSON escapes it), so they stay
+//!   null-terminated; an error message's NUL reads as a space.
+//! - Ids (`line_id`, `position`, `book_id`, `section_id`) are u64 in the ABI
+//!   but their domain is 0..=i64::MAX (SQLite rowids; C# `long`, Dart
+//!   `int`): a larger value is rejected with an error at ingest. u64::MAX
+//!   is reserved as "none" in outputs (`se_search_copy_next_lines`).
 //! - Calls on one object are not thread-safe; use one object per thread or
 //!   lock. Different objects are independent.
 
@@ -66,11 +75,43 @@ pub extern "C" fn se_version() -> *const c_char {
 /// # Safety
 /// `query` must be valid for `len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn se_reduce_paired_readings(query: *const u8, len: usize) -> *mut c_char {
+pub unsafe extern "C" fn se_reduce_paired_readings(query: *const u8, len: usize, out_len: *mut usize) -> *mut u8 {
     guard(ptr::null_mut(), || {
         let q = str_arg(query, len)?;
-        Ok(out_string(seforim_engine::reduce_paired_readings(q).into_owned()))
+        if out_len.is_null() {
+            return Err("null out_len".into());
+        }
+        Ok(out_bytes(seforim_engine::reduce_paired_readings(q).into_owned(), out_len))
     })
+}
+
+/// Frees bytes returned by the engine with their length (`ptr + out_len`
+/// outputs such as `se_reduce_paired_readings`).
+///
+/// # Safety
+/// `data` / `len` must come from this library and not be freed twice.
+#[no_mangle]
+pub unsafe extern "C" fn se_bytes_free(data: *mut u8, len: usize) {
+    if !data.is_null() {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len)));
+    }
+}
+
+/// Owned bytes for a `ptr + out_len` output. Never null on success: an
+/// empty text is a dangling, non-null pointer with length 0 (still freed).
+unsafe fn out_bytes(s: String, out_len: *mut usize) -> *mut u8 {
+    let bytes = s.into_bytes().into_boxed_slice();
+    *out_len = bytes.len();
+    Box::into_raw(bytes) as *mut u8
+}
+
+/// Ids cross the ABI as u64 but live in 0..=i64::MAX (see the module docs).
+fn check_id(name: &str, value: u64) -> Result<u64, String> {
+    if value > i64::MAX as u64 {
+        Err(format!("{name} {value} is out of range: ids are 0..=9223372036854775807 (i64::MAX)"))
+    } else {
+        Ok(value)
+    }
 }
 
 /// Otzaria's `parse_user_regex` kind for `query`, as a JSON string:
@@ -292,9 +333,9 @@ pub unsafe extern "C" fn se_writer_add(
     guard(-1, || {
         let writer = writer.as_mut().ok_or("null writer")?;
         let doc = LineDoc {
-            line_id,
-            position,
-            book_id,
+            line_id: check_id("line_id", line_id)?,
+            position: check_id("position", position)?,
+            book_id: check_id("book_id", book_id)?,
             text: str_arg(text, text_len)?.to_string(),
             section_id: None,
             no_cross: false,
@@ -332,11 +373,15 @@ pub unsafe extern "C" fn se_writer_add_line(
     guard(-1, || {
         let writer = writer.as_mut().ok_or("null writer")?;
         let doc = LineDoc {
-            line_id,
-            position,
-            book_id,
+            line_id: check_id("line_id", line_id)?,
+            position: check_id("position", position)?,
+            book_id: check_id("book_id", book_id)?,
             text: str_arg(text, text_len)?.to_string(),
-            section_id: (flags & SE_LINE_HAS_SECTION != 0).then_some(section_id),
+            section_id: if flags & SE_LINE_HAS_SECTION != 0 {
+                Some(check_id("section_id", section_id)?)
+            } else {
+                None
+            },
             no_cross: flags & SE_LINE_NO_CROSS != 0,
         };
         writer.add(&doc).map_err(err)?;
@@ -351,6 +396,7 @@ pub unsafe extern "C" fn se_writer_add_line(
 #[no_mangle]
 pub unsafe extern "C" fn se_writer_delete(writer: *mut LineWriter, line_id: u64) -> i32 {
     guard(-1, || {
+        let line_id = check_id("line_id", line_id)?;
         writer.as_mut().ok_or("null writer")?.delete(line_id);
         Ok(0)
     })
@@ -619,6 +665,11 @@ pub struct SeBuffer {
     pub len: usize,
     cap: usize,
 }
+
+// The layout hosts declare (C# `SeBuffer`, Dart `SeBuffer`): three
+// pointer-sized words, on 32-bit targets (ARM32) as on 64-bit.
+const _: () = assert!(std::mem::size_of::<SeBuffer>() == 3 * std::mem::size_of::<usize>());
+const _: () = assert!(std::mem::align_of::<SeBuffer>() == std::mem::align_of::<usize>());
 
 impl SeBuffer {
     fn from_vec(mut v: Vec<u32>) -> SeBuffer {
@@ -1225,5 +1276,68 @@ mod tests {
             se_index_close(index);
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn abi_edges() {
+        unsafe {
+            // a helper's text output keeps an embedded NUL (ptr + length)
+            let q = "a b";
+            let mut n = usize::MAX;
+            let out = se_reduce_paired_readings(q.as_ptr(), q.len(), &mut n);
+            assert!(!out.is_null());
+            assert_eq!(std::slice::from_raw_parts(out, n), b"a b");
+            se_bytes_free(out, n);
+            let out = se_reduce_paired_readings(ptr::null(), 0, &mut n);
+            assert!(!out.is_null());
+            assert_eq!(n, 0);
+            se_bytes_free(out, n);
+            assert!(se_reduce_paired_readings(q.as_ptr(), q.len(), ptr::null_mut()).is_null());
+
+            // ids above i64::MAX are rejected at ingest; i64::MAX itself is fine
+            let dir = std::env::temp_dir().join(format!("se_ffi_edges_{}", std::process::id()));
+            let d = dir.to_string_lossy().into_owned();
+            let index = se_index_create(d.as_ptr(), d.len(), ptr::null(), 0);
+            assert!(!index.is_null());
+            let writer = se_writer_open(index, 30_000_000, 1);
+            let text = "abc";
+            let big = i64::MAX as u64 + 1;
+            for (id, pos, book) in [(big, 0, 0), (0, big, 0), (0, 0, big), (u64::MAX, 0, 0)] {
+                assert_eq!(se_writer_add(writer, id, pos, book, text.as_ptr(), text.len()), -1);
+                let e = CStr::from_ptr(se_last_error()).to_str().unwrap().to_string();
+                assert!(e.contains("out of range"), "{e}");
+            }
+            assert_eq!(se_writer_add_line(writer, 1, 0, 0, big, SE_LINE_HAS_SECTION, text.as_ptr(), text.len()), -1);
+            // without the flag the section id is not read
+            assert_eq!(se_writer_add_line(writer, 1, 0, 0, big, 0, text.as_ptr(), text.len()), 0);
+            assert_eq!(se_writer_delete(writer, big), -1);
+            let max = i64::MAX as u64;
+            assert_eq!(se_writer_add(writer, max, max, max, text.as_ptr(), text.len()), 0);
+            assert_eq!(se_last_error_message(), "");
+            se_writer_close(writer);
+            se_index_close(index);
+            let _ = std::fs::remove_dir_all(dir);
+
+            // the last error is per thread: an error on another thread is not seen here
+            let null_str = se_reduce_paired_readings(ptr::null(), 1, &mut n);
+            assert!(null_str.is_null());
+            let here = se_last_error_message();
+            assert!(!here.is_empty());
+            let other = std::thread::spawn(|| {
+                let before = se_last_error_message();
+                let mut n = 0usize;
+                se_reduce_paired_readings(ptr::null(), 0, &mut n);
+                se_bytes_free(ptr::null_mut(), 0);
+                (before, se_last_error_message())
+            })
+            .join()
+            .unwrap();
+            assert_eq!(other, (String::new(), String::new()));
+            assert_eq!(se_last_error_message(), here);
+        }
+    }
+
+    fn se_last_error_message() -> String {
+        unsafe { CStr::from_ptr(se_last_error()).to_str().unwrap().to_string() }
     }
 }

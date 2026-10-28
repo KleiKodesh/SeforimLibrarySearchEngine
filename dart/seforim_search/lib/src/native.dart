@@ -55,8 +55,10 @@ final class SeforimNative {
             Pointer<Utf8> Function(Pointer<Void>)>('se_index_info'),
         userRegexKind = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
             Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_user_regex_kind'),
-        reducePairedReadings = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
-            Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_reduce_paired_readings'),
+        reducePairedReadings = lib.lookupFunction<Pointer<Uint8> Function(Pointer<Uint8>, Size, Pointer<Size>),
+            Pointer<Uint8> Function(Pointer<Uint8>, int, Pointer<Size>)>('se_reduce_paired_readings'),
+        bytesFree = lib.lookupFunction<Void Function(Pointer<Uint8>, Size), void Function(Pointer<Uint8>, int)>(
+            'se_bytes_free'),
         indexBuildFmSidecar = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
             'se_index_build_fm_sidecar'),
         indexHasFmSidecar = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
@@ -149,7 +151,8 @@ final class SeforimNative {
   final Pointer<Void> Function(Pointer<Uint8>, int) indexOpen;
   final int Function(Pointer<Uint8>, int) indexExists;
   final Pointer<Utf8> Function(Pointer<Void>) indexInfo;
-  final Pointer<Utf8> Function(Pointer<Uint8>, int) reducePairedReadings;
+  final Pointer<Uint8> Function(Pointer<Uint8>, int, Pointer<Size>) reducePairedReadings;
+  final void Function(Pointer<Uint8>, int) bytesFree;
   final Pointer<Utf8> Function(Pointer<Uint8>, int) userRegexKind;
   final int Function(Pointer<Void>) indexBuildFmSidecar;
   final int Function(Pointer<Void>) indexHasFmSidecar;
@@ -236,6 +239,17 @@ final class SeforimNative {
 
   void checkStatus(int status) {
     if (status != 0) throw error();
+  }
+
+  /// Copies and frees engine-owned UTF-8 bytes given as pointer + length
+  /// (an embedded NUL is kept).
+  String takeBytes(Pointer<Uint8> p, int len) {
+    if (p == nullptr) throw error();
+    try {
+      return utf8.decode(p.asTypedList(len));
+    } finally {
+      bytesFree(p, len);
+    }
   }
 
   /// Takes an engine-owned JSON string and frees it.

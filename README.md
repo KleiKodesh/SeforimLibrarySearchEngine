@@ -1023,7 +1023,16 @@ are not printed), so upstream's query-parser tests stay as they are.
   line regex and cross-line pairs use them.
 - **C ABI conventions:** objects are opaque handles; strings cross as UTF-8
   pointer + length; errors are `0/-1` status codes with a per-thread
-  `se_last_error`; hot paths are binary (no JSON). Located marks carry a
+  `se_last_error` (cleared at the start of every call, never seen by
+  another thread); hot paths are binary (no JSON). Text the engine hands
+  back that may hold any character (`se_reduce_paired_readings`) is
+  pointer + `out_len`, freed with `se_bytes_free`, so an embedded NUL
+  survives; JSON results stay null-terminated (JSON escapes a NUL). Ids
+  (`line_id`, `position`, `book_id`, `section_id`) are u64 in the ABI with
+  the domain 0..=i64::MAX (SQLite rowids, C# `long`, Dart `int`): a larger
+  value (a negative C# / Dart id) is rejected at ingest; u64::MAX means
+  "none" in outputs. `SeBuffer` is three pointer-sized words on every
+  target (compile-time assert, 32-bit included). Located marks carry a
   term id into the search's term table; `se_search_take_new_terms` (C#
   `TakeNewTerms`) returns the terms added since the previous call.
 

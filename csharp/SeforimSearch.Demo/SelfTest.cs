@@ -204,6 +204,19 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             Check(meta.Contains("sort_by_field") && meta.Contains("\"position\""), "index not sorted by position");
             Check(FtsLib.Fts5.TantivySeforimIndex.IndexFormatVersion == "tantivy12", "format version");
 
+            // ABI edges: a helper's text output is pointer + length (an embedded NUL
+            // survives); ids live in 0..=long.MaxValue, a negative id is rejected
+            Check(SeforimIndex.ReducePairedReadings("a b") == "a b", "embedded NUL in a helper output");
+            Check(SeforimIndex.ReducePairedReadings("") == "", "empty helper output");
+            string idsDir = Path.Combine(dir, "ids");
+            using (var ids = SeforimIndex.Create(idsDir))
+            using (var w = ids.OpenWriter(30_000_000, 1))
+            {
+                bool rejected = false;
+                try { w.Delete(-1); } catch (Exception) { rejected = true; }
+                Check(rejected, "a negative line id must be rejected");
+            }
+
             // catalog order: book 2 (orderIndex 1) first, then book 1, by lineIndex
             var expected = new List<int>();
             foreach (int book in new[] { 2, 1 })

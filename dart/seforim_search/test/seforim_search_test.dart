@@ -1,6 +1,8 @@
+import 'dart:ffi';
 import 'dart:io';
 
 import 'package:seforim_search/seforim_search.dart';
+import 'package:seforim_search/src/native.dart' show SeBuffer;
 import 'package:test/test.dart';
 
 /// Finds the native library: SEFORIM_SEARCH_NATIVE, else ../../target/release.
@@ -239,6 +241,25 @@ void main() {
   test('paired readings keep their second reading', () {
     expect(SeforimIndex.reducePairedReadings('א (בג) [דה] ו'), 'א  דה  ו');
     expect(SeforimIndex.reducePairedReadings('(א) ב'), '(א) ב');
+  });
+
+  test('ABI edges: embedded NUL, id domain, SeBuffer layout', () {
+    // ptr + length output: an embedded NUL survives
+    expect(SeforimIndex.reducePairedReadings('a b'), 'a b');
+    expect(SeforimIndex.reducePairedReadings(''), '');
+    // ids are 0..=i64::MAX: a negative Dart int is a u64 above it, rejected
+    final dir = Directory.systemTemp.createTempSync('se_dart_ids_');
+    final i = SeforimIndex.create(dir.path);
+    final w = i.openWriter(heapBytes: 30000000, threads: 1);
+    expect(() => w.add(const LineDocument(lineId: -1, position: 0, bookId: 1, text: 'x')),
+        throwsA(isA<SeforimEngineException>()));
+    expect(() => w.delete(-1), throwsA(isA<SeforimEngineException>()));
+    w.add(const LineDocument(lineId: 0x7fffffffffffffff, position: 0, bookId: 1, text: 'x'));
+    w.close();
+    i.close();
+    dir.deleteSync(recursive: true);
+    // the struct returned by value: three pointer-sized words on every target
+    expect(sizeOf<SeBuffer>(), 3 * sizeOf<IntPtr>());
   });
 
   test('errors surface as exceptions', () {

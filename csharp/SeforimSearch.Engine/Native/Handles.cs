@@ -96,6 +96,15 @@ namespace SeforimSearch.Engine.Native
             finally { NativeMethods.se_string_free(p); }
         }
 
+        /// <summary>Copies and frees engine-owned UTF-8 bytes given as pointer + length
+        /// (an embedded NUL is kept).</summary>
+        public static unsafe string TakeBytes(IntPtr p, UIntPtr len)
+        {
+            if (p == IntPtr.Zero) throw Fail(LastError());
+            try { return Utf8.GetString((byte*)p, checked((int)(ulong)len)); }
+            finally { NativeMethods.se_bytes_free(p, len); }
+        }
+
         /// <summary>Copies and frees an engine-owned u32 buffer.</summary>
         public static uint[] TakeBuffer(SeBuffer buffer)
         {

@@ -68,7 +68,9 @@ final class SeforimIndex implements Finalizable {
   static String reducePairedReadings(String query) {
     return using((a) {
       final (q, ql) = utf8Native(query, a);
-      return _n.takeString(_n.reducePairedReadings(q, ql));
+      final n = a<Size>();
+      final r = _n.reducePairedReadings(q, ql, n);
+      return _n.takeBytes(r, n.value);
     });
   }
 

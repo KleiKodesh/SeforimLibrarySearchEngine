@@ -30,7 +30,10 @@ namespace SeforimSearch.Engine
         {
             byte[] q = Interop.ToUtf8(query);
             fixed (byte* p = q)
-                return Interop.TakeString(NativeMethods.se_reduce_paired_readings(p, (UIntPtr)q.Length));
+            {
+                IntPtr r = NativeMethods.se_reduce_paired_readings(p, (UIntPtr)q.Length, out UIntPtr n);
+                return Interop.TakeBytes(r, n);
+            }
         }
 
         /// <summary>Otzaria's user-regex kind of <paramref name="query"/>: "none" (not

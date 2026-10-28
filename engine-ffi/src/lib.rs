@@ -1186,6 +1186,24 @@ mod tests {
                 assert_eq!(se_search_hit_count(search), hits, "{json}");
                 se_search_close(search);
             }
+            // proximity gaps: u32::MAX is unbounded (no overflow, same hits as
+            // MAX - 1); a value outside u32 is rejected with an error
+            let gap = |g: &str| format!(r#"{{"query":"והתורה למשה","proximity":{{"mode":"ordered","gaps":[{g}]}}}}"#);
+            let hits_of = |json: String| {
+                let search = se_search(index, json.as_ptr(), json.len());
+                assert!(!search.is_null(), "{:?}", CStr::from_ptr(se_last_error()));
+                let n = se_search_hit_count(search);
+                se_search_close(search);
+                n
+            };
+            assert_eq!(hits_of(gap("4294967295")), hits_of(gap("4294967294")));
+            assert_eq!(hits_of(gap("4294967295")), 1);
+            for bad in ["4294967296", "-1", "1.5"] {
+                let json = gap(bad);
+                assert!(se_search(index, json.as_ptr(), json.len()).is_null(), "{bad}");
+                let e = CStr::from_ptr(se_last_error()).to_str().unwrap().to_string();
+                assert!(e.contains("u32"), "{bad}: {e}");
+            }
             se_index_close(index);
         }
         let _ = std::fs::remove_dir_all(dir);

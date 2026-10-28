@@ -862,7 +862,9 @@ are not printed), so upstream's query-parser tests stay as they are.
   (`gap_phrase.rs` `Proximity`, `hebrew_query.rs` `resolve_proximity`):
   - `ordered { gaps }`: words in query order, at most `gaps[i]` words
     between word i and i+1 (Otzaria: `distance` for every pair, or
-    customSpacing per pair).
+    customSpacing per pair). Gaps and `distance` are u32: `4294967295`
+    is unbounded (same lines as one less); a value outside u32 (negative,
+    fractional, larger) fails the search with an error.
   - `any_order { distance }`: every word at its own position, any order,
     all inside a window of `(k-1)(distance+1)` positions for k words.
     A repeated query word needs its own occurrence.

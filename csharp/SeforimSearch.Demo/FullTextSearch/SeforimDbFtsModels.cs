@@ -46,6 +46,30 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         public string After { get; set; } = "";
     }
 
+    /// <summary>One pushed frame of a streaming search (Core's FtsStreamChunk, same fields).
+    /// The final frame has <c>Done</c> true. <c>Ready</c> false = index not built: sent as
+    /// the first and only frame.</summary>
+    public sealed class FtsStreamChunk
+    {
+        public bool Ready { get; set; } = true;
+        public List<FtsHit> Results { get; set; } = new List<FtsHit>();
+        /// <summary>Matched-term strings first seen in this frame, in id order: the receiver
+        /// appends them to its table, which the hits' mark term ids index into.</summary>
+        public List<string> NewTerms { get; set; } = new List<string>();
+        /// <summary>Snippet texts for the first hits of the search only
+        /// (<see cref="SeforimDbFtsSearcher.SeedSnippetTextHitCount"/>); a resumed search seeds none.</summary>
+        public List<FtsSnippetText> SnippetTexts { get; set; } = new List<FtsSnippetText>();
+        public bool Done { get; set; }
+        public string? Error { get; set; }
+        /// <summary>A RESUMED search whose resume line could not be placed any more, so it runs
+        /// from the start instead: the receiver drops the hits it had. First frame only.</summary>
+        public bool Restarted { get; set; }
+        /// <summary>What the engine is doing (validate, parse, expand, lookup, fetch, snippets,
+        /// enrich). Until the first results frame a stage change is a frame of its own; after
+        /// it, the latest stage rides on the next results frame.</summary>
+        public string? Stage { get; set; }
+    }
+
     /// <summary>One search's matched-term strings, numbered in first-seen order
     /// (Core's FtsTermTable). Thread-safe.</summary>
     public sealed class FtsTermTable

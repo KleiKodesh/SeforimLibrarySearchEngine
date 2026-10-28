@@ -103,43 +103,44 @@ namespace SeforimSearch.Demo
             bool built = engine.Index.IsBuilt;
             Console.Error.WriteLine($"open: index {openSw.Elapsed.TotalMilliseconds:F0} ms (built={built})");
             int repeat = int.TryParse(Option(args, "--repeat"), out var rp) && rp > 1 ? rp : 1;
-            // --resume-after <lineId>: Core's StreamSearch resume (277de7a9): the line's index
-            // position, or, when it cannot be placed, a restart from the start (Restarted).
-            long afterPosition = 0;
-            if (int.TryParse(Option(args, "--resume-after"), out int resumeAfterLineId) && resumeAfterLineId > 0)
-            {
-                long? position = engine.PositionOfLine(resumeAfterLineId);
-                if (position is long found) afterPosition = found;
-                else Console.Error.WriteLine("restarted: the resume line cannot be placed; searching from the start");
-            }
+            // --resume-after <lineId>: Core's ftsSearchStream resume (277de7a9), through the
+            // ported coordinator: the first frame carries Restarted when the line cannot be placed.
+            int resumeAfterLineId = int.TryParse(Option(args, "--resume-after"), out int ra) && ra > 0 ? ra : 0;
+            var coordinator = new SeforimDbFtsIndexCoordinator(engine) { WordOptions = wordOptions };
             for (int run = 1; run <= repeat; run++)
             {
-            var terms = new FtsTermTable();
+            var terms = new List<string>();   // the receiver's table: NewTerms appended per frame
             var sw = Stopwatch.StartNew();
             TimeSpan? first = null;
-            int total = 0, shown = run == 1 ? 0 : 10;
-            foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
-                         engine, query, distance, requireOrdered: false, contextWords: 8, wordOptions, terms,
-                         afterPosition: afterPosition))
+            int total = 0, shown = run == 1 ? 0 : 10, frames = 0;
+            string? error = null;
+            coordinator.StreamSearch(query, distance, requireOrdered: false, contextWords: 8, chunk =>
             {
-                first ??= sw.Elapsed;
-                total += batch.Hits.Count;
-                foreach (var hit in batch.Hits)
+                if (frames++ == 0 && chunk.Restarted)
+                    Console.Error.WriteLine("restarted: true (the resume line cannot be placed; results are from the start)");
+                if (!chunk.Ready) error = "index not built";
+                if (chunk.Error != null) error = chunk.Error;
+                terms.AddRange(chunk.NewTerms);
+                if (chunk.Results.Count > 0) first ??= sw.Elapsed;
+                total += chunk.Results.Count;
+                foreach (var hit in chunk.Results)
                 {
                     if (shown >= 10) break;
                     shown++;
                     // The seeded snippet text (Core's FtsSnippetText): the matched line, plus
                     // plain neighbour context for a short window (presentation only).
-                    var text = batch.SnippetTexts.Find(t => t.LineId == hit.LineId);
+                    var text = chunk.SnippetTexts.Find(t => t.LineId == hit.LineId);
                     string rendered = text == null ? "" : Render(text.Text, hit);
                     if (text != null && (hit.SnippetFlags & FtsHit.SnippetFlagShort) != 0)
                         rendered = WithContext(rendered, text, hit, 8);
                     Console.WriteLine($"line {hit.LineId} book {hit.BookId} dist {hit.WordDistance}: " + rendered);
                 }
-            }
+                return Task.CompletedTask;
+            }, System.Threading.CancellationToken.None, resumeAfterLineId).GetAwaiter().GetResult();
+            if (error != null) { Console.Error.WriteLine("search failed: " + error); return 1; }
             if (FtsLib.Fts5.HostTiming.Enabled) Console.Error.WriteLine(FtsLib.Fts5.HostTiming.Report());
             Console.Error.WriteLine($"search: {total:N0} hits in {sw.Elapsed.TotalMilliseconds:F0} ms " +
-                                    $"(first batch {first?.TotalMilliseconds:F0} ms); terms: {string.Join(", ", terms.All())}");
+                                    $"(first batch {first?.TotalMilliseconds:F0} ms); terms: {string.Join(", ", terms)}");
             }
             return 0;
         }

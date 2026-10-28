@@ -34,6 +34,7 @@ namespace SeforimSearch.Demo
                 ("concurrent rents get distinct connections", ConcurrentRent),
                 ("file change reopens", FileChangeReopens),
                 ("end to end: build tantivy12 + search in catalog order", EndToEnd),
+                ("stream: chunks, resume, Restarted, cancellation (Core's StreamSearch)", Stream),
             };
             int failed = 0;
             foreach (var (name, body) in tests)
@@ -275,6 +276,71 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                 Check(shortText.Before.Split(' ').Length == 3 && shortText.After.Split(' ').Length == 6,
                       "short line: one line before (book start), two after");
             }
+        }
+
+        private static List<FtsStreamChunk> StreamAll(SeforimDbFtsIndexCoordinator c, string query,
+            int resumeAfterLineId = 0, CancellationToken ct = default)
+        {
+            var frames = new List<FtsStreamChunk>();
+            c.StreamSearch(query, int.MaxValue, false, 8, f => { frames.Add(f); return Task.CompletedTask; },
+                ct, resumeAfterLineId).GetAwaiter().GetResult();
+            return frames;
+        }
+
+        private static void Stream(string db, string dir)
+        {
+            string index = Path.Combine(dir, "index-stream");
+            using var engine = new SeforimDbFtsEngine(index, db);
+            var notBuilt = StreamAll(new SeforimDbFtsIndexCoordinator(engine), "beta");
+            Check(notBuilt.Count == 1 && !notBuilt[0].Ready && notBuilt[0].Done, "unbuilt index: one Ready=false Done frame");
+            engine.Index.BuildLines(linesPerCommit: 500, heapBytes: 60_000_000);
+            var c = new SeforimDbFtsIndexCoordinator(engine);
+
+            var full = StreamAll(c, "beta");
+            Check(full[0].Stage == "validate" && !full[0].Restarted && full[0].Results.Count == 0, "first frame = validate");
+            Check(full[full.Count - 1].Done && full[full.Count - 1].Error == null, "last frame = Done");
+            Check(full.Count(f => f.Done) == 1, "one Done frame");
+            var fullIds = full.SelectMany(f => f.Results).Select(h => h.LineId).ToList();
+            Check(fullIds.Count == 2 * LinesPerBook / 3, $"full stream {fullIds.Count} hits");
+            var resultFrames = full.Where(f => f.Results.Count > 0).ToList();
+            Check(resultFrames.Count >= 2, "several result frames");
+            Check(resultFrames[0].NewTerms.Count > 0, "the first results frame carries the terms");
+            Check(full.Skip(1).TakeWhile(f => f.Results.Count == 0).All(f => f.Stage != null && !f.Done),
+                  "stage-only frames until the first results frame");
+
+            // Resume after the first chunk(s): first k frames' hits + resumed stream == full stream.
+            for (int k = 1; k < resultFrames.Count; k++)
+            {
+                var held = resultFrames.Take(k).SelectMany(f => f.Results).Select(h => h.LineId).ToList();
+                var resumed = StreamAll(c, "beta", held[held.Count - 1]);
+                Check(!resumed[0].Restarted, "a placeable line does not restart");
+                var rest = resumed.SelectMany(f => f.Results).ToList();
+                Check(held.Concat(rest.Select(h => h.LineId)).SequenceEqual(fullIds), $"resume after {k} frame(s) != full");
+                Check(resumed.All(f => f.SnippetTexts.Count == 0), "a resumed stream seeds no snippet texts");
+                // Term ids restart in the resumed stream: its own NewTerms resolve its own marks.
+                var table = resumed.SelectMany(f => f.NewTerms).ToList();
+                Check(table.Count > 0 && rest.All(h => Marks(h).All(t => t < table.Count)), "resumed term ids index its own table");
+            }
+
+            // An unplaceable resume line: Restarted on the first frame only, and the full results.
+            var restarted = StreamAll(c, "beta", 987654);
+            Check(restarted[0].Restarted && restarted.Skip(1).All(f => !f.Restarted), "Restarted on the first frame only");
+            Check(restarted.SelectMany(f => f.Results).Select(h => h.LineId).SequenceEqual(fullIds), "restart = full results");
+
+            // Cancellation: a cancelled client gets no Done frame and no error.
+            using (var cts = new CancellationTokenSource())
+            {
+                cts.Cancel();
+                var cancelled = StreamAll(c, "beta", 0, cts.Token);
+                Check(!cancelled.Any(f => f.Done || f.Error != null || f.Results.Count > 0), "cancelled: no results, no Done");
+            }
+            var empty = StreamAll(c, "  ");
+            Check(empty.Count == 1 && empty[0].Done && empty[0].Ready, "blank query: one Done frame");
+        }
+
+        private static IEnumerable<int> Marks(FtsHit h)
+        {
+            for (int i = 2; i < h.SnippetMarks.Length; i += 3) yield return h.SnippetMarks[i];
         }
     }
 }

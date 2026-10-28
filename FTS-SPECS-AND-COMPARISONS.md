@@ -39,6 +39,7 @@ Current index formats: ours `tantivy12`, FtsLib `fts10`.
 | Truncated flag when a cap is hit | done |
 | Cross-line phrases (one break, any search type; line-edge enumerators skipped as Otzaria) and same-section scope | built; unit tests; full-DB verification pending |
 | Fuzzy: a swap of two adjacent letters is one edit (Otzaria; FtsLib changed too) | done |
+| Quoted phrases (Otzaria's rule, both engines): a whole-query phrase is literal and may cross a line (ours); a phrase among words is required in the line | done; unit tests; FtsLib per line only |
 | Snippets from index positions (`locate_lines`, per-batch cost rule) | done |
 
 ## Index builds (full DB, 7,080,797 lines)

@@ -314,6 +314,14 @@ pub struct SearchRequest {
     /// looser: the tightest window covering the words must be gap-free, so
     /// a repeated word can fill a gap (רבי משה בן רבי נחמן passes).
     pub phrase_alternatives: Vec<Vec<GroupSpec>>,
+    /// Quoted phrases a hit must carry besides the query (Otzaria's smart
+    /// search: the query AND every literal phrase): each phrase's slots
+    /// adjacent and in order, in the hit's own line. With positions a
+    /// phrase runs as a span query; without, as an AND whose adjacency is
+    /// checked on the text (a filter that must pass). A phrase whose word
+    /// matches no term matches nothing. Cross-line matching is off when
+    /// there is one (Otzaria's smart search is per line).
+    pub required_phrases: Vec<Vec<GroupSpec>>,
     /// Otzaria's word proximity (see [`ProximitySpec`]). When set it is the
     /// main query's distance rule and `max_word_distance`,
     /// `require_ordered` and `gaps` are ignored for the main query (they
@@ -387,6 +395,7 @@ impl Default for SearchRequest {
             proximity: None,
             exclude: None,
             phrase_alternatives: Vec::new(),
+            required_phrases: Vec::new(),
             books: None,
             order: ResultsOrder::Catalog,
             book_generations: Vec::new(),
@@ -654,6 +663,9 @@ fn locate_tokenized_with(
     if negative.iter().enumerate().any(|(i, n)| {
         // a vocalized negative sees only lines that carry a mark (Otzaria's
         // vocalized field)
+        if n.required {
+            return !n.excludes(locator, 0, maps.negative(i));
+        }
         (!n.vocalized || hebrew_fts::chars::contains_attached_marks(text)) && n.excludes(locator, 0, maps.negative(i))
     }) {
         return None;
@@ -711,6 +723,9 @@ struct NegativeFilter {
     /// Vocalized (see [`ExcludeSpec::vocalized`]): only a line carrying a
     /// mark can be excluded.
     vocalized: bool,
+    /// A required quoted phrase (`SearchRequest::required_phrases`), not a
+    /// negative: the line is dropped when it does NOT carry it.
+    required: bool,
 }
 
 impl NegativeFilter {
@@ -1910,7 +1925,7 @@ impl LineIndex {
             _ => None,
         };
         // Cross-line: per-pair gaps cross the break in order only.
-        let cross = request.cross_line && !section;
+        let cross = request.cross_line && !section && request.required_phrases.is_empty();
         if cross && request.gaps.is_some() && !partial && proximity.is_none() && !request.require_ordered {
             return Err(Error::Unsupported(
                 "cross-line matching with per-pair gaps needs the words in order (require_ordered)".into(),
@@ -2290,6 +2305,52 @@ impl LineIndex {
             }
             _ => None,
         };
+        // Required quoted phrases: a Must clause each; without positions
+        // their adjacency is checked on the text.
+        let mut required_text: Vec<Vec<MatchedTermsSink>> = Vec::new();
+        let mut required_queries: Vec<Box<dyn Query>> = Vec::new();
+        for phrase in &request.required_phrases {
+            if phrase.len() < 2 {
+                continue;
+            }
+            let mut sinks = Vec::new();
+            let q: Option<Box<dyn Query>> = if self.options.positions {
+                self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, fm, &mut sinks)?
+                    .map(|q| Box::new(q) as Box<dyn Query>)
+            } else {
+                let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                let mut complete = true;
+                for group in phrase {
+                    let sink = MatchedTermsSink::new();
+                    match self.group_query(group, &sink, &searcher, fm)? {
+                        Some(q) => {
+                            clauses.push((Occur::Must, q));
+                            sinks.push(sink);
+                        }
+                        None => complete = false,
+                    }
+                }
+                (complete && !clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>)
+            };
+            // a phrase that cannot match: no hit can carry it
+            let Some(q) = q else {
+                let truncated = watched.iter().chain(&sinks).any(|s| s.is_truncated());
+                return Ok(SearchResult::new(Vec::new(), session).with_notices(notices).with_truncated(truncated));
+            };
+            watched.extend(sinks.iter().cloned());
+            if !self.options.positions {
+                fill_sinks(q.as_ref())?;
+                required_text.push(sinks);
+            }
+            required_queries.push(q);
+        }
+        let query: Box<dyn Query> = if required_queries.is_empty() {
+            query
+        } else {
+            let mut clauses = vec![(Occur::Must, query)];
+            clauses.extend(required_queries.into_iter().map(|q| (Occur::Must, q)));
+            Box::new(BooleanQuery::new(clauses))
+        };
         let query: Box<dyn Query> = if query_negatives.is_empty() {
             query
         } else {
@@ -2393,8 +2454,24 @@ impl LineIndex {
                     require_ordered,
                     proximity,
                     vocalized: negative_vocalized,
+                    required: false,
                 });
             }
+        }
+
+        for sinks in required_text {
+            let terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
+            if terms.iter().any(|g| g.is_empty()) {
+                return Ok(SearchResult::new(Vec::new(), session).with_notices(notices).with_truncated(truncated));
+            }
+            session.negative.push(NegativeFilter {
+                prepared: PreparedQueryGroups::from_groups(&terms),
+                max_word_distance: 0,
+                require_ordered: true,
+                proximity: Some(Proximity::Ordered { gaps: vec![0; terms.len() - 1] }),
+                vocalized: false,
+                required: true,
+            });
         }
 
         // The main query's matcher, if it can match at all.

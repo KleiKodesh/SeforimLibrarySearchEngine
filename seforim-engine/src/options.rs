@@ -317,10 +317,55 @@ impl SearchOptions {
                 .words
                 .values()
                 .any(|w| w.match_nikud == Some(true) || w.match_teamim == Some(true));
-        let main = slots(&self.query, keep_marks, |i| match self.words.get(&i) {
+        // Quoted phrases (Otzaria's rule, see `hebrew_fts::quoted_phrases`):
+        // their words are searched as written.
+        let quoted = hebrew_fts::quoted_phrases(&self.query);
+        let literal: Vec<usize> = quoted.iter().flatten().copied().collect();
+        let main = slots_with(&self.query, keep_marks, &literal, |i| match self.words.get(&i) {
             Some(w) => (w.apply(global), w.alternatives.as_slice()),
             None => (global, &[]),
         });
+        // One phrase holding every word that searches: Otzaria's literal
+        // phrase search (`searchLiteralPhrase`, adjacent lines included):
+        // the words adjacent and in order, the user's distance, order and
+        // partial matching replaced by it, and the match may cross a line.
+        // (a quoted span with no word that searches does not count)
+        let searching: Vec<&Vec<usize>> =
+            quoted.iter().filter(|p| p.iter().any(|&i| main.typed.get(i).is_some_and(|t| t.is_some()))).collect();
+        let whole_phrase = searching.len() == 1
+            && main.typed.iter().enumerate().all(|(i, t)| t.is_none() || searching[0].contains(&i))
+            && main.typed.iter().any(|t| t.is_some());
+        if whole_phrase {
+            let typed = main.typed.len();
+            let adjacent = ProximitySpec::Ordered { gaps: vec![0; typed.saturating_sub(1)] };
+            let groups = main.searched_groups();
+            let proximity = if groups.len() > 1 { Some(main.lower(&adjacent)?) } else { None };
+            let mut request = self.lower_rest(keep_marks, global, vocalized)?;
+            request.groups = groups;
+            request.proximity = proximity;
+            request.cross_line = true;
+            request.same_section = false;
+            return Ok(request);
+        }
+        // Otherwise each phrase of two or more slots is required on its own
+        // (Otzaria's smart search: the query AND every literal phrase).
+        let required_phrases: Vec<Vec<GroupSpec>> = quoted
+            .iter()
+            .map(|p| {
+                let mut ids: Vec<usize> = Vec::new();
+                for &i in p {
+                    if let Some(Some((first, last))) = main.typed.get(i) {
+                        for g in *first..=*last {
+                            if !ids.contains(&g) {
+                                ids.push(g);
+                            }
+                        }
+                    }
+                }
+                ids.into_iter().map(|g| main.groups[g].clone()).collect::<Vec<GroupSpec>>()
+            })
+            .filter(|p| p.len() > 1)
+            .collect();
         // With a proximity rule the too long words leave the query and keep
         // their positions in the rule; without, they stay as skipped slots
         // that count toward word distance (FtsLib's originalGroupCount).
@@ -332,6 +377,20 @@ impl SearchOptions {
             Some(m) => m.min_groups(main.searched_count()),
             None => self.min_groups,
         };
+        let mut request = self.lower_rest(keep_marks, global, vocalized)?;
+        request.groups = groups;
+        request.max_word_distance = self.max_word_distance;
+        request.require_ordered = self.require_ordered;
+        request.min_groups = min_groups;
+        request.proximity = proximity;
+        request.required_phrases = required_phrases;
+        Ok(request)
+    }
+
+    /// Everything of the request but the main query's slots and their
+    /// distance, order and partial-matching rules (left at their defaults).
+    fn lower_rest(&self, keep_marks: bool, global: WalkOptionsSpec, vocalized: bool) -> Result<SearchRequest> {
+        let global_vocalized = global.match_nikud || global.match_teamim;
         let exclude = match &self.exclude {
             Some(e) => {
                 // per word, exactly as the positive words: the global
@@ -361,15 +420,16 @@ impl SearchOptions {
         };
         let phrase_alternatives = phrases(&self.phrase_alternatives, keep_marks);
         Ok(SearchRequest {
-            groups,
-            max_word_distance: self.max_word_distance,
-            require_ordered: self.require_ordered,
+            groups: Vec::new(),
+            max_word_distance: None,
+            require_ordered: false,
             context_words: self.context_words,
             gaps: None,
-            min_groups,
+            min_groups: None,
             exclude,
             phrase_alternatives,
-            proximity,
+            required_phrases: Vec::new(),
+            proximity: None,
             books: self.books.clone(),
             order: self.order,
             book_generations: self.book_generations.clone(),
@@ -489,6 +549,33 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
             };
             with_variants(GroupSpec::Grammar { word, prefixes, suffixes, ignore_quotes }, variants)
         }
+    }
+}
+
+/// A quoted phrase's word options: none of the expansions, only the base
+/// word model's rules (quotes, nikud / te'amim).
+fn exact_options(o: WalkOptionsSpec) -> WalkOptionsSpec {
+    WalkOptionsSpec {
+        ignore_quotes: o.ignore_quotes,
+        exact_quotes: o.exact_quotes,
+        match_nikud: o.match_nikud,
+        match_teamim: o.match_teamim,
+        ..Default::default()
+    }
+}
+
+/// A quoted phrase's word as written: a wildcard, fuzzy or `%` word loses
+/// its operators and becomes the literal it spells.
+fn literal_term(t: QueryTerm, keep_marks: bool) -> QueryTerm {
+    let word = match t {
+        QueryTerm::Wildcard(p) => p.replace(['*', '?'], ""),
+        QueryTerm::Fuzzy { word, .. } | QueryTerm::Grammar { word, .. } => word,
+        other => return other,
+    };
+    // re-read as a plain word (its length decides whether it is indexed)
+    match tokenize_query(&word, keep_marks).into_iter().next() {
+        Some(QueryToken::Word { term: Some(t @ (QueryTerm::Word(_) | QueryTerm::Unindexed(_))), .. }) => t,
+        _ => QueryTerm::Word(word),
     }
 }
 
@@ -653,6 +740,19 @@ impl Slots {
 /// alternatives join the sub-word's slot (and stand for the word when it
 /// cannot search itself).
 fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String])) -> Slots {
+    slots_with(query, keep_marks, &[], word)
+}
+
+/// [`slots`], with the typed words in `literal` (a quoted phrase's words)
+/// searched as written: the word itself, its operators (`*` `?` `~N` `%`)
+/// dropped, no alternatives, and of its options only the base word model's
+/// (quotes, nikud / te'amim).
+fn slots_with<'a>(
+    query: &str,
+    keep_marks: bool,
+    literal: &[usize],
+    word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String]),
+) -> Slots {
     let mut groups = Vec::new();
     let mut typed: Vec<Option<(usize, usize)>> = Vec::new();
     let mut pending: Vec<GroupSpec> = Vec::new();
@@ -674,6 +774,11 @@ fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptions
             typed.resize(index + 1, None);
         }
         let (o, alternatives) = word(index);
+        let (o, alternatives, term) = if literal.contains(&index) {
+            (exact_options(o), &[][..], term.map(|t| literal_term(t, keep_marks)))
+        } else {
+            (o, alternatives, term)
+        };
         let mut members: Vec<GroupSpec> = term.into_iter().map(|t| group(t, o)).collect();
         for alt in alternatives {
             for t in tokenize_query(alt, keep_marks) {

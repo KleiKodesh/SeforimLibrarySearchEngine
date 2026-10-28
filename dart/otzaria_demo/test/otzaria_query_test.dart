@@ -35,6 +35,21 @@ void main() {
     });
   });
 
+  test('quoted phrases stay quoted; an acronym quotes nothing', () {
+    const a = 'אב', b = 'גד', c = 'הו', d = 'זח';
+    const acronym = 'רמב"ם';
+    String q(String query, [SearchMode mode = SearchMode.advanced]) =>
+        OtzariaSearch(query: query, mode: mode).toOptions().toJson()['query'] as String;
+    expect(q('"$a $b"'), '"$a $b"');
+    expect(q('$a ״$b $c״ $d'), '$a "$b $c" $d');
+    expect(q('„$a“ $b “$c $d”'), '"$a" $b "$c $d"');
+    expect(q('$acronym $a'), '$acronym $a');
+    expect(q('"$acronym $a" $b'), '"$acronym $a" $b');
+    expect(q('"$a $b'), '$a $b');
+    // fuzzy mode writes ~N on every word; the engine drops it inside a phrase
+    expect(q('"$a $b" $c', SearchMode.fuzzy), '"$a~1 $b~1" $c~1');
+  });
+
   test('a paired reading keeps its second reading (engine rule)', () {
     final s = OtzariaSearch(query: '(אב) [גד] הו', distance: 0).toOptions().toJson();
     expect(s['query'], 'גד הו');

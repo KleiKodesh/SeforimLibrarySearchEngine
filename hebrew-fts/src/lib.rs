@@ -42,7 +42,7 @@ pub use exact_terms::ExactTermsQuery;
 pub use fuzzy::HebrewFuzzyQuery;
 pub use grammar_query::HebrewGrammarQuery;
 pub use prepared::{PreparedQueryGroups, PreparedTerm};
-pub use query_parser::{tokenize_query, QueryTerm, QueryToken, MAX_FUZZY_DISTANCE};
+pub use query_parser::{quoted_phrases, tokenize_query, QueryTerm, QueryToken, MAX_FUZZY_DISTANCE};
 pub use scanner::{scan, scan_with, word_count, TextToken, TextTokens, WordSpan};
 pub use snippet::{Proximity, SnippetDescriptor, SnippetWindowLocator, DEFAULT_CONTEXT_WORDS, MARK_STRIDE};
 pub use set_automaton::SetAutomaton;

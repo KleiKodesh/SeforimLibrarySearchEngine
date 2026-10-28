@@ -111,6 +111,85 @@ pub fn tokenize_query(query: &str, keep_marks: bool) -> Vec<QueryToken> {
     out
 }
 
+/// A char that opens or closes a quoted phrase (Otzaria's
+/// `smartSearchQuotedPhrases`): `"`, gershayim, and the typographic double
+/// quotes.
+fn is_phrase_quote(c: char) -> bool {
+    matches!(c, '"' | '\u{05F4}' | '\u{201C}' | '\u{201D}' | '\u{201E}')
+}
+
+/// Otzaria's marks skipped when looking back from a quote (nikud and
+/// te'amim; the maqaf U+05BE is not skipped).
+fn is_skipped_mark(c: char) -> bool {
+    ('\u{0591}'..='\u{05BD}').contains(&c) || ('\u{05BF}'..='\u{05C7}').contains(&c)
+}
+
+/// The quoted phrases of `query` (Otzaria's `smartSearchQuotedPhrases`,
+/// `lib/search/utils/smart_lexical_in_book_search.dart`), as the typed-word
+/// indexes of [`tokenize_query`] each phrase covers, in order.
+///
+/// Rule: a quote char ([`is_phrase_quote`]) opens a phrase, the next one
+/// closes it, unless the quote's previous char (marks skipped, a maqaf
+/// counts) and its next char are both Hebrew letters (U+05D0..U+05EA): that
+/// quote is an acronym's gershayim and quotes nothing. An unclosed quote and
+/// an empty phrase are ignored. A typed word belongs to a phrase when it
+/// overlaps the quoted span (its own edge quote included). Read on the
+/// query after the paired readings are reduced, as [`tokenize_query`].
+pub fn quoted_phrases(query: &str) -> Vec<Vec<usize>> {
+    let query = keep_second_of_paired_readings(query);
+    let letter = |c: Option<char>| c.is_some_and(|c| ('\u{05D0}'..='\u{05EA}').contains(&c));
+    // quoted spans as byte ranges between the quotes
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut open: Option<usize> = None;
+    let mut previous: Option<char> = None;
+    let mut chars = query.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let next = chars.peek().map(|&(_, n)| n);
+        if is_phrase_quote(c) && !(letter(previous) && letter(next)) {
+            match open.take() {
+                None => open = Some(i + c.len_utf8()),
+                Some(start) => {
+                    if !query[start..i].trim().is_empty() {
+                        spans.push((start, i));
+                    }
+                }
+            }
+        }
+        if !is_skipped_mark(c) {
+            previous = Some(c);
+        }
+    }
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    // typed words as tokenize_query cuts them: (index, byte range)
+    let mut typed: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    for (i, c) in query.char_indices() {
+        if matches!(c, '|' | ' ' | '\t' | '\r' | '\n') {
+            if i > start {
+                typed.push((start, i));
+            }
+            start = i + c.len_utf8();
+        }
+    }
+    if query.len() > start {
+        typed.push((start, query.len()));
+    }
+    spans
+        .into_iter()
+        .map(|(s, e)| {
+            typed
+                .iter()
+                .enumerate()
+                .filter(|(_, &(ws, we))| ws < e && we > s)
+                .map(|(k, _)| k)
+                .collect::<Vec<usize>>()
+        })
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
 /// A char that stays inside a piece: a word char, a quote, a transparent
 /// char, or a query operator (`?` wildcard, `%` grammar; `*` and `~` are
 /// transparent chars).
@@ -261,6 +340,26 @@ mod tests {
         assert_eq!(idx, ["0:\u{05D0}\u{05D1}", "|", "1:\u{05D2}\u{05D3}", "2:\u{05D0}", "3-", "4:\u{05D4}\u{05D5}", "4:\u{05D6}\u{05D7}"]);
         let t = tokenize_query("\u{05EA}\u{05BC}\u{05D5}\u{05B9}\u{05E8}\u{05B8}\u{05D4}", true);
         assert_eq!(t, vec![QueryToken::Word { index: 0, term: Some(QueryTerm::Word("\u{05EA}\u{05BC}\u{05D5}\u{05B9}\u{05E8}\u{05B8}\u{05D4}".into())) }]);
+    }
+
+    #[test]
+    fn quoted_phrases_otzaria_rule() {
+        let (a, b, c, d) = ("\u{05D0}\u{05D1}", "\u{05D2}\u{05D3}", "\u{05D4}\u{05D5}", "\u{05D6}\u{05D7}");
+        // one phrase, the whole query
+        assert_eq!(quoted_phrases(&format!("\"{a} {b}\"")), vec![vec![0, 1]]);
+        // a phrase among smart words; gershayim and typographic quotes delimit too
+        assert_eq!(quoted_phrases(&format!("{a} \u{05F4}{b} {c}\u{05F4} {d}")), vec![vec![1, 2]]);
+        assert_eq!(quoted_phrases(&format!("\u{201E}{a}\u{201C} {b} \u{201C}{c} {d}\u{201D}")), vec![vec![0], vec![2, 3]]);
+        // an acronym's gershayim (between letters, marks skipped) quotes nothing
+        let acronym = "\u{05E8}\u{05DE}\u{05D1}\"\u{05DD}";
+        assert!(quoted_phrases(&format!("{acronym} {a}")).is_empty());
+        assert!(quoted_phrases("\u{05E8}\u{05B8}\u{05DE}\u{05D1}\u{05BC}\"\u{05DD} \u{05D0}").is_empty());
+        assert_eq!(quoted_phrases(&format!("\"{acronym} {a}\" {b}")), vec![vec![0, 1]]);
+        // a maqaf before the quote is not skipped: the quote delimits
+        assert_eq!(quoted_phrases(&format!("{a}\u{05BE}\"{b} {c}\"")), vec![vec![0, 1]]);
+        // unclosed and empty quotes are ignored
+        assert!(quoted_phrases(&format!("\"{a} {b}")).is_empty());
+        assert!(quoted_phrases(&format!("\" \" {a}")).is_empty());
     }
 
     #[test]

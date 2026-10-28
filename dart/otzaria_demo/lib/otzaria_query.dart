@@ -52,14 +52,63 @@ abstract final class OtzariaOption {
 ///
 /// Paired readings `(X) [Y]` keep only Y first, by the engine's own rule
 /// (Otzaria's `keep_second_of_paired_readings`).
-List<String> splitQueryWords(String query) {
-  var q = SeforimIndex.reducePairedReadings(query).replaceAll('״', '"').replaceAll('׳', "'").replaceAll("''", '"').replaceAll(RegExp('[־|-]'), ' ');
-  final words = <String>[];
-  for (var w in q.split(RegExp(r'\s+'))) {
-    w = w.replaceAll(RegExp(r'^"+|"+$'), '').replaceAll(RegExp(r"^'+"), '');
-    if (w.isNotEmpty) words.add(w);
+List<String> splitQueryWords(String query) => [for (final w in splitQueryWordsWithPhrases(query)) w.$1];
+
+/// [splitQueryWords], each word with the index of the quoted phrase it is in
+/// (null: outside every phrase). Otzaria's `smartSearchQuotedPhrases` rule,
+/// as the engine reads it (`hebrew_fts::quoted_phrases`): a quote (`"`,
+/// gershayim, typographic double quotes) opens a phrase and the next closes
+/// it, unless its previous char (nikud / te'amim skipped) and its next char
+/// are both Hebrew letters (an acronym's gershayim). The typographic double
+/// quotes are folded to `"` with gershayim.
+List<(String, int?)> splitQueryWordsWithPhrases(String query) {
+  // one char for one char, so offsets hold for the phrase spans
+  final q = SeforimIndex.reducePairedReadings(query)
+      .replaceAll(RegExp('[״“”„]'), '"')
+      .replaceAll('׳', "'")
+      .replaceAll(RegExp('[־|-]'), ' ');
+  bool letter(int? c) => c != null && c >= 0x05D0 && c <= 0x05EA;
+  final spans = <(int, int)>[];
+  int? start;
+  int? previous;
+  for (var i = 0; i < q.length; i++) {
+    final c = q.codeUnitAt(i);
+    final next = i + 1 < q.length ? q.codeUnitAt(i + 1) : null;
+    if (c == 0x22 && !(letter(previous) && letter(next))) {
+      if (start == null) {
+        start = i + 1;
+      } else {
+        if (q.substring(start, i).trim().isNotEmpty) spans.add((start, i));
+        start = null;
+      }
+    }
+    if (!(c >= 0x0591 && c <= 0x05BD || c >= 0x05BF && c <= 0x05C7)) previous = c;
+  }
+  final words = <(String, int?)>[];
+  for (final m in RegExp(r'\S+').allMatches(q)) {
+    final w = m[0]!.replaceAll("''", '"').replaceAll(RegExp(r'^"+|"+$'), '').replaceAll(RegExp(r"^'+"), '');
+    if (w.isEmpty) continue;
+    int? phrase;
+    for (var k = 0; k < spans.length && phrase == null; k++) {
+      if (m.start < spans[k].$2 && m.end > spans[k].$1) phrase = k;
+    }
+    words.add((w, phrase));
   }
   return words;
+}
+
+/// [words] joined into the engine's query, each quoted phrase's run of
+/// words wrapped in `"` (the engine searches it as a literal phrase).
+String joinWithPhrases(List<String> words, List<int?> phrases) {
+  final out = StringBuffer();
+  for (var i = 0; i < words.length; i++) {
+    final p = phrases[i];
+    final open = p != null && (i == 0 || phrases[i - 1] != p);
+    final close = p != null && (i == words.length - 1 || phrases[i + 1] != p);
+    if (i > 0) out.write(' ');
+    out.write('${open ? '"' : ''}${words[i]}${close ? '"' : ''}');
+  }
+  return out.toString();
 }
 
 
@@ -357,10 +406,13 @@ class OtzariaSearch {
     }
     // `|` and `%` are FtsLib syntax in the engine's query string: an Otzaria
     // word is literal, so they are dropped from it.
-    final words = [
-      for (final w in splitQueryWords(query))
-        if (w.replaceAll(RegExp('[|%]'), '').isNotEmpty) w.replaceAll(RegExp('[|%]'), '')
+    final split = [
+      for (final w in splitQueryWordsWithPhrases(query))
+        if (w.$1.replaceAll(RegExp('[|%]'), '').isNotEmpty) (w.$1.replaceAll(RegExp('[|%]'), ''), w.$2)
     ];
+    final words = [for (final w in split) w.$1];
+    // Quoted phrases stay quoted: the engine searches each as a literal phrase.
+    final phrases = [for (final w in split) w.$2];
     final global = _globalSet();
     final perWord = <int, WordOptions>{};
     for (var i = 0; i < words.length; i++) {
@@ -379,7 +431,7 @@ class OtzariaSearch {
     }
     final s = _withOptions(
       SearchOptions(
-        [for (final w in words) _queryWord(w)].join(' '),
+        joinWithPhrases([for (final w in words) _queryWord(w)], phrases),
         words: perWord,
         contextWords: contextWords,
         exclude: _exclude(),

@@ -157,6 +157,7 @@ md.append("""## Engines compared
 | Truncated flag when a cap is hit | done |
 | Cross-line phrases (one break, any search type; line-edge enumerators skipped as Otzaria) and same-section scope | built; unit tests; full-DB verification pending |
 | Fuzzy: a swap of two adjacent letters is one edit (Otzaria; FtsLib changed too) | done |
+| Quoted phrases (Otzaria's rule, both engines): a whole-query phrase is literal and may cross a line (ours); a phrase among words is required in the line | done; unit tests; FtsLib per line only |
 | Snippets from index positions (`locate_lines`, per-batch cost rule) | done |
 """)
 
@@ -399,7 +400,7 @@ claude_block = "\n".join([
     f"ours `{INDEX_FORMAT}`, FtsLib `{FTSLIB_FORMAT}`. Features: FtsLib syntax + parity, per-word Otzaria "
     f"options as FST walks (cap 2000 per segment), proximity / word match, vocalized walks, user regex "
     f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, resume after position, "
-    f"truncated flag, cross-line (enumerators skipped) and same-section, positions snippets, FM sidecar.",
+    f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, positions snippets, FM sidecar.",
     "Builds: " + "; ".join(l.strip("| ").replace(" | ", " ") for l in build_lines()) + ".",
     ("Parity with FtsLib: all sets identical (" + ", ".join(x[0] for x in PAR_RUN) + "; both flavours)."
      if PAR_ALL_SAME else "Parity with FtsLib: " + parity_summary() + "."),

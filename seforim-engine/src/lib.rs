@@ -1594,6 +1594,67 @@ mod tests {
         assert_eq!(by_flavour[0], by_flavour[1], "both flavours give the same hits");
     }
 
+    /// Quoted phrases (issue #2 H57, Otzaria's rule): one phrase holding
+    /// the whole query is a literal phrase that may cross a line; a phrase
+    /// among other words is required in the line besides them; an
+    /// acronym's gershayim quotes nothing; a phrase word is matched as
+    /// written (no expansion of its own).
+    #[test]
+    fn quoted_phrases_both_flavours() {
+        // 0: A B C        1: B A C (not adjacent in order)
+        // 2: F A | 3: B   (the phrase across the break)
+        // 4: A X B F      5: C A B F
+        let texts: Vec<String> = vec![
+            format!("{XA} {XB} {XC}"),
+            format!("{XB} {XA} {XC}"),
+            format!("{XF} {XA}"),
+            XB.to_string(),
+            format!("{XA} {XC} {XB} {XF}"),
+            format!("{XC} {XA} {XB} {XF}"),
+            format!("{XF}{XA} {XB}"),
+        ];
+        let docs: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| xline(i as u64, 1, t, None, false)).collect();
+        let mut by_flavour = Vec::new();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &docs);
+            let whole = SearchOptions { query: format!("\"{XA} {XB}\""), ..Default::default() };
+            let got_whole = passing(&index, &whole, &texts);
+            assert_eq!(got_whole, vec![(0, false), (2, true), (5, false)], "positions={positions}");
+            // the user's looser distance does not loosen the phrase
+            let loose = SearchOptions { max_word_distance: Some(5), ..whole.clone() };
+            assert_eq!(passing(&index, &loose, &texts), got_whole);
+            // mixed: the phrase in the line, F anywhere in it
+            let mixed = SearchOptions { query: format!("\"{XA} {XB}\" {XF}"), ..Default::default() };
+            let got_mixed = passing(&index, &mixed, &texts);
+            assert_eq!(got_mixed, vec![(5, false)], "positions={positions}");
+            // without quotes the same words are plain words
+            let plain = SearchOptions { query: format!("{XA} {XB} {XF}"), ..Default::default() };
+            assert_eq!(passing(&index, &plain, &texts), vec![(4, false), (5, false)]);
+            // a phrase word is literal: a prefix option does not reach it
+            let prefixed = SearchOptions { advanced_prefixes: true, ..whole.clone() };
+            assert_eq!(passing(&index, &prefixed, &texts), got_whole);
+            let unquoted = SearchOptions {
+                query: format!("{XA} {XB}"),
+                advanced_prefixes: true,
+                proximity: Some(ProximitySpec::Ordered { gaps: vec![0] }),
+                ..Default::default()
+            };
+            assert!(passing(&index, &unquoted, &texts).contains(&(6, false)), "positions={positions}");
+            by_flavour.push((got_whole, got_mixed));
+        }
+        assert_eq!(by_flavour[0], by_flavour[1], "both flavours give the same hits");
+        // the acronym's gershayim quotes nothing: the words stay plain
+        let acronym = format!("{XA}\"{XB}");
+        let o = SearchOptions { query: format!("{acronym} {XC}"), ..Default::default() };
+        let r = o.to_request(false).unwrap();
+        assert!(r.required_phrases.is_empty() && r.proximity.is_none() && !r.cross_line);
+        let o = SearchOptions { query: format!("\"{XA} {XB}\" {XC}"), ..Default::default() };
+        let r = o.to_request(false).unwrap();
+        assert_eq!(r.required_phrases.len(), 1);
+        assert_eq!(r.groups.len(), 3);
+    }
+
     #[test]
     fn cross_line_skips_line_edge_enumerators() {
         // Otzaria's content_range: the break joins content words; a trailing

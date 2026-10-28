@@ -8,7 +8,7 @@ Current index formats: ours `tantivy12`, FtsLib `fts10`.
 >
 > - Index builds, parity and search speed below were measured on `tantivy9` / FtsLib `fts8`. `tantivy10` / `fts9` changed indexing (an unterminated `<` no longer swallows the rest of the line; per-line content edges for cross-line) and fuzzy (a swap of two adjacent letters is one edit): the full-DB rebuilds, parity sets and the Otzaria hit-count comparison need a rerun.
 > - `tantivy11` sorts the index by catalog position (search skips its sort on the merged segment) and the C# / Dart hosts keep seforim.db open across searches: index build time and size, and the first-page profile, need a full-DB rerun.
-> - `tantivy12` / `fts10`: a `<sup>` holding a vocalized Hebrew letter mid-word is transparent (issue #2 H58): both full-DB rebuilds and the parity sets need a rerun.
+> - `tantivy12` / `fts10`: a `<sup>` holding a vocalized Hebrew letter mid-word is transparent (issue #2 H58), and a keep_marks term drops U+034F (combining grapheme joiner, issue #2 H02): both full-DB rebuilds and the parity sets need a rerun.
 > - Hit-count comparison: the rows classified as our bugs (unterminated `<`, cross-line enumerators) and the fuzzy transposition rows are expected to change; not rerun yet.
 
 ## Engines compared

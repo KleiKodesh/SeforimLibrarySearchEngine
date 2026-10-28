@@ -1335,6 +1335,37 @@ mod tests {
     }
 
     #[test]
+    fn grapheme_joiner_is_dropped_from_terms() {
+        // issue #2 H02: bet + dagesh + CGJ + hiriq + tav (the joiner keeps
+        // the non-canonical order in the text); the typed word may hold the
+        // joiner or not, in either mark order: one term, same hits
+        const BIT_CGJ: &str = "\u{05D1}\u{05BC}\u{034F}\u{05B4}\u{05EA}";
+        let lines = vec![
+            line(1, 1, 1, &format!("{BIT_CGJ} \u{05D0}")),
+            line(2, 2, 1, "\u{05D1}\u{05EA} \u{05D0}"),
+            line(3, 3, 1, "\u{05D1}\u{05B4}\u{05BC}\u{05EA}"),
+        ];
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build_one_segment(dir.path(), IndexOptions { positions, keep_marks: true }, &lines);
+            let nikud = |q: &str| SearchOptions { query: q.into(), match_nikud: true, ..Default::default() };
+            for q in [
+                BIT_CGJ,
+                "\u{05D1}\u{05B4}\u{034F}\u{05BC}\u{05EA}",
+                "\u{05D1}\u{05BC}\u{05B4}\u{05EA}",
+                "\u{05D1}\u{05B4}\u{05BC}\u{05EA}",
+            ] {
+                // the unvocalized line 2 is excluded by the vocalized mode
+                assert_eq!(located_ids(&index, &lines, &nikud(q)), [1, 3], "positions={positions} {}", q.escape_unicode());
+            }
+            // the highlight covers the whole word, joiner included (UTF-16)
+            let mut r = index.search_options(&nikud("\u{05D1}\u{05B4}\u{05BC}\u{05EA}")).unwrap();
+            let s = r.session.locate(&lines[0].text).unwrap();
+            assert_eq!(&s.marks[..2], &[0, BIT_CGJ.encode_utf16().count() as u32]);
+        }
+    }
+
+    #[test]
     fn cap_counts_mark_free_forms() {
         // four spellings of one word and two other words of its length:
         // under a cap of 2 slots the spellings are ONE slot (summed doc

@@ -302,8 +302,15 @@ pub fn combining_class(c: char) -> u8 {
 /// Appends the term mark `mark` to `text` in canonical order: before the
 /// marks at the end of `text` whose combining class is greater (a stable
 /// insertion sort of each mark run, Unicode's canonical ordering). Returns
-/// nothing; the caller counts bytes.
+/// nothing; the caller counts bytes. The combining grapheme joiner
+/// ([`is_grapheme_joiner`]) is dropped: it only blocks canonical reordering
+/// in the source text, so a term (and a typed word) never holds it and the
+/// two mark orders around it give one term. It stays inside the word's span
+/// (the scanner's offsets count it).
 pub fn push_mark_canonical(text: &mut String, mark: char) {
+    if is_grapheme_joiner(mark) {
+        return;
+    }
     let class = combining_class(mark);
     if class == 0 {
         text.push(mark);
@@ -320,8 +327,16 @@ pub fn push_mark_canonical(text: &mut String, mark: char) {
     text.insert(at, mark);
 }
 
+/// U+034F COMBINING GRAPHEME JOINER: a general combining mark of class 0
+/// that texts put between two marks to keep their order (issue #2 H02).
+/// Dropped from every term and typed word ([`push_mark_canonical`]).
+#[inline(always)]
+pub fn is_grapheme_joiner(c: char) -> bool {
+    c == '\u{034F}'
+}
+
 /// `term` with the marks of each letter in canonical order (see
-/// [`push_mark_canonical`]).
+/// [`push_mark_canonical`]); a grapheme joiner is dropped.
 pub fn canonical_marks(term: &str) -> String {
     let mut out = String::with_capacity(term.len());
     for c in term.chars() {
@@ -395,6 +410,9 @@ mod tests {
         // never across a letter
         assert_eq!(canonical_marks("\u{05D1}\u{05BC}\u{05D2}\u{05B8}"), "\u{05D1}\u{05BC}\u{05D2}\u{05B8}");
         assert!(contains_attached_marks("a\u{05B8}") && !contains_attached_marks("a\u{0301}\u{05BE}"));
+        // the grapheme joiner is dropped: both mark orders around it give one term
+        assert_eq!(canonical_marks("\u{05D1}\u{05BC}\u{034F}\u{05B4}"), "\u{05D1}\u{05B4}\u{05BC}");
+        assert_eq!(canonical_marks("\u{05D1}\u{05B4}\u{034F}\u{05BC}"), "\u{05D1}\u{05B4}\u{05BC}");
         assert_eq!(strip_term_marks("\u{05D1}\u{05B8}\u{0301}\""), "\u{05D1}\"");
     }
 

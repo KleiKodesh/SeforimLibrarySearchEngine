@@ -508,16 +508,22 @@ fn value(c: Config) -> u32 {
     c as u32
 }
 
-/// Is `b` a single-byte indexed letter (lowercased ASCII)?
+/// Otzaria `AFFIX_LETTER` (`hebrew_query.rs`), the single-byte part: a
+/// geresh / gershayim in the index form (`'`, `"`). An any-letter window
+/// adds only these and Hebrew letters ([`is_affix_tail`]): never a Latin
+/// letter, a digit or another script.
 #[inline]
-fn is_ascii_letter(b: u8) -> bool {
-    b.is_ascii_lowercase()
+fn is_affix_quote(b: u8) -> bool {
+    b == b'\'' || b == b'"'
 }
-/// Lead byte of a UTF-8 Hebrew letter (א..ת = 0xD7 0x90..0xAA).
+/// Lead byte of a UTF-8 Hebrew letter (U+05D0..U+05EA = 0xD7 0x90..0xAA,
+/// U+05F0..U+05F2 = 0xD7 0xB0..0xB2).
 const HEBREW_LEAD: u8 = 0xD7;
+/// Otzaria `AFFIX_LETTER`, the two-byte part (after [`HEBREW_LEAD`]): the
+/// Hebrew letters U+05D0..U+05EA and the Yiddish ligatures U+05F0..U+05F2.
 #[inline]
-fn is_hebrew_tail_letter(b: u8) -> bool {
-    (0x90..=0xAA).contains(&b)
+fn is_affix_tail(b: u8) -> bool {
+    (0x90..=0xAA).contains(&b) || (0xB0..=0xB2).contains(&b)
 }
 
 /// The composite walk automaton. State = sorted set of NFA configs; empty =
@@ -857,7 +863,7 @@ impl HebrewWalkAutomaton {
             }
             // Second byte of a Hebrew letter in an any-letter phase.
             PEND_LETTER => {
-                if is_hebrew_tail_letter(byte) {
+                if is_affix_tail(byte) {
                     self.close_into(pack(t, PEND_NONE, value(config) + 1), out);
                 }
                 return;
@@ -892,11 +898,17 @@ impl HebrewWalkAutomaton {
                     },
                 );
                 if count < max {
-                    if is_ascii_letter(byte) {
+                    if is_affix_quote(byte) {
                         self.close_into(pack(t, PEND_NONE, count + 1), out);
                     } else if byte == HEBREW_LEAD {
                         self.close_into(pack(t, PEND_LETTER, count), out);
                     }
+                }
+                // Otzaria `NOTE_DIGITS` (`[0-9]*` before the window's
+                // letters): a footnote number glued to the word, only in the
+                // window before the root, free of the letter budget.
+                if t == TAG_PRE_ANY && count == 0 && byte.is_ascii_digit() {
+                    self.close_into(pack(t, PEND_NONE, 0), out);
                 }
             }
             TAG_CORE => {
@@ -1348,6 +1360,47 @@ mod tests {
         );
         assert!(matches(&a, "תורהקקקקק")); // 5 after
         assert!(!matches(&a, "תורהקקקקקק")); // 6 > 5
+    }
+
+    #[test]
+    fn affix_windows_add_only_hebrew_letters_and_quotes() {
+        // Otzaria hebrew_query.rs affix_windows_add_only_hebrew_letters_and_quotes
+        const SHABBAT: &str = "\u{05E9}\u{05D1}\u{05EA}";
+        let prefix = WalkOptions { advanced_prefixes: true, ..Default::default() };
+        let suffix = WalkOptions { advanced_suffixes: true, ..Default::default() };
+        let partial = WalkOptions { part_of_word: true, ..Default::default() };
+        for (o, is_suffix) in [(&prefix, false), (&suffix, true), (&partial, false)] {
+            let a = walk(SHABBAT, o.clone());
+            assert!(
+                matches(&a, &format!("\u{05D1}{SHABBAT}")) || matches(&a, &format!("{SHABBAT}\u{05D5}"))
+            );
+            for foreign in [
+                format!("a{SHABBAT}"),
+                format!("{SHABBAT}1"),
+                format!("{SHABBAT}x"),
+                format!("\u{0301}{SHABBAT}"),
+                format!("a1{SHABBAT}"),
+            ] {
+                assert!(!matches(&a, &foreign), "accepted {}", foreign.escape_unicode());
+            }
+            // a footnote number glued before the word: only the window before the root
+            assert_eq!(matches(&a, &format!("28{SHABBAT}")), !is_suffix);
+        }
+        let p = |w: &str, o: &WalkOptions, t: &str| matches(&walk(w, o.clone()), t);
+        assert!(p("\u{05E8}\u{05DE}\u{05D1}", &partial, "\u{05D4}\u{05E8}\u{05DE}\u{05D1}\"\u{05DD}"));
+        assert!(p(SHABBAT, &partial, "\u{05DE}\u{05D7}\u{05E9}\u{05D1}\u{05EA}\u{05D5}"));
+        assert!(p("\u{05D1}\u{05E8}\u{05DB}", &partial, "448\u{05D1}\u{05E8}\u{05DB}\u{05D5}\u{05EA}"));
+        let amar = "\u{05D0}\u{05DE}\u{05E8}";
+        assert!(p(amar, &prefix, &format!("70\u{05D5}{amar}")));
+        assert!(!p(amar, &prefix, &format!("7a0{amar}")));
+        // digits only before the window's letters, never after one
+        assert!(!p(amar, &prefix, &format!("\u{05D5}7{amar}")));
+        // grammatical prefixes take no digits
+        let gram = WalkOptions { grammar_prefixes: true, ..Default::default() };
+        assert!(!p(SHABBAT, &gram, &format!("28{SHABBAT}")));
+        // the Yiddish ligatures U+05F0..U+05F2 are affix letters
+        assert!(p(SHABBAT, &prefix, &format!("\u{05F0}{SHABBAT}")));
+        assert!(p(SHABBAT, &suffix, &format!("{SHABBAT}\u{05F2}")));
     }
 
     #[test]

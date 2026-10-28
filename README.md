@@ -334,6 +334,13 @@ are not printed), so upstream's query-parser tests stay as they are.
       one of ו מ דא כש כ ב ש ל ה ד, then one of כש כ ב ש ל ה ד, then ה
       (up to 5 letters: דאכשה־); Aramaic prefixes add א to the first slot.
       Composes with the advanced prefix window (union, as Otzaria's lead).
+    - **Any-letter windows** (advanced prefixes / suffixes, part of word):
+      Otzaria's `AFFIX_LETTER`: each unit is a Hebrew letter U+05D0..U+05EA,
+      a Yiddish ligature U+05F0..U+05F2 or a geresh / gershayim (`'` `"`),
+      never a Latin letter, a digit or another script. The window before
+      the root also takes Otzaria's `NOTE_DIGITS`: any ASCII digits ahead of
+      its letters (a glued footnote number), free of the letter budget; the
+      window after the root takes none (issue #2 H05).
     - **שגיאות כתיב**, two behaviours, chosen by `typo_mode` (letters
       counted without quotes/marks; ≤2 letters never take a typo):
       - `otzaria` (default, exactly Otzaria): a lone word of ≥4 letters

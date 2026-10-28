@@ -871,9 +871,22 @@ impl HebrewWalkAutomaton {
             _ => {}
         }
 
-        // Free marks apply in every phase: a mark may begin here (the core
-        // trie may also read it: a typed, required mark).
-        if self.free_marks && crate::marks::is_mark_lead(byte) {
+        // Free marks apply in every phase once a letter was read: a mark may begin here (the core
+        // trie may also read it: a typed, required mark). A free mark
+        // follows a letter: never where no letter has been read yet (the
+        // start of a phase that begins the term, the window before the root
+        // before its first letter, the core root). Otzaria's vocalized
+        // window is `[0-9]*(?:letter marks*)*`, so a mark never sits before,
+        // between or right after the glued footnote digits. A letter that
+        // was read (a prefix, a window letter) keeps its marks through its
+        // own phase, which then closes into the core again.
+        let no_letter_yet = match t {
+            TAG_PRE_ANY => value(config) == 0,
+            TAG_PRE => value(config) == SetAutomaton::ROOT,
+            TAG_CORE => value(config) == SetAutomaton::ROOT && config & EDITED == 0,
+            _ => false,
+        };
+        if self.free_marks && !no_letter_yet && crate::marks::is_mark_lead(byte) {
             let pend = with_data(pack(t, PEND_MARK, value(config)) | gate, byte as u16);
             if !out.contains(&pend) {
                 out.push(pend);
@@ -1640,6 +1653,39 @@ mod tests {
         // a mark-free index: no wrapper, a plain word matches plain terms
         let plain = HebrewWalkQuery::new(Field::from_field_id(0), BERESHIT, WalkOptions::default());
         assert!(acc(&plain, BERESHIT) && !acc(&plain, BERESHIT_VOC));
+    }
+
+    #[test]
+    fn vocalized_affix_windows() {
+        // Otzaria hebrew_query.rs affix_windows_add_only_hebrew_letters_and_quotes,
+        // the vocalized part (no required marks: a plain word on a marks index)
+        const SHABBAT: &str = "\u{05E9}\u{05D1}\u{05EA}";
+        const SHABBAT_VOC: &str = "\u{05E9}\u{05B7}\u{05C1}\u{05D1}\u{05B8}\u{05BC}\u{05EA}";
+        let partial = WalkOptions { part_of_word: true, ..Default::default() };
+        let q = marked(SHABBAT, partial.clone());
+        assert!(acc(&q, &format!("\u{05D1}\u{05B0}\u{05BC}{SHABBAT_VOC}")));
+        assert!(acc(&q, &format!("1{SHABBAT_VOC}")));
+        assert!(!acc(&q, &format!("a{SHABBAT_VOC}")));
+        // free marks on (a typed, required patah on the shin): marks follow an
+        // affix letter, never before or between the leading digits
+        let typed = "\u{05E9}\u{05B7}\u{05D1}\u{05EA}";
+        for o in [partial, WalkOptions { advanced_prefixes: true, ..Default::default() }] {
+            let q = marked(typed, WalkOptions { match_nikud: true, ..o });
+            assert!(acc(&q, SHABBAT_VOC));
+            assert!(acc(&q, &format!("\u{05D1}\u{05B0}\u{05BC}{SHABBAT_VOC}")));
+            assert!(acc(&q, &format!("12{SHABBAT_VOC}")));
+            assert!(acc(&q, &format!("12\u{05D1}\u{05B0}{SHABBAT_VOC}")));
+            assert!(!acc(&q, &format!("a{SHABBAT_VOC}")));
+            assert!(!acc(&q, &format!("\u{05B0}12{SHABBAT_VOC}")), "mark before the digits");
+            assert!(!acc(&q, &format!("1\u{05B0}2{SHABBAT_VOC}")), "mark between the digits");
+            assert!(!acc(&q, &format!("12\u{05B0}{SHABBAT_VOC}")), "mark after the digits, no letter");
+            assert!(!acc(&q, &format!("\u{05B0}{SHABBAT_VOC}")), "leading mark");
+        }
+        // a grammatical prefix letter keeps its marks
+        let q = marked(typed, WalkOptions { match_nikud: true, grammar_prefixes: true, ..Default::default() });
+        assert!(acc(&q, &format!("\u{05D5}\u{05B0}{SHABBAT_VOC}")));
+        assert!(acc(&q, &format!("\u{05D5}\u{05B0}\u{05D1}\u{05B7}\u{05BC}{SHABBAT_VOC}")));
+        assert!(!acc(&q, &format!("\u{05B0}\u{05D5}{SHABBAT_VOC}")), "leading mark");
     }
 
     #[test]

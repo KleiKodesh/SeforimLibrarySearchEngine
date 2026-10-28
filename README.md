@@ -340,7 +340,11 @@ are not printed), so upstream's query-parser tests stay as they are.
       never a Latin letter, a digit or another script. The window before
       the root also takes Otzaria's `NOTE_DIGITS`: any ASCII digits ahead of
       its letters (a glued footnote number), free of the letter budget; the
-      window after the root takes none (issue #2 H05).
+      window after the root takes none (issue #2 H05). In vocalized
+      matching (typed, required marks; every other mark free) a free mark
+      follows a letter: never before, between or right after those digits,
+      nor before the word's first letter (Otzaria's vocalized
+      `[0-9]*(?:letter marks*){min,max}`).
     - **שגיאות כתיב**, two behaviours, chosen by `typo_mode` (letters
       counted without quotes/marks; ≤2 letters never take a typo):
       - `otzaria` (default, exactly Otzaria): a lone word of ≥4 letters

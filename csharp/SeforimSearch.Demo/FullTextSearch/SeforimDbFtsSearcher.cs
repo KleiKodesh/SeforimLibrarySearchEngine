@@ -94,6 +94,9 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// <param name="contextWords">Words of context requested per side of the match.</param>
         /// <param name="wordOptions">Otzaria's per-word search options (prefixes, suffixes,
         /// ktiv, nikud…). Replaces FtsLib's expandKetiv flag.</param>
+        /// <param name="afterPosition">Resume: only lines after this index position
+        /// (<see cref="SeforimDbFtsEngine.PositionOfLine"/>); 0 = from the start. A resumed
+        /// search seeds no snippet texts (the caller already shows its first screen). (Core 277de7a9.)</param>
         public IEnumerable<SeforimDbFtsHitBatch> SearchInBatches(
             SeforimDbFtsEngine engine,
             string query,
@@ -103,7 +106,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             SeforimSearch.Engine.WalkOptions? wordOptions,
             FtsTermTable terms,
             CancellationToken cancellationToken = default,
-            Action<string>? onStage = null)
+            Action<string>? onStage = null,
+            long afterPosition = 0)
         {
             if (engine == null) throw new ArgumentNullException(nameof(engine));
             if (terms == null) throw new ArgumentNullException(nameof(terms));
@@ -116,7 +120,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             Action<string>? stage = onStage == null ? null : s => { if (s != last) { last = s; onStage(s); } };
 
             int batchIndex = 0;
-            int seedLeft = SeedSnippetTextHitCount;
+            int seedLeft = afterPosition > 0 ? 0 : SeedSnippetTextHitCount;
             var batch = new List<SearchResult>(FirstBatchSize);
 
             var searchOptions = new TantivySearchOptions
@@ -137,7 +141,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             SeforimDbFtsCorpus Corpus() => corpus ??= engine.OpenCorpus();
             try
             {
-                foreach (var hit in index.Search(query, searchOptions, cancellationToken, stage, BatchSizeAt, withPlacement: false))
+                foreach (var hit in index.Search(query, searchOptions, cancellationToken, stage, BatchSizeAt, withPlacement: false,
+                                                 afterPosition: afterPosition))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     batch.Add(hit);

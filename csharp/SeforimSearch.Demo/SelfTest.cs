@@ -224,6 +224,28 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                 Check(snippets == got.Count, "every hit has a marked snippet");
             }
 
+            // Resume (Core 277de7a9): a run resumed after its N-th hit's line yields exactly the
+            // rest of the full run; a line that cannot be placed has no position (restart).
+            Check(engine.PositionOfLine(LinesPerBook + 1) == 1, "first catalog line is position 1 (FtsLib's rowid)");
+            Check(engine.PositionOfLine(1) == LinesPerBook + 1, "book 1 starts after book 2");
+            Check(engine.PositionOfLine(987654) == null, "an unknown line cannot be placed");
+            foreach (int n in new[] { 1, 7, expected.Count - 1, expected.Count })
+            {
+                long? after = engine.PositionOfLine(expected[n - 1]);
+                Check(after.HasValue, $"resume line {expected[n - 1]} placed");
+                var rest = new List<int>();
+                int restSeeded = 0;
+                foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
+                             engine, "beta", int.MaxValue, false, 8, null, new FtsTermTable(), afterPosition: after!.Value))
+                {
+                    restSeeded += batch.SnippetTexts.Count;
+                    foreach (var hit in batch.Hits) rest.Add(hit.LineId);
+                }
+                Check(expected.Take(n).Concat(rest).SequenceEqual(expected),
+                      $"resume after hit {n}: first {n} + {rest.Count} resumed != full {expected.Count}");
+                Check(restSeeded == 0, "a resumed run seeds no snippet texts");
+            }
+
             // Snippet texts (Core 5e1091b8): every fixture line has 3 words < 8 context, so
             // every hit is SHORT and its seeded text comes with same-book +-2 neighbours.
             var seeded = new List<FtsSnippetText>();

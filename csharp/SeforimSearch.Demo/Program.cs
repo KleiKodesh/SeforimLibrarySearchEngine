@@ -83,7 +83,7 @@ namespace SeforimSearch.Demo
         private static int Search(SeforimDbFtsEngine engine, string[] args)
         {
             var words = args.Skip(1).Where((a, i) => !a.StartsWith("--", StringComparison.Ordinal)
-                && (i == 0 || !new[] { "--db", "--index", "--distance", "--repeat" }.Contains(args[i]))).ToArray();
+                && (i == 0 || !new[] { "--db", "--index", "--distance", "--repeat", "--resume-after" }.Contains(args[i]))).ToArray();
             string query = string.Join(" ", words);
             int distance = int.TryParse(Option(args, "--distance"), out var d) ? d : int.MaxValue;
             var wordOptions = new WalkOptions
@@ -103,6 +103,15 @@ namespace SeforimSearch.Demo
             bool built = engine.Index.IsBuilt;
             Console.Error.WriteLine($"open: index {openSw.Elapsed.TotalMilliseconds:F0} ms (built={built})");
             int repeat = int.TryParse(Option(args, "--repeat"), out var rp) && rp > 1 ? rp : 1;
+            // --resume-after <lineId>: Core's StreamSearch resume (277de7a9): the line's index
+            // position, or, when it cannot be placed, a restart from the start (Restarted).
+            long afterPosition = 0;
+            if (int.TryParse(Option(args, "--resume-after"), out int resumeAfterLineId) && resumeAfterLineId > 0)
+            {
+                long? position = engine.PositionOfLine(resumeAfterLineId);
+                if (position is long found) afterPosition = found;
+                else Console.Error.WriteLine("restarted: the resume line cannot be placed; searching from the start");
+            }
             for (int run = 1; run <= repeat; run++)
             {
             var terms = new FtsTermTable();
@@ -110,7 +119,8 @@ namespace SeforimSearch.Demo
             TimeSpan? first = null;
             int total = 0, shown = run == 1 ? 0 : 10;
             foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
-                         engine, query, distance, requireOrdered: false, contextWords: 8, wordOptions, terms))
+                         engine, query, distance, requireOrdered: false, contextWords: 8, wordOptions, terms,
+                         afterPosition: afterPosition))
             {
                 first ??= sw.Elapsed;
                 total += batch.Hits.Count;

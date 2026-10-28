@@ -154,7 +154,8 @@ namespace FtsLib.Fts5
         /// </summary>
         public IEnumerable<SearchResult> Search(string query, TantivySearchOptions? options = null,
                                                 CancellationToken ct = default, Action<string>? onStage = null,
-                                                Func<int, int>? batchSizeAt = null, bool withPlacement = true)
+                                                Func<int, int>? batchSizeAt = null, bool withPlacement = true,
+                                                long afterPosition = 0)
         {
             if (!SeforimIndex.Exists(_indexPath)) yield break;
             options ??= new TantivySearchOptions();
@@ -162,6 +163,10 @@ namespace FtsLib.Fts5
             // The engine parses the query (FtsLib's QueryParser rules) and builds
             // one walk per word with these options.
             var request = ToRequest(query, options);
+            // Resume (FtsLib's afterPosition: rowid > position, 0 = from the start). FtsLib's
+            // positions start at 1 and the engine's at 0 (same order), so FtsLib's position p
+            // is the engine's p - 1; the engine bounds the hits while collecting.
+            if (afterPosition > 0) request.AfterPosition = afterPosition - 1;
 
             onStage?.Invoke("search");
             // NOT disposed with the enumeration: results outlive it (Core snippets the

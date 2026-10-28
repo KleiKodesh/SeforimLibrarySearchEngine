@@ -44,6 +44,12 @@ namespace SeforimSearch.Demo.SeforimDb
             " WHERE l.id > @after ORDER BY l.id" + (hasLimit ? " LIMIT @lim" : "");
 
         /// <summary>Lines per book — lets the catalog-order feed skip whole books on resume.</summary>
+        /// <summary>A line's rank inside its book in the index's order (lineIndex; id breaks a
+        /// tie): its position is the book's first position plus this. Served by
+        /// idx_line_book_index. (Core 277de7a9.)</summary>
+        internal const string FtsLineRankInBook =
+            "SELECT COUNT(*) FROM line WHERE bookId = @b AND (lineIndex < @li OR (lineIndex = @li AND id < @id))";
+
         internal const string FtsLineCountsByBook = "SELECT bookId, COUNT(*) FROM line GROUP BY bookId";
 
         /// <summary>One book's lines in reading order (lineIndex; id breaks a tie), from the

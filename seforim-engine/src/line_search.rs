@@ -76,6 +76,8 @@ pub(crate) struct LineRun {
     matched: Vec<PlacedHit>,
     pub(crate) truncated: bool,
     books: Option<HashSet<u64>>,
+    /// Resume: lines at or before this position are out of scope.
+    after: Option<u64>,
     cancel: Option<CancelToken>,
 }
 
@@ -116,8 +118,11 @@ impl LineRun {
         CancelToken::check(self.cancel.as_ref())?;
         let mut found = match_texts(&self.plan, texts, self.cancel.as_ref())?;
         for (hit, ranges) in lines.iter().zip(found.iter_mut()) {
-            // a line outside the book filter is out of scope: not counted as fed
-            if self.books.as_ref().is_some_and(|b| !b.contains(&hit.book_id)) {
+            // a line outside the book filter, or at or before the resume
+            // position, is out of scope: not counted as fed
+            if self.books.as_ref().is_some_and(|b| !b.contains(&hit.book_id))
+                || self.after.is_some_and(|a| hit.position <= a)
+            {
                 ranges.clear();
                 continue;
             }
@@ -282,7 +287,12 @@ impl LineIndex {
         CancelToken::check(cancel.as_ref())?;
         let (hits, full_scan, scope_lines) = match candidates {
             Some(query) => {
-                let collector = PlacedCollector { books: books.clone().map(Arc::new), drop_sections: None, keep_docs: false };
+                let collector = PlacedCollector {
+                    books: books.clone().map(Arc::new),
+                    drop_sections: None,
+                    keep_docs: false,
+                    after: request.after_position,
+                };
                 let mut hits = searcher.search(query.as_ref(), &collector)?;
                 if !self.catalog_ordered(&searcher) {
                     hits.sort_unstable_by_key(|h| h.position);
@@ -290,12 +300,12 @@ impl LineIndex {
                 let n = hits.len() as u64;
                 (hits, false, n)
             }
-            None => (Vec::new(), true, scope_line_count(&searcher, books.as_ref())?),
+            None => (Vec::new(), true, scope_line_count(&searcher, books.as_ref(), request.after_position)?),
         };
         let session =
             SnippetSession::for_line(plan.clone(), request.context_words, self.options.keep_marks, cancel.clone());
         let mut result = SearchResult::new(hits, session);
-        result.line = Some(LineRun { plan, full_scan, scope_lines, fed: 0, matched: Vec::new(), truncated: false, books, cancel });
+        result.line = Some(LineRun { plan, full_scan, scope_lines, fed: 0, matched: Vec::new(), truncated: false, books, after: request.after_position, cancel });
         Ok(result)
     }
 
@@ -367,15 +377,22 @@ impl LineIndex {
     }
 }
 
-/// Live lines in scope (the book filter, or every line).
-fn scope_line_count(searcher: &Searcher, books: Option<&HashSet<u64>>) -> Result<u64> {
-    let Some(books) = books else { return Ok(searcher.num_docs()) };
+/// Live lines in scope (the book filter, or every line; past the resume
+/// position `after`, when set).
+fn scope_line_count(searcher: &Searcher, books: Option<&HashSet<u64>>, after: Option<u64>) -> Result<u64> {
+    if books.is_none() && after.is_none() {
+        return Ok(searcher.num_docs());
+    }
     let mut n = 0u64;
     for segment in searcher.segment_readers() {
-        let column = segment.fast_fields().u64("book_id")?;
+        let book_column = segment.fast_fields().u64("book_id")?;
+        let position_column = segment.fast_fields().u64("position")?;
         let alive = segment.alive_bitset();
         for doc in 0..segment.max_doc() {
-            if alive.is_none_or(|a| a.is_alive(doc)) && column.first(doc).is_some_and(|b| books.contains(&b)) {
+            if alive.is_none_or(|a| a.is_alive(doc))
+                && books.is_none_or(|books| book_column.first(doc).is_some_and(|b| books.contains(&b)))
+                && after.is_none_or(|a| position_column.first(doc).is_some_and(|p| p > a))
+            {
                 n += 1;
             }
         }
@@ -472,5 +489,34 @@ mod tests {
         o.books = Some(vec![2]);
         let r = index.search_options(&o).unwrap();
         assert_eq!(r.line_regex().unwrap().scope_lines, 1);
+        // a resume puts the lines at or before its position out of scope
+        let mut o = regex("/\\w[ ]c/");
+        o.after_position = Some(0);
+        let mut r = index.search_options(&o).unwrap();
+        assert_eq!(r.line_regex().unwrap().scope_lines, 1);
+        let found = r.line_scan_batch(&lines, &[texts[0].1, texts[1].1]).unwrap();
+        assert!(found[0].is_empty());
+        assert_eq!(found[1], vec![(2, 5)]);
+        assert_eq!(r.line_hits().len(), 1);
+        assert!(r.line_regex().unwrap().done);
+    }
+
+    #[test]
+    fn resume_bounds_the_candidates() {
+        const ALPHA: &str = "\u{05d0}\u{05dc}\u{05e4}\u{05d4}\u{05d0}";
+        let both = format!("{ALPHA} x {ALPHA}");
+        let owned = [(1, both.clone()), (1, "x".to_string()), (2, both.clone()), (2, both)];
+        let texts: Vec<(u64, &str)> = owned.iter().map(|(b, t)| (*b, t.as_str())).collect();
+        let (_d, index) = build(false, &texts);
+        let ids = |after: Option<u64>| -> Vec<u64> {
+            let o = SearchOptions { after_position: after, ..regex(&format!("/{ALPHA} .* {ALPHA}/")) };
+            let r = index.search_options(&o).unwrap();
+            assert!(!r.line_regex().unwrap().full_scan);
+            r.hits.iter().map(|h| h.line_id).collect()
+        };
+        assert_eq!(ids(None), vec![100, 102, 103]);
+        assert_eq!(ids(Some(0)), vec![102, 103]);
+        assert_eq!(ids(Some(2)), vec![103]);
+        assert_eq!(ids(Some(3)), Vec::<u64>::new());
     }
 }

@@ -827,6 +827,62 @@ mod tests {
         assert_eq!(positions(index.search(&req("bet*")).unwrap()), bet);
     }
 
+    /// Resume after a position (FtsLib's `afterPosition`): the hits are the
+    /// full run's hits past the bound, on several segments (each sorted:
+    /// seek), after an update (deleted docs keep their position), on one
+    /// merged segment, cancellable or not; totals are the rest's.
+    #[test]
+    fn resume_after_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let n = 2000u64;
+        let pos = |i: u64| (i * 7919) % n;
+        let text = |p: u64| if p % 3 == 0 { "alpha beta" } else { "gamma alpha" };
+        let mut w = index.writer(120_000_000, 4).unwrap();
+        for i in 0..n {
+            let p = pos(i);
+            w.add(&line(p + 1, p, p / 100, text(p))).unwrap();
+            if i % 500 == 499 {
+                w.commit(None).unwrap();
+            }
+        }
+        w.commit(None).unwrap();
+        let req = |p: &str, after: Option<u64>| SearchRequest {
+            groups: vec![GroupSpec::Wildcard { pattern: p.into(), ignore_quotes: false }],
+            after_position: after,
+            ..Default::default()
+        };
+        let check = |label: &str| {
+            for p in ["alph*", "bet*"] {
+                let full = index.search(&req(p, None)).unwrap().hits;
+                for after in [0, 1, 2, 3, 499, 500, 1000, 1499, n - 2, n - 1, n + 7] {
+                    let want: Vec<PlacedHit> = full.iter().copied().filter(|h| h.position > after).collect();
+                    let r = index.search(&req(p, Some(after))).unwrap();
+                    assert_eq!(r.hits, want, "{label} {p} after {after}");
+                    assert_eq!(r.counts().total, want.len() as u64);
+                    let c = index.search_cancellable(&req(p, Some(after)), Some(CancelToken::new())).unwrap();
+                    assert_eq!(c.hits, want, "{label} {p} after {after}, cancellable");
+                }
+            }
+        };
+        let searcher = || index.index.reader().unwrap().searcher();
+        assert!(searcher().segment_readers().len() > 1);
+        check("segments");
+        // an update: the line at position 3 loses alpha, the one at 5 is rewritten
+        w.delete(4);
+        w.add(&line(4, 3, 0, "beta")).unwrap();
+        w.delete(6);
+        w.add(&line(6, 5, 0, "alpha beta")).unwrap();
+        w.commit(None).unwrap();
+        check("updated");
+        let rest = index.search(&req("alph*", Some(2))).unwrap().hits;
+        assert!(rest.iter().all(|h| h.position != 3));
+        assert_eq!(rest.iter().filter(|h| h.position == 5).count(), 1);
+        w.merge_all().unwrap();
+        assert!(index.catalog_ordered(&searcher()));
+        check("merged");
+    }
+
     /// The parity diff that found the bug: FtsLib's quote-free index has
     /// יציק, one edit from יצחק; ours keeps יצי"ק, which the DFA counted as two
     /// edits. With the quote transparent it is one edit on both paths.
@@ -1537,6 +1593,30 @@ mod tests {
         w.delete(1);
         w.commit(None).unwrap();
         assert_eq!(passing(&index, &o, &texts), vec![(2, false)]);
+    }
+
+    /// Resume after a position (FtsLib's `afterPosition`): cross-line hits
+    /// are bounded by their first line, like the in-line ones.
+    #[test]
+    fn resume_after_position_cross_line() {
+        let texts: Vec<String> = vec![format!("{XF} {XA}"), format!("{XB} {XF}"), format!("{XA} {XB}"), format!("{XB}")];
+        let docs: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| xline(i as u64, 1, t, None, false)).collect();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &docs);
+            let o = |after: Option<u64>| SearchOptions {
+                query: format!("{XA} {XB}"),
+                proximity: Some(ProximitySpec::Ordered { gaps: vec![0] }),
+                cross_line: true,
+                after_position: after,
+                ..Default::default()
+            };
+            assert_eq!(passing(&index, &o(None), &texts), vec![(0, true), (2, false)]);
+            assert_eq!(passing(&index, &o(Some(0)), &texts), vec![(2, false)]);
+            assert_eq!(passing(&index, &o(Some(1)), &texts), vec![(2, false)]);
+            assert_eq!(passing(&index, &o(Some(2)), &texts), vec![]);
+            assert_eq!(index.search_options(&o(Some(2))).unwrap().hits.len(), 0);
+        }
     }
 
     #[test]

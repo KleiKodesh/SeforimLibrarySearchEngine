@@ -246,6 +246,9 @@ void main() {
     }
 
     expect(ids(SearchOptions(q, grammarPrefixes: true)), [8, 7]);
+    // resume after a position: the rest of the catalog-order run
+    expect(ids(SearchOptions(q, grammarPrefixes: true, afterPosition: 0)), [7]);
+    expect(ids(SearchOptions(q, grammarPrefixes: true, afterPosition: 1)), <int>[]);
     expect(ids(SearchOptions(q, grammarPrefixes: true, order: ResultsOrder.relevance)), [7, 8]);
     expect(
         ids(SearchOptions(q,

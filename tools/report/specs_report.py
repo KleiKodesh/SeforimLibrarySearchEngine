@@ -138,6 +138,7 @@ md.append("""## Engines compared
 | Otzaria tokenizer rules (one-letter words, digits, joiners, geresh, paired readings, 128-byte limit) in both engines | done |
 | Vocalized matching (nikud / te'amim) as a walk on a keep-marks index | done |
 | Exact totals + per-book counts, cancellation, pull streaming | done |
+| Resume after a catalog position (FtsLib's `afterPosition`; C# demo `PositionOfLine` + restart when unplaceable) | done |
 | User regex `/.../` (word, sequence, line kinds) | done |
 | Relevance / generation order (option; catalog default) + notice when positions are needed | done |
 | Truncated flag when a cap is hit | done |
@@ -384,7 +385,7 @@ claude_block = "\n".join([
     f"Specs section: rerun it whenever the engine, index format or a full-DB run changes. Index formats: "
     f"ours `{INDEX_FORMAT}`, FtsLib `{FTSLIB_FORMAT}`. Features: FtsLib syntax + parity, per-word Otzaria "
     f"options as FST walks (cap 2000 per segment), proximity / word match, vocalized walks, user regex "
-    f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, "
+    f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, resume after position, "
     f"truncated flag, cross-line (enumerators skipped) and same-section, positions snippets, FM sidecar.",
     "Builds: " + "; ".join(l.strip("| ").replace(" | ", " ") for l in build_lines()) + ".",
     ("Parity with FtsLib: all sets identical (" + ", ".join(x[0] for x in PAR_RUN) + "; both flavours)."

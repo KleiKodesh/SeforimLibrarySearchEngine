@@ -662,12 +662,17 @@ namespace SeforimSearch.Engine
         /// <summary>Otzaria's SameSection scope: every word (or WordMatch's count) anywhere in
         /// one section; the hits are that section's lines holding a word.</summary>
         public bool SameSection { get; set; }
+        /// <summary>Resume (FtsLib's afterPosition): only lines at catalog positions strictly
+        /// after this one (<see cref="PlacedHit.Position"/>, 0-based). Null: from the start.
+        /// Totals and counts are then those of the rest.</summary>
+        public long? AfterPosition { get; set; }
 
         internal string ToJson()
         {
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             var sb = new StringBuilder("{\"query\":");
             Json.WriteString(sb, Query ?? "");
+            if (AfterPosition.HasValue) sb.Append(",\"after_position\":").Append(AfterPosition.Value.ToString(inv));
             if (UserRegex) sb.Append(",\"user_regex\":true");
             if (CrossLine) sb.Append(",\"cross_line\":true");
             if (SameSection) sb.Append(",\"same_section\":true");

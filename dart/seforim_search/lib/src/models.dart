@@ -607,6 +607,7 @@ class SearchOptions {
     Map<int, int>? bookGenerations,
     this.crossLine = false,
     this.sameSection = false,
+    this.afterPosition,
   })  : words = words ?? {},
         phraseAlternatives = phraseAlternatives ?? [],
         bookGenerations = bookGenerations ?? {};
@@ -625,6 +626,11 @@ class SearchOptions {
   /// Otzaria's SameSection scope: every word (or [wordMatch]'s count)
   /// anywhere in one section; the hits are its lines holding a word.
   bool sameSection;
+
+  /// Resume (FtsLib's afterPosition): only lines at catalog positions
+  /// strictly after this one ([PlacedHit.position], from 0). Null: from the
+  /// start. Totals and counts are then those of the rest.
+  int? afterPosition;
 
   // Word options: every word, unless [words] overrides (see [WalkOptions]
   // for each one's meaning).
@@ -691,6 +697,7 @@ class SearchOptions {
         if (userRegex) 'user_regex': true,
         if (crossLine) 'cross_line': true,
         if (sameSection) 'same_section': true,
+        if (afterPosition != null) 'after_position': afterPosition,
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
             matchNikud, matchTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,

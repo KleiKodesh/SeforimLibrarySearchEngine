@@ -104,6 +104,30 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// <summary>An open corpus from the pool; Dispose returns it (the database stays open).</summary>
         public SeforimDbFtsCorpus OpenCorpus() => _corpora.Rent();
 
+        private readonly object _lock = new object();
+        private System.Collections.Generic.Dictionary<int, (long First, long Count)>? _bookPositions;
+
+        /// <summary>
+        /// The index position of a line (<see cref="SeforimDbFtsCorpus.PositionOfLine"/>), to
+        /// resume a search after it. Null when the line cannot be placed (gone from the library,
+        /// or a book this index does not hold): the caller then starts over. (Core 277de7a9.)
+        /// </summary>
+        public long? PositionOfLine(int lineId)
+        {
+            System.Collections.Generic.Dictionary<int, (long First, long Count)> books;
+            lock (_lock)
+            {
+                if (_bookPositions == null)
+                {
+                    using var positions = OpenCorpus();
+                    _bookPositions = positions.BookPositionRanges();
+                }
+                books = _bookPositions;
+            }
+            using var corpus = OpenCorpus();
+            return corpus.PositionOfLine(lineId, books);
+        }
+
         public void Dispose()
         {
             Index.Dispose();

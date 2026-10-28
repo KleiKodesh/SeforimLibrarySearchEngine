@@ -427,6 +427,8 @@ pub unsafe extern "C" fn se_writer_close(writer: *mut LineWriter) {
 ///            {"kind":"wildcard","pattern":"שלו*"}],
 ///  "max_word_distance":5,"require_ordered":false,"context_words":8}
 /// ```
+/// Both take `"after_position":N` (resume, FtsLib's `afterPosition`): only
+/// lines at catalog positions after N.
 /// Returns a search object holding every matching line (in the requested order, catalog by default) and
 /// the snippet session.
 ///
@@ -1141,6 +1143,13 @@ mod tests {
             assert_eq!(se_search_count_batch(search, ptrs.as_ptr(), lens.as_ptr(), 1), 1);
             assert_eq!(se_search_count_batch(search, ptrs.as_ptr(), lens.as_ptr(), 1), -1);
             assert_eq!(se_last_error_cancelled(), 0);
+            se_search_close(search);
+
+            // resume: the one line is at position 0, so after it nothing is left
+            let resumed = req.replacen('{', r#"{"after_position":0,"#, 1);
+            let search = se_search(index, resumed.as_ptr(), resumed.len());
+            assert!(!search.is_null(), "{:?}", CStr::from_ptr(se_last_error()));
+            assert_eq!(se_search_hit_count(search), 0);
             se_search_close(search);
 
             // cancellation: a cancelled token stops the session's locates and

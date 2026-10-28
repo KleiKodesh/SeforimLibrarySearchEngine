@@ -97,6 +97,9 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         public IEnumerable<(int Id, string Text, FtsDocumentPlacement Placement)> FetchPlacedDocuments(IEnumerable<int> ids) =>
             Guard(C.FetchPlacedDocuments(ids));
         public Dictionary<int, FtsDocumentPlacement> FetchPlacements(IReadOnlyList<int> ids) => C.FetchPlacements(ids);
+        public Dictionary<int, (long First, long Count)> BookPositionRanges() => C.BookPositionRanges();
+        public long? PositionOfLine(int lineId, Dictionary<int, (long First, long Count)> books) =>
+            C.PositionOfLine(lineId, books);
         public List<FtsSnippetText> FetchSnippetTexts(IReadOnlyList<int> lineIds, IReadOnlyCollection<int> shortLineIds) =>
             C.FetchSnippetTexts(lineIds, shortLineIds);
 
@@ -235,23 +238,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         public IEnumerable<(int Id, string Text, int BookId, long? SectionId)> ReadDocumentsWithSectionInResultOrder(long skip,
                                                                                                CancellationToken ct = default)
         {
-            var treeOrder = SeforimDbBookTreeOrder.Load(_connection);
-
-            var lineCounts = new Dictionary<int, long>();
-            using (var count = _connection.CreateCommand())
-            {
-                count.CommandText = SeforimDbSqlStrings.FtsLineCountsByBook;
-                using var r = count.ExecuteReader();
-                while (r.Read()) lineCounts[r.GetInt32(0)] = r.GetInt64(1);
-            }
-
-            var bookOrder = new List<int>(lineCounts.Keys);
-            bookOrder.Sort((a, b) =>
-            {
-                bool hasA = treeOrder.TryGetValue(a, out int rankA), hasB = treeOrder.TryGetValue(b, out int rankB);
-                if (hasA != hasB) return hasA ? -1 : 1;
-                return hasA ? rankA.CompareTo(rankB) : a.CompareTo(b);
-            });
+            var (bookOrder, lineCounts) = BooksInResultOrder();
 
             using var command = _connection.CreateCommand();
             command.CommandText = SeforimDbSqlStrings.FtsReadBookLinesWithSection(_schema);
@@ -329,6 +316,71 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             {
                 Release(command, cached);
             }
+        }
+
+        /// <summary>
+        /// The books in result order with their line counts: the one definition of the index
+        /// order, read by the build (<see cref="ReadDocumentsWithSectionInResultOrder"/>) and by
+        /// <see cref="BookPositionRanges"/>, so the two can never disagree. (Core 277de7a9.)
+        /// </summary>
+        private (List<int> BookOrder, Dictionary<int, long> LineCounts) BooksInResultOrder()
+        {
+            var treeOrder = SeforimDbBookTreeOrder.Load(_connection);
+
+            var lineCounts = new Dictionary<int, long>();
+            using (var count = _connection.CreateCommand())
+            {
+                count.CommandText = SeforimDbSqlStrings.FtsLineCountsByBook;
+                using var r = count.ExecuteReader();
+                while (r.Read()) lineCounts[r.GetInt32(0)] = r.GetInt64(1);
+            }
+
+            var bookOrder = new List<int>(lineCounts.Keys);
+            bookOrder.Sort((a, b) =>
+            {
+                bool hasA = treeOrder.TryGetValue(a, out int rankA), hasB = treeOrder.TryGetValue(b, out int rankB);
+                if (hasA != hasB) return hasA ? -1 : 1;
+                return hasA ? rankA.CompareTo(rankB) : a.CompareTo(b);
+            });
+            return (bookOrder, lineCounts);
+        }
+
+        /// <summary>
+        /// Each book's run of index positions: books in result order, a book's lines in reading
+        /// order, so a book is the contiguous run [First, First + Count - 1]. Positions are
+        /// FtsLib's (its rowid, from 1), as Core; the engine's own positions are these minus one
+        /// (TantivySeforimIndex.Search converts). (Core 277de7a9.)
+        /// </summary>
+        public Dictionary<int, (long First, long Count)> BookPositionRanges()
+        {
+            var (bookOrder, lineCounts) = BooksInResultOrder();
+            var ranges = new Dictionary<int, (long First, long Count)>(bookOrder.Count);
+            long next = 1;
+            foreach (int bookId in bookOrder)
+            {
+                long count = lineCounts[bookId];
+                ranges[bookId] = (next, count);
+                next += count;
+            }
+            return ranges;
+        }
+
+        /// <summary>
+        /// A line's index position (<see cref="BookPositionRanges"/>: the book's first position
+        /// plus the line's rank in the book). Two primary-key / index reads. Null for a line that
+        /// no longer exists or a book the ranges do not hold. (Core 277de7a9.)
+        /// </summary>
+        public long? PositionOfLine(int lineId, Dictionary<int, (long First, long Count)> books)
+        {
+            var placement = FetchPlacements(new[] { lineId });
+            if (!placement.TryGetValue(lineId, out var at) || !books.TryGetValue(at.BookId, out var book)) return null;
+            using var command = _connection.CreateCommand();
+            command.CommandText = SeforimDbSqlStrings.FtsLineRankInBook;
+            command.Parameters.AddWithValue("@b", at.BookId);
+            command.Parameters.AddWithValue("@li", at.LineIndex);
+            command.Parameters.AddWithValue("@id", lineId);
+            long rank = (long)command.ExecuteScalar()!;
+            return rank < book.Count ? book.First + rank : null;
         }
 
         /// <summary>

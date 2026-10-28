@@ -364,6 +364,15 @@ pub struct SearchRequest {
     /// `/.../`): matched on each line's text (see `crate::line_search`).
     /// When set, every other field but `books` and `context_words` is unused.
     pub line_regex: Option<String>,
+    /// Resume (FtsLib's `afterPosition`): only lines at catalog positions
+    /// strictly after this one; None = from the start. Positions are the
+    /// catalog order, so a catalog-order search resumed after its last
+    /// delivered line continues exactly where it stopped. Applied while
+    /// collecting (a sorted segment seeks straight to the first doc past
+    /// it), to the cross-line hits and to a line regex's lines alike, so
+    /// totals and counts are those of the rest. Costs nothing when None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_position: Option<u64>,
 }
 
 impl Default for SearchRequest {
@@ -385,6 +394,7 @@ impl Default for SearchRequest {
             cross_line: false,
             same_section: false,
             line_regex: None,
+            after_position: None,
         }
     }
 }
@@ -1367,6 +1377,8 @@ pub(crate) struct PlacedCollector {
     pub(crate) drop_sections: Option<Arc<std::collections::HashSet<SectionKey>>>,
     /// Keep each hit's doc id (relevance order scores them after the search).
     pub(crate) keep_docs: bool,
+    /// Only positions after this one (see `SearchRequest::after_position`).
+    pub(crate) after: Option<u64>,
 }
 
 pub(crate) struct PlacedSegmentCollector {
@@ -1376,6 +1388,7 @@ pub(crate) struct PlacedSegmentCollector {
     out: Vec<PlacedHit>,
     /// Relevance order only: each kept hit's doc id (aligned with `out`).
     docs: Option<Vec<DocId>>,
+    after: Option<u64>,
 }
 
 impl Collector for PlacedCollector {
@@ -1404,6 +1417,7 @@ impl Collector for PlacedCollector {
             },
             out: Vec::new(),
             docs: self.keep_docs.then(Vec::new),
+            after: self.after,
         })
     }
 
@@ -1421,6 +1435,10 @@ impl SegmentCollector for PlacedSegmentCollector {
 
     fn collect(&mut self, doc: DocId, _score: Score) {
         let get = |c: &Column<u64>| c.first(doc).unwrap_or(0);
+        let position = get(&self.columns[0]);
+        if self.after.is_some_and(|a| position <= a) {
+            return;
+        }
         let book_id = get(&self.columns[2]);
         if self.books.as_ref().is_some_and(|b| !b.contains(&book_id)) {
             return;
@@ -1431,7 +1449,7 @@ impl SegmentCollector for PlacedSegmentCollector {
             }
         }
         self.out.push(PlacedHit {
-            position: get(&self.columns[0]),
+            position,
             line_id: get(&self.columns[1]),
             book_id,
             next_line_id: None,
@@ -2301,22 +2319,36 @@ impl LineIndex {
             drop_sections: drop_sections.clone(),
             // relevance scores the docs; positions locate the snippets from them
             keep_docs: relevance || self.options.positions,
+            after: request.after_position,
         };
         for (ord, segment) in searcher.segment_readers().iter().enumerate() {
             CancelToken::check(cancel.as_ref())?;
+            // A resume on a position-sorted segment starts at the first doc
+            // past the bound (the collector filters the rest either way).
+            let start = match request.after_position {
+                Some(after) => self.first_doc_after(segment, after)?,
+                None => 0,
+            };
+            if start >= segment.max_doc() && start > 0 {
+                continue;
+            }
             let mut child = collector.for_segment(ord as SegmentOrdinal, segment)?;
-            if let Some(token) = &cancel {
-                // Cancellable: walk the scorer, checking every 4096 docs.
+            if cancel.is_some() || start > 0 {
+                // Cancellable or resumed: walk the scorer (checking the
+                // token every 4096 docs), seeking to `start`.
                 let mut scorer = weight.scorer(segment, 1.0)?;
                 let alive = segment.alive_bitset();
                 let mut doc = scorer.doc();
+                if doc < start {
+                    doc = scorer.seek(start);
+                }
                 let mut seen = 0u32;
                 while doc != tantivy::TERMINATED {
                     if alive.is_none_or(|a| a.is_alive(doc)) {
                         child.collect(doc, 0.0);
                     }
                     seen = seen.wrapping_add(1);
-                    if seen % 4096 == 0 && token.is_cancelled() {
+                    if seen % 4096 == 0 && cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
                         return Err(Error::Cancelled);
                     }
                     doc = scorer.advance();
@@ -2513,6 +2545,9 @@ impl LineIndex {
             }
             session.count_needs_text |= out.needs_text;
             for (hit, key) in out.hits {
+                if request.after_position.is_some_and(|a| hit.position <= a) {
+                    continue;
+                }
                 hits.push(hit);
                 cross_keys.push(key);
             }

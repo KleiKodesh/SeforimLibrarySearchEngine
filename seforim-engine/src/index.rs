@@ -273,6 +273,33 @@ impl LineIndex {
         sorted && searcher.segment_readers().len() <= 1
     }
 
+    /// The first doc of `segment` whose position is after `after`, when the
+    /// index is sorted by position (every segment then is); 0 otherwise
+    /// (the caller filters by position anyway). Deleted docs keep their
+    /// position, so the column stays sorted.
+    pub(crate) fn first_doc_after(&self, segment: &tantivy::SegmentReader, after: u64) -> Result<tantivy::DocId> {
+        let sorted = self
+            .index
+            .settings()
+            .sort_by_field
+            .as_ref()
+            .is_some_and(|s| s.field == "position" && s.order == Order::Asc);
+        if !sorted {
+            return Ok(0);
+        }
+        let column = segment.fast_fields().u64("position")?;
+        let (mut lo, mut hi) = (0u32, segment.max_doc());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if column.first(mid).unwrap_or(0) <= after {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(lo)
+    }
+
     /// True when `dir` holds an index.
     pub fn exists(dir: &Path) -> bool {
         dir.join("meta.json").exists()

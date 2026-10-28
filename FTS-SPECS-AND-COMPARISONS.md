@@ -32,6 +32,7 @@ Current index formats: ours `tantivy11`, FtsLib `fts9`.
 | Otzaria tokenizer rules (one-letter words, digits, joiners, geresh, paired readings, 128-byte limit) in both engines | done |
 | Vocalized matching (nikud / te'amim) as a walk on a keep-marks index | done |
 | Exact totals + per-book counts, cancellation, pull streaming | done |
+| Resume after a catalog position (FtsLib's `afterPosition`; C# demo `PositionOfLine` + restart when unplaceable) | done |
 | User regex `/.../` (word, sequence, line kinds) | done |
 | Relevance / generation order (option; catalog default) + notice when positions are needed | done |
 | Truncated flag when a cap is hit | done |

@@ -119,6 +119,10 @@ pub struct SearchOptions {
     /// Otzaria's SameSection scope for the query (see
     /// `SearchRequest::same_section`). Off by default.
     pub same_section: bool,
+    /// Resume (FtsLib's `afterPosition`): only lines at catalog positions
+    /// strictly after this one (see `SearchRequest::after_position`).
+    /// None = from the start.
+    pub after_position: Option<u64>,
 }
 
 impl Default for SearchOptions {
@@ -159,6 +163,7 @@ impl Default for SearchOptions {
             book_generations: Vec::new(),
             cross_line: false,
             same_section: false,
+            after_position: None,
         }
     }
 }
@@ -284,6 +289,7 @@ impl SearchOptions {
                         order: self.order,
                         book_generations: self.book_generations.clone(),
                         cross_line: self.cross_line,
+                        after_position: self.after_position,
                         ..Default::default()
                     });
                 }
@@ -296,6 +302,7 @@ impl SearchOptions {
                             line_regex: Some(self.query.clone()),
                             context_words: self.context_words,
                             books: self.books.clone(),
+                            after_position: self.after_position,
                             ..Default::default()
                         });
                     }
@@ -370,6 +377,7 @@ impl SearchOptions {
             cross_line: self.cross_line,
             same_section: self.same_section,
             line_regex: None,
+            after_position: self.after_position,
         })
     }
 }

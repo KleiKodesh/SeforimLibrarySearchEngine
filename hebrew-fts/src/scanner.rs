@@ -303,7 +303,8 @@ impl<F: FnMut(&str, WordSpan) -> bool> Scan<'_, F> {
 ///   unless kept; the term is lowercased (every script).
 /// - The second reading of `(X) [Y]` takes X's position.
 /// - HTML (FtsLib): inline tags are transparent (a word continues across
-///   them); block tags and `sup`/`sub` end the word; every entity (or a bare
+///   them); block tags and `sup`/`sub` end the word, except a `<sup>` holding
+///   a vocalized Hebrew letter set mid-word ([`html_tags::is_transparent_sup`]); every entity (or a bare
 ///   `&`) is a separator kept outside the word's span.
 /// - A word whose term has [`chars::MAX_TERM_BYTES`] bytes or more is still
 ///   reported (it is a word for positions and distances); the index
@@ -366,6 +367,9 @@ pub(crate) fn scan_until(
     let mut tag_len = 0usize;
     let mut in_tag = false;
     let mut tag_name_done = false;
+    // Byte of the current tag's '<', and whether the open `<sup>` was transparent.
+    let mut tag_lt = 0usize;
+    let mut sup_transparent = false;
     // Byte of the text's last '>' (None: none), read at the first '<': a
     // '<' after it is unterminated (see below).
     let mut last_gt: Option<Option<usize>> = None;
@@ -457,7 +461,18 @@ pub(crate) fn scan_until(
 
         if in_tag {
             if c == '>' {
-                if html_tags::is_word_break_tag(&tag_name[..tag_len]) {
+                let name = &tag_name[..tag_len];
+                let breaks = if html_tags::is_sup(name) {
+                    if bytes[tag_lt + 1] == b'/' {
+                        !std::mem::take(&mut sup_transparent)
+                    } else {
+                        sup_transparent = html_tags::is_transparent_sup(text, tag_lt, b);
+                        !sup_transparent
+                    }
+                } else {
+                    html_tags::is_word_break_tag(name)
+                };
+                if breaks {
                     s.element(' ', b, u, visible);
                 }
                 in_tag = false;
@@ -491,6 +506,7 @@ pub(crate) fn scan_until(
             in_tag = true;
             tag_len = 0;
             tag_name_done = false;
+            tag_lt = b;
             b += 1;
             u += 1;
             continue;
@@ -912,6 +928,39 @@ mod tests {
     }
 
     #[test]
+    fn sup_with_a_vocalized_letter_mid_word_is_transparent() {
+        // issue #2 H58: a vocalized letter in <sup> inside a word joins it
+        let t = "\u{05D0}\u{05B8}<sup>\u{05D1}\u{05BC}\u{05B0}</sup>\u{05D2}\u{05B5} \u{05D3}";
+        assert_eq!(words(t), vec!["\u{05D0}\u{05D1}\u{05D2}".to_string(), "\u{05D3}".into()]);
+        let s = spans(t);
+        let first = &t[..t.find(' ').unwrap()];
+        assert_eq!((s[0].1.byte_start, s[0].1.byte_end), (0, first.len())); // the whole word, both tags inside
+        assert_eq!(s[0].1.utf16_end, first.encode_utf16().count());
+        assert_same(t);
+        assert_same("\u{05D0}<SUP class=\"x\">\u{05D1}\u{05B0}</SUP>\u{05D2}");
+        // a digit marker breaks
+        assert_eq!(words("\u{05D0}\u{05B8}<sup>1</sup>\u{05D2}").len(), 3);
+        // an unmarked letter marker mid-word breaks
+        assert_eq!(words("\u{05D0}\u{05B8}<sup>\u{05D1}</sup>\u{05D2}").len(), 3);
+        // a marker at the word end breaks (nothing Hebrew after </sup>)
+        assert_eq!(words("\u{05D0}<sup>\u{05D1}\u{05B0}</sup> \u{05D2}").len(), 3);
+        // nothing Hebrew before <sup>
+        assert_eq!(words("a<sup>\u{05D1}\u{05B0}</sup>\u{05D2}").len(), 3);
+        // a tag inside the sup breaks
+        assert_eq!(words("\u{05D0}<sup><b>\u{05D1}\u{05B0}</b></sup>\u{05D2}").len(), 3);
+        for c in [
+            "\u{05D0}\u{05B8}<sup>1</sup>\u{05D2}",
+            "\u{05D0}\u{05B8}<sup>\u{05D1}</sup>\u{05D2}",
+            "\u{05D0}<sup>\u{05D1}\u{05B0}</sup> \u{05D2}",
+            "\u{05D0}<sup>\u{05D1}\u{05B0}</sub>\u{05D2}",
+            "\u{05D0}<sup>\u{05D1}\u{05B0}",
+            "\u{05D0}</sup>\u{05D1}",
+        ] {
+            assert_same(c);
+        }
+    }
+
+    #[test]
     fn unterminated_lt_is_a_plain_separator() {
         // Otzaria keeps an unterminated '<' verbatim; the rest of the line is indexed
         assert_eq!(words(&format!("{ALEF} <{BET} {GIMEL}")), vec![ALEF, BET, GIMEL]);
@@ -1051,7 +1100,7 @@ mod tests {
             "\u{05B0}", "\u{05B4}", "\u{0591}", "\u{05BC}", "\u{05C1}", "\u{05C7}", "\u{05C0}", "\u{05C3}", "\u{05C6}", "\u{05BE}",
             "\u{0301}", "\u{FB1E}", "\u{FB2B}", "\u{FB4F}", "\u{FB31}", "\"", "'", "\u{05F3}", "\u{05F4}", "\u{2018}", "\u{2019}",
             "\u{201C}", "\u{201D}", ".", "[", "]", "(", ")", "*", "~", "^", "\\", "`", "\u{200F}", "\u{200B}", "\u{FEFF}", "\u{202B}",
-            " ", "  ", "\t", "\n", ",", ":", "?", "-", "<b>", "</b>", "<i>", "<br>", "<p>", "</p>", "<sup>", "</sup>", "<span class=\"x\">",
+            " ", "  ", "\t", "\n", ",", ":", "?", "-", "<b>", "</b>", "<i>", "<br>", "<p>", "</p>", "<sup>", "</sup>", "<SUP>", "\u{05D1}\u{05B0}", "<span class=\"x\">",
             "</span>", "<", ">", "&nbsp;", "&amp;", "&#160;", "&", ";", "\u{1F600}", "\u{00A0}",
             "(\u{05D0}\u{05D1}) [\u{05D2}\u{05D3}]", ") [", "\u{05D0}\u{05D1}\u{05D2}\u{05D3}\u{05D4}\u{05D5}\u{05D6}",
         ];

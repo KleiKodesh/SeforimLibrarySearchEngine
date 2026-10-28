@@ -19,10 +19,10 @@ An AI agent follows [AGENT-RUNBOOK.md](AGENT-RUNBOOK.md).
 
 | Engine | What | Version / index format |
 |---|---|---|
-| ours, positions | this repo: modified tantivy (`tantivy/` submodule) + hebrew-fts walks; index with positions (span queries for distance) | `TantivySeforimIndex.IndexFormatVersion` (tantivy11 at the time of writing) |
+| ours, positions | this repo: modified tantivy (`tantivy/` submodule) + hebrew-fts walks; index with positions (span queries for distance) | `TantivySeforimIndex.IndexFormatVersion` (tantivy12 at the time of writing) |
 | ours, no positions | same engine; distance/order checked on the line text by the locator | same |
 | ours, keep marks | positions index that keeps nikud/te'amim (vocalized walks); build only | same |
-| FtsLib | KitveiHakodesh's FtsLib (SQLite FTS5, `detail=none`) through Core's own searcher (`tools/parity/FtsLibDump`) | submodule `external/KleiKodeshProject` pinned at 1c647ea7, `SeforimDbFtsIndexer.IndexFormatVersion` (fts9) |
+| FtsLib | KitveiHakodesh's FtsLib (SQLite FTS5, `detail=none`) through Core's own searcher (`tools/parity/FtsLibDump`) | submodule `external/KleiKodeshProject` pinned at 1c647ea7, `SeforimDbFtsIndexer.IndexFormatVersion` (fts10) |
 | Otzaria | `otzaria_search_engine` v5.0.0, unmodified, through `tools/bench/otzaria-driver` (cargo git dependency, tag v5.0.0) | Otzaria's own tantivy index |
 
 Feature specs and the latest numbers: [FTS-SPECS-AND-COMPARISONS.md](../../FTS-SPECS-AND-COMPARISONS.md).

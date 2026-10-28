@@ -56,7 +56,8 @@ pub(crate) fn is_block_tag(name: &[char]) -> bool {
 
 /// Tags that END the current word: every block-level element, plus `sup`/`sub` —
 /// their content (footnote and reference markers) is a separate logical token,
-/// not part of the word they interrupt. All other tags are TRANSPARENT: inline
+/// not part of the word they interrupt (the scanners make a `<sup>` that
+/// [`is_transparent_sup`] accepts transparent instead). All other tags are TRANSPARENT: inline
 /// formatting (`<b>`, `<i>`, `<small>`, `<span>`, …) interrupts words mid-letter
 /// (emphasised letters, e.g. ורא<b>ה</b>), and breaking the word there would
 /// index unfindable fragments.
@@ -73,6 +74,41 @@ pub(crate) fn is_word_break_tag(name: &[char]) -> bool {
     let c1 = name[1].to_ascii_lowercase();
     let c2 = name[2].to_ascii_lowercase();
     c0 == 's' && c1 == 'u' && (c2 == 'p' || c2 == 'b') // sup, sub
+}
+
+/// True for a `sup` tag name (open or close; the scanners drop the `/`).
+pub(crate) fn is_sup(name: &[char]) -> bool {
+    let start = usize::from(matches!(name.first(), Some('/')));
+    let name = &name[start.min(name.len())..];
+    name.len() == 3 && name.iter().map(|c| c.to_ascii_lowercase()).eq(['s', 'u', 'p'])
+}
+
+fn is_letter_or_mark(c: char) -> bool {
+    crate::chars::is_hebrew_letter(c) || crate::chars::is_attached_mark(c)
+}
+
+/// A `<sup>` whose `<` is at byte `lt` and `>` at byte `gt` of `text` is
+/// TRANSPARENT (the word continues through it, like `<b>`) only when its
+/// content up to the next `<` is non-empty, holds only Hebrew letters and
+/// attached marks with at least one mark, that `<` starts `</sup>`, and the
+/// chars right before `<sup` and right after `</sup>` are Hebrew letters or
+/// marks (a vocalized letter set mid-word, e.g. in Tanach). Every other
+/// `<sup>` (a footnote or letter marker) ends the word. Same rule in FtsLib's
+/// `HtmlBlockTags.IsTransparentSup`.
+pub(crate) fn is_transparent_sup(text: &str, lt: usize, gt: usize) -> bool {
+    if !text[..lt].chars().next_back().is_some_and(is_letter_or_mark) {
+        return false;
+    }
+    let rest = &text[gt + 1..];
+    let Some(close) = rest.find('<') else { return false };
+    let inner = &rest[..close];
+    if inner.is_empty() || !inner.chars().all(is_letter_or_mark) || !inner.chars().any(crate::chars::is_attached_mark) {
+        return false;
+    }
+    let after = &rest[close..];
+    after.len() >= 6
+        && after.as_bytes()[..6].eq_ignore_ascii_case(b"</sup>")
+        && after[6..].chars().next().is_some_and(is_letter_or_mark)
 }
 
 /// Advances `i` past a well-formed entity's closing `;` (entity = `&` at

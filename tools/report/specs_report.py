@@ -15,10 +15,22 @@ SP = sys.argv[1]
 P = sys.argv[sys.argv.index("--prefix") + 1] if "--prefix" in sys.argv else "r11-"
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(ROOT, "FTS-SPECS-AND-COMPARISONS.md")
-INDEX_FORMAT = "tantivy11"   # C# TantivySeforimIndex.IndexFormatVersion
-FTSLIB_FORMAT = "fts9"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
+INDEX_FORMAT = "tantivy12"   # C# TantivySeforimIndex.IndexFormatVersion
+FTSLIB_FORMAT = "fts10"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
-STALE = []
+STALE = [
+    "Index builds, parity and search speed below were measured on `tantivy9` / FtsLib `fts8`. "
+    "`tantivy10` / `fts9` changed indexing (an unterminated `<` no longer swallows the rest of the line; "
+    "per-line content edges for cross-line) and fuzzy (a swap of two adjacent letters is one edit): "
+    "the full-DB rebuilds, parity sets and the Otzaria hit-count comparison need a rerun.",
+    "`tantivy11` sorts the index by catalog position (search skips its sort on the merged segment) and the "
+    "C# / Dart hosts keep seforim.db open across searches: index build time and size, and the first-page "
+    "profile, need a full-DB rerun.",
+    "`tantivy12` / `fts10`: a `<sup>` holding a vocalized Hebrew letter mid-word is transparent "
+    "(issue #2 H58): both full-DB rebuilds and the parity sets need a rerun.",
+    "Hit-count comparison: the rows classified as our bugs (unterminated `<`, cross-line enumerators) "
+    "and the fuzzy transposition rows are expected to change; not rerun yet.",
+]
 # Snippets from index positions vs the text path (median of 15, first 4000 hits, 8 cores).
 SNIPPETS = [
     ("two words", 23.1, 19.5), ("two words, distance 0", 22.7, 18.7), ("two words, proximity", 24.6, 19.9),
@@ -122,7 +134,7 @@ md.append("""## Engines compared
 |---|---|
 | ours, positions | this repo: modified tantivy + hebrew-fts walks, index with positions (span queries) |
 | ours, no positions | same engine, index without positions; distance/order checked on the text by the locator |
-| FtsLib | KitveiHakodesh FtsLib (SQLite FTS5, `detail=none`, index fts9) |
+| FtsLib | KitveiHakodesh FtsLib (SQLite FTS5, `detail=none`, index fts10) |
 | Otzaria | otzaria_search_engine v5.0.0 (tantivy), driven by the scratchpad driver |
 
 ## Feature specs (ours)

@@ -4,7 +4,8 @@
 //!
 //! 1. FtsLib's HTML layer turns the raw text into visible elements: every
 //!    char outside a tag, a break for each entity (at its `&`) and for each
-//!    word-breaking tag (at its `>`). Inline tags vanish.
+//!    word-breaking tag (at its `>`). Inline tags vanish, and so does a
+//!    `<sup>` that `html_tags::is_transparent_sup` accepts.
 //! 2. The elements become a plain string (a break is a space) and Otzaria's
 //!    own functions, verbatim ([`crate::word_rule`]), cut it into words,
 //!    find the paired readings and normalize each word.
@@ -41,12 +42,24 @@ fn elements(text: &str) -> (Vec<Elem>, usize) {
     let mut tag_name: Vec<char> = Vec::new();
     let mut in_tag = false;
     let mut tag_name_done = false;
+    let mut tag_lt = 0usize;
+    let mut sup_transparent = false;
     let mut i = 0usize;
     while i < len {
         let (b, u, c) = table[i];
         if in_tag {
             if c == '>' {
-                if html_tags::is_word_break_tag(&tag_name) {
+                let breaks = if html_tags::is_sup(&tag_name) {
+                    if text[tag_lt + 1..].starts_with('/') {
+                        !std::mem::take(&mut sup_transparent)
+                    } else {
+                        sup_transparent = html_tags::is_transparent_sup(text, tag_lt, b);
+                        !sup_transparent
+                    }
+                } else {
+                    html_tags::is_word_break_tag(&tag_name)
+                };
+                if breaks {
                     out.push(Elem { c: ' ', byte: b, utf16: u, width: 0 });
                 }
                 in_tag = false;
@@ -66,6 +79,7 @@ fn elements(text: &str) -> (Vec<Elem>, usize) {
             in_tag = true;
             tag_name.clear();
             tag_name_done = false;
+            tag_lt = b;
             i += 1;
             continue;
         }

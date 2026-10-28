@@ -33,7 +33,7 @@ namespace SeforimSearch.Demo
                 ("abandoned enumerator does not keep a pooled connection", AbandonedEnumerator),
                 ("concurrent rents get distinct connections", ConcurrentRent),
                 ("file change reopens", FileChangeReopens),
-                ("end to end: build tantivy11 + search in catalog order", EndToEnd),
+                ("end to end: build tantivy12 + search in catalog order", EndToEnd),
             };
             int failed = 0;
             foreach (var (name, body) in tests)
@@ -201,7 +201,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             Check(engine.Index.IsBuilt, "built");
             string meta = File.ReadAllText(Path.Combine(index, "meta.json"));
             Check(meta.Contains("sort_by_field") && meta.Contains("\"position\""), "index not sorted by position");
-            Check(FtsLib.Fts5.TantivySeforimIndex.IndexFormatVersion == "tantivy11", "format version");
+            Check(FtsLib.Fts5.TantivySeforimIndex.IndexFormatVersion == "tantivy12", "format version");
 
             // catalog order: book 2 (orderIndex 1) first, then book 1, by lineIndex
             var expected = new List<int>();

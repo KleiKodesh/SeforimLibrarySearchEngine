@@ -292,6 +292,40 @@ mod tests {
     }
 
     #[test]
+    fn open_rejects_missing_malformed_or_mismatched_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = IndexOptions { positions: false, keep_marks: false };
+        drop(build(dir.path(), options, &[line(1, 0, 1, "abc")]));
+        let file = dir.path().join("engine_options.json");
+        let good = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(LineIndex::open(dir.path()).unwrap().options(), options);
+        let open_err = |content: Option<&str>| {
+            match content {
+                Some(c) => std::fs::write(&file, c).unwrap(),
+                None => std::fs::remove_file(&file).unwrap(),
+            }
+            let e = LineIndex::open(dir.path()).err().expect("must fail").to_string();
+            std::fs::write(&file, &good).unwrap();
+            e
+        };
+        assert!(open_err(None).contains("cannot read the index options"));
+        for bad in [
+            "",
+            "{",
+            "null",
+            r#"{"positions":false}"#,
+            r#"{"positions":"no","keep_marks":false}"#,
+            r#"{"positions":false,"keep_marks":false,"extra":1}"#,
+        ] {
+            assert!(open_err(Some(bad)).contains("malformed index options"), "{bad}");
+        }
+        // options that disagree with the schema: positions on an index built without
+        assert!(open_err(Some(r#"{"positions":true,"keep_marks":false}"#)).contains("does not match"));
+        assert!(open_err(Some(r#"{"positions":false,"keep_marks":true}"#)).contains("does not match"));
+        assert!(LineIndex::open(dir.path()).is_ok());
+    }
+
+    #[test]
     fn update_and_wildcard_slots() {
         let dir = tempfile::tempdir().unwrap();
         let index = build(

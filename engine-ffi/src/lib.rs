@@ -129,7 +129,10 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 // ── Index ───────────────────────────────────────────────────────────────
 
 /// Creates a fresh index in `dir` (wiping it). `options_json`:
-/// `{"positions":true,"keep_marks":false}` (both optional).
+/// `{"positions":true,"keep_marks":false}`. Both keys are optional (an
+/// absent key, or empty `options_json`, takes the documented default), but
+/// the JSON is strict: malformed JSON, a non-object, an unknown key or a
+/// non-boolean value fails with an error instead of becoming a default.
 ///
 /// # Safety
 /// Pointers must be valid for their lengths.
@@ -144,7 +147,7 @@ pub unsafe extern "C" fn se_index_create(
         let dir = PathBuf::from(str_arg(dir, dir_len)?);
         let json = str_arg(options_json, options_len)?;
         #[derive(serde::Deserialize, Default)]
-        #[serde(default)]
+        #[serde(default, deny_unknown_fields)]
         struct Opts {
             positions: Option<bool>,
             keep_marks: Option<bool>,
@@ -152,7 +155,12 @@ pub unsafe extern "C" fn se_index_create(
         let o: Opts = if json.trim().is_empty() {
             Opts::default()
         } else {
-            serde_json::from_str(json).map_err(err)?
+            let value: serde_json::Value =
+                serde_json::from_str(json).map_err(|e| format!("invalid index options: {e}"))?;
+            if !value.is_object() {
+                return Err("invalid index options: expected a JSON object".into());
+            }
+            serde_json::from_value(value).map_err(|e| format!("invalid index options: {e}"))?
         };
         let defaults = IndexOptions::default();
         let options = IndexOptions {
@@ -1186,6 +1194,16 @@ mod tests {
                 assert_eq!(se_search_hit_count(search), hits, "{json}");
                 se_search_close(search);
             }
+            // index options are strict: an unknown key or a wrong type is an error
+            let other = format!("{d}_opts");
+            for bad in [r#"{"position":true}"#, r#"{"positions":1}"#, "[]", "null", "{"] {
+                let i = se_index_create(other.as_ptr(), other.len(), bad.as_ptr(), bad.len());
+                assert!(i.is_null(), "{bad}");
+                let e = CStr::from_ptr(se_last_error()).to_str().unwrap().to_string();
+                assert!(e.starts_with("invalid index options"), "{bad}: {e}");
+            }
+            let _ = std::fs::remove_dir_all(&other);
+
             // proximity gaps: u32::MAX is unbounded (no overflow, same hits as
             // MAX - 1); a value outside u32 is rejected with an error
             let gap = |g: &str| format!(r#"{{"query":"והתורה למשה","proximity":{{"mode":"ordered","gaps":[{g}]}}}}"#);

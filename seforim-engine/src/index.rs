@@ -34,6 +34,7 @@ use crate::Result;
 
 /// How the index is built. Fixed at creation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct IndexOptions {
     /// Store word positions in the postings. Off: smaller index, distance is
     /// validated from the text only.
@@ -208,7 +209,7 @@ impl LineIndex {
         hebrew_fts::register_hebrew_tokenizer(index.tokenizers());
         fs::write(
             dir.join(OPTIONS_FILE),
-            serde_json_lite::to_string(&options),
+            serde_json::to_string(&options).map_err(|e| crate::Error::Unsupported(e.to_string()))?,
         )?;
         Ok(Self::wrap(index, fields, options, dir))
     }
@@ -227,12 +228,10 @@ impl LineIndex {
 
     /// Opens an existing index.
     pub fn open(dir: &Path) -> Result<LineIndex> {
-        let options = fs::read_to_string(dir.join(OPTIONS_FILE))
-            .ok()
-            .and_then(|s| serde_json_lite::from_str(&s))
-            .unwrap_or_default();
+        let options = read_options(dir)?;
         let index = Index::open(MmapDirectory::open(dir)?)?;
         hebrew_fts::register_hebrew_tokenizer(index.tokenizers());
+        check_schema(&index.schema(), options)?;
         let (_, mut fields) = line_schema(options);
         // a marks index built before the line flag has no `marked` field
         fields.marked = index.schema().get_field("marked").ok();
@@ -461,29 +460,42 @@ impl LineWriter {
     }
 }
 
-/// Minimal JSON for the two-bool options file (avoids a serde_json
-/// dependency in the engine; the FFI crate owns JSON).
-mod serde_json_lite {
-    use super::IndexOptions;
+/// The build options recorded next to the index. Strict: a missing or
+/// unreadable file, malformed JSON, a missing or unknown key is an error,
+/// never the defaults (an index opened with the wrong options would search
+/// with the wrong tokenizer or rules).
+fn read_options(dir: &Path) -> Result<IndexOptions> {
+    let path = dir.join(OPTIONS_FILE);
+    let text = fs::read_to_string(&path).map_err(|e| {
+        crate::Error::Unsupported(format!("cannot read the index options {}: {e}", path.display()))
+    })?;
+    serde_json::from_str(&text)
+        .map_err(|e| crate::Error::Unsupported(format!("malformed index options {}: {e}", path.display())))
+}
 
-    pub fn to_string(o: &IndexOptions) -> String {
-        format!(
-            "{{\"positions\":{},\"keep_marks\":{}}}",
-            o.positions, o.keep_marks
-        )
+/// The index's schema must be the one its recorded options build: same
+/// `text` tokenizer and record option, and every field the options imply.
+fn check_schema(schema: &Schema, options: IndexOptions) -> Result<()> {
+    let bad = |what: String| Err(crate::Error::Unsupported(format!("index schema does not match its options {options:?}: {what}")));
+    let Ok(text) = schema.get_field("text") else { return bad("no text field".into()) };
+    let tantivy::schema::FieldType::Str(text_options) = schema.get_field_entry(text).field_type() else {
+        return bad("text is not a text field".into());
+    };
+    let Some(indexing) = text_options.get_indexing_options() else { return bad("text is not indexed".into()) };
+    let (expected, _) = line_schema(options);
+    let want = expected.get_field_entry(expected.get_field("text").expect("text")).field_type();
+    let tantivy::schema::FieldType::Str(want) = want else { unreachable!() };
+    let want = want.get_indexing_options().expect("indexed");
+    if indexing.tokenizer() != want.tokenizer() {
+        return bad(format!("tokenizer {}", indexing.tokenizer()));
     }
-
-    pub fn from_str(s: &str) -> Option<IndexOptions> {
-        let flag = |name: &str| -> Option<bool> {
-            let at = s.find(&format!("\"{name}\""))?;
-            let rest = &s[at..];
-            let colon = rest.find(':')?;
-            let value = rest[colon + 1..].trim_start();
-            Some(value.starts_with("true"))
-        };
-        Some(IndexOptions {
-            positions: flag("positions")?,
-            keep_marks: flag("keep_marks")?,
-        })
+    if indexing.index_option() != want.index_option() {
+        return bad(format!("record option {:?}", indexing.index_option()));
     }
+    for name in ["line_id", "position", "book_id"] {
+        if schema.get_field(name).is_err() {
+            return bad(format!("no {name} field"));
+        }
+    }
+    Ok(())
 }

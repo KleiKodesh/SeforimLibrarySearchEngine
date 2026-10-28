@@ -498,7 +498,13 @@ are not printed), so upstream's query-parser tests stay as they are.
   `se_writer_open`, `se_writer_add` / `se_writer_add_line` (per-line flags,
   see cross-line below), `se_writer_delete`, `se_writer_commit` /
   `_rollback` / `_merge_and_close`, `se_index_build_fm_sidecar` /
-  `se_index_has_fm_sidecar`.
+  `se_index_has_fm_sidecar`. Options are strict both ways: create's
+  options JSON may omit a key (its default) but malformed JSON, a
+  non-object, an unknown key or a wrong type is an error; open reads the
+  recorded `engine_options.json` (both keys required, no unknown key) and
+  checks the schema agrees with it (text tokenizer, positions record
+  option, id fields), so a missing, malformed or mismatched recipe fails
+  the open instead of opening with defaults.
 - **Hits:** `PlacedHit` = position, line_id, book_id; the C ABI's
   `se_search_copy_hits` writes 3 u64 per hit in that order.
 - **Filtered search by book:** `books` in the request (C# `Books`, Dart

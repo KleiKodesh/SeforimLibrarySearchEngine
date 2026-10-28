@@ -501,7 +501,10 @@ are not printed), so upstream's query-parser tests stay as they are.
   provenance stamp) committed atomically with the documents. C ABI:
   `se_index_create` / `_open` / `_exists` / `_info` / `_close`,
   `se_writer_open`, `se_writer_add` / `se_writer_add_line` (per-line flags,
-  see cross-line below), `se_writer_delete`, `se_writer_commit` /
+  see cross-line below), `se_writer_add_lines` (a batch in one call:
+  48-byte `SeLineRecord`s of `se_writer_add_line`'s fields + text length,
+  the UTF-8 texts concatenated in one buffer; Dart `IndexWriter.addAll`),
+  `se_writer_delete`, `se_writer_commit` /
   `_rollback` / `_merge_and_close`, `se_index_build_fm_sidecar` /
   `se_index_has_fm_sidecar`. Options are strict both ways: create's
   options JSON may omit a key (its default) but malformed JSON, a

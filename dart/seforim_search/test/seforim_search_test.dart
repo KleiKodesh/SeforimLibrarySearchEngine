@@ -313,6 +313,41 @@ void main() {
     dir.deleteSync(recursive: true);
   });
 
+  test('addAll: a batch indexes as add per line', () {
+    const alpha = '\u05d0\u05dc\u05e4\u05d4\u05d0', beta = '\u05d1\u05d9\u05ea\u05d0';
+    final docs = [
+      const LineDocument(lineId: 1, position: 0, bookId: 1, text: '$alpha $beta', sectionId: 5),
+      const LineDocument(lineId: 2, position: 1, bookId: 1, text: '', noCross: true),
+      const LineDocument(lineId: 3, position: 2, bookId: 2, text: '<b>$beta</b> $alpha'),
+    ];
+    List<int> hits(void Function(IndexWriter) feed) {
+      final dir = Directory.systemTemp.createTempSync('se_dart_batch_');
+      final idx = SeforimIndex.create(dir.path);
+      final w = idx.openWriter(heapBytes: 30000000, threads: 1);
+      feed(w);
+      w.commit();
+      w.close();
+      final s = idx.search(SearchOptions(beta));
+      final r = s.allHits().map((h) => h.lineId).toList();
+      s.close();
+      idx.close();
+      dir.deleteSync(recursive: true);
+      return r;
+    }
+
+    expect(hits((w) => w.addAll(docs)), [1, 3]);
+    expect(hits((w) => docs.forEach(w.add)), [1, 3]);
+    final dir = Directory.systemTemp.createTempSync('se_dart_batch_bad_');
+    final idx = SeforimIndex.create(dir.path);
+    final w = idx.openWriter(heapBytes: 30000000, threads: 1);
+    w.addAll(const []);
+    expect(() => w.addAll(const [LineDocument(lineId: -1, position: 0, bookId: 1, text: 'x')]),
+        throwsA(isA<SeforimEngineException>().having((e) => e.toString(), 'message', contains('record 0'))));
+    w.close();
+    idx.close();
+    dir.deleteSync(recursive: true);
+  });
+
   test('user regex of the line kind: candidates, text matching, full scan', () {
     final dir = Directory.systemTemp.createTempSync('se_dart_line_');
     final idx = SeforimIndex.create(dir.path);

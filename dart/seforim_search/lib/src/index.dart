@@ -185,6 +185,40 @@ final class IndexWriter implements Finalizable {
     });
   }
 
+  /// Queues many lines in one native call (`se_writer_add_lines`): far
+  /// fewer FFI crossings than [add] per line when indexing a whole library.
+  /// On an error the lines before the failing one stay queued.
+  void addAll(List<LineDocument> lines) {
+    if (lines.isEmpty) return;
+    final texts = [for (final l in lines) utf8.encode(l.text)];
+    var total = 0;
+    for (final t in texts) {
+      total += t.length;
+    }
+    using((a) {
+      final recs = a<Uint64>(lines.length * 6);
+      final words = recs.asTypedList(lines.length * 6);
+      final p = a<Uint8>(total == 0 ? 1 : total);
+      final bytes = p.asTypedList(total);
+      var at = 0;
+      for (var i = 0; i < lines.length; i++) {
+        final l = lines[i];
+        final t = texts[i];
+        bytes.setRange(at, at + t.length, t);
+        at += t.length;
+        final w = i * 6;
+        words[w] = l.lineId;
+        words[w + 1] = l.position;
+        words[w + 2] = l.bookId;
+        words[w + 3] = l.sectionId ?? 0;
+        words[w + 4] = t.length;
+        // flags in the low half (little-endian), reserved = 0
+        words[w + 5] = (l.noCross ? 1 : 0) | (l.sectionId != null ? 2 : 0);
+      }
+      if (_n.writerAddLines(_h, recs, lines.length, p, total) < 0) _n.checkStatus(-1);
+    });
+  }
+
   /// Queues deletion of a line. An update is delete + add.
   void delete(int lineId) => _n.checkStatus(_n.writerDelete(_h, lineId));
 

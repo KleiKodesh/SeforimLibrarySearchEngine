@@ -389,6 +389,93 @@ pub unsafe extern "C" fn se_writer_add_line(
     })
 }
 
+/// One line of a `se_writer_add_lines` batch: the fields of
+/// `se_writer_add_line`, its text being the next `text_len` bytes of the
+/// batch's text buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SeLineRecord {
+    pub line_id: u64,
+    pub position: u64,
+    pub book_id: u64,
+    pub section_id: u64,
+    pub text_len: u64,
+    pub flags: u32,
+    pub reserved: u32,
+}
+
+// The layout hosts declare: 5 u64 + 2 u32 = 48 bytes on every target.
+const _: () = assert!(std::mem::size_of::<SeLineRecord>() == 48);
+
+/// Queues `count` lines in one call (`se_writer_add_line` per record); the
+/// texts are concatenated in `texts` (UTF-8, `texts_len` bytes in all, each
+/// record taking its `text_len` bytes in order). Returns the number of lines
+/// queued (= `count`), or -1: the error names the failing record, and the
+/// records before it stay queued (roll back to drop them); lengths that do
+/// not add up to `texts_len` fail before any record is queued. Little-endian
+/// layout on every supported target.
+///
+/// # Safety
+/// `writer` must be live; `records` valid for `count` records and `texts`
+/// for `texts_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn se_writer_add_lines(
+    writer: *mut LineWriter,
+    records: *const SeLineRecord,
+    count: usize,
+    texts: *const u8,
+    texts_len: usize,
+) -> i64 {
+    guard(-1, || {
+        let writer = writer.as_mut().ok_or("null writer")?;
+        if count == 0 {
+            return Ok(0);
+        }
+        if records.is_null() {
+            return Err("null records".into());
+        }
+        let records = std::slice::from_raw_parts(records, count);
+        let texts: &[u8] = if texts.is_null() {
+            if texts_len != 0 {
+                return Err("null texts".into());
+            }
+            &[]
+        } else {
+            std::slice::from_raw_parts(texts, texts_len)
+        };
+        // the lengths must add up to the buffer before anything is queued
+        let need = records.iter().try_fold(0u64, |a, r| a.checked_add(r.text_len));
+        if need != Some(texts.len() as u64) {
+            return Err(format!("texts_len {} but the records take {need:?} bytes", texts.len()));
+        }
+        let mut at = 0usize;
+        for (i, r) in records.iter().enumerate() {
+            let fail = |e: String| format!("record {i}: {e}");
+            let len = usize::try_from(r.text_len).map_err(|_| fail("text_len out of range".into()))?;
+            let end = at
+                .checked_add(len)
+                .filter(|&e| e <= texts.len())
+                .ok_or_else(|| fail("text runs past texts_len".into()))?;
+            let text = std::str::from_utf8(&texts[at..end]).map_err(|_| fail("text is not valid UTF-8".into()))?;
+            at = end;
+            let doc = LineDoc {
+                line_id: check_id("line_id", r.line_id).map_err(fail)?,
+                position: check_id("position", r.position).map_err(fail)?,
+                book_id: check_id("book_id", r.book_id).map_err(fail)?,
+                text: text.to_string(),
+                section_id: if r.flags & SE_LINE_HAS_SECTION != 0 {
+                    Some(check_id("section_id", r.section_id).map_err(fail)?)
+                } else {
+                    None
+                },
+                no_cross: r.flags & SE_LINE_NO_CROSS != 0,
+            };
+            writer.add(&doc).map_err(|e| fail(err(e)))?;
+        }
+        Ok(count as i64)
+    })
+}
+
 /// Queues deletion of a line id (an update = delete + add).
 ///
 /// # Safety
@@ -1313,6 +1400,31 @@ mod tests {
             assert_eq!(se_writer_delete(writer, big), -1);
             let max = i64::MAX as u64;
             assert_eq!(se_writer_add(writer, max, max, max, text.as_ptr(), text.len()), 0);
+            // a batch: texts concatenated, each record takes its text_len bytes
+            let rec = |id: u64, len: u64, flags: u32| SeLineRecord {
+                line_id: id,
+                position: id,
+                book_id: 1,
+                section_id: 9,
+                text_len: len,
+                flags,
+                reserved: 0,
+            };
+            let texts = "abcde";
+            let recs = [rec(10, 2, SE_LINE_HAS_SECTION), rec(11, 0, SE_LINE_NO_CROSS), rec(12, 3, 0)];
+            assert_eq!(se_writer_add_lines(writer, recs.as_ptr(), 3, texts.as_ptr(), texts.len()), 3);
+            assert_eq!(se_writer_add_lines(writer, ptr::null(), 0, ptr::null(), 0), 0);
+            // a text past the buffer, a leftover byte, an id out of range: -1 naming the record
+            let over = [rec(13, 2, 0), rec(14, 9, 0)];
+            assert_eq!(se_writer_add_lines(writer, over.as_ptr(), 2, texts.as_ptr(), texts.len()), -1);
+            assert!(se_last_error_message().contains("take Some(11) bytes"), "{}", se_last_error_message());
+            assert_eq!(se_writer_add_lines(writer, over.as_ptr(), 1, texts.as_ptr(), texts.len()), -1);
+            assert!(se_last_error_message().contains("take Some(2) bytes"), "{}", se_last_error_message());
+            let bad = [rec(big, 1, 0)];
+            assert_eq!(se_writer_add_lines(writer, bad.as_ptr(), 1, texts.as_ptr(), 1), -1);
+            assert!(se_last_error_message().contains("record 0: line_id"), "{}", se_last_error_message());
+            // a good call clears the error
+            assert_eq!(se_writer_add_lines(writer, ptr::null(), 0, ptr::null(), 0), 0);
             assert_eq!(se_last_error_message(), "");
             se_writer_close(writer);
             se_index_close(index);

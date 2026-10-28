@@ -71,6 +71,9 @@ final class SeforimNative {
         writerAddLine = lib.lookupFunction<
             Int32 Function(Pointer<Void>, Uint64, Uint64, Uint64, Uint64, Uint32, Pointer<Uint8>, Size),
             int Function(Pointer<Void>, int, int, int, int, int, Pointer<Uint8>, int)>('se_writer_add_line'),
+        writerAddLines = lib.lookupFunction<
+            Int64 Function(Pointer<Void>, Pointer<Uint64>, Size, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int)>('se_writer_add_lines'),
         searchCopyNextLines = lib.lookupFunction<Uint64 Function(Pointer<Void>, Uint64, Uint64, Pointer<Uint64>),
             int Function(Pointer<Void>, int, int, Pointer<Uint64>)>('se_search_copy_next_lines'),
         locatePairs = lib.lookupFunction<
@@ -160,6 +163,10 @@ final class SeforimNative {
   final int Function(Pointer<Void>, int, int, int, Pointer<Uint8>, int) writerAdd;
   final int Function(Pointer<Void>, int) writerDelete;
   final int Function(Pointer<Void>, int, int, int, int, int, Pointer<Uint8>, int) writerAddLine;
+
+  /// `se_writer_add_lines`: records of 6 u64 words (line, position, book,
+  /// section, text length, flags | reserved << 32), texts concatenated.
+  final int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int) writerAddLines;
   final int Function(Pointer<Void>, int, int, Pointer<Uint64>) searchCopyNextLines;
   final SeBuffer Function(
       Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) locatePairs;

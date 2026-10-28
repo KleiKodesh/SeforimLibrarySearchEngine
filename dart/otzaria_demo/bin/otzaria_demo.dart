@@ -102,12 +102,14 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
       dir, IndexOptions(positions: !o.containsKey('no-positions'), keepMarks: o.containsKey('keep-marks')));
   final w = index.openWriter(heapBytes: 200000000);
   var position = 0;
+  // lines go to the engine in batches (one FFI call per 1000 lines)
+  final batch = <LineDocument>[];
   try {
     outer:
     for (final bookId in db.catalogBookOrder()) {
       for (final line in db.bookLines(bookId)) {
         if (maxLines > 0 && position >= maxLines) break outer;
-        w.add(LineDocument(
+        batch.add(LineDocument(
             lineId: line.id,
             position: position++,
             bookId: line.bookId,
@@ -116,9 +118,14 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
             // Otzaria's rule: a heading interrupts the text (no cross-line phrase)
             sectionId: line.tocEntryId == 0 ? null : line.tocEntryId,
             noCross: line.text.startsWith('<h')));
+        if (batch.length == 1000) {
+          w.addAll(batch);
+          batch.clear();
+        }
         if (position % 100000 == 0) stdout.writeln('  $position lines, ${sw.elapsed.inSeconds}s');
       }
     }
+    w.addAll(batch);
     w.commit('{"lines":$position,"db":"${db.fingerprint()}"}');
   } catch (_) {
     w.rollback();

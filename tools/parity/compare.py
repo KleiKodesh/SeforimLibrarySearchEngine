@@ -4,13 +4,13 @@ Usage: python compare.py <ftslib out dir> <tantivy out dir>
 
 For each query reports: hit counts, the first divergence in hit order (line
 id), and per-field mismatches over the hits both sides returned (word
-distance, snippet window, snippet lines, marks with their term strings).
+distance, snippet window, flags, marks with their term strings).
 """
 import json
 import sys
 from pathlib import Path
 
-FIELDS = ["dist", "start", "end", "flags", "lines", "marks"]
+FIELDS = ["dist", "start", "end", "flags", "marks"]
 
 
 def load(path):

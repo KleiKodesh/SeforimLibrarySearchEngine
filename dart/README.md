@@ -96,7 +96,7 @@ The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzar
 | book/category facets | `--book TEXT`: the book ids whose title or an ancestor category title (`category_closure`) matches go to the engine as `SearchOptions.books` (filtered search on the indexed `book_id`). |
 | `limit` / `offset` | Counted over results that pass the snippet filters, as Otzaria's pages are. |
 | query sanitizing | Same rules: ״→", ׳→', maqaf and `-` → space, an edge `"` is dropped, `''`→". |
-| result `title` / `reference` / snippet | Book title, `line.heRef`, and the snippet with `⟦marks⟧`. Short windows (`isShort`) are located again over the line joined with ±2 neighbour lines, by the demo, which reads the hit's lineIndex from SQLite (`lineIndexesOf`; seforim.db knowledge stays out of the engine). |
+| result `title` / `reference` / snippet | Book title, `line.heRef`, and the snippet with `⟦marks⟧`. A short window (`isShort`, KitveiHakodesh's `SnippetFlagShort`) keeps the window located over its line and is shown with its same-book ±2 neighbour lines as plain context (`SeforimDb.snippetTexts`, one SQL statement per page; rendered as KitveiHakodesh's `withContext`; seforim.db knowledge stays out of the engine). |
 
 ### Gaps: what Otzaria does that the engine/demo can't (yet)
 

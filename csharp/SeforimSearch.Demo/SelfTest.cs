@@ -223,6 +223,36 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                 Check(got.SequenceEqual(expected), $"round {round}: hits {got.Count}, expected {expected.Count} in catalog order");
                 Check(snippets == got.Count, "every hit has a marked snippet");
             }
+
+            // Snippet texts (Core 5e1091b8): every fixture line has 3 words < 8 context, so
+            // every hit is SHORT and its seeded text comes with same-book +-2 neighbours.
+            var seeded = new List<FtsSnippetText>();
+            int shortHits = 0;
+            foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
+                         engine, "beta", int.MaxValue, false, 8, null, new FtsTermTable()))
+            {
+                seeded.AddRange(batch.SnippetTexts);
+                foreach (var hit in batch.Hits)
+                    if ((hit.SnippetFlags & FtsHit.SnippetFlagShort) != 0) shortHits++;
+            }
+            Check(shortHits == expected.Count, $"short hits {shortHits}, expected {expected.Count}");
+            Check(seeded.Count == SeforimDbFtsSearcher.SeedSnippetTextHitCount, $"seeded {seeded.Count}");
+            int firstOfBook2 = LinesPerBook + 1;   // book 2, lineIndex 0: no line before it
+            var first = seeded.Find(t => t.LineId == firstOfBook2)
+                        ?? throw new InvalidOperationException("first hit not seeded");
+            Check(first.Before.Length == 0, "no context before a book's first line (book bound)");
+            Check(first.After.Split(' ').Length == 6, "after = two neighbour lines joined by a space");
+            using (var corpus = engine.OpenCorpus())
+            {
+                // plain id 4 (book 1, lineIndex 3) and short id 2 + LinesPerBook (book 2, index 1)
+                var texts = corpus.FetchSnippetTexts(new[] { 4 }, new[] { LinesPerBook + 2 });
+                Check(texts.Count == 2, $"snippet texts {texts.Count}");
+                var plain = texts.Find(t => t.LineId == 4)!;
+                var shortText = texts.Find(t => t.LineId == LinesPerBook + 2)!;
+                Check(plain.Before.Length == 0 && plain.After.Length == 0 && plain.Text.Length > 0, "plain line has no context");
+                Check(shortText.Before.Split(' ').Length == 3 && shortText.After.Split(' ').Length == 6,
+                      "short line: one line before (book start), two after");
+            }
         }
     }
 }

@@ -5,19 +5,20 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 {
     /// <summary>
     /// One full-text hit (KitveiHakodesh Core's FtsHit, same fields): the line,
-    /// its book and TOC entry, and the snippet DESCRIPTOR — the page joins the
-    /// texts of <see cref="SnippetLineIds"/> with single spaces and renders the
-    /// window [<see cref="SnippetStart"/>, <see cref="SnippetEnd"/>) with
-    /// <see cref="SnippetMarks"/> highlighted.
+    /// its book, and the snippet DESCRIPTOR located once, by the search's own check,
+    /// over the MATCHED LINE's text alone: the page renders the window
+    /// [<see cref="SnippetStart"/>, <see cref="SnippetEnd"/>) of that text with
+    /// <see cref="SnippetMarks"/> highlighted. A <see cref="SnippetFlagShort"/> window
+    /// also gets plain context from the neighbour lines (<see cref="FtsSnippetText"/>),
+    /// presentation only, never part of the descriptor. No TOC entry: the page reads
+    /// row headers by line id for the rows it renders.
     /// </summary>
     public sealed class FtsHit
     {
         public int LineId { get; set; }
         public int BookId { get; set; }
-        public int TocEntryId { get; set; }
         public int Score { get; set; }
         public int WordDistance { get; set; }
-        public int[] SnippetLineIds { get; set; } = System.Array.Empty<int>();
         public int SnippetStart { get; set; }
         public int SnippetEnd { get; set; }
         /// <summary>(start, length, termId) triples; termId into the search's <see cref="FtsTermTable"/>.</summary>
@@ -26,6 +27,23 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 
         public const int SnippetFlagLeadingEllipsis = 1;
         public const int SnippetFlagTrailingEllipsis = 2;
+        /// <summary>The window holds fewer words than the requested context: the line is too
+        /// short to fill it, so the page fetches its neighbour lines with it.</summary>
+        public const int SnippetFlagShort = 4;
+    }
+
+    /// <summary>
+    /// A snippet's TEXT (Core's FtsSnippetText): the matched line's own text and, for a short
+    /// window only, the plain context around it - the same book's non-empty lines up to
+    /// <see cref="SeforimDbFtsCorpus.SnippetNeighbourLineRadius"/> before and after, each side
+    /// joined by single spaces in document order. Empty sides for a line that is not short.
+    /// </summary>
+    public sealed class FtsSnippetText
+    {
+        public int LineId { get; set; }
+        public string Text { get; set; } = "";
+        public string Before { get; set; } = "";
+        public string After { get; set; } = "";
     }
 
     /// <summary>One search's matched-term strings, numbered in first-seen order

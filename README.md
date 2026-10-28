@@ -67,10 +67,13 @@ is one engine, one index format and the same results for both apps.
    - add ±8 words of context and the ellipsis flags
    - mark every matched word inside the window
    - apply the word-distance and word-order filters
-   - report the window's word count, so the host can tell a short window
-     and locate again over the line joined with its neighbours (what
-     counts as a neighbour is seforim.db knowledge, so that stays in the
-     host: FtsLib's `SnippetDescriptorPipeline`, ported in the C# demo)
+   - report the window's word count, so the host can flag a short window
+     (FtsLib's `SnippetFlagShort`, fewer words than the context). The window
+     is located ONCE, over the matched line alone, and is the hit's final
+     descriptor. A short row is shown with its same-book ±2 non-empty
+     neighbour lines as plain context, never located again (KitveiHakodesh
+     5e1091b8; what counts as a neighbour is seforim.db knowledge, so the
+     host reads it: `FetchSnippetTexts`, one SQL statement per batch)
 
    The output is offsets only, not HTML, so the page renderer is unchanged.
 
@@ -623,9 +626,9 @@ are not printed), so upstream's query-parser tests stay as they are.
 - **Search:** every matching line in catalog order (or by relevance /
   generation, see the result order item), plus a snippet session.
   - The session locates snippets for a whole batch across all cores.
-  - It applies the word-distance and order filters. Widening a short
-    window is the host's job: join the line with its neighbours and locate
-    that text (no neighbour or DB logic in the engine).
+  - It applies the word-distance and order filters. A short window's
+    neighbour context is the host's job, presentation only (no neighbour or
+    DB logic in the engine, and no second locate).
   - It keeps the term table.
 - **Search API: one `SearchOptions` object** (Rust `LineIndex::search_options`,
   C ABI `se_search` with a JSON that has `"query"`, C# `SeforimIndex.Search(SearchOptions)`,
@@ -947,10 +950,9 @@ are not printed), so upstream's query-parser tests stay as they are.
 - **Snippets from the index positions** (`SnippetSession::try_locate_lines`,
   C ABI `se_search_locate_lines`, C# `SearchSession.LocateLines`, Dart
   `SearchSession.locateLines`): hits are given as their LINES, each hit its
-  matched line and, for a short window, its neighbour lines, each with its
-  `line_id` (plus the hit's index in the hits when known). The engine joins
-  the non-empty texts by single spaces (FtsLib's `JoinWithNeighbourLines`,
-  the same text and offsets as before) and, on an index with positions,
+  matched line (optionally further lines, each with its `line_id`, plus the
+  hit's index in the hits when known). The engine joins the non-empty texts
+  by single spaces and, on an index with positions,
   takes the matched words from the postings instead of hashing every word
   of the text. See "Snippets from positions" below. The text-only calls
   (`locate_batch`, `locate_pairs`) stay: an index without positions, the
@@ -965,17 +967,22 @@ are not printed), so upstream's query-parser tests stay as they are.
 - **DB code**, copied from KitveiHakodesh Core with namespace renames only:
   - schema probe (3 DB shapes), zstd codec, catalog tree order, content
     fingerprint
-  - corpus reads, and `SeforimDbFtsSearcher` (batch plan, neighbour widening,
-    seeded line texts)
+  - corpus reads, and `SeforimDbFtsSearcher` (batch plan, every hit keeps the
+    descriptor its check located, `SnippetFlagShort`, book id read for passing
+    hits only, no TOC entry on hits; the first 100 hits' `FtsSnippetText`s
+    seeded, short ones with their ±2 neighbour context from
+    `FetchSnippetTexts`: plain ids by primary key and short ids with their
+    neighbours in ONE statement)
 - **FtsLib facade with the same names:** `FtsDocumentPlacement`,
   `SearchResult`, `SnippetDescriptor` (the query string goes to the engine
   as `SearchOptions`; FtsLib's `QueryParser` is ported in hebrew-fts), and
-  `TantivySeforimIndex` (`Search`, `LocateSnippetWindow`,
-  `LocateSnippetWindowOverNeighbourLines`, resumable `BuildLines`,
-  `GetResumeState`). Batches and the neighbour widening go to the engine
-  as lines (`LocateLines`: each result's hit index and line id, the
-  neighbours one by one), so a positions index locates them from the
-  postings.
+  `TantivySeforimIndex` (`Search`, `LocateSnippetWindow`, resumable
+  `BuildLines`, `GetResumeState`). Batches go to the engine as lines
+  (`LocateLines`: each result's hit index and line id), so a positions index
+  locates them from the postings.
+- **Dart demo** (`dart/otzaria_demo`) does the same: no widening; short rows
+  get plain ±2 neighbour context from `SeforimDb.snippetTexts` (one statement
+  per page), rendered as the KitveiHakodesh page does (`withContext`).
 
 ## Build and search reports
 
@@ -988,7 +995,7 @@ Full comparison on any machine (index builds, parity, speed, Otzaria hit counts,
   runs every query with the engine's stage timing on and writes
   `search-report.md`: per query the engine hits and the time of each stage
   (query weight; FST walks / FM lookups + hit collection; host text fetch +
-  snippet locate + widening), time to the first batch, total, and exit code. Every run's full
+  snippet locate + seeded short-row context), time to the first batch, total, and exit code. Every run's full
   log is kept next to the report. `--runs N` adds one warm-up run, then
   reports each stage as the median of N runs (every run in `search-<n>.log`).
 
@@ -1075,7 +1082,7 @@ losers slower: one common word +23%, three words +14%, the capped wildcard
 `tools/parity/` runs KitveiHakodesh Core's own searcher on the installed FtsLib
 index (`FtsLibDump`) and our demo (`SeforimSearch.Demo dump`) on the same DB
 and query list, then diffs every hit with `compare.py`. The diff covers hit
-order, word distance, snippet window, snippet lines, flags, and each mark's
+order, word distance, snippet window, flags (short bit included), and each mark's
 offsets and term.
 
 On the full Otzaria DB (7,080,797 lines), first 2,000 hits per query: 16 of
@@ -1189,7 +1196,7 @@ every differing query.
 - **Hosts keep seforim.db open:** the C# demo rents corpora from a
   `SeforimDbFtsCorpusPool` (one connection each, with its schema probe, zstd
   dictionary and prepared statements; one user at a time, a second one
-  opened for a concurrent search or the neighbour widening; up to 4 kept
+  opened for a concurrent search; up to 4 kept
   idle). Each rent is a fresh lease: Dispose returns the connection exactly
   once (a second Dispose does nothing, a disposed lease refuses calls), and a
   lease that ends with a result sequence still open (an abandoned

@@ -159,6 +159,27 @@ String _render(String text, Snippet s) {
   return b.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
 }
 
+/// The page's withContext (KitveiHakodesh fullTextSearchSnippets.ts): plain
+/// context for a short window, the last [words] words of the text before and
+/// the first [words] after, tags stripped, "…" where the context is cut. A side
+/// the window itself already cut (its own "…") gets no context.
+String _withContext(String window, SnippetText text, Snippet s, int words) {
+  List<String> wordsOf(String t) =>
+      t.replaceAll('&nbsp;', ' ').replaceAll(RegExp(r'<[^>]*>?'), ' ').split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+  var out = window;
+  if (text.before.isNotEmpty && !s.leadingEllipsis) {
+    final all = wordsOf(text.before);
+    final kept = all.length > words ? all.sublist(all.length - words) : all;
+    if (kept.isNotEmpty) out = '${kept.length < all.length ? '…' : ''}${kept.join(' ')} $out';
+  }
+  if (text.after.isNotEmpty && !s.trailingEllipsis) {
+    final all = wordsOf(text.after);
+    final kept = all.length > words ? all.sublist(0, words) : all;
+    if (kept.isNotEmpty) out = '$out ${kept.join(' ')}${kept.length < all.length ? '…' : ''}';
+  }
+  return out;
+}
+
 void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   if (query.trim().isEmpty) {
     stderr.writeln('empty query');
@@ -280,27 +301,20 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   // line's section id): the hits come back already filtered.
   final hits = session.allHits().toList();
 
-  (String, Snippet) widen(PlacedHit h, String text, Snippet s) {
-    if (!s.isShort(contextWords) || s.breakAt != null) return (text, s);
-    // Widen over up to 2 neighbouring lines per side (as the C# demo):
-    // previous + ' ' + line + ' ' + next, empty sides dropped (FtsLib's
-    // JoinWithNeighbourLines); the engine just locates the longer text. The
-    // demo shows the joined text's snippet as is; KitveiHakodesh's searcher
-    // (C# demo) keeps the matched line's score and distance.
-    // the engine returns line ids only: lineIndex comes from SQLite
-    final lineIndex = db.lineIndexesOf([h.lineId])[h.lineId];
-    if (lineIndex == null) return (text, s);
-    final around = db.lineIdsAround(h.bookId, lineIndex - 2, lineIndex + 2);
-    // the lines go to the engine one by one (id + text); it joins them by
-    // single spaces and, on an index with positions, reads the matched words
-    // from the postings
-    final lines = <(int, String)>[
-      for (var d = -2; d <= 2; d++)
-        if (d == 0) (h.lineId, text) else if (around[lineIndex + d] case final l? when l.$2.isNotEmpty) l
+  // KitveiHakodesh (Core 5e1091b8): a hit's snippet is the window the check
+  // located over the matched line alone; a SHORT window (fewer words than the
+  // context) is shown with its same-book +-2 neighbour lines as PLAIN context,
+  // never located again. One SQL statement fetches the context of every short
+  // row on the page.
+  List<String> renderAll(List<(PlacedHit, String, Snippet)> rows) {
+    bool isShort(Snippet s) => s.isShort(contextWords) && s.breakAt == null;
+    final context = db.snippetTexts(const [], [for (final r in rows) if (isShort(r.$3)) r.$1.lineId]);
+    return [
+      for (final (h, text, s) in rows)
+        isShort(s) && context[h.lineId] != null
+            ? _withContext(_render(text, s), context[h.lineId]!, s, contextWords)
+            : _render(text, s)
     ];
-    final joined = [for (final l in lines) if (l.$2.isNotEmpty) l.$2].join(' ');
-    final wide = session.locateLines([HitLines(-1, lines)])[0];
-    return wide == null ? (text, s) : (joined, wide);
   }
 
   final grouping = switch (o['group']) {
@@ -309,7 +323,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     _ => null,
   };
   if (grouping != null) {
-    _grouped(db, session, hits, request, o, grouping, titles, limit, offset, sw, searchMs, widen);
+    _grouped(db, session, hits, request, o, grouping, titles, limit, offset, sw, searchMs, renderAll);
     index.close();
     return;
   }
@@ -345,8 +359,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
       if (s == null) continue;
       if (passed++ < offset) continue;
       final joined = s.breakAt == null ? lineTexts[i] : '${lineTexts[i]}\n${nextTexts[i]}';
-      final (text, shown) = widen(batch[i], joined, s);
-      results.add((batch[i], text, shown));
+      results.add((batch[i], joined, s));
     }
   }
   final refs = db.heRefs(results.map((r) => r.$1.lineId));
@@ -358,9 +371,11 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   stdout.writeln('Matched words: ${terms.take(30).join(', ')}${terms.length > 30 ? ' …' : ''}');
   if (o.containsKey('count')) _printCounts(db, session, titles);
   var n = offset;
-  for (final (h, text, s) in results) {
+  final rendered = renderAll(results);
+  for (var i = 0; i < results.length; i++) {
+    final h = results[i].$1;
     stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})');
-    stdout.writeln('   ${_render(text, s)}');
+    stdout.writeln('   ${rendered[i]}');
   }
   session.close();
   index.close();
@@ -483,7 +498,7 @@ void _grouped(
   int offset,
   Stopwatch sw,
   int searchMs,
-  (String, Snippet) Function(PlacedHit, String, Snippet) widen,
+  List<String> Function(List<(PlacedHit, String, Snippet)>) renderAll,
 ) {
   var scanned = all;
   var truncated = false;
@@ -521,8 +536,7 @@ void _grouped(
       for (var j = 0; j < part.length; j++) {
         final s = snippets[j];
         if (s != null) {
-          final (text, sn) = widen(part[j], lineTexts[j], s);
-          rep = (part[j], text, sn);
+          rep = (part[j], lineTexts[j], s);
           break;
         }
       }
@@ -542,11 +556,13 @@ void _grouped(
       'groups: ${groups.length}${truncated ? '+' : ''} (${grouping.name}), search ${searchMs}ms, '
       'page ${sw.elapsedMilliseconds}ms');
   var n = offset;
-  for (final (g, h, text, s) in cards) {
+  final rendered = renderAll([for (final c in cards) (c.$2, c.$3, c.$4)]);
+  var k = 0;
+  for (final (g, h, _, _) in cards) {
     final count = '${g.members.length}${truncated ? '+' : ''}';
     stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId}) '
         '[$count results]');
-    stdout.writeln('   ${_render(text, s)}');
+    stdout.writeln('   ${rendered[k++]}');
     for (final m in g.members.where((m) => m != h).take(mergedSiblingsCap)) {
       stdout.writeln('     - ${titles[m.bookId] ?? m.bookId} | ${refs[m.lineId] ?? ''}  (line ${m.lineId})');
     }

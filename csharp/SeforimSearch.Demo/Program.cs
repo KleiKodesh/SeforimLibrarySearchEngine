@@ -118,10 +118,13 @@ namespace SeforimSearch.Demo
                 {
                     if (shown >= 10) break;
                     shown++;
-                    string joined = string.Join(" ", hit.SnippetLineIds
-                        .Where(batch.LineTexts.ContainsKey).Select(id => batch.LineTexts[id]));
-                    Console.WriteLine($"line {hit.LineId} book {hit.BookId} toc {hit.TocEntryId} dist {hit.WordDistance}: " +
-                                      Render(joined, hit));
+                    // The seeded snippet text (Core's FtsSnippetText): the matched line, plus
+                    // plain neighbour context for a short window (presentation only).
+                    var text = batch.SnippetTexts.Find(t => t.LineId == hit.LineId);
+                    string rendered = text == null ? "" : Render(text.Text, hit);
+                    if (text != null && (hit.SnippetFlags & FtsHit.SnippetFlagShort) != 0)
+                        rendered = WithContext(rendered, text, hit, 8);
+                    Console.WriteLine($"line {hit.LineId} book {hit.BookId} dist {hit.WordDistance}: " + rendered);
                 }
             }
             if (FtsLib.Fts5.HostTiming.Enabled) Console.Error.WriteLine(FtsLib.Fts5.HostTiming.Report());
@@ -218,10 +221,10 @@ namespace SeforimSearch.Demo
                             if (count++ >= maxHits) break;
                             var sb = new StringBuilder();
                             sb.Append("{\"line\":").Append(h.LineId).Append(",\"book\":").Append(h.BookId)
-                              .Append(",\"toc\":").Append(h.TocEntryId).Append(",\"dist\":").Append(h.WordDistance)
+                              .Append(",\"dist\":").Append(h.WordDistance)
                               .Append(",\"start\":").Append(h.SnippetStart).Append(",\"end\":").Append(h.SnippetEnd)
                               .Append(",\"flags\":").Append(h.SnippetFlags)
-                              .Append(",\"lines\":[").Append(string.Join(",", h.SnippetLineIds)).Append("],\"marks\":[");
+                              .Append(",\"marks\":[");
                             for (int i = 0; i + 2 < h.SnippetMarks.Length; i += 3)
                             {
                                 if (i > 0) sb.Append(',');
@@ -269,6 +272,29 @@ namespace SeforimSearch.Demo
             if (pos < end) sb.Append(StripTags(text.Substring(pos, end - pos)));
             if ((hit.SnippetFlags & FtsHit.SnippetFlagTrailingEllipsis) != 0) sb.Append('…');
             return sb.ToString();
+        }
+
+        /// <summary>The page's withContext (KitveiHakodesh fullTextSearchSnippets.ts): plain
+        /// context for a short window, the last <paramref name="words"/> words of Before and the
+        /// first of After, stripped like the window, with "…" where the context is cut. A side
+        /// the window itself already cut (its own "…") gets no context.</summary>
+        private static string WithContext(string window, FtsSnippetText text, FtsHit hit, int words)
+        {
+            int flags = hit.SnippetFlags;
+            string result = window;
+            if (text.Before.Length > 0 && (flags & FtsHit.SnippetFlagLeadingEllipsis) == 0)
+            {
+                var all = StripTags(text.Before).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                var kept = all.Skip(Math.Max(0, all.Length - words)).ToArray();
+                if (kept.Length > 0) result = (kept.Length < all.Length ? "…" : "") + string.Join(" ", kept) + " " + result;
+            }
+            if (text.After.Length > 0 && (flags & FtsHit.SnippetFlagTrailingEllipsis) == 0)
+            {
+                var all = StripTags(text.After).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                var kept = all.Take(words).ToArray();
+                if (kept.Length > 0) result = result + " " + string.Join(" ", kept) + (kept.Length < all.Length ? "…" : "");
+            }
+            return result;
         }
 
         private static string StripTags(string s)

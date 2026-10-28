@@ -131,12 +131,10 @@ static string HitJson(FtsHit h, List<string> terms)
     var sb = new StringBuilder();
     sb.Append("{\"line\":").Append(h.LineId)
       .Append(",\"book\":").Append(h.BookId)
-      .Append(",\"toc\":").Append(h.TocEntryId)
       .Append(",\"dist\":").Append(h.WordDistance)
       .Append(",\"start\":").Append(h.SnippetStart)
       .Append(",\"end\":").Append(h.SnippetEnd)
       .Append(",\"flags\":").Append(h.SnippetFlags)
-      .Append(",\"lines\":[").Append(string.Join(",", h.SnippetLineIds)).Append("]")
       .Append(",\"marks\":[");
     for (int i = 0; i + 2 < h.SnippetMarks.Length; i += 3)
     {

@@ -7,19 +7,17 @@ using SeforimSearch.Engine;
 // over by swapping the namespace import.
 namespace FtsLib
 {
-    /// <summary>Where a line sits: book, reading position, own TOC entry (0 when none).</summary>
+    /// <summary>Where a line sits: book and reading position (FtsLib dropped the TOC entry).</summary>
     public readonly struct FtsDocumentPlacement
     {
-        public FtsDocumentPlacement(int bookId, int lineIndex, int tocEntryId)
+        public FtsDocumentPlacement(int bookId, int lineIndex)
         {
             BookId = bookId;
             LineIndex = lineIndex;
-            TocEntryId = tocEntryId;
         }
 
         public int BookId { get; }
         public int LineIndex { get; }
-        public int TocEntryId { get; }
     }
 }
 

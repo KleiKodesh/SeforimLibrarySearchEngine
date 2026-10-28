@@ -33,9 +33,17 @@ class DbLine {
 ///
 /// Kept OPEN for the life of the object: one connection, its schema probe,
 /// zstd dictionary and prepared statements (by SQL text) serve every search
-/// and batch, the neighbour widening included. When the file changes (size
+/// and batch, the snippet-text reads included. When the file changes (size
 /// or write time of the main file) the next query closes everything and
 /// reopens. Single-isolate use: sqlite3 handles do not cross isolates.
+/// A snippet's TEXT (KitveiHakodesh Core's FtsSnippetText): the matched line
+/// and, for a short window only, the plain context before and after it.
+class SnippetText {
+  SnippetText(this.lineId, this.text, this.before, this.after);
+  final int lineId;
+  final String text, before, after;
+}
+
 class SeforimDb {
   SeforimDb._(this.path, this._zstdLib, _Open o)
       : _db = o.db,
@@ -229,36 +237,72 @@ class SeforimDb {
     return out;
   }
 
-  /// Lines of [bookId] with lineIndex in [from, to], keyed by lineIndex.
-  Map<int, String> linesAround(int bookId, int from, int to) {
-    final rs = _select(
-        'SELECT l.lineIndex, $_contentCol FROM line l$_contentJoin WHERE l.bookId = ? AND l.lineIndex BETWEEN ? AND ?',
-        [bookId, from, to]);
-    return {for (final r in rs) r.columnAt(0) as int: decode(r.columnAt(1))};
-  }
+  /// How many lines per side a SHORT snippet's context reaches (same book
+  /// only); KitveiHakodesh Core's `SnippetNeighbourLineRadius`.
+  static const snippetNeighbourLineRadius = 2;
 
-  /// [linesAround] with each line's id: lineIndex -> (id, text).
-  Map<int, (int, String)> lineIdsAround(int bookId, int from, int to) {
-    final rs = _select(
-        'SELECT l.lineIndex, l.id, $_contentCol FROM line l$_contentJoin WHERE l.bookId = ? AND l.lineIndex BETWEEN ? AND ?',
-        [bookId, from, to]);
-    return {for (final r in rs) r.columnAt(0) as int: (r.columnAt(1) as int, decode(r.columnAt(2)))};
-  }
-
-  /// Each line's lineIndex (its place in its book), from the DB: the engine
-  /// returns line ids only.
-  Map<int, int> lineIndexesOf(Iterable<int> ids) {
-    final out = <int, int>{};
-    final list = ids.toList();
-    for (var i = 0; i < list.length; i += 900) {
-      final chunk = list.sublist(i, i + 900 > list.length ? list.length : i + 900);
-      final rs = _select(
-          'SELECT id, lineIndex FROM line WHERE id IN (${List.filled(chunk.length, '?').join(',')})', chunk);
-      for (final r in rs) {
-        out[r.columnAt(0) as int] = r.columnAt(1) as int;
+  /// Core's `FetchSnippetTexts`: the snippet texts of the given lines in ONE
+  /// statement per chunk. Plain ids ([lineIds]) are read by primary key from
+  /// the table that holds the text; [shortLineIds] also get their non-empty
+  /// same-book neighbours within [snippetNeighbourLineRadius], each side
+  /// joined by single spaces in document order (plain context, never located).
+  /// A line with no text row is absent.
+  Map<int, SnippetText> snippetTexts(Iterable<int> lineIds, Iterable<int> shortLineIds) {
+    final shortSet = shortLineIds.toSet();
+    final plain = [for (final id in lineIds) if (!shortSet.contains(id)) id];
+    final shorts = shortSet.toList();
+    final texts = <int, String>{};
+    final before = <int, Map<int, String>>{};
+    final after = <int, Map<int, String>>{};
+    const perStatement = 997; // under SQLite's 999 variables: the radius is bound twice
+    var p = 0, q = 0;
+    while (p < plain.length || q < shorts.length) {
+      final plainCount = perStatement < plain.length - p ? perStatement : plain.length - p;
+      final rest = perStatement - plainCount;
+      final shortCount = rest < shorts.length - q ? rest : shorts.length - q;
+      final parts = <String>[];
+      final params = <Object?>[];
+      if (plainCount > 0) {
+        parts.add('SELECT id, 0, content FROM ${splitContent ? 'line_content' : 'line'}'
+            ' WHERE id IN (${List.filled(plainCount, '?').join(',')})');
+        params.addAll(plain.sublist(p, p + plainCount));
+      }
+      if (shortCount > 0) {
+        // the content join must come AFTER this JOIN's own ON clause
+        parts.add('SELECT m.id, n.lineIndex - m.lineIndex, ${splitContent ? 'lc.content' : 'n.content'}'
+            ' FROM line m JOIN line n ON n.bookId = m.bookId'
+            ' AND n.lineIndex BETWEEN m.lineIndex - ? AND m.lineIndex + ?'
+            ' AND (n.lineIndex <> m.lineIndex OR n.id = m.id)'
+            '${splitContent ? ' LEFT JOIN line_content lc ON lc.id = n.id' : ''}'
+            ' WHERE m.id IN (${List.filled(shortCount, '?').join(',')})');
+        params
+          ..add(snippetNeighbourLineRadius)
+          ..add(snippetNeighbourLineRadius)
+          ..addAll(shorts.sublist(q, q + shortCount));
+      }
+      p += plainCount;
+      q += shortCount;
+      for (final r in _select(parts.join(' UNION ALL '), params)) {
+        final id = r.columnAt(0) as int;
+        final delta = r.columnAt(1) as int;
+        final text = decode(r.columnAt(2));
+        if (delta == 0) {
+          texts[id] = text;
+          continue;
+        }
+        if (text.isEmpty) continue; // empty neighbours are skipped, not joined
+        (delta < 0 ? before : after).putIfAbsent(id, () => {})[delta] = text;
       }
     }
-    return out;
+    String side(Map<int, String>? m) {
+      if (m == null) return '';
+      final keys = m.keys.toList()..sort();
+      return [for (final k in keys) m[k]!].join(' ');
+    }
+
+    return {
+      for (final e in texts.entries) e.key: SnippetText(e.key, e.value, side(before[e.key]), side(after[e.key])),
+    };
   }
 
   /// Each line's section (TOC entry) for grouping, straight from the DB: the

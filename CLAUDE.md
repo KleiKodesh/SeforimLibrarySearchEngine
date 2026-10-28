@@ -65,7 +65,7 @@ in one or two lines. Remove entries that turn out to be wrong.
   through `tools/report/search_report.py`, which keeps every run's full log and writes
   `search-report.md`: per query engine hits, weight ms, walks+collect ms (the walks run
   inside scorer creation, not in the weight), host ms (text fetch
-  + locate + widening), first batch, total, and exit code. Quote these numbers to the
+  + locate + short-row context; widening until 5e1091b8), first batch, total, and exit code. Quote these numbers to the
   user; keep the logs and report in the scratchpad `logs/`.
 - **Parity with FtsLib is the goal.** Port FtsLib/Core logic step for step ("tit for
   tat"); no generalizing, no guessing. Before porting, quote the C# and list its exact
@@ -75,9 +75,9 @@ in one or two lines. Remove entries that turn out to be wrong.
   Check on-disk vs git HEAD (`git status`) first; files were once deleted on disk.
 - **No database code in Rust / tantivy.** Anything that needs SQLite or knows the
   seforim.db schema lives in the C# demo (`csharp/SeforimSearch.Demo`). The engine is
-  fed lines and texts by the host. This includes widening short snippets over
-  neighbour lines: "it has to do with the seforim db", so no join/re-locate helper in
-  Rust; the host joins the texts and calls the plain locate (user's rule).
+  fed lines and texts by the host. This includes a short snippet's neighbour
+  context: "it has to do with the seforim db", so no neighbour helper in Rust; the
+  host reads the neighbours and shows them as plain context (user's rule).
 - **tantivy/ is our modified copy** ("KleiKodesh version", the user dislikes "fork"
   meaning anything online). Commit straight to its `main`, no branches. It is a git submodule
   (origin = KleiKodesh/tantivy); after tantivy commits, push it, then `git add tantivy` here.
@@ -152,11 +152,13 @@ Search flow: the query string goes through `QueryParser` (FtsLib rules) and beco
 groups (AND across, OR inside). Each group is a walk with a sink, and the
 BooleanQuery returns every hit's line id + catalog position. The host fetches texts
 in FtsLib's batch plan (256×16, then doubling to 2048). The engine then locates
-each batch in one multi-core call and applies the distance and order filters. A
-short window is the HOST's business: it joins the line with its same-book
-neighbours (radius 2, non-empty lines; FtsLib's `SnippetDescriptorPipeline`, in the
-C# demo) and locates that text. Rust holds no neighbour logic (user's rule: it is
-seforim.db knowledge).
+each batch in one multi-core call and applies the distance and order filters. That
+located window IS every hit's final descriptor (KitveiHakodesh 5e1091b8: no
+re-locate, no joined text). A window with fewer words than the context is flagged
+`SnippetFlagShort`; the HOST shows it with its same-book ±2 non-empty neighbour
+lines as PLAIN context (`FetchSnippetTexts` / Dart `snippetTexts`, one SQL
+statement per batch). Rust holds no neighbour logic (user's rule: it is
+seforim.db knowledge). Hits carry no TOC entry; the host reads it by line id.
 
 ## Key facts about the data and FtsLib
 

@@ -16,8 +16,8 @@ namespace FtsLib.Fts5
     /// thread-safe); batch locates run multi-core inside the engine.
     /// </summary>
     /// <summary>Opt-in host-stage counters (SEFORIM_HOST_TIMING): time spent in the
-    /// engine's snippet locate, split into batch locates and single-text locates (the
-    /// per-hit neighbour widening), with call counts. Diagnostic only.</summary>
+    /// engine's snippet locate, split into batch locates and single-text locates (one
+    /// text or hit at a time), with call counts. Diagnostic only.</summary>
     public static class HostTiming
     {
         public static readonly bool Enabled =
@@ -28,7 +28,7 @@ namespace FtsLib.Fts5
 
         public static string Report() =>
             $"[host] locate batches: {BatchCalls} calls, {BatchTexts} texts, {BatchTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F0} ms; " +
-            $"single locates (widening): {SingleCalls} calls, {SingleTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F0} ms";
+            $"single locates: {SingleCalls} calls, {SingleTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F0} ms";
     }
 
     internal sealed class SearchSessionRef : IDisposable
@@ -110,8 +110,8 @@ namespace FtsLib.Fts5
     /// <summary>
     /// The tantivy engine behind the full-text search, shaped like FtsLib's
     /// Fts5SeforimIndex: Search streams SearchResults in catalog order with their
-    /// content fetched in the caller's batch plan; LocateSnippetWindow and
-    /// LocateSnippetWindowOverNeighbourLines return SnippetDescriptors; BuildLines
+    /// content fetched in the caller's batch plan; LocateSnippetWindow returns
+    /// SnippetDescriptors; BuildLines
     /// builds or resumes the index from the corpus.
     /// </summary>
     public sealed class TantivySeforimIndex : IDisposable
@@ -199,7 +199,7 @@ namespace FtsLib.Fts5
                     var bookOf = new Dictionary<int, int>(hits.Length);
                     foreach (var h in hits) bookOf[(int)h.LineId] = (int)h.BookId;
                     foreach (var (id, text, _) in corpus.FetchDocuments(ids))
-                        byId[id] = (text, new FtsDocumentPlacement(bookOf[id], 0, 0));
+                        byId[id] = (text, new FtsDocumentPlacement(bookOf[id], 0));
                 }
 
                 for (int i = 0; i < ids.Length; i++)
@@ -391,127 +391,6 @@ namespace FtsLib.Fts5
             result.LocatedSnippet = snippet;
             result.IsLocated = true;
             return snippet == null ? SnippetDescriptor.NoMatch : new SnippetDescriptor(snippet, result.Session.TermAt);
-        }
-
-        /// <summary>FtsLib's <c>SnippetDescriptorPipeline.LocateOverNeighbourLines</c>:
-        /// locates over the matched line PLUS the given surrounding lines (already
-        /// fetched, in document order). The text is joined by
-        /// <see cref="JoinWithNeighbourLines"/>, then the normal locate runs; the match is
-        /// found in the matched line and the context expands into the neighbour text.
-        /// Offsets are into that JOINED text. Used only for lines whose own window came
-        /// out shorter than the requested context. Deviation: <paramref name="requireOrdered"/>
-        /// and <paramref name="contextWords"/> are kept for FtsLib's signature but the native
-        /// session locates with the values the search was made with, and applies the
-        /// search's MaxWordDistance filter (FtsLib's pipeline did not filter here); the Core
-        /// caller passes the same values, and the joined text's tightest window can never be
-        /// wider than the line's own, so the result is the same.</summary>
-        public SnippetDescriptor LocateSnippetWindowOverNeighbourLines(SearchResult result, string previousContent,
-                                                                       string nextContent, bool requireOrdered = false,
-                                                                       int contextWords = DefaultContextWords)
-        {
-            if (result == null || string.IsNullOrEmpty(result.Content)) return SnippetDescriptor.NoMatch;
-            string joined = JoinWithNeighbourLines(previousContent, result.Content, nextContent);
-            var snippet = result.Session.LocateBatch(new[] { joined })[0];
-            return snippet == null ? SnippetDescriptor.NoMatch : new SnippetDescriptor(snippet, result.Session.TermAt);
-        }
-
-        /// <summary>
-        /// <see cref="LocateSnippetWindowOverNeighbourLines"/> for many results at once: the
-        /// joined texts go to the engine in one batch call per search session (located
-        /// multi-core), instead of one native call per result. Same descriptors, in order.
-        /// </summary>
-        public SnippetDescriptor[] LocateSnippetWindowsOverNeighbourLines(IReadOnlyList<SearchResult> results,
-                                                                          IReadOnlyList<string> previousContents,
-                                                                          IReadOnlyList<string> nextContents)
-        {
-            var output = new SnippetDescriptor[results.Count];
-            var bySession = new Dictionary<SearchSessionRef, List<int>>();
-            for (int i = 0; i < results.Count; i++)
-            {
-                output[i] = SnippetDescriptor.NoMatch;
-                var r = results[i];
-                if (r == null || string.IsNullOrEmpty(r.Content)) continue;
-                if (!bySession.TryGetValue(r.Session, out var list)) bySession[r.Session] = list = new List<int>();
-                list.Add(i);
-            }
-            foreach (var kv in bySession)
-            {
-                var texts = new string[kv.Value.Count];
-                for (int k = 0; k < texts.Length; k++)
-                {
-                    int i = kv.Value[k];
-                    texts[k] = JoinWithNeighbourLines(previousContents[i], results[i].Content, nextContents[i]);
-                }
-                var located = kv.Key.LocateBatch(texts);
-                for (int k = 0; k < texts.Length; k++)
-                {
-                    var snippet = located[k];
-                    if (snippet != null) output[kv.Value[k]] = new SnippetDescriptor(snippet, kv.Key.TermAt);
-                }
-            }
-            return output;
-        }
-
-        /// <summary>
-        /// <see cref="LocateSnippetWindowsOverNeighbourLines(IReadOnlyList{SearchResult}, IReadOnlyList{string}, IReadOnlyList{string})"/>
-        /// with the neighbour lines given one by one (id and text, document order) instead
-        /// of joined: the engine joins the result's line with them by single spaces (the
-        /// same text, the same offsets) and, on an index with positions, reads the matched
-        /// words from the postings instead of searching the joined text word by word.
-        /// </summary>
-        public SnippetDescriptor[] LocateSnippetWindowsOverNeighbourLines(IReadOnlyList<SearchResult> results,
-            IReadOnlyList<IReadOnlyList<(long LineId, string Text)>> previousLines,
-            IReadOnlyList<IReadOnlyList<(long LineId, string Text)>> nextLines)
-        {
-            var output = new SnippetDescriptor[results.Count];
-            var bySession = new Dictionary<SearchSessionRef, List<int>>();
-            for (int i = 0; i < results.Count; i++)
-            {
-                output[i] = SnippetDescriptor.NoMatch;
-                var r = results[i];
-                if (r == null || string.IsNullOrEmpty(r.Content)) continue;
-                if (!bySession.TryGetValue(r.Session, out var list)) bySession[r.Session] = list = new List<int>();
-                list.Add(i);
-            }
-            foreach (var kv in bySession)
-            {
-                var hits = new HitLines[kv.Value.Count];
-                for (int k = 0; k < hits.Length; k++)
-                {
-                    int i = kv.Value[k];
-                    var lines = new List<(long, string)>(previousLines[i].Count + 1 + nextLines[i].Count);
-                    lines.AddRange(previousLines[i]);
-                    lines.Add((results[i].LineId, results[i].Content));
-                    lines.AddRange(nextLines[i]);
-                    hits[k] = new HitLines(results[i].HitIndex, lines);
-                }
-                var located = kv.Key.LocateLines(hits);
-                for (int k = 0; k < hits.Length; k++)
-                {
-                    var snippet = located[k];
-                    if (snippet != null) output[kv.Value[k]] = new SnippetDescriptor(snippet, kv.Key.TermAt);
-                }
-            }
-            return output;
-        }
-
-        /// <summary>FtsLib's <c>SnippetDescriptorPipeline.JoinWithNeighbourLines</c>:
-        /// previous + ' ' + content + ' ' + next, an empty side dropped together with its
-        /// space. The space keeps boundary words distinct (they must not fuse across a
-        /// line break) and renders as a normal gap. The page re-joins line texts the same
-        /// way, so a descriptor's offsets land on the same characters.</summary>
-        internal static string JoinWithNeighbourLines(string? previousContent, string content, string? nextContent)
-        {
-            bool hasPrevious = !string.IsNullOrEmpty(previousContent);
-            bool hasNext = !string.IsNullOrEmpty(nextContent);
-            if (!hasPrevious && !hasNext) return content;
-
-            var joined = new System.Text.StringBuilder(
-                (previousContent?.Length ?? 0) + content.Length + (nextContent?.Length ?? 0) + 2);
-            if (hasPrevious) joined.Append(previousContent).Append(' ');
-            joined.Append(content);
-            if (hasNext) joined.Append(' ').Append(nextContent);
-            return joined.ToString();
         }
 
         // ── Build ─────────────────────────────────────────────────────

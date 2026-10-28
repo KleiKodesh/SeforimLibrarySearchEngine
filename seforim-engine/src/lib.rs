@@ -1784,4 +1784,28 @@ mod tests {
             assert!(!index.search_options(&neg).unwrap().count_needs_text());
         }
     }
+
+    #[test]
+    fn partial_modes_ignore_order_and_count_distinct_words() {
+        // 0: B A (reverse order) | 1: A alone | 2: A C
+        let texts: Vec<String> = vec![format!("{XB} {XA}"), XA.to_string(), format!("{XA} {XC}")];
+        let docs: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| xline(i as u64, 1, t, Some(1), false)).collect();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &docs);
+            let ids = |o: &SearchOptions| -> Vec<u64> { passing(&index, o, &texts).into_iter().map(|h| h.0).collect() };
+            let ordered = |q: String, m: WordMatchSpec| SearchOptions {
+                query: q,
+                word_match: Some(m),
+                proximity: Some(ProximitySpec::Ordered { gaps: vec![0; 2] }),
+                ..Default::default()
+            };
+            // most of 2 = 2 and at least 2 need both words, in any order
+            assert_eq!(ids(&ordered(format!("{XA} {XB}"), WordMatchSpec::MostWords)), vec![0], "positions={positions}");
+            assert_eq!(ids(&ordered(format!("{XA} {XB}"), WordMatchSpec::AtLeast { count: 2 })), vec![0]);
+            // a word typed twice counts once: A A B at least 2 = A and B
+            assert_eq!(ids(&ordered(format!("{XA} {XA} {XB}"), WordMatchSpec::AtLeast { count: 2 })), vec![0]);
+            assert_eq!(ids(&ordered(format!("{XA} {XA} {XB}"), WordMatchSpec::AnyWord)), vec![0, 1, 2]);
+        }
+    }
 }

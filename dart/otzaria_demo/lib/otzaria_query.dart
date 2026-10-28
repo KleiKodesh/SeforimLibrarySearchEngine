@@ -410,24 +410,52 @@ class OtzariaSearch {
       for (final w in splitQueryWordsWithPhrases(query))
         if (w.$1.replaceAll(RegExp('[|%]'), '').isNotEmpty) (w.$1.replaceAll(RegExp('[|%]'), ''), w.$2)
     ];
-    final words = [for (final w in split) w.$1];
+    // Partial matching (any / most / at least n) is its own rule, as
+    // Otzaria's `scoped_words_query`: each distinct typed word counts once
+    // (a repeated word merges into its first place: the union of its
+    // options and alternatives), and no distance or order applies, even
+    // when n reaches the word count.
+    final partial = mode == SearchMode.advanced && wordMatchMode != WordMatchMode.all;
+    // typed word index -> the word indexes merged into it
+    final merged = <List<int>>[];
+    final keep = <(String, int?)>[];
+    for (var i = 0; i < split.length; i++) {
+      final at = partial && split[i].$2 == null
+          ? keep.indexWhere((k) => k.$2 == null && k.$1 == split[i].$1)
+          : -1;
+      if (at >= 0) {
+        merged[at].add(i);
+      } else {
+        keep.add(split[i]);
+        merged.add([i]);
+      }
+    }
+    final words = [for (final w in keep) w.$1];
     // Quoted phrases stay quoted: the engine searches each as a literal phrase.
-    final phrases = [for (final w in split) w.$2];
+    final phrases = [for (final w in keep) w.$2];
     final global = _globalSet();
     final perWord = <int, WordOptions>{};
-    for (var i = 0; i < words.length; i++) {
-      final o = _optionsFor(i);
-      final alts = <String>[
-        if (mode == SearchMode.advanced) ...?alternativeWords[i],
-        // Otzaria translation_alternatives: appended to the word's alternatives
-        if (mode == SearchMode.advanced && o.contains(OtzariaOption.aramaicTranslation))
-          ...?translations?.expansions(words[i]),
-      ];
+    Set<String> optionsOf(int k) => {for (final i in merged[k]) ..._optionsFor(i)};
+    for (var k = 0; k < words.length; k++) {
+      final o = optionsOf(k);
+      final alts = <String>[];
+      void add(Iterable<String>? xs) {
+        for (final x in xs ?? const <String>[]) {
+          if (!alts.contains(x)) alts.add(x);
+        }
+      }
+      for (final i in merged[k]) {
+        if (mode == SearchMode.advanced) add(alternativeWords[i]);
+      }
+      // Otzaria translation_alternatives: appended to the word's alternatives
+      if (mode == SearchMode.advanced && o.contains(OtzariaOption.aramaicTranslation)) {
+        add(translations?.expansions(words[k]));
+      }
       if (mode == SearchMode.advanced && o.contains(OtzariaOption.aramaicTranslation) && translations == null) {
         warnings.add('option "${OtzariaOption.aramaicTranslation}" needs --dictionary (Otzaria assets/dictionary.json)');
       }
       final w = _wordOverride(o, global, alts);
-      if (w != null) perWord[i] = w;
+      if (w != null) perWord[k] = w;
     }
     final s = _withOptions(
       SearchOptions(
@@ -435,16 +463,15 @@ class OtzariaSearch {
         words: perWord,
         contextWords: contextWords,
         exclude: _exclude(),
-        phraseAlternatives: _phraseAlternatives(words, _optionsFor),
+        phraseAlternatives: _phraseAlternatives(words, optionsOf),
       ),
       global,
     );
-    // The user's settings as they are: the engine counts the words for
-    // partial matching (which wins over proximity: the match is at line
-    // resolution) and cuts the words it drops (no letters or digits) out of
-    // the proximity, merging their gaps. A one-letter word is a word.
+    // The engine counts the words for partial matching and cuts the words
+    // it drops (no letters or digits) out of the proximity, merging their
+    // gaps. A one-letter word is a word. A partial mode sends no proximity.
     if (mode == SearchMode.advanced) s.wordMatch = wordMatch;
-    if (words.length > 1) s.proximity = _proximity(words.length, customSpacing);
+    if (words.length > 1 && !partial) s.proximity = _proximity(words.length, customSpacing);
     return s;
   }
 }

@@ -749,7 +749,9 @@ are not printed), so upstream's query-parser tests stay as they are.
   - Query level: `max_word_distance`, `require_ordered`, `min_groups`,
     `word_match` (`{"mode":"all"|"any_word"|"most_words"}` /
     `{"mode":"at_least","count":N}`: Otzaria's wordMatchMode, the engine
-    counts the slots it searches, a dropped word not counted; wins over
+    counts the distinct slots it searches, a dropped word not counted and
+    a repeated identical slot counted once; any mode but `all` applies no
+    distance, order or proximity, even when it needs every word; wins over
     `min_groups`), `context_words`, `proximity` (per TYPED word, see the
     proximity item), `exclude` (`{query, words, phrase_alternatives,
     max_word_distance, require_ordered, proximity}`; options are per
@@ -855,8 +857,12 @@ are not printed), so upstream's query-parser tests stay as they are.
   A line needs only that many of the groups (anyWord 1, mostWords n/2+1,
   atLeast N, clamped to 1..n); it runs as a BooleanQuery with a minimum
   number of matching clauses, and the snippet is the tightest window
-  holding that many groups. As in Otzaria, distance, order and spacing are
-  not applied in that case.
+  holding that many groups. As in Otzaria (`scoped_words_query`), a
+  partial mode (any / most / at least N) applies no distance, order or
+  spacing even when N reaches the word count (it never falls back to the
+  ordered query), and each distinct word counts once: the engine merges
+  identical slots, and the Dart adapter merges a word typed twice into its
+  first place (union of its options and alternatives).
 - **Exclusion** (Otzaria's negative query): `exclude` in the request (C#
   `SearchRequest.Exclude`, Dart `exclude`, demo `--exclude "words"
   [--exclude-scope distance|paragraph|section]`): the words to drop, as a query of their own

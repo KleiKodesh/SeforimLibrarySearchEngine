@@ -29,10 +29,44 @@ void main() {
     ).toOptions().toJson();
     expect(s['query'], 'משה ו תורה');
     expect(s['word_match'], {'mode': 'most_words'});
-    expect(s['proximity'], {
+    // a partial mode has no distance or order
+    expect(s.containsKey('proximity'), isFalse);
+    final all = OtzariaSearch(
+      query: 'משה ו תורה',
+      distance: 2,
+      customSpacing: {0: 1},
+    ).toOptions().toJson();
+    expect(all['proximity'], {
       'mode': 'ordered',
       'gaps': [1, 1]
     });
+  });
+
+  test('partial modes: a repeated word counts once, its options and alternatives merged', () {
+    const a = 'אב', b = 'גד', x = 'הו', y = 'זח';
+    final s = OtzariaSearch(
+      query: '$a $b $a',
+      wordMatchMode: WordMatchMode.atLeast,
+      wordMatchCount: 2,
+      wordOptions: {
+        2: {OtzariaOption.prefixes}
+      },
+      alternativeWords: {
+        0: [x],
+        2: [y, x]
+      },
+    ).toOptions().toJson();
+    expect(s['query'], '$a $b');
+    expect(s['word_match'], {'mode': 'at_least', 'count': 2});
+    expect(s.containsKey('proximity'), isFalse);
+    expect(s['words'], {
+      '0': {
+        'advanced_prefixes': true,
+        'alternatives': [x, y]
+      }
+    });
+    // all words: the repeated word stays (ordered phrase)
+    expect(OtzariaSearch(query: '$a $b $a').toOptions().toJson()['query'], '$a $b $a');
   });
 
   test('quoted phrases stay quoted; an acronym quotes nothing', () {

@@ -369,19 +369,33 @@ impl SearchOptions {
         // With a proximity rule the too long words leave the query and keep
         // their positions in the rule; without, they stay as skipped slots
         // that count toward word distance (FtsLib's originalGroupCount).
+        // A partial mode (Otzaria's wordMatchMode other than all) is its own
+        // rule: Otzaria's `scoped_words_query` counts each distinct word once
+        // and applies no distance or order, even when it needs every word
+        // (so it never falls back to the ordered query). Identical slots
+        // (a word typed twice with the same options) merge into one.
+        if let Some(m) = self.word_match.filter(|m| *m != WordMatchSpec::All) {
+            let mut seen = std::collections::HashSet::new();
+            let groups: Vec<GroupSpec> = main
+                .searched_groups()
+                .into_iter()
+                .filter(|g| seen.insert(serde_json::to_string(g).unwrap_or_default()))
+                .collect();
+            let mut request = self.lower_rest(keep_marks, global, vocalized)?;
+            request.min_groups = m.min_groups(groups.len());
+            request.groups = groups;
+            request.required_phrases = required_phrases;
+            return Ok(request);
+        }
         let (groups, proximity) = match &self.proximity {
             Some(p) => (main.searched_groups(), Some(main.lower(p)?)),
             None => (main.groups.clone(), None),
-        };
-        let min_groups = match self.word_match {
-            Some(m) => m.min_groups(main.searched_count()),
-            None => self.min_groups,
         };
         let mut request = self.lower_rest(keep_marks, global, vocalized)?;
         request.groups = groups;
         request.max_word_distance = self.max_word_distance;
         request.require_ordered = self.require_ordered;
-        request.min_groups = min_groups;
+        request.min_groups = if self.word_match.is_some() { None } else { self.min_groups };
         request.proximity = proximity;
         request.required_phrases = required_phrases;
         Ok(request)

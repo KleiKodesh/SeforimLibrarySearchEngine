@@ -98,6 +98,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             Guard(C.FetchPlacedDocuments(ids));
         public Dictionary<int, FtsDocumentPlacement> FetchPlacements(IReadOnlyList<int> ids) => C.FetchPlacements(ids);
         public Dictionary<int, (long First, long Count)> BookPositionRanges() => C.BookPositionRanges();
+        public HashSet<long> BaseBookIds() => C.BaseBookIds();
         public long? PositionOfLine(int lineId, Dictionary<int, (long First, long Count)> books) =>
             C.PositionOfLine(lineId, books);
         public List<FtsSnippetText> FetchSnippetTexts(IReadOnlyList<int> lineIds, IReadOnlyCollection<int> shortLineIds) =>
@@ -343,6 +344,19 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 return hasA ? rankA.CompareTo(rankB) : a.CompareTo(b);
             });
             return (bookOrder, lineCounts);
+        }
+
+        /// <summary>The ids of the books flagged <c>book.isBaseBook</c> (the relevance order puts
+        /// them first within a tier, issue #6). Empty when the column is missing.</summary>
+        public HashSet<long> BaseBookIds()
+        {
+            var ids = new HashSet<long>();
+            if (!SeforimDbSchema.ColumnExists(_connection, "book", "isBaseBook")) return ids;
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT id FROM book WHERE isBaseBook = 1";
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) ids.Add(reader.GetInt64(0));
+            return ids;
         }
 
         /// <summary>

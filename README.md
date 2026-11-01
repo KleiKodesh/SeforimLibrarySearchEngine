@@ -766,8 +766,8 @@ are not printed), so upstream's query-parser tests stay as they are.
     global set for the negative query),
     `books`, `phrase_alternatives` (`[{query, ignore_quotes}]`), `order`
     (`"catalog"` default, `"relevance"`, `"generation"`) and
-    `book_generations` (`[[book_id, generation_order], ...]`), see the
-    result order item.
+    `book_generations` (`[[book_id, generation_order], ...]`) and
+    `base_books` (`[book_id, ...]`, relevance only), see the result order item.
   - JSON: `{"query":"משה תורה","grammar_prefixes":true,
     "words":{"1":{"grammar_prefixes":false,"alternatives":["אורייתא"]}}}`.
   - The low-level `SearchRequest` (slots built by the caller) stays, for
@@ -961,8 +961,8 @@ are not printed), so upstream's query-parser tests stay as they are.
     (one-letter words and digit runs too).
   - Measured on the full index, בית המקדש adjacent: 15,218 lines in 29 ms.
 - **Result order** (Otzaria's `ResultsOrder`; `order` in `SearchOptions`,
-  C# `SearchOptions.Order` / `BookGenerations`, Dart `order` /
-  `bookGenerations`, Otzaria demo `--order catalog|relevance`;
+  C# `SearchOptions.Order` / `BookGenerations` / `BaseBooks`, Dart `order` /
+  `bookGenerations` / `baseBooks`, Otzaria demo `--order catalog|relevance`;
   `seforim-engine/src/relevance.rs`). Catalog order stays the default and
   costs nothing: no score, no doc id kept.
   - `generation`: Otzaria's `OrderKind::Generation`: books by the
@@ -971,8 +971,13 @@ are not printed), so upstream's query-parser tests stay as they are.
     A book without one comes last.
   - `relevance`: Otzaria's `order_by_score()` over the query Otzaria builds
     for the same search, computed after the search for the hits only, from
-    the terms the walks matched (sinks); ties in catalog order (Otzaria:
-    ascending doc address). Per shape:
+    the terms the walks matched (sinks). Sort key (issue #6): the tier
+    (the score's constant boosts: tier boosts, fuzzy floors, word counts),
+    then base books first (`base_books`: the host passes seforim.db's
+    `book.isBaseBook` ids per search, nothing in the index; both demos read
+    them), then the rest of the score (BM25 / span bonus), then catalog
+    order (Otzaria: ascending doc address). A base book never crosses a
+    tier. Per shape:
     - one slot: Otzaria's tiers (`match_tier`, ported verbatim: the typed
       form or an alternative 0, inside a longer word 1, a ktiv male/haser
       variant 2, the rest 3), a line scores the sum of 1000 / 100 / 10 / 1

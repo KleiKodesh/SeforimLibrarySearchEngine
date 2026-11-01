@@ -112,6 +112,9 @@ pub struct SearchOptions {
     /// For `"generation"`: `[[book_id, generation_order], ...]` from the
     /// host (Otzaria's per-book `generationOrder`); books absent come last.
     pub book_generations: Vec<(u64, u32)>,
+    /// For `"relevance"`: the base book ids (the host's `isBaseBook`), first
+    /// within each tier (issue #6). Ignored by the other orders.
+    pub base_books: Vec<u64>,
     /// Cross-line matching: a match may continue from the end of a line onto
     /// the start of the next line of the same book (see
     /// `SearchRequest::cross_line`). Off by default (FtsLib).
@@ -166,6 +169,7 @@ impl Default for SearchOptions {
             user_regex: false,
             order: ResultsOrder::Catalog,
             book_generations: Vec::new(),
+            base_books: Vec::new(),
             cross_line: false,
             same_section: false,
             after_position: None,
@@ -294,6 +298,7 @@ impl SearchOptions {
                         books: self.books.clone(),
                         order: self.order,
                         book_generations: self.book_generations.clone(),
+                        base_books: self.base_books.clone(),
                         cross_line: self.cross_line,
                         after_position: self.after_position,
                         max_expanded_terms: self.max_expanded_terms,
@@ -455,6 +460,7 @@ impl SearchOptions {
             books: self.books.clone(),
             order: self.order,
             book_generations: self.book_generations.clone(),
+            base_books: self.base_books.clone(),
             vocalized,
             cross_line: self.cross_line,
             same_section: self.same_section,

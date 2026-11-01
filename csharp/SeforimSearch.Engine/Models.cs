@@ -552,7 +552,8 @@ namespace SeforimSearch.Engine
     {
         /// <summary>Catalog order, as FtsLib (the default; costs nothing).</summary>
         Catalog = 0,
-        /// <summary>Otzaria's relevance: best score first, ties in catalog order. Phrase,
+        /// <summary>Otzaria's relevance: by tier, then base books first
+        /// (<see cref="SearchOptions.BaseBooks"/>), then BM25, then catalog order. Phrase,
         /// proximity and multi-word fuzzy queries need an index with positions; without,
         /// they come back in catalog order with the notice
         /// <see cref="SearchInfo.RelevanceNeedsPositions"/> (<see cref="SearchSession.GetInfo"/>).</summary>
@@ -654,6 +655,10 @@ namespace SeforimSearch.Engine
         /// (Otzaria's generationOrder, from the host). Books absent come last; negative
         /// ids (no such book) are not sent.</summary>
         public Dictionary<long, int> BookGenerations { get; } = new Dictionary<long, int>();
+        /// <summary>For <see cref="ResultsOrder.Relevance"/>: the base book ids (seforim.db
+        /// <c>book.isBaseBook</c>, from the host), first within each relevance tier (never
+        /// across tiers). Ignored by the other orders.</summary>
+        public HashSet<long> BaseBooks { get; } = new HashSet<long>();
         /// <summary>Cross-line matching: a match may continue from the end of a line onto the
         /// start of the next line of the same book (one break at most). Such a hit has
         /// <see cref="PlacedHit.NextLineId"/>; locate it with
@@ -731,6 +736,19 @@ namespace SeforimSearch.Engine
                     first = false;
                     sb.Append('[').Append(kv.Key.ToString(inv)).Append(',')
                         .Append(Math.Max(0, kv.Value).ToString(inv)).Append(']');
+                }
+                sb.Append(']');
+            }
+            if (BaseBooks.Count > 0)
+            {
+                sb.Append(",\"base_books\":[");
+                bool first = true;
+                foreach (long id in BaseBooks)
+                {
+                    if (id < 0) continue; // book ids are unsigned in the engine
+                    if (!first) sb.Append(',');
+                    first = false;
+                    sb.Append(id.ToString(inv));
                 }
                 sb.Append(']');
             }

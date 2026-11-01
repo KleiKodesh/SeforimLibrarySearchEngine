@@ -146,6 +146,14 @@ class SeforimDb {
     return v.toString();
   }
 
+  /// The ids of the books flagged `book.isBaseBook` (the relevance order
+  /// puts them first within a tier, issue #6). Empty without the column.
+  Set<int> baseBooks() {
+    final hasBase = db.select('PRAGMA table_info(book)').any((r) => r['name'] == 'isBaseBook');
+    if (!hasBase) return {};
+    return {for (final r in db.select('SELECT id FROM book WHERE isBaseBook = 1')) r['id'] as int};
+  }
+
   /// Book ids in catalog order: categories by (orderIndex<0, orderIndex),
   /// in each folder its base books first, then subfolders, then the rest
   /// (books by orderIndex). Books outside the tree go last.

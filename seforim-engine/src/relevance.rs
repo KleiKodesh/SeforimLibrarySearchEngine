@@ -13,8 +13,12 @@
 //! **Relevance** is Otzaria's `order_by_score()` over the query Otzaria
 //! builds for the same search, ported per query shape (its
 //! `api/search_engine.rs`, `gap_phrase.rs`, `quote_expansion.rs`,
-//! `hebrew_query.rs::match_tier`). Ties go to the catalog order (Otzaria's
-//! `TopDocs` breaks them by ascending doc address). The score is computed
+//! `hebrew_query.rs::match_tier`). The hits sort by the score's constant
+//! boosts (the tier: Otzaria's tier boosts, fuzzy floors, word counts),
+//! then base books first (the host's per-book `isBaseBook`, issue #6: a base
+//! book leads within its tier, never across tiers), then the rest of the
+//! score (BM25 / span bonus), then the catalog order (Otzaria's `TopDocs`
+//! breaks ties by ascending doc address). The score is computed
 //! after the search, only for the hits, from the terms the walks matched:
 //!
 //! - one slot: Otzaria's relevance tiers (`ranked_term_query`): each matched
@@ -520,32 +524,36 @@ enum Part {
 }
 
 impl Part {
-    fn score(&mut self, doc: DocId) -> Score {
+    /// `(tier, rest)`: the constant boosts (Otzaria's tiers, floors and
+    /// counts) and the BM25 / span-bonus part.
+    fn score(&mut self, doc: DocId) -> (Score, Score) {
         match self {
             Part::Const { union, boost } => {
                 if union.holds(doc) {
-                    *boost
+                    (*boost, 0.0)
                 } else {
-                    0.0
+                    (0.0, 0.0)
                 }
             }
             Part::Exact { union, bm25, fieldnorms } => {
                 if !union.holds(doc) {
-                    return 0.0;
+                    return (0.0, 0.0);
                 }
-                FUZZY_BOOST_EXACT
-                    + FUZZY_BOOST_EXACT_REL * bm25.score(fieldnorms.fieldnorm_id(doc), union.term_freq().max(1))
+                (
+                    FUZZY_BOOST_EXACT,
+                    FUZZY_BOOST_EXACT_REL * bm25.score(fieldnorms.fieldnorm_id(doc), union.term_freq().max(1)),
+                )
             }
             Part::Phrase { scorer, constant } => {
                 if scorer.doc() < doc {
                     scorer.seek(doc);
                 }
                 if scorer.doc() != doc {
-                    return 0.0;
+                    return (0.0, 0.0);
                 }
                 match constant {
-                    Some(c) => *c,
-                    None => tantivy::query::Scorer::score(scorer.as_mut()),
+                    Some(c) => (*c, 0.0),
+                    None => (0.0, tantivy::query::Scorer::score(scorer.as_mut())),
                 }
             }
             Part::AllOf { unions } => {
@@ -555,23 +563,23 @@ impl Part {
                     all &= u.holds(doc);
                 }
                 if all {
-                    unions.len() as Score
+                    (unions.len() as Score, 0.0)
                 } else {
-                    0.0
+                    (0.0, 0.0)
                 }
             }
             Part::Span { unions, positions } => {
                 for (u, p) in unions.iter_mut().zip(positions.iter_mut()) {
                     if !u.holds(doc) {
-                        return 0.0;
+                        return (0.0, 0.0);
                     }
                     u.positions(p);
                 }
                 let Some(span) = tightest_span(positions) else {
-                    return 0.0;
+                    return (0.0, 0.0);
                 };
                 // Otzaria: the driver's k const-1 clauses + the span bonus.
-                unions.len() as Score + 1.0 / (1.0 + span as Score)
+                (unions.len() as Score, 1.0 / (1.0 + span as Score))
             }
         }
     }
@@ -647,6 +655,25 @@ fn tightest_span(slots: &[Vec<u32>]) -> Option<u32> {
     best
 }
 
+/// One hit's relevance score in its two parts (see [`sort_by_score`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct RankScore {
+    /// The constant boosts: Otzaria's tiers (1000 / 100 / 10 / 1), fuzzy
+    /// floors and adjacency boost, word counts.
+    pub tier: Score,
+    /// The rest: BM25 (phrase, fuzzy exact word) or the span bonus.
+    pub rest: Score,
+    /// A cross-line hit: after every in-line hit, base book or not.
+    pub cross_line: bool,
+}
+
+impl RankScore {
+    /// The total, Otzaria's score.
+    pub(crate) fn total(self) -> Score {
+        self.tier + self.rest
+    }
+}
+
 /// The scores of `keys` (`(segment ordinal, doc)`, segments ascending and
 /// docs ascending within one): Otzaria's relevance (see the module docs).
 /// [`Error::Cancelled`] once `cancel` is cancelled (checked every 4096 hits).
@@ -655,7 +682,7 @@ pub(crate) fn scores(
     plan: &ScorePlan<'_>,
     keys: &[(u32, DocId)],
     cancel: Option<&CancelToken>,
-) -> Result<Vec<Score>> {
+) -> Result<Vec<RankScore>> {
     let field = plan.field;
     // Per-search, segment-independent pieces: the tiers and the weights.
     let main = match &plan.main {
@@ -730,15 +757,19 @@ pub(crate) fn scores(
                 }
                 None => true,
             };
-            let mut score: Score = 0.0;
+            let mut score = RankScore::default();
+            let mut add = |(tier, rest): (Score, Score)| {
+                score.tier += tier;
+                score.rest += rest;
+            };
             if in_main {
                 for p in &mut main_parts {
-                    score += p.score(doc);
+                    add(p.score(doc));
                 }
             }
             for parts in &mut phrase_parts {
                 for p in parts {
-                    score += p.score(doc);
+                    add(p.score(doc));
                 }
             }
             out.push(score);
@@ -905,15 +936,35 @@ impl MainWeights {
     }
 }
 
-/// Orders `hits` (aligned with `scores`) best first, ties by catalog position.
+/// Orders `hits` (aligned with `scores`) by relevance: the tier (higher
+/// first), then a base book (`base_books`, the host's `isBaseBook`) before
+/// any other within that tier, then the rest (BM25 / span bonus, higher
+/// first), then catalog position. A base book never crosses a tier.
+/// Returns the hits with their total scores.
 pub(crate) fn sort_by_score<T>(
     hits: Vec<T>,
-    scores: Vec<Score>,
+    scores: Vec<RankScore>,
     hit: impl Fn(&T) -> &PlacedHit,
+    base_books: &[u64],
 ) -> (Vec<T>, Vec<Score>) {
-    let mut pairs: Vec<(T, Score)> = hits.into_iter().zip(scores).collect();
-    pairs.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(hit(&a.0).position.cmp(&hit(&b.0).position)));
-    pairs.into_iter().unzip()
+    let base: std::collections::HashSet<u64> = base_books.iter().copied().collect();
+    let mut keyed: Vec<(T, RankScore, bool)> = hits
+        .into_iter()
+        .zip(scores)
+        .map(|(h, s)| {
+            let b = base.contains(&hit(&h).book_id);
+            (h, s, b)
+        })
+        .collect();
+    keyed.sort_unstable_by(|a, b| {
+        a.1.cross_line
+            .cmp(&b.1.cross_line)
+            .then(b.1.tier.total_cmp(&a.1.tier))
+            .then(b.2.cmp(&a.2))
+            .then(b.1.rest.total_cmp(&a.1.rest))
+            .then(hit(&a.0).position.cmp(&hit(&b.0).position))
+    });
+    keyed.into_iter().map(|(h, s, _)| (h, s.total())).unzip()
 }
 
 #[cfg(test)]
@@ -1015,6 +1066,42 @@ mod tests {
             .unwrap();
         assert_eq!(ids(&r), vec![2, 4, 0, 3, 1]);
         assert!(r.scores().is_none());
+    }
+
+    #[test]
+    fn base_books_first_within_a_tier_never_across() {
+        let rs = |tier: Score, rest: Score| RankScore { tier, rest, cross_line: false };
+        let hit = |position: u64, book_id: u64| PlacedHit { position, line_id: position, book_id, next_line_id: None };
+        // (position, book, tier, rest); book 9 is the base book
+        let rows = [
+            (0, 1, 100.0, 0.0),
+            (1, 1, 1000.0, 5.0), // higher BM25, not base
+            (2, 9, 1000.0, 1.0), // base, lower BM25
+            (3, 9, 100.0, 0.0),
+            (4, 1, 1000.0, 5.0),
+            (5, 9, 1000.0, 3.0),
+            (6, 2, 1000.0, 9.0),
+            (7, 9, 10.0, 50.0), // base never crosses up a tier
+        ];
+        let hits: Vec<PlacedHit> = rows.iter().map(|r| hit(r.0, r.1)).collect();
+        let scores = rows.iter().map(|r| rs(r.2, r.3)).collect();
+        let (sorted, totals) = sort_by_score(hits.clone(), scores, |h| h, &[9]);
+        let order: Vec<u64> = sorted.iter().map(|h| h.position).collect();
+        assert_eq!(order, vec![5, 2, 6, 1, 4, 3, 0, 7]);
+        assert_eq!(totals[0], 1003.0);
+        // no base set: tier, then BM25, then catalog
+        let scores = rows.iter().map(|r| rs(r.2, r.3)).collect();
+        let (sorted, _) = sort_by_score(hits, scores, |h| h, &[]);
+        let order: Vec<u64> = sorted.iter().map(|h| h.position).collect();
+        assert_eq!(order, vec![6, 1, 4, 5, 2, 0, 3, 7]);
+    }
+
+    #[test]
+    fn base_books_through_the_search() {
+        // book 1 holds the typed form twice (tier 1000), book 2 (base) once
+        let (_d, index) = build(IndexOptions::default(), &[(1, A), (2, A), (1, A)]);
+        let r = index.search(&SearchRequest { base_books: vec![2], ..relevance(vec![word(A)]) }).unwrap();
+        assert_eq!(ids(&r), vec![1, 0, 2]);
     }
 
     #[test]

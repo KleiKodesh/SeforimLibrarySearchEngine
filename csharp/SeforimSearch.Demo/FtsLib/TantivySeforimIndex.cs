@@ -166,7 +166,7 @@ namespace FtsLib.Fts5
             if (string.IsNullOrWhiteSpace(query)) yield break;
             // The engine parses the query (FtsLib's QueryParser rules) and builds
             // one walk per word with these options.
-            var request = ToRequest(query, options);
+            var request = WithBaseBooks(ToRequest(query, options));
             // Resume (FtsLib's afterPosition: rowid > position, 0 = from the start). FtsLib's
             // positions start at 1 and the engine's at 0 (same order), so FtsLib's position p
             // is the engine's p - 1; the engine bounds the hits while collecting.
@@ -220,6 +220,22 @@ namespace FtsLib.Fts5
             }
         }
 
+        /// <summary>The relevance order's base books (seforim.db <c>book.isBaseBook</c>), read
+        /// once per facade; the other orders need none.</summary>
+        private HashSet<long>? _baseBooks;
+
+        private SearchOptions WithBaseBooks(SearchOptions request)
+        {
+            if (request.Order != ResultsOrder.Relevance) return request;
+            if (_baseBooks == null)
+            {
+                using var corpus = _openCorpus();
+                _baseBooks = corpus.BaseBookIds();
+            }
+            request.BaseBooks.UnionWith(_baseBooks);
+            return request;
+        }
+
         /// <summary>The engine request for a query and this facade's options.</summary>
         private static SearchOptions ToRequest(string query, TantivySearchOptions options)
         {
@@ -271,7 +287,7 @@ namespace FtsLib.Fts5
                                      int batchSize, out SearchInfo info)
         {
             options ??= new TantivySearchOptions();
-            using var session = Engine().Search(ToRequest(query, options), ct);
+            using var session = Engine().Search(WithBaseBooks(ToRequest(query, options)), ct);
             var line = session.GetLineRegexStatus();
             if (line != null)
             {

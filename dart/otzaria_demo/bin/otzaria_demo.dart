@@ -282,6 +282,8 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     'catalog' || 'catalogue' => ResultsOrder.catalog,
     final other => throw ArgumentError('--order: catalog or relevance, not "$other"'),
   };
+  // relevance: base books (isBaseBook) first within each tier (issue #6)
+  if (request.order == ResultsOrder.relevance) request.baseBooks.addAll(db.baseBooks());
   req.warnings.toSet().forEach((w) => stderr.writeln('warning: $w'));
   request.crossLine = o.containsKey('cross-line');
   request.sameSection = o['scope'] == 'section';

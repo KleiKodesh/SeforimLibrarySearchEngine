@@ -345,6 +345,9 @@ pub struct SearchRequest {
     /// For the generation order: `(book_id, generation_order)` per book,
     /// from the host (Otzaria's `generationOrder`); books absent come last.
     pub book_generations: Vec<(u64, u32)>,
+    /// For the relevance order: the base books (the host's `isBaseBook`),
+    /// first within each tier (issue #6). Ignored by the other orders.
+    pub base_books: Vec<u64>,
     /// Otzaria's vocalized mode (`match_nikud` / `match_taamim` on, for the
     /// query or for any of its words): only lines that carry an attached
     /// mark can match, as Otzaria then searches its vocalized field
@@ -404,6 +407,7 @@ impl Default for SearchRequest {
             books: None,
             order: ResultsOrder::Catalog,
             book_generations: Vec::new(),
+            base_books: Vec::new(),
             vocalized: false,
             cross_line: false,
             same_section: false,
@@ -2708,16 +2712,16 @@ impl LineIndex {
             };
             let mut scores = relevance::scores(&searcher, &plan, &keys, cancel.as_ref())?;
             // cross-line hits rank after every in-line hit (score 0)
-            scores.extend(cross_keys.iter().map(|_| 0.0));
+            scores.extend(cross_keys.iter().map(|_| relevance::RankScore { cross_line: true, ..Default::default() }));
             let (hits, scores) = if self.options.positions && keys.len() + cross_keys.len() == hits.len() {
                 let pairs: Vec<(PlacedHit, (u32, DocId))> =
                     hits.into_iter().zip(keys.iter().chain(&cross_keys).copied()).collect();
-                let (pairs, scores) = relevance::sort_by_score(pairs, scores, |p| &p.0);
+                let (pairs, scores) = relevance::sort_by_score(pairs, scores, |p| &p.0, &request.base_books);
                 let (hits, docs): (Vec<PlacedHit>, Vec<(u32, DocId)>) = pairs.into_iter().unzip();
                 session.set_hit_docs(&hits, docs);
                 (hits, scores)
             } else {
-                relevance::sort_by_score(hits, scores, |h| h)
+                relevance::sort_by_score(hits, scores, |h| h, &request.base_books)
             };
             if timing {
                 eprintln!("  [timing] relevance {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);

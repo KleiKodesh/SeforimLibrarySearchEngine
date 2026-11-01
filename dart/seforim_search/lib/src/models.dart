@@ -92,7 +92,8 @@ enum ResultsOrder {
   /// Catalog order, as FtsLib (the default; costs nothing).
   catalog,
 
-  /// Otzaria's relevance: best score first, ties in catalog order. Phrase,
+  /// Otzaria's relevance: by tier, then base books first
+  /// ([SearchOptions.baseBooks]), then BM25, then catalog order. Phrase,
   /// proximity and multi-word fuzzy queries need an index with positions;
   /// without, they come back in catalog order with the notice
   /// [SearchInfo.relevanceNeedsPositions] ([SearchSession.info]).
@@ -605,13 +606,15 @@ class SearchOptions {
     this.userRegex = false,
     this.order = ResultsOrder.catalog,
     Map<int, int>? bookGenerations,
+    Set<int>? baseBooks,
     this.crossLine = false,
     this.sameSection = false,
     this.afterPosition,
     this.maxExpandedTerms,
   })  : words = words ?? {},
         phraseAlternatives = phraseAlternatives ?? [],
-        bookGenerations = bookGenerations ?? {};
+        bookGenerations = bookGenerations ?? {},
+        baseBooks = baseBooks ?? {};
 
   String query;
 
@@ -699,6 +702,11 @@ class SearchOptions {
   /// negative ids (no such book) are not sent.
   final Map<int, int> bookGenerations;
 
+  /// For [ResultsOrder.relevance]: the base book ids (seforim.db
+  /// `book.isBaseBook`, from the host), first within each relevance tier
+  /// (never across tiers). Ignored by the other orders.
+  final Set<int> baseBooks;
+
   Map<String, Object?> toJson() => {
         'query': query,
         if (userRegex) 'user_regex': true,
@@ -726,6 +734,7 @@ class SearchOptions {
             for (final e in bookGenerations.entries)
               if (e.key >= 0) [e.key, e.value.clamp(0, 0xFFFFFFFF)]
           ],
+        if (baseBooks.isNotEmpty) 'base_books': [for (final b in baseBooks) if (b >= 0) b],
       };
 }
 

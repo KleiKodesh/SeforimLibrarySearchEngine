@@ -608,6 +608,7 @@ class SearchOptions {
     this.crossLine = false,
     this.sameSection = false,
     this.afterPosition,
+    this.maxExpandedTerms,
   })  : words = words ?? {},
         phraseAlternatives = phraseAlternatives ?? [],
         bookGenerations = bookGenerations ?? {};
@@ -631,6 +632,12 @@ class SearchOptions {
   /// strictly after this one ([PlacedHit.position], from 0). Null: from the
   /// start. Totals and counts are then those of the rest.
   int? afterPosition;
+
+  /// The expansion cap: how many index terms one query word (walk,
+  /// wildcard, fuzzy, `%`, regex word) may expand to, one cap across all
+  /// segments, shortest first, the exact word typed always kept. Null: 2000
+  /// (FtsLib's). 0: uncapped. Hitting it sets [SearchInfo.truncated].
+  int? maxExpandedTerms;
 
   // Word options: every word, unless [words] overrides (see [WalkOptions]
   // for each one's meaning).
@@ -698,6 +705,7 @@ class SearchOptions {
         if (crossLine) 'cross_line': true,
         if (sameSection) 'same_section': true,
         if (afterPosition != null) 'after_position': afterPosition,
+        if (maxExpandedTerms != null) 'max_expanded_terms': maxExpandedTerms,
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
             matchNikud, matchTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,

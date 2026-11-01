@@ -381,6 +381,11 @@ pub struct SearchRequest {
     /// totals and counts are those of the rest. Costs nothing when None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_position: Option<u64>,
+    /// The expansion cap: how many index terms one query word (walk,
+    /// wildcard, fuzzy, `%`, regex word) may expand to, one cap across all
+    /// segments, shortest first (the exact word typed always kept). Default
+    /// 2000 (FtsLib's); 0 = uncapped. Hitting it sets the truncated flag.
+    pub max_expanded_terms: usize,
 }
 
 impl Default for SearchRequest {
@@ -404,6 +409,7 @@ impl Default for SearchRequest {
             same_section: false,
             line_regex: None,
             after_position: None,
+            max_expanded_terms: hebrew_fts::DEFAULT_MAX_EXPANDED_TERMS,
         }
     }
 }
@@ -1499,6 +1505,15 @@ impl SpanTermSource for AnySource {
     }
 }
 
+/// What every walk of one search shares: the FM sidecar (leading `*`,
+/// fuzzy) and the expansion cap (one cap across all segments; 0 =
+/// uncapped).
+#[derive(Clone, Copy)]
+struct Walk<'a> {
+    fm: Option<&'a FmIndex>,
+    cap: usize,
+}
+
 impl LineIndex {
     /// The span slot for one group, reporting into `sink`. None when the
     /// group cannot search.
@@ -1507,10 +1522,10 @@ impl LineIndex {
         group: &GroupSpec,
         sink: &MatchedTermsSink,
         searcher: &tantivy::Searcher,
-        fm: Option<&FmIndex>,
+        walk: Walk<'_>,
     ) -> Result<Option<Arc<dyn SpanTermSource>>> {
         let field = self.fields.text;
-        if let Some((terms, truncated)) = self.fm_terms(fm, searcher, group)? {
+        if let Some((terms, truncated)) = self.fm_terms(walk, searcher, group)? {
             if truncated {
                 sink.mark_truncated();
             }
@@ -1525,6 +1540,7 @@ impl LineIndex {
                 }
                 let mut q = HebrewWalkQuery::new(field, word.clone(), self.walk_options(options));
                 q.set_matched_terms_sink(sink.clone());
+                q.set_max_expansions(walk.cap);
                 Some(q.span_slot(searcher)?)
             }
             GroupSpec::Wildcard { pattern, ignore_quotes } => {
@@ -1536,6 +1552,7 @@ impl LineIndex {
                 let Ok(mut q) = q else { return Ok(None) };
                 q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
+                q.set_max_expansions(walk.cap);
                 Some(q.span_slot(searcher)?)
             }
             GroupSpec::Grammar { word, prefixes, suffixes, ignore_quotes } => {
@@ -1546,6 +1563,7 @@ impl LineIndex {
                 q.set_ignore_quotes(*ignore_quotes);
                 q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
+                q.set_max_expansions(walk.cap);
                 Some(q.span_slot(searcher)?)
             }
             GroupSpec::Fuzzy { word, distance, ignore_quotes } => {
@@ -1556,6 +1574,7 @@ impl LineIndex {
                 q.set_ignore_quotes(*ignore_quotes);
                 q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
+                q.set_max_expansions(walk.cap);
                 Some(q.span_slot(searcher)?)
             }
             GroupSpec::Unindexed { .. } => None,
@@ -1563,12 +1582,13 @@ impl LineIndex {
                 let mut q = HebrewRegexQuery::new(field, pattern).map_err(|e| Error::Unsupported(e.to_string()))?;
                 q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
+                q.set_max_expansions(walk.cap);
                 Some(q.span_slot(searcher)?)
             }
             GroupSpec::Any { alternatives } => {
                 let mut sources = Vec::new();
                 for a in alternatives {
-                    if let Some(s) = self.group_slot(a, sink, searcher, fm)? {
+                    if let Some(s) = self.group_slot(a, sink, searcher, walk)? {
                         sources.push(s);
                     }
                 }
@@ -1593,7 +1613,7 @@ impl LineIndex {
         ordered: bool,
         window: Option<u32>,
         searcher: &tantivy::Searcher,
-        fm: Option<&FmIndex>,
+        walk: Walk<'_>,
         sinks: &mut Vec<MatchedTermsSink>,
     ) -> Result<Option<SpanQuery>> {
         if !self.options.positions {
@@ -1612,7 +1632,7 @@ impl LineIndex {
         let first_sink = sinks.len();
         for (i, group) in groups.iter().enumerate() {
             let sink = MatchedTermsSink::new();
-            let Some(slot) = self.group_slot(group, &sink, searcher, fm)? else {
+            let Some(slot) = self.group_slot(group, &sink, searcher, walk)? else {
                 // no partial matcher over the groups before this one
                 sinks.truncate(first_sink);
                 return Ok(None);
@@ -1636,9 +1656,9 @@ impl LineIndex {
         group: &GroupSpec,
         sink: &MatchedTermsSink,
         searcher: &tantivy::Searcher,
-        fm: Option<&FmIndex>,
+        walk: Walk<'_>,
     ) -> Result<Option<Box<dyn Query>>> {
-        if let Some((terms, truncated)) = self.fm_terms(fm, searcher, group)? {
+        if let Some((terms, truncated)) = self.fm_terms(walk, searcher, group)? {
             if truncated {
                 sink.mark_truncated();
             }
@@ -1653,6 +1673,7 @@ impl LineIndex {
                 }
                 let mut q = HebrewWalkQuery::new(self.fields.text, word.clone(), self.walk_options(options));
                 q.set_matched_terms_sink(sink.clone());
+                q.set_max_expansions(walk.cap);
                 Some(Box::new(q))
             }
             GroupSpec::Wildcard {
@@ -1667,6 +1688,7 @@ impl LineIndex {
                 let Ok(mut q) = parsed else { return Ok(None) };
                 q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
+                q.set_max_expansions(walk.cap);
                 Some(Box::new(q))
             }
             GroupSpec::Grammar {
@@ -1682,6 +1704,7 @@ impl LineIndex {
                 q.set_ignore_quotes(*ignore_quotes);
                 q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
+                q.set_max_expansions(walk.cap);
                 Some(Box::new(q))
             }
             GroupSpec::Fuzzy { word, distance, ignore_quotes } => {
@@ -1692,6 +1715,7 @@ impl LineIndex {
                 q.set_ignore_quotes(*ignore_quotes);
                 q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
+                q.set_max_expansions(walk.cap);
                 Some(Box::new(q))
             }
             GroupSpec::Unindexed { .. } => None,
@@ -1700,12 +1724,13 @@ impl LineIndex {
                     HebrewRegexQuery::new(self.fields.text, pattern).map_err(|e| Error::Unsupported(e.to_string()))?;
                 q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
+                q.set_max_expansions(walk.cap);
                 Some(Box::new(q))
             }
             GroupSpec::Any { alternatives } => {
                 let mut parts: Vec<(Occur, Box<dyn Query>)> = Vec::new();
                 for a in alternatives {
-                    if let Some(q) = self.group_query(a, sink, searcher, fm)? {
+                    if let Some(q) = self.group_query(a, sink, searcher, walk)? {
                         parts.push((Occur::Should, q));
                     }
                 }
@@ -1783,11 +1808,13 @@ impl LineIndex {
     /// runs as a walk.
     fn fm_terms(
         &self,
-        fm: Option<&FmIndex>,
+        walk: Walk<'_>,
         searcher: &tantivy::Searcher,
         group: &GroupSpec,
     ) -> Result<Option<(Vec<Vec<u8>>, bool)>> {
-        let Some(fm) = fm else { return Ok(None) };
+        let Some(fm) = walk.fm else { return Ok(None) };
+        // 0 = uncapped (the FM expansion takes a count).
+        let cap = if walk.cap == 0 { usize::MAX } else { walk.cap };
         let field = self.fields.text;
         let dict = || -> Result<_> { Ok(searcher.segment_readers()[0].inverted_index(field)?) };
         match group {
@@ -1809,7 +1836,7 @@ impl LineIndex {
                     &q.automaton(),
                     &core,
                     suffix_only,
-                    q.max_expansions(),
+                    cap,
                     self.options.keep_marks,
                 )?;
                 Ok(Some(terms))
@@ -1828,7 +1855,7 @@ impl LineIndex {
                         inverted.terms(),
                         q.word(),
                         q.distance_limit(),
-                        q.max_expansions(),
+                        cap,
                         self.options.keep_marks,
                     )?
                 } else {
@@ -1838,7 +1865,7 @@ impl LineIndex {
                         &q.automaton(),
                         q.word(),
                         q.distance_limit(),
-                        q.max_expansions(),
+                        cap,
                         self.options.keep_marks,
                     )?
                 };
@@ -1958,7 +1985,7 @@ impl LineIndex {
         let reader = self.index.reader()?;
         let searcher = reader.searcher();
         let fm = self.fm_sidecar_for(&searcher);
-        let fm = fm.as_deref();
+        let walk = Walk { fm: fm.as_deref(), cap: request.max_expanded_terms };
         let mut sinks = Vec::new();
         let mut relevance = request.order == ResultsOrder::Relevance;
         // The request groups the main sinks belong to, when not all of them
@@ -1974,7 +2001,7 @@ impl LineIndex {
             let mut searched = Vec::new();
             for (gi, group) in request.groups.iter().enumerate() {
                 let sink = MatchedTermsSink::new();
-                if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                if let Some(q) = self.group_query(group, &sink, &searcher, walk)? {
                     // a vocalized search: a word counts only on a marked line
                     let q = if request.vocalized { self.marked_lines_only(q)? } else { q };
                     let w = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
@@ -2007,7 +2034,7 @@ impl LineIndex {
                     Proximity::Ordered { gaps } => (gaps.clone(), None),
                     Proximity::AnyOrder { max_span } => (Vec::new(), Some(*max_span)),
                 };
-                self.span_query(&request.groups, &gaps, true, window, &searcher, fm, &mut sinks)?
+                self.span_query(&request.groups, &gaps, true, window, &searcher, walk, &mut sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else {
                 // Without positions: every group present; the locator
@@ -2016,7 +2043,7 @@ impl LineIndex {
                 let mut complete = true;
                 for group in &request.groups {
                     let sink = MatchedTermsSink::new();
-                    match self.group_query(group, &sink, &searcher, fm)? {
+                    match self.group_query(group, &sink, &searcher, walk)? {
                         Some(q) => {
                             clauses.push((Occur::Must, q));
                             sinks.push(sink);
@@ -2031,7 +2058,7 @@ impl LineIndex {
             }
         } else if let (Some(gaps), false) = (&request.gaps, partial) {
             // Per-pair spacing: a span query, one slot per group, each gap its own limit.
-            self.span_query(&request.groups, gaps, request.require_ordered, None, &searcher, fm, &mut sinks)?
+            self.span_query(&request.groups, gaps, request.require_ordered, None, &searcher, walk, &mut sinks)?
                 .map(|q| Box::new(q) as Box<dyn Query>)
         } else {
             // One query + one sink per searchable slot. Rejected wildcards skip
@@ -2040,7 +2067,7 @@ impl LineIndex {
             let mut searched = Vec::new();
             for (gi, group) in request.groups.iter().enumerate() {
                 let sink = MatchedTermsSink::new();
-                if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                if let Some(q) = self.group_query(group, &sink, &searcher, walk)? {
                     clauses.push((Occur::Must, q));
                     sinks.push(sink);
                     searched.push(gi);
@@ -2075,14 +2102,14 @@ impl LineIndex {
             }
             let mut alt_sinks = Vec::new();
             let q: Option<Box<dyn Query>> = if self.options.positions && phrase.len() > 1 {
-                self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, fm, &mut alt_sinks)?
+                self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, walk, &mut alt_sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else {
                 let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
                 let mut complete = true;
                 for group in phrase {
                     let sink = MatchedTermsSink::new();
-                    match self.group_query(group, &sink, &searcher, fm)? {
+                    match self.group_query(group, &sink, &searcher, walk)? {
                         Some(q) => {
                             clauses.push((Occur::Must, q));
                             alt_sinks.push(sink);
@@ -2178,7 +2205,7 @@ impl LineIndex {
                 let mut per_word = Vec::new();
                 for group in groups {
                     let sink = MatchedTermsSink::new();
-                    if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                    if let Some(q) = self.group_query(group, &sink, &searcher, walk)? {
                         section_sinks.borrow_mut().push(sink.clone());
                         let q = if ex.vocalized { self.marked_lines_only(q)? } else { q };
                         let w = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
@@ -2209,16 +2236,16 @@ impl LineIndex {
                     Proximity::Ordered { gaps } => (gaps.clone(), None),
                     Proximity::AnyOrder { max_span } => (Vec::new(), Some(*max_span)),
                 };
-                self.span_query(&ex.groups, &gaps, true, window, &searcher, fm, &mut negative_sinks)?
+                self.span_query(&ex.groups, &gaps, true, window, &searcher, walk, &mut negative_sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else if let (Some(gaps), None) = (&ex.gaps, &ex.proximity) {
-                self.span_query(&ex.groups, gaps, ex.require_ordered, None, &searcher, fm, &mut negative_sinks)?
+                self.span_query(&ex.groups, gaps, ex.require_ordered, None, &searcher, walk, &mut negative_sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else {
                 let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
                 for group in &ex.groups {
                     let sink = MatchedTermsSink::new();
-                    if let Some(q) = self.group_query(group, &sink, &searcher, fm)? {
+                    if let Some(q) = self.group_query(group, &sink, &searcher, walk)? {
                         clauses.push((Occur::Must, q));
                         negative_sinks.push(sink);
                     }
@@ -2260,7 +2287,7 @@ impl LineIndex {
                 let mut sinks = Vec::new();
                 if self.options.positions && phrase.len() > 1 {
                     if let Some(q) =
-                        self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, fm, &mut sinks)?
+                        self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, walk, &mut sinks)?
                     {
                         query_negatives.push(Box::new(q));
                     }
@@ -2271,7 +2298,7 @@ impl LineIndex {
                 let mut complete = true;
                 for group in phrase {
                     let sink = MatchedTermsSink::new();
-                    match self.group_query(group, &sink, &searcher, fm)? {
+                    match self.group_query(group, &sink, &searcher, walk)? {
                         Some(q) => {
                             clauses.push((Occur::Must, q));
                             sinks.push(sink);
@@ -2315,14 +2342,14 @@ impl LineIndex {
             }
             let mut sinks = Vec::new();
             let q: Option<Box<dyn Query>> = if self.options.positions {
-                self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, fm, &mut sinks)?
+                self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, walk, &mut sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else {
                 let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
                 let mut complete = true;
                 for group in phrase {
                     let sink = MatchedTermsSink::new();
-                    match self.group_query(group, &sink, &searcher, fm)? {
+                    match self.group_query(group, &sink, &searcher, walk)? {
                         Some(q) => {
                             clauses.push((Occur::Must, q));
                             sinks.push(sink);

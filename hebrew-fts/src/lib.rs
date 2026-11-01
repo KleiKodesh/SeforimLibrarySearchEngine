@@ -49,4 +49,4 @@ pub use set_automaton::SetAutomaton;
 pub use user_regex::{HebrewRegexQuery, UserRegex, UserRegexError};
 pub use tokenizer::{register_hebrew_tokenizer, HebrewTokenizer, HEBREW_TOKENIZER_NAME};
 pub use marks::MarkFree;
-pub use walk::{HebrewWalkAutomaton, HebrewWalkQuery, KtivRules, TypoMode, WalkOptions};
+pub use walk::{HebrewWalkAutomaton, HebrewWalkQuery, KtivRules, TypoMode, WalkOptions, DEFAULT_MAX_EXPANDED_TERMS};

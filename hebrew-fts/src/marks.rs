@@ -44,17 +44,34 @@ pub fn zero_width_chars(marked_terms: bool) -> ZeroWidthChars {
 
 /// How a term automaton is turned into a tantivy weight: its field, sink,
 /// cap, and whether the dictionary's terms keep marks.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct WeightPlan<'a> {
     pub field: tantivy::schema::Field,
     pub sink: Option<&'a tantivy::query::MatchedTermsSink>,
-    /// The expansion cap (per segment); None = uncapped.
+    /// The expansion cap, one cap over all `segments`; None or 0 =
+    /// uncapped.
     pub cap: Option<usize>,
+    /// The searcher's segments (the cap is global across them); None = per
+    /// segment.
+    pub segments: Option<&'a [tantivy::SegmentReader]>,
+    /// Terms that always keep a slot under the cap (the exact word typed and
+    /// its quote-free twin).
+    pub pinned: Vec<Vec<u8>>,
     /// The dictionary's terms keep marks: the cap counts mark-free forms.
     pub marked_terms: bool,
     /// Wrap the automaton in [`MarkFree`] (a mark-free automaton over a
     /// dictionary that keeps marks).
     pub mark_free: bool,
+}
+
+/// The exact typed form of `word` and its quote-free twin, as pinned terms.
+pub(crate) fn exact_forms(word: &str) -> Vec<Vec<u8>> {
+    let mut forms = vec![word.as_bytes().to_vec()];
+    let quote_free: String = word.chars().filter(|&c| !crate::chars::is_term_quote(c)).collect();
+    if quote_free != word && !quote_free.is_empty() {
+        forms.push(quote_free.into_bytes());
+    }
+    forms
 }
 
 impl WeightPlan<'_> {
@@ -67,8 +84,12 @@ impl WeightPlan<'_> {
         if let Some(sink) = self.sink {
             weight.set_matched_terms_sink(sink.clone());
         }
-        if let Some(cap) = self.cap {
+        if let Some(cap) = self.cap.filter(|&cap| cap > 0) {
             weight.set_max_expansions(cap);
+            weight.set_pinned_terms(self.pinned.clone());
+            if let Some(segments) = self.segments {
+                weight.set_cap_across_segments(segments);
+            }
         }
         weight.set_zero_width_chars(zero_width_chars(self.marked_terms));
         weight

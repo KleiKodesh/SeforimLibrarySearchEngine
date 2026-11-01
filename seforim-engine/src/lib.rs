@@ -468,6 +468,85 @@ mod tests {
         assert!(!q("*abaa").truncated());
     }
 
+    /// The cap is a request option (issue #5): 3000 prefix forms of a word,
+    /// cap 2000 truncates and still keeps the exact word; 0 = uncapped; a cap
+    /// above the expansion does not truncate.
+    #[test]
+    fn expansion_cap_is_a_request_option() {
+        let letters: Vec<char> = ('a'..='z').collect();
+        let mut words = vec!["ab".to_string()];
+        'outer: for a in &letters {
+            for b in &letters {
+                for c in &letters {
+                    words.push(format!("{a}{b}{c}ab"));
+                    if words.len() == 3001 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        // one word per line: the hits are the kept terms
+        let lines: Vec<LineDoc> = words.iter().enumerate().map(|(i, w)| line(i as u64, i as u64, 1, w)).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let index = build(dir.path(), IndexOptions::default(), &lines);
+        let q = |s: &str, cap: Option<usize>| {
+            let mut o = SearchOptions { query: s.into(), ..Default::default() };
+            if let Some(cap) = cap {
+                o.max_expanded_terms = cap;
+            }
+            index.search_options(&o).unwrap()
+        };
+        // "*ab" (leading star: the FM path on a merged index, else the walk)
+        for merged in [false, true] {
+            if merged {
+                index.writer(50_000_000, 1).unwrap().merge_all().unwrap();
+                index.build_fm_sidecar().unwrap();
+            }
+            let r = q("*ab", None);
+            assert!(r.truncated(), "merged {merged}");
+            assert_eq!(r.hits.len(), 2000, "merged {merged}");
+            assert!(r.hits.iter().any(|h| h.line_id == 0), "exact word kept, merged {merged}");
+            let r = q("*ab", Some(0));
+            assert!(!r.truncated());
+            assert_eq!(r.hits.len(), 3001);
+            assert!(!q("*ab", Some(3500)).truncated());
+            let r = q("*ab", Some(10));
+            assert!(r.truncated());
+            assert_eq!(r.hits.len(), 10);
+        }
+    }
+
+    /// One cap across all segments (issue #5): the same query keeps the same
+    /// terms and hits on an index split into segments and on the merged one,
+    /// though a per-segment cap would keep a different term in segment 2.
+    #[test]
+    fn expansion_cap_ignores_segment_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        let batches: [&[&str]; 3] = [&["abc", "abd", "abef"], &["abg", "abh"], &["abg", "abg"]];
+        let mut id = 0;
+        for batch in batches {
+            for text in batch {
+                w.add(&line(id, id, 1, text)).unwrap();
+                id += 1;
+            }
+            w.commit(None).unwrap();
+        }
+        let run = || {
+            let o = SearchOptions { query: "ab*".into(), max_expanded_terms: 3, ..Default::default() };
+            let r = index.search_options(&o).unwrap();
+            let mut ids: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();
+            ids.sort_unstable();
+            (ids, r.truncated())
+        };
+        let split = run();
+        // abc, abd, abg (three lines): abh is left out
+        assert_eq!(split, (vec![0, 1, 3, 5, 6], true));
+        w.merge_all().unwrap();
+        assert_eq!(run(), split);
+    }
+
     #[test]
     fn min_groups_partial_matching() {
         let dir = tempfile::tempdir().unwrap();

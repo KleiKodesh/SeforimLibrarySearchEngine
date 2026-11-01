@@ -625,7 +625,7 @@ impl Automaton for RegexTermAutomaton {
 }
 
 /// One regex word as a walk over the term dictionary: whole-term, quote
-/// transparent, capped at [`DEFAULT_MAX_EXPANDED_TERMS`] per segment,
+/// transparent, capped at [`DEFAULT_MAX_EXPANDED_TERMS`] across all segments,
 /// shortest first.
 #[derive(Debug, Clone)]
 pub struct HebrewRegexQuery {
@@ -672,25 +672,27 @@ impl HebrewRegexQuery {
         QuoteFree::new(self.automaton.clone(), true)
     }
 
-    fn plan(&self) -> crate::marks::WeightPlan<'_> {
+    fn plan<'s>(&'s self, segments: Option<&'s [tantivy::SegmentReader]>) -> crate::marks::WeightPlan<'s> {
         crate::marks::WeightPlan {
             field: self.field,
             sink: self.matched_terms_sink.as_ref(),
             cap: Some(self.max_expansions),
+            segments,
+            pinned: Vec::new(),
             marked_terms: self.marked_terms,
             mark_free: self.marked_terms,
         }
     }
 
-    /// This word as a span slot, capped per segment.
-    pub fn span_slot(&self, _searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
-        Ok(self.plan().span(self.automaton()))
+    /// This word as a span slot, capped across all segments.
+    pub fn span_slot(&self, searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
+        Ok(self.plan(Some(searcher.segment_readers())).span(self.automaton()))
     }
 }
 
 impl Query for HebrewRegexQuery {
-    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        Ok(self.plan().boxed(self.automaton()))
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        Ok(self.plan(enable_scoring.searcher().map(|s| s.segment_readers())).boxed(self.automaton()))
     }
 }
 

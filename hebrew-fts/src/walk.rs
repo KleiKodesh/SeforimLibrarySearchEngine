@@ -1080,7 +1080,7 @@ impl HebrewWalkQuery {
         self.matched_terms_sink = Some(sink);
     }
 
-    /// Overrides the expansion cap (per segment).
+    /// Overrides the expansion cap (one cap across all segments; 0 = uncapped).
     pub fn set_max_expansions(&mut self, cap: usize) {
         self.max_expansions = cap;
     }
@@ -1098,11 +1098,13 @@ impl HebrewWalkQuery {
         (automaton, o.marked_terms && !required)
     }
 
-    fn plan(&self, mark_free: bool) -> crate::marks::WeightPlan<'_> {
+    fn plan<'s>(&'s self, mark_free: bool, segments: Option<&'s [tantivy::SegmentReader]>) -> crate::marks::WeightPlan<'s> {
         crate::marks::WeightPlan {
             field: self.field,
             sink: self.matched_terms_sink.as_ref(),
             cap: Some(self.max_expansions),
+            segments,
+            pinned: crate::marks::exact_forms(&self.word),
             marked_terms: self.options.marked_terms,
             mark_free,
         }
@@ -1120,11 +1122,11 @@ impl HebrewWalkQuery {
 
     /// This walk as a slot of a [`SpanQuery`](tantivy::query::SpanQuery):
     /// "any word this walk matches", with positions. The sink, if set, still
-    /// collects the matched forms. The expansion cap applies per
-    /// segment.
-    pub fn span_slot(&self, _searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
+    /// collects the matched forms. The expansion cap is one cap across all
+    /// segments.
+    pub fn span_slot(&self, searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
         let (automaton, mark_free) = self.automaton();
-        Ok(self.plan(mark_free).span(automaton))
+        Ok(self.plan(mark_free, Some(searcher.segment_readers())).span(automaton))
     }
 }
 
@@ -1141,9 +1143,9 @@ pub(crate) fn run<A: Automaton>(automaton: &A, term: &[u8]) -> bool {
 }
 
 impl Query for HebrewWalkQuery {
-    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
         let (automaton, mark_free) = self.automaton();
-        Ok(self.plan(mark_free).boxed(automaton))
+        Ok(self.plan(mark_free, enable_scoring.searcher().map(|s| s.segment_readers())).boxed(automaton))
     }
 }
 

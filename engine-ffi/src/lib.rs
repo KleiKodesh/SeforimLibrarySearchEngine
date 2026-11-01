@@ -598,6 +598,9 @@ pub unsafe extern "C" fn se_writer_close(writer: *mut LineWriter) {
 /// ```
 /// Both take `"after_position":N` (resume, FtsLib's `afterPosition`): only
 /// lines at catalog positions after N.
+/// Both take `"max_expanded_terms":N`: the expansion cap per query word,
+/// one cap across all segments, shortest first, the exact word typed always
+/// kept (default 2000, FtsLib's; 0 = uncapped).
 /// Returns a search object holding every matching line (in the requested order, catalog by default) and
 /// the snippet session.
 ///
@@ -1109,7 +1112,8 @@ pub unsafe extern "C" fn se_search_counts(search: *const SearchResult) -> *mut c
 /// `notices` are not errors: `"relevance_needs_positions"` = relevance order
 /// was asked for a phrase / proximity / multi-word fuzzy query on an index
 /// without positions, so the hits are in catalog order. `truncated`: a walk
-/// hit its expansion cap (2000 per segment), so terms beyond it were not
+/// hit its expansion cap (`max_expanded_terms`, default 2000, one cap
+/// across all segments), so terms beyond it were not
 /// searched. Free with `se_string_free`.
 ///
 /// # Safety

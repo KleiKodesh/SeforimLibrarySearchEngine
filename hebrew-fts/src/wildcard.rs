@@ -13,7 +13,7 @@
 //!   (max Hebrew prefix stack); leading AND trailing → 3 + 4 = 7; otherwise
 //!   (trailing or internal) → 4 (max pronominal suffix).
 //! - The 2000-term cap (shortest first, then most frequent) is applied by
-//!   the AutomatonWeight per segment.
+//!   the AutomatonWeight, one cap across all segments.
 //!
 //! Where FtsLib ran LIKE / range / FM-index scans and filtered afterwards,
 //! here one automaton walks the term dictionary and never leaves the budget.
@@ -336,7 +336,7 @@ impl Automaton for WildcardAutomaton {
 }
 
 /// Tantivy query for one wildcard pattern, capped at
-/// [`DEFAULT_MAX_EXPANDED_TERMS`] per segment (shortest first).
+/// [`DEFAULT_MAX_EXPANDED_TERMS`] across all segments (shortest first).
 #[derive(Debug, Clone)]
 pub struct HebrewWildcardQuery {
     field: Field,
@@ -402,25 +402,27 @@ impl HebrewWildcardQuery {
         self.marked_terms = marked_terms;
     }
 
-    fn plan(&self) -> crate::marks::WeightPlan<'_> {
+    fn plan<'s>(&'s self, segments: Option<&'s [tantivy::SegmentReader]>) -> crate::marks::WeightPlan<'s> {
         crate::marks::WeightPlan {
             field: self.field,
             sink: self.matched_terms_sink.as_ref(),
             cap: Some(self.max_expansions),
+            segments,
+            pinned: Vec::new(),
             marked_terms: self.marked_terms,
             mark_free: self.marked_terms,
         }
     }
 
-    /// This pattern as a span slot, capped per segment.
-    pub fn span_slot(&self, _searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
-        Ok(self.plan().span(self.automaton()))
+    /// This pattern as a span slot, capped across all segments.
+    pub fn span_slot(&self, searcher: &tantivy::Searcher) -> tantivy::Result<Arc<dyn SpanTermSource>> {
+        Ok(self.plan(Some(searcher.segment_readers())).span(self.automaton()))
     }
 }
 
 impl Query for HebrewWildcardQuery {
-    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        Ok(self.plan().boxed(self.automaton()))
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        Ok(self.plan(enable_scoring.searcher().map(|s| s.segment_readers())).boxed(self.automaton()))
     }
 }
 

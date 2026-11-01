@@ -123,6 +123,11 @@ pub struct SearchOptions {
     /// strictly after this one (see `SearchRequest::after_position`).
     /// None = from the start.
     pub after_position: Option<u64>,
+    /// The expansion cap: how many index terms one query word (walk,
+    /// wildcard, fuzzy, `%`, regex word) may expand to, one cap across all
+    /// segments, shortest first (the exact word typed always kept). Default
+    /// 2000 (FtsLib's); 0 = uncapped. Hitting it sets the truncated flag.
+    pub max_expanded_terms: usize,
 }
 
 impl Default for SearchOptions {
@@ -164,6 +169,7 @@ impl Default for SearchOptions {
             cross_line: false,
             same_section: false,
             after_position: None,
+            max_expanded_terms: hebrew_fts::DEFAULT_MAX_EXPANDED_TERMS,
         }
     }
 }
@@ -290,6 +296,7 @@ impl SearchOptions {
                         book_generations: self.book_generations.clone(),
                         cross_line: self.cross_line,
                         after_position: self.after_position,
+                        max_expanded_terms: self.max_expanded_terms,
                         ..Default::default()
                     });
                 }
@@ -303,6 +310,7 @@ impl SearchOptions {
                             context_words: self.context_words,
                             books: self.books.clone(),
                             after_position: self.after_position,
+                        max_expanded_terms: self.max_expanded_terms,
                             ..Default::default()
                         });
                     }
@@ -452,6 +460,7 @@ impl SearchOptions {
             same_section: self.same_section,
             line_regex: None,
             after_position: self.after_position,
+            max_expanded_terms: self.max_expanded_terms,
         })
     }
 }

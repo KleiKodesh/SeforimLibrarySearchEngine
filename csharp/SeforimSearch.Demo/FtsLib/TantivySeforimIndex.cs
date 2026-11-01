@@ -105,6 +105,10 @@ namespace FtsLib.Fts5
 
         /// <summary>Result order (Otzaria's). Catalog, as FtsLib, by default.</summary>
         public ResultsOrder Order { get; set; }
+
+        /// <summary>Expansion cap per query word, one cap across all segments (null: 2000,
+        /// FtsLib's; 0: uncapped). Whether it was hit: SearchInfo.Truncated.</summary>
+        public int? MaxExpandedTerms { get; set; }
     }
 
     /// <summary>
@@ -246,6 +250,7 @@ namespace FtsLib.Fts5
                 ContextWords = options.ContextWords,
                 UserRegex = options.UserRegex,
                 Order = options.Order,
+                MaxExpandedTerms = options.MaxExpandedTerms,
             };
         }
 

@@ -2,7 +2,7 @@
 //!
 //! The same Levenshtein DFA tantivy's `FuzzyTermQuery` uses, run through an
 //! [`AutomatonWeight`] configured the FtsLib way: capped at
-//! [`DEFAULT_MAX_EXPANDED_TERMS`] per segment, closest (edit distance) first,
+//! [`DEFAULT_MAX_EXPANDED_TERMS`] across all segments, closest (edit distance) first,
 //! then shortest (the intra-word quote is zero-width, and the marks on an
 //! index that keeps them, see [`crate::marks::zero_width_chars`]), then most
 //! frequent. With a [`MatchedTermsSink`]
@@ -127,7 +127,7 @@ pub const MAX_FUZZY_DISTANCE: u8 = 3;
 impl HebrewFuzzyQuery {
     /// `distance`: 1..=[`MAX_FUZZY_DISTANCE`] (clamped, as FtsLib's
     /// `ExpandFuzzy`). The expansion is capped at
-    /// [`DEFAULT_MAX_EXPANDED_TERMS`] per segment, closest first.
+    /// [`DEFAULT_MAX_EXPANDED_TERMS`] across all segments, closest first.
     pub fn new(field: Field, word: impl Into<String>, distance: u8) -> HebrewFuzzyQuery {
         HebrewFuzzyQuery {
             field,
@@ -163,7 +163,7 @@ impl HebrewFuzzyQuery {
         self.matched_terms_sink = Some(sink);
     }
 
-    /// Overrides the expansion cap (per segment).
+    /// Overrides the expansion cap (one cap across all segments; 0 = uncapped).
     pub fn set_max_expansions(&mut self, cap: usize) {
         self.max_expansions = cap;
     }
@@ -202,7 +202,7 @@ impl HebrewFuzzyQuery {
         }
     }
 
-    fn configure<A>(&self, mut weight: AutomatonWeight<A>, dfa: Arc<LevenshteinDfa>) -> AutomatonWeight<A>
+    fn configure<A>(&self, mut weight: AutomatonWeight<A>, dfa: Arc<LevenshteinDfa>, segments: Option<&[tantivy::SegmentReader]>) -> AutomatonWeight<A>
     where
         A: Automaton + Send + Sync + 'static,
         A::State: Clone,
@@ -210,7 +210,13 @@ impl HebrewFuzzyQuery {
         if let Some(sink) = &self.matched_terms_sink {
             weight.set_matched_terms_sink(sink.clone());
         }
-        weight.set_max_expansions(self.max_expansions);
+        if self.max_expansions > 0 {
+            weight.set_max_expansions(self.max_expansions);
+            weight.set_pinned_terms(crate::marks::exact_forms(&self.word));
+            if let Some(segments) = segments {
+                weight.set_cap_across_segments(segments);
+            }
+        }
         weight.set_zero_width_chars(crate::marks::zero_width_chars(self.marked_terms));
         // Closest first: the edit distance of the matched term.
         weight.set_expansion_rank(Arc::new(move |key: &[u8]| match dfa.distance(key) {
@@ -224,24 +230,24 @@ impl HebrewFuzzyQuery {
     /// sink as the plain query.
     pub fn span_slot(
         &self,
-        _searcher: &tantivy::Searcher,
+        searcher: &tantivy::Searcher,
     ) -> tantivy::Result<Arc<dyn SpanTermSource>> {
         let dfa = Arc::new(self.automaton());
         Ok(if self.marked_terms {
-            Arc::new(self.configure(AutomatonWeight::<MarkFree<SharedDfa>>::new(self.field, MarkFree::new(SharedDfa(dfa.clone()))), dfa))
+            Arc::new(self.configure(AutomatonWeight::<MarkFree<SharedDfa>>::new(self.field, MarkFree::new(SharedDfa(dfa.clone()))), dfa, Some(searcher.segment_readers())))
         } else {
-            Arc::new(self.configure(AutomatonWeight::<LevenshteinDfa>::new(self.field, dfa.clone()), dfa))
+            Arc::new(self.configure(AutomatonWeight::<LevenshteinDfa>::new(self.field, dfa.clone()), dfa, Some(searcher.segment_readers())))
         })
     }
 }
 
 impl Query for HebrewFuzzyQuery {
-    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
         let dfa = Arc::new(self.automaton());
         Ok(if self.marked_terms {
-            Box::new(self.configure(AutomatonWeight::<MarkFree<SharedDfa>>::new(self.field, MarkFree::new(SharedDfa(dfa.clone()))), dfa))
+            Box::new(self.configure(AutomatonWeight::<MarkFree<SharedDfa>>::new(self.field, MarkFree::new(SharedDfa(dfa.clone()))), dfa, enable_scoring.searcher().map(|s| s.segment_readers())))
         } else {
-            Box::new(self.configure(AutomatonWeight::<LevenshteinDfa>::new(self.field, dfa.clone()), dfa))
+            Box::new(self.configure(AutomatonWeight::<LevenshteinDfa>::new(self.field, dfa.clone()), dfa, enable_scoring.searcher().map(|s| s.segment_readers())))
         })
     }
 }

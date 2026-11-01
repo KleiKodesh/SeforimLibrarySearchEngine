@@ -26,7 +26,7 @@ Current index formats: ours `tantivy13`, FtsLib `fts11`.
 | Feature | Status |
 |---|---|
 | FtsLib query syntax (`* ? % ~N \|`), results identical to FtsLib | done, parity below |
-| Every option one FST walk per word, shortest first, cap 2000 per segment, matched terms returned | done |
+| Every option one FST walk per word, shortest first, cap per request (default 2000, 0 = none) across all segments, exact word kept, matched terms returned | done |
 | Otzaria word options (grammar/advanced/Aramaic prefixes+suffixes, ktiv, part of word, typo modes, quotes) | done |
 | Ketiv rule sets: Otzaria's or FtsLib's KetivExpander (`ktiv_rules`) | done |
 | One search options object, per-word options (negative words too), alternatives, acronyms | done |

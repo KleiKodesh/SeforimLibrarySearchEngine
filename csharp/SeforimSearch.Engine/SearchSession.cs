@@ -436,7 +436,8 @@ namespace SeforimSearch.Engine
         public IReadOnlyList<string> Notices { get; }
 
         /// <summary>A walk (any word, alternative or negative word) hit its expansion
-        /// cap (2000 per segment): terms beyond it were not searched.</summary>
+        /// cap (<see cref="SearchOptions.MaxExpandedTerms"/>, default 2000, one cap across all
+        /// segments): terms beyond it were not searched.</summary>
         public bool Truncated { get; }
     }
 }

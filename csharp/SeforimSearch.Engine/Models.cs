@@ -666,6 +666,11 @@ namespace SeforimSearch.Engine
         /// after this one (<see cref="PlacedHit.Position"/>, 0-based). Null: from the start.
         /// Totals and counts are then those of the rest.</summary>
         public long? AfterPosition { get; set; }
+        /// <summary>The expansion cap: how many index terms one query word (walk, wildcard,
+        /// fuzzy, %, regex word) may expand to, one cap across all segments, shortest first, the
+        /// exact word typed always kept. Null: 2000 (FtsLib's). 0: uncapped. Hitting it sets
+        /// <see cref="SearchInfo.Truncated"/>.</summary>
+        public int? MaxExpandedTerms { get; set; }
 
         internal string ToJson()
         {
@@ -673,6 +678,11 @@ namespace SeforimSearch.Engine
             var sb = new StringBuilder("{\"query\":");
             Json.WriteString(sb, Query ?? "");
             if (AfterPosition.HasValue) sb.Append(",\"after_position\":").Append(AfterPosition.Value.ToString(inv));
+            if (MaxExpandedTerms.HasValue)
+            {
+                if (MaxExpandedTerms.Value < 0) throw new ArgumentOutOfRangeException(nameof(MaxExpandedTerms));
+                sb.Append(",\"max_expanded_terms\":").Append(MaxExpandedTerms.Value.ToString(inv));
+            }
             if (UserRegex) sb.Append(",\"user_regex\":true");
             if (CrossLine) sb.Append(",\"cross_line\":true");
             if (SameSection) sb.Append(",\"same_section\":true");

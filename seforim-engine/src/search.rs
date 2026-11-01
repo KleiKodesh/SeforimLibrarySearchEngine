@@ -632,7 +632,13 @@ impl Matcher {
             return SnippetSession::raw(d, usize::MAX);
         }
         locator.set_min_groups(self.min_groups);
-        let d = locator.locate_tokenized_mapped(&self.prepared, map, self.require_ordered, self.original_group_count);
+        let d = locator.locate_tokenized_within(
+            &self.prepared,
+            map,
+            self.require_ordered,
+            self.original_group_count,
+            self.max_word_distance,
+        );
         SnippetSession::raw(d, self.max_word_distance)
     }
 }

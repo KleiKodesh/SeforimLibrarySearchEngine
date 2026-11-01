@@ -82,6 +82,13 @@ fn main() {
             sink = sink.wrapping_add(d.score as u64);
         }
     });
+    // 5b. FtsLib's distance filter: marks only of covering windows within it (issue #4)
+    rate("tokenize + locate_tokenized_within (d=8)", &mut || {
+        for l in &lines {
+            loc.tokenize(l);
+            sink = sink.wrapping_add(loc.locate_tokenized_within(&prepared, &[], false, 0, 8).score as u64);
+        }
+    });
     // 6. Otzaria proximity on the same tokens (ordered per-pair gaps / any order)
     let ordered = Proximity::Ordered { gaps: vec![2] };
     rate("tokenize + locate_proximity (ordered)", &mut || {
@@ -97,5 +104,26 @@ fn main() {
             sink = sink.wrapping_add(loc.locate_proximity_tokenized(&prepared, &any).score as u64);
         }
     });
+    // 7. locate only, on tokens scanned once per line (the marks' share)
+    let reps = 20;
+    let only = |label: &str, loc: &mut SnippetWindowLocator, sink: &mut u64, f: &dyn Fn(&mut SnippetWindowLocator) -> usize| {
+        let t = Instant::now();
+        for _ in 0..rounds.div_ceil(reps) {
+            for l in &lines {
+                loc.tokenize(l);
+                for _ in 0..reps {
+                    *sink = sink.wrapping_add(f(loc) as u64);
+                }
+            }
+        }
+        let s = t.elapsed().as_secs_f64();
+        println!("{label:<40} {:8.3} µs/locate", s * 1e6 / (rounds.div_ceil(reps) * reps * lines.len()) as f64);
+    };
+    only("locate only: ftslib", &mut loc, &mut sink, &|l| l.locate_tokenized(&prepared, false, 0).mark_ranges.len());
+    only("locate only: ftslib d=8", &mut loc, &mut sink, &|l| {
+        l.locate_tokenized_within(&prepared, &[], false, 0, 8).mark_ranges.len()
+    });
+    only("locate only: ordered", &mut loc, &mut sink, &|l| l.locate_proximity_tokenized(&prepared, &ordered).mark_ranges.len());
+    only("locate only: any order", &mut loc, &mut sink, &|l| l.locate_proximity_tokenized(&prepared, &any).mark_ranges.len());
     println!("(sink {sink})");
 }

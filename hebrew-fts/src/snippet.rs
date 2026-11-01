@@ -13,7 +13,8 @@
 //!   3. `expand_window` widens it by context words, reading the token list
 //!      only.
 //!   4. `collect_mark_ranges` walks the tokens inside the window and records
-//!      the matched ones.
+//!      the matched ones: those of a full occurrence of the query inside the
+//!      window (`occurrence_marks`, issue #4).
 //!
 //! All offsets are UTF-16 code units into the source string, as in FtsLib,
 //! so the page's existing renderer consumes them unchanged.
@@ -50,7 +51,8 @@ const NO_TERM: u32 = u32::MAX;
 ///
 /// The located window is the TIGHTEST window (raw char span, ties = the
 /// earliest) that satisfies the rule, so the snippet always shows a valid
-/// occurrence; marks are every query-term token inside the expanded window.
+/// occurrence; marks are the tokens of every full occurrence (this rule)
+/// inside the expanded window (issue #4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Proximity {
     /// One limit per consecutive pair of groups (`group_count - 1` entries).
@@ -279,6 +281,8 @@ pub struct SnippetWindowLocator {
     positioned: bool,
     /// Scratch for a matched token's word in `tokenize_positioned`.
     word: String,
+    /// Scratch for the occurrence marks (issue #4).
+    marks: MarkScratch,
 }
 
 impl Default for SnippetWindowLocator {
@@ -315,6 +319,7 @@ impl SnippetWindowLocator {
             token_terms: Vec::new(),
             positioned: false,
             word: String::new(),
+            marks: MarkScratch::default(),
         }
     }
 
@@ -520,6 +525,23 @@ impl SnippetWindowLocator {
         require_ordered: bool,
         original_group_count: usize,
     ) -> SnippetDescriptor<'_> {
+        self.locate_tokenized_within(prepared, term_map, require_ordered, original_group_count, usize::MAX)
+    }
+
+    /// [`locate_tokenized_mapped`](Self::locate_tokenized_mapped) for a
+    /// caller that keeps only hits whose `word_distance` is at most
+    /// `max_word_distance` (FtsLib's filter; `usize::MAX` = none): the marks
+    /// are then only the tokens of covering windows inside the snippet
+    /// that keep that distance (issue #4). Partial matching
+    /// (`min_groups`) marks every query term in the snippet, as before.
+    pub fn locate_tokenized_within(
+        &mut self,
+        prepared: &PreparedQueryGroups,
+        term_map: &[u32],
+        require_ordered: bool,
+        original_group_count: usize,
+        max_word_distance: usize,
+    ) -> SnippetDescriptor<'_> {
         if prepared.is_empty() {
             return SnippetDescriptor::NO_MATCH;
         }
@@ -534,6 +556,7 @@ impl SnippetWindowLocator {
             break_token,
             token_terms,
             positioned,
+            marks,
             ..
         } = self;
         let brk = *break_token;
@@ -556,7 +579,6 @@ impl SnippetWindowLocator {
 
         let (snap_start, snap_end, s_idx, e_idx) =
             expand_window(tokens, raw_len, i_left, i_right, *context_words);
-        collect_mark_ranges(tokens, ordinals, snap_start, snap_end, mark_ranges);
 
         // Visible words actually inside the window: lets the host detect a
         // "short" snippet for free (it may then re-locate over a longer text).
@@ -572,6 +594,23 @@ impl SnippetWindowLocator {
         } else {
             all_groups
         };
+        // Marks: the tokens of full occurrences (issue #4). Without a
+        // distance every term token in the snippet is in a covering window
+        // (crossing the break too, when the best one does), so only a
+        // distance narrows them; partial matching marks every term.
+        let masked = !partial
+            && max_word_distance != usize::MAX
+            && occurrence_marks(
+                tokens,
+                ordinals,
+                prepared,
+                &MarkRule::Cover { max_span: max_word_distance.saturating_add(denominator - 1) },
+                (s_idx, e_idx),
+                (i_left, i_right),
+                brk,
+                marks,
+            );
+        collect_mark_ranges(tokens, ordinals, snap_start, snap_end, mark_ranges, masked.then_some((&marks.mask[..], s_idx)));
         // Words between the ends, by position (a paired reading's second
         // reading shares its first reading's position).
         let word_dist = (tokens[i_right].position - tokens[i_left].position).saturating_sub(denominator - 1);
@@ -633,6 +672,7 @@ impl SnippetWindowLocator {
             break_token,
             token_terms,
             positioned,
+            marks,
             ..
         } = self;
         let brk = *break_token;
@@ -653,7 +693,13 @@ impl SnippetWindowLocator {
         };
         let (snap_start, snap_end, s_idx, e_idx) =
             expand_window(tokens, raw_len, i_left, i_right, *context_words);
-        collect_mark_ranges(tokens, ordinals, snap_start, snap_end, mark_ranges);
+        // Marks: only the tokens of full occurrences inside the snippet (issue #4).
+        let rule = match proximity {
+            Proximity::Ordered { gaps } => MarkRule::Ordered(gaps),
+            Proximity::AnyOrder { max_span } => MarkRule::AnyOrder(*max_span as usize),
+        };
+        let masked = occurrence_marks(tokens, ordinals, prepared, &rule, (s_idx, e_idx), (i_left, i_right), brk, marks);
+        collect_mark_ranges(tokens, ordinals, snap_start, snap_end, mark_ranges, masked.then_some((&marks.mask[..], s_idx)));
         SnippetDescriptor {
             is_match: true,
             score,
@@ -1141,9 +1187,10 @@ fn collect_mark_ranges(
     snap_start: usize,
     snap_end: usize,
     mark_ranges: &mut Vec<usize>,
+    occurrence: Option<(&[bool], usize)>,
 ) {
     mark_ranges.clear();
-    for (tok, &ordinal) in tokens.iter().zip(ordinals) {
+    for (t, (tok, &ordinal)) in tokens.iter().zip(ordinals).enumerate() {
         if tok.utf16_end <= snap_start {
             continue;
         }
@@ -1153,11 +1200,300 @@ fn collect_mark_ranges(
         if ordinal == NO_TERM {
             continue;
         }
+        // only tokens of a full occurrence inside the window (issue #4)
+        if let Some((mask, s)) = occurrence {
+            if t < s || !mask.get(t - s).copied().unwrap_or(false) {
+                continue;
+            }
+        }
         let tok_end = tok.utf16_end.min(snap_end);
         mark_ranges.push(tok.utf16_start);
         mark_ranges.push(tok_end - tok.utf16_start);
         mark_ranges.push(ordinal as usize);
     }
+}
+
+// ── Occurrence marks (issue #4) ───────────────────────────────────────
+
+/// The rule a full occurrence follows, the locate's own.
+#[derive(Clone, Copy)]
+enum MarkRule<'a> {
+    /// FtsLib: a token range covering every group whose ends are at most
+    /// `max_span` positions apart (`max_word_distance + groups - 1`).
+    Cover { max_span: usize },
+    /// Otzaria's ordered proximity (per-pair gaps).
+    Ordered(&'a [u32]),
+    /// Otzaria's any-order proximity.
+    AnyOrder(usize),
+}
+
+/// Scratch for [`occurrence_marks`], reused across lines.
+#[derive(Default)]
+struct MarkScratch {
+    /// Per token of the snippet window (index - s): in a full occurrence.
+    mask: Vec<bool>,
+    counts: Vec<usize>,
+    /// Ordered: per (group, token) chain prefix / suffix reachability.
+    fwd: Vec<bool>,
+    bwd: Vec<bool>,
+    /// Any order: group of each token, token of each group, visit stamps.
+    owner: Vec<usize>,
+    taken: Vec<usize>,
+    stamp: Vec<u32>,
+    generation: u32,
+}
+
+/// Marks in `scratch.mask` every term token of tokens `s..=e` that belongs
+/// to a full occurrence of the query lying inside `s..=e` under `rule`
+/// (cross-line, `brk`: an occurrence with a token on each line). False when
+/// every term token qualifies anyway (no mask needed): the cheap check that
+/// keeps the common hit free, all term tokens inside the best window
+/// `best` and, for proximity, exactly one per group.
+#[allow(clippy::too_many_arguments)]
+fn occurrence_marks(
+    tokens: &[TextToken],
+    ordinals: &[u32],
+    prepared: &PreparedQueryGroups,
+    rule: &MarkRule<'_>,
+    (s, e): (usize, usize),
+    best: (usize, usize),
+    brk: Option<usize>,
+    sc: &mut MarkScratch,
+) -> bool {
+    let k = prepared.group_count();
+    let mut n_terms = 0usize;
+    let mut outside = false;
+    for t in s..=e {
+        if ordinals[t] != NO_TERM {
+            n_terms += 1;
+            outside |= t < best.0 || t > best.1;
+        }
+    }
+    if !outside && (matches!(rule, MarkRule::Cover { .. }) || n_terms == k) {
+        return false;
+    }
+    let w = e - s + 1;
+    sc.mask.clear();
+    sc.mask.resize(w, false);
+    let groups_of = |t: usize| -> &[usize] {
+        if ordinals[t] == NO_TERM {
+            &[]
+        } else {
+            prepared.groups_at(ordinals[t] as usize)
+        }
+    };
+    let pos = |t: usize| tokens[t].position;
+    // cross-line: the first line's last term token in the window
+    let last_left = match brk {
+        Some(b) => match (s..b.min(e + 1)).rev().find(|&t| ordinals[t] != NO_TERM) {
+            Some(t) => Some(t),
+            None => return true, // no crossing occurrence in the window
+        },
+        None => None,
+    };
+    // Any order with one group per token and no break: a window covering
+    // every group IS an occurrence (its tokens are distinct), so the cheap
+    // covering sweep decides it.
+    let rule = match *rule {
+        MarkRule::AnyOrder(m) if brk.is_none() && (s..=e).all(|t| groups_of(t).len() <= 1) => {
+            MarkRule::Cover { max_span: m }
+        }
+        r => r,
+    };
+    match rule {
+        MarkRule::Cover { max_span } => {
+            // Per right end r (a term token): the covering windows [l', r]
+            // are those with l' <= l - 1 (the latest covering left end);
+            // their union within the span is [lo, r].
+            sc.counts.clear();
+            sc.counts.resize(k, 0);
+            let (mut covered, mut l, mut lo, mut marked_to) = (0usize, s, s, s);
+            for r in s..=e {
+                for &g in groups_of(r) {
+                    sc.counts[g] += 1;
+                    covered += usize::from(sc.counts[g] == 1);
+                }
+                while covered >= k {
+                    for &g in groups_of(l) {
+                        sc.counts[g] -= 1;
+                        covered -= usize::from(sc.counts[g] == 0);
+                    }
+                    l += 1;
+                }
+                if ordinals[r] == NO_TERM || l == s {
+                    continue;
+                }
+                let mut x = l - 1;
+                if let (Some(b), Some(last)) = (brk, last_left) {
+                    if r < b {
+                        continue;
+                    }
+                    x = x.min(last);
+                }
+                while pos(r) - pos(lo) > max_span {
+                    lo += 1;
+                }
+                if lo <= x {
+                    for t in lo.max(marked_to)..=r {
+                        sc.mask[t - s] = true;
+                    }
+                    marked_to = r + 1;
+                }
+            }
+        }
+        MarkRule::Ordered(gaps) => {
+            // A chain through t at slot g = a prefix chain ending at t and
+            // a suffix chain starting at t.
+            sc.fwd.clear();
+            sc.fwd.resize(k * w, false);
+            sc.bwd.clear();
+            sc.bwd.resize(k * w, false);
+            let in_g = |t: usize, g: usize| groups_of(t).contains(&g);
+            let reach = |g: usize| gaps.get(g).map_or(0, |&x| x as usize + 1);
+            for t in s..=e {
+                if in_g(t, 0) && brk.is_none_or(|b| t < b) {
+                    sc.fwd[t - s] = true;
+                }
+                if in_g(t, k - 1) && brk.is_none_or(|b| t >= b) {
+                    sc.bwd[(k - 1) * w + t - s] = true;
+                }
+            }
+            for g in 1..k {
+                let (r, mut last, mut j) = (reach(g - 1), None::<usize>, s);
+                for t in s..=e {
+                    if !in_g(t, g) {
+                        continue;
+                    }
+                    while j <= e && pos(j) < pos(t) {
+                        if sc.fwd[(g - 1) * w + j - s] {
+                            last = Some(pos(j));
+                        }
+                        j += 1;
+                    }
+                    if last.is_some_and(|p| pos(t) - p <= r) {
+                        sc.fwd[g * w + t - s] = true;
+                    }
+                }
+            }
+            for g in (0..k.saturating_sub(1)).rev() {
+                let (r, mut next, mut j) = (reach(g), None::<usize>, e + 1);
+                for t in (s..=e).rev() {
+                    if !in_g(t, g) {
+                        continue;
+                    }
+                    while j > s && pos(j - 1) > pos(t) {
+                        j -= 1;
+                        if sc.bwd[(g + 1) * w + j - s] {
+                            next = Some(pos(j));
+                        }
+                    }
+                    if next.is_some_and(|p| p - pos(t) <= r) {
+                        sc.bwd[g * w + t - s] = true;
+                    }
+                }
+            }
+            for t in s..=e {
+                sc.mask[t - s] = (0..k).any(|g| sc.fwd[g * w + t - s] && sc.bwd[g * w + t - s]);
+            }
+        }
+        MarkRule::AnyOrder(max_span) => {
+            sc.owner.clear();
+            sc.owner.resize(w, FREE);
+            sc.taken.clear();
+            sc.taken.resize(k, FREE);
+            sc.stamp.clear();
+            sc.stamp.resize(w, 0);
+            for t in s..=e {
+                if ordinals[t] == NO_TERM || sc.mask[t - s] {
+                    continue;
+                }
+                // windows [a, hi] of at most max_span positions holding t
+                'starts: for a in s..=t {
+                    if ordinals[a] == NO_TERM || pos(t) - pos(a) > max_span {
+                        continue;
+                    }
+                    let mut hi = t;
+                    while hi < e && pos(hi + 1) - pos(a) <= max_span {
+                        hi += 1;
+                    }
+                    for &gt in groups_of(t) {
+                        let found = match brk {
+                            None => any_order_match(groups_of, (a, hi), s, &[(t, gt)], k, sc),
+                            // cross-line: also force a token on the other line
+                            Some(b) => (a..=hi).filter(|&u| u != t && ((u < b) != (t < b))).any(|u| {
+                                groups_of(u)
+                                    .iter()
+                                    .any(|&gu| gu != gt && any_order_match(groups_of, (a, hi), s, &[(t, gt), (u, gu)], k, sc))
+                            }),
+                        };
+                        if found {
+                            for g in 0..k {
+                                sc.mask[sc.taken[g] - s] = true;
+                            }
+                            break 'starts;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Whether every group gets its own token of `a..=hi`, the `forced`
+/// (token, group) pairs fixed. On success `sc.taken` holds the matching.
+fn any_order_match<'g>(
+    groups_of: impl Fn(usize) -> &'g [usize] + Copy,
+    (a, hi): (usize, usize),
+    s: usize,
+    forced: &[(usize, usize)],
+    k: usize,
+    sc: &mut MarkScratch,
+) -> bool {
+    for t in a..=hi {
+        sc.owner[t - s] = FREE;
+    }
+    sc.taken.iter_mut().for_each(|x| *x = FREE);
+    for &(t, g) in forced.iter() {
+        sc.owner[t - s] = g;
+        sc.taken[g] = t;
+    }
+    fn kuhn<'g>(
+        g: usize,
+        groups_of: impl Fn(usize) -> &'g [usize] + Copy,
+        (a, hi): (usize, usize),
+        s: usize,
+        forced: &[(usize, usize)],
+        sc: &mut MarkScratch,
+    ) -> bool {
+        for t in a..=hi {
+            if sc.stamp[t - s] == sc.generation || !groups_of(t).contains(&g) || forced.iter().any(|f| f.0 == t) {
+                continue;
+            }
+            sc.stamp[t - s] = sc.generation;
+            let holder = sc.owner[t - s];
+            if holder == FREE || kuhn(holder, groups_of, (a, hi), s, forced, sc) {
+                sc.owner[t - s] = g;
+                sc.taken[g] = t;
+                return true;
+            }
+        }
+        false
+    }
+    for g in 0..k {
+        if sc.taken[g] != FREE {
+            continue;
+        }
+        sc.generation = sc.generation.wrapping_add(1);
+        if sc.generation == 0 {
+            sc.stamp.iter_mut().for_each(|x| *x = 0);
+            sc.generation = 1;
+        }
+        if !kuhn(g, groups_of, (a, hi), s, forced, sc) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1585,4 +1921,199 @@ mod tests {
         assert_eq!(c.len(), 3);
         assert_eq!(light.raw_utf16_len(), len, "the whole text's length even after a stop");
     }
+    // ── Issue #4: marks only the tokens of full occurrences ──────────────
+
+    /// The marked words of a descriptor, in order.
+    fn marked(text: &str, d: &SnippetDescriptor<'_>) -> Vec<String> {
+        d.marks().map(|(s, l, _)| slice16(text, s, s + l)).collect()
+    }
+
+    /// The issue's line (Moshe and Aharon said shalom, and after that Moshe
+    /// the priest went) and its query words, as escapes.
+    const MOSHE: &str = "\u{05DE}\u{05E9}\u{05D4}";
+    const AHARON: &str = "\u{05D5}\u{05D0}\u{05D4}\u{05E8}\u{05DF}";
+    fn issue4_line() -> String {
+        format!(
+            "{MOSHE} {AHARON} \u{05D0}\u{05DE}\u{05E8}\u{05D5} \u{05E9}\u{05DC}\u{05D5}\u{05DD} \
+             \u{05D5}\u{05D0}\u{05D7}\u{05E8} \u{05DB}\u{05DA} {MOSHE} \u{05DB}\u{05D4}\u{05DF} \u{05D4}\u{05DC}\u{05DA}"
+        )
+    }
+
+    #[test]
+    fn issue4_marks_only_the_full_occurrence() {
+        let text = issue4_line();
+        let p = PreparedQueryGroups::from_groups(&[vec![MOSHE], vec![AHARON]]);
+        let terms: Vec<String> = vec![MOSHE.into(), AHARON.into()];
+        let map: Vec<u32> = terms.iter().map(|t| p.get(t).map_or(u32::MAX, |x| x.ordinal as u32)).collect();
+        let occ = postings_of(&text, &terms);
+        let want = vec![MOSHE.to_string(), AHARON.to_string()];
+        for ctx in [0, 8] {
+            for positioned in [false, true] {
+                let mut loc = SnippetWindowLocator::new(ctx);
+                if positioned {
+                    assert!(loc.tokenize_positioned(&text, &[0], &[&occ], &terms));
+                } else {
+                    loc.tokenize(&text);
+                }
+                let m: &[u32] = if positioned { &map } else { &[] };
+                // Otzaria ordered gap 0
+                let d = loc.locate_proximity_tokenized_mapped(&p, m, &Proximity::Ordered { gaps: vec![0] });
+                assert!(d.is_match);
+                assert_eq!(marked(&text, &d), want, "ordered ctx {ctx} positioned {positioned}");
+                // any order, span 1
+                let d = loc.locate_proximity_tokenized_mapped(&p, m, &Proximity::AnyOrder { max_span: 1 });
+                assert_eq!(marked(&text, &d), want, "any order ctx {ctx} positioned {positioned}");
+                // FtsLib distance 0
+                let d = loc.locate_tokenized_within(&p, m, true, 0, 0);
+                assert_eq!(marked(&text, &d), want, "ftslib ctx {ctx} positioned {positioned}");
+                // FtsLib without a distance: every query word in the snippet (unchanged)
+                let d = loc.locate_tokenized_within(&p, m, true, 0, usize::MAX);
+                assert_eq!(d.marks().count(), if ctx == 0 { 2 } else { 3 });
+            }
+        }
+    }
+
+    #[test]
+    fn issue4_repeated_phrase_marks_both_and_alternatives_do_not_mix() {
+        let (a, b, c) = ("\u{05D0}\u{05D1}", "\u{05D2}\u{05D3}", "\u{05D4}\u{05D5}");
+        let mut loc = SnippetWindowLocator::new(8);
+        // two full occurrences: both marked
+        let text = format!("{a} {b} x {a} {b} y {a}");
+        let p = PreparedQueryGroups::from_groups(&[vec![a], vec![b]]);
+        loc.tokenize(&text);
+        for prox in [Proximity::Ordered { gaps: vec![0] }, Proximity::AnyOrder { max_span: 1 }] {
+            let d = loc.locate_proximity_tokenized(&p, &prox);
+            assert_eq!(marked(&text, &d), [a, b, a, b], "{prox:?}");
+        }
+        let d = loc.locate_tokenized_within(&p, &[], false, 0, 0);
+        assert_eq!(marked(&text, &d), [a, b, a, b]);
+        // a group's alternative (a or c) that completes no occurrence stays unmarked
+        let text = format!("{a} {b} {c} x {c} {b}");
+        let p = PreparedQueryGroups::from_groups(&[vec![a, c], vec![b]]);
+        loc.tokenize(&text);
+        let d = loc.locate_proximity_tokenized(&p, &Proximity::Ordered { gaps: vec![0] });
+        assert_eq!(marked(&text, &d), [a, b, c, b]);
+        let text = format!("{a} {b} {c} x y {b}");
+        loc.tokenize(&text);
+        let d = loc.locate_proximity_tokenized(&p, &Proximity::Ordered { gaps: vec![0] });
+        assert_eq!(marked(&text, &d), [a, b]);
+    }
+
+    #[test]
+    fn issue4_partial_keeps_every_query_word() {
+        let (a, b) = ("\u{05D0}\u{05D1}", "\u{05D2}\u{05D3}");
+        let mut loc = SnippetWindowLocator::new(8);
+        loc.set_min_groups(1);
+        let text = format!("{a} x y z {b}");
+        let p = PreparedQueryGroups::from_groups(&[vec![a], vec![b]]);
+        loc.tokenize(&text);
+        let d = loc.locate_tokenized_within(&p, &[], false, 0, usize::MAX);
+        assert_eq!(marked(&text, &d), [a, b]);
+    }
+
+    #[test]
+    fn issue4_cross_line_marks_only_the_crossing_occurrence() {
+        let (a, b) = ("\u{05D0}\u{05D1}", "\u{05D2}\u{05D3}");
+        let p = PreparedQueryGroups::from_groups(&[vec![a], vec![b]]);
+        let mut loc = SnippetWindowLocator::new(8);
+        // ordered: a on the first line, b on the next
+        let (l1, l2) = (format!("{b} q {a}"), format!("{b} z {a}"));
+        let joined = format!("{l1}\n{l2}");
+        loc.tokenize_pair(&l1, &l2);
+        let d = loc.locate_proximity_tokenized(&p, &Proximity::Ordered { gaps: vec![5] });
+        assert!(d.is_match);
+        assert_eq!(d.marks().map(|m| m.0).collect::<Vec<_>>(), [5, 8]);
+        assert_eq!(marked(&joined, &d), [a, b]);
+        // distance / any order: only the pair at the break
+        let (l1, l2) = (format!("{a} q q q {a}"), format!("{b} q q q {b}"));
+        let joined = format!("{l1}\n{l2}");
+        let at = l1.chars().count();
+        loc.tokenize_pair(&l1, &l2);
+        let d = loc.locate_proximity_tokenized(&p, &Proximity::AnyOrder { max_span: 1 });
+        assert_eq!(d.marks().map(|m| m.0).collect::<Vec<_>>(), [at - 2, at + 1]);
+        let d = loc.locate_tokenized_within(&p, &[], false, 0, 0);
+        assert_eq!(d.marks().map(|m| m.0).collect::<Vec<_>>(), [at - 2, at + 1]);
+        assert_eq!(marked(&joined, &d), [a, b]);
+    }
+
+    /// Brute force: a token is marked iff some assignment of the groups to
+    /// distinct window tokens holding it satisfies the rule.
+    #[test]
+    fn issue4_marks_equal_brute_force() {
+        let words = ["\u{05D0}\u{05D1}", "\u{05D2}\u{05D3}", "\u{05D4}\u{05D5}", "\u{05D6}\u{05D7}"];
+        let groups: Vec<Vec<&str>> = vec![vec![words[0]], vec![words[1], words[2]], vec![words[2]]];
+        let k = groups.len();
+        let p = PreparedQueryGroups::from_groups(&groups);
+        let mut seed = 7u64;
+        let mut loc = SnippetWindowLocator::new(3);
+        let mut checked = 0;
+        for case in 0..3000usize {
+            let n = 4 + (case % 9);
+            let picks: Vec<usize> = (0..n)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    ((seed >> 33) % 4) as usize
+                })
+                .collect();
+            let text = picks.iter().map(|&i| words[i]).collect::<Vec<_>>().join(" ");
+            let starts: Vec<usize> = (0..n).map(|t| t * 3).collect(); // two letters + a space
+            let gs = |t: usize| -> Vec<usize> { (0..k).filter(|&g| groups[g].contains(&words[picks[t]])).collect() };
+            let rules = [
+                Proximity::Ordered { gaps: vec![(case % 3) as u32, 1] },
+                Proximity::AnyOrder { max_span: 2 + (case % 4) as u32 },
+            ];
+            loc.tokenize(&text);
+            for prox in &rules {
+                let d = loc.locate_proximity_tokenized(&p, prox);
+                if !d.is_match {
+                    continue;
+                }
+                checked += 1;
+                let s_idx = starts.iter().rposition(|&x| x <= d.snap_start).unwrap();
+                let e_idx = starts.iter().rposition(|&x| x < d.snap_end).unwrap();
+                let mut want = vec![false; n];
+                let mut assign = vec![0usize; k];
+                #[allow(clippy::type_complexity)]
+                fn rec(
+                    g: usize,
+                    k: usize,
+                    a: &mut Vec<usize>,
+                    cand: &dyn Fn(usize) -> Vec<usize>,
+                    ok: &dyn Fn(&[usize]) -> bool,
+                    want: &mut Vec<bool>,
+                ) {
+                    if g == k {
+                        if ok(a) {
+                            for &t in a.iter() {
+                                want[t] = true;
+                            }
+                        }
+                        return;
+                    }
+                    for t in cand(g) {
+                        if a[..g].contains(&t) {
+                            continue;
+                        }
+                        a[g] = t;
+                        rec(g + 1, k, a, cand, ok, want);
+                    }
+                }
+                let cand = |g: usize| (s_idx..=e_idx).filter(|&t| gs(t).contains(&g)).collect::<Vec<_>>();
+                let ok = |a: &[usize]| match prox {
+                    Proximity::Ordered { gaps } => {
+                        (1..k).all(|g| a[g] > a[g - 1] && a[g] - a[g - 1] - 1 <= gaps[g - 1] as usize)
+                    }
+                    Proximity::AnyOrder { max_span } => {
+                        a.iter().max().unwrap() - a.iter().min().unwrap() <= *max_span as usize
+                    }
+                };
+                rec(0, k, &mut assign, &cand, &ok, &mut want);
+                let got: Vec<usize> = d.marks().map(|(s, _, _)| starts.iter().position(|&x| x == s).unwrap()).collect();
+                let want: Vec<usize> = (0..n).filter(|&t| want[t]).collect();
+                assert_eq!(got, want, "case {case} {prox:?} picks {picks:?}");
+            }
+        }
+        assert!(checked > 1000);
+    }
+
 }

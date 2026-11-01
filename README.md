@@ -65,7 +65,12 @@ is one engine, one index format and the same results for both apps.
    engine runs FtsLib's snippet locator, ported step for step:
    - find the tightest window covering every query word
    - add ±8 words of context and the ellipsis flags
-   - mark every matched word inside the window
+   - mark the words of every full occurrence inside the window (issue #4):
+     with a word distance (FtsLib) or Otzaria's proximity (ordered gaps / any
+     order) only the tokens of occurrences that satisfy the rule, every such
+     occurrence; across a line break only the occurrence that crosses it;
+     without a distance, and with partial word match, every query word in the
+     window (as before). FtsLib marks the same way (its distance filter)
    - apply the word-distance and word-order filters
    - report the window's word count, so the host can flag a short window
      (FtsLib's `SnippetFlagShort`, fewer words than the context). The window

@@ -209,8 +209,8 @@ namespace SeforimSearch.Engine
         /// <summary>Drops everything queued since the last commit.</summary>
         public void Rollback() => Interop.Check(NativeMethods.se_writer_rollback(_handle));
 
-        /// <summary>Merges all segments into one (for a shipped, read-mostly index)
-        /// and closes the writer.</summary>
+        /// <summary>Commits pending adds and deletes (keeping the last payload), merges
+        /// all segments into one (for a shipped, read-mostly index) and closes the writer.</summary>
         public void MergeAndClose() => Interop.Check(NativeMethods.se_writer_merge_and_close(_handle.Detach()));
 
         /// <summary>Closes the writer, discarding anything uncommitted.</summary>

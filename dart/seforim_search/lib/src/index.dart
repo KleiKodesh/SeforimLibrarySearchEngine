@@ -243,7 +243,8 @@ final class IndexWriter implements Finalizable {
   /// Drops everything queued since the last commit.
   void rollback() => _n.checkStatus(_n.writerRollback(_h));
 
-  /// Merges all segments into one and closes the writer.
+  /// Commits pending adds and deletes (keeping the last payload), merges all
+  /// segments into one and closes the writer.
   void mergeAndClose() {
     final h = _h;
     _n.writerCloseFinalizer.detach(this);

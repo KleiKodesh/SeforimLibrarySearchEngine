@@ -453,7 +453,13 @@ impl LineWriter {
     /// build failed this way). So: no new background merges from here on, read
     /// the CURRENT committed segment ids from the index meta, and if a merge
     /// that was already running still beats us, re-read and retry.
+    ///
+    /// Pending adds and deletes are committed first (as Otzaria's optimize and
+    /// FtsLib do), keeping the last committed payload, so nothing queued is
+    /// lost when the writer closes.
     pub fn merge_all(mut self) -> Result<()> {
+        let payload = self.writer.index().load_metas()?.payload;
+        self.commit(payload.as_deref())?;
         self.writer
             .set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
         let mut attempt = 0;
@@ -516,4 +522,39 @@ fn check_schema(schema: &Schema, options: IndexOptions) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc(id: u64, text: &str) -> LineDoc {
+        LineDoc {
+            line_id: id,
+            position: id,
+            book_id: 1,
+            text: text.into(),
+            section_id: None,
+            no_cross: false,
+        }
+    }
+
+    /// Issue #7 A11: merge_all commits pending adds and deletes first and
+    /// keeps the last committed payload.
+    #[test]
+    fn merge_all_commits_pending_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        w.add(&doc(1, "alpha beta")).unwrap();
+        w.add(&doc(2, "gamma")).unwrap();
+        w.commit(Some("p1")).unwrap();
+        w.add(&doc(3, "delta")).unwrap();
+        w.delete(2);
+        w.merge_all().unwrap(); // no commit before it
+        drop(index);
+        let index = LineIndex::open(dir.path()).unwrap();
+        assert_eq!(index.num_lines().unwrap(), 2);
+        assert_eq!(index.committed_payload().unwrap().as_deref(), Some("p1"));
+    }
 }

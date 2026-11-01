@@ -550,7 +550,8 @@ pub unsafe extern "C" fn se_writer_rollback(writer: *mut LineWriter) -> i32 {
     })
 }
 
-/// Merges all segments into one, waits, and CLOSES the writer (it must not
+/// Commits pending adds and deletes (keeping the last committed payload),
+/// merges all segments into one, waits, and CLOSES the writer (it must not
 /// be used or closed afterwards).
 ///
 /// # Safety

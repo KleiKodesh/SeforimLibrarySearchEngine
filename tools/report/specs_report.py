@@ -15,8 +15,8 @@ SP = sys.argv[1]
 P = sys.argv[sys.argv.index("--prefix") + 1] if "--prefix" in sys.argv else "r11-"
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(ROOT, "FTS-SPECS-AND-COMPARISONS.md")
-INDEX_FORMAT = "tantivy12"   # C# TantivySeforimIndex.IndexFormatVersion
-FTSLIB_FORMAT = "fts10"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
+INDEX_FORMAT = "tantivy13"   # C# TantivySeforimIndex.IndexFormatVersion
+FTSLIB_FORMAT = "fts11"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
 STALE = [
     "Index builds, parity and search speed below were measured on `tantivy9` / FtsLib `fts8`. "
@@ -29,6 +29,8 @@ STALE = [
     "`tantivy12` / `fts10`: a `<sup>` holding a vocalized Hebrew letter mid-word is transparent "
     "(issue #2 H58), and a keep_marks term drops U+034F (combining grapheme joiner, issue #2 H02): "
     "both full-DB rebuilds and the parity sets need a rerun.",
+    "`tantivy13` / `fts11`: catalog order (= position / rowid) counts a base text by the `isBaseBook` flag only "
+    "(the title-equals-folder rule is gone, issue #6), so a few books move: both full-DB rebuilds and the parity sets need a rerun.",
     "Hit-count comparison: the rows classified as our bugs (unterminated `<`, cross-line enumerators) "
     "and the fuzzy transposition rows are expected to change; not rerun yet.",
 ]
@@ -135,7 +137,7 @@ md.append("""## Engines compared
 |---|---|
 | ours, positions | this repo: modified tantivy + hebrew-fts walks, index with positions (span queries) |
 | ours, no positions | same engine, index without positions; distance/order checked on the text by the locator |
-| FtsLib | KitveiHakodesh FtsLib (SQLite FTS5, `detail=none`, index fts10) |
+| FtsLib | KitveiHakodesh FtsLib (SQLite FTS5, `detail=none`, index fts11) |
 | Otzaria | otzaria_search_engine v5.0.0 (tantivy), driven by the scratchpad driver |
 
 ## Feature specs (ours)

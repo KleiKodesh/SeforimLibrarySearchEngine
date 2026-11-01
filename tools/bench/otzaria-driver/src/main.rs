@@ -69,7 +69,6 @@ struct BookRow {
     category: Option<i64>,
     title: String,
     is_base: bool,
-    is_dependent: bool,
 }
 
 fn has_column(db: &Connection, table: &str, col: &str) -> Res<bool> {
@@ -110,24 +109,17 @@ fn load_categories(db: &Connection) -> Res<Vec<Cat>> {
 /// Books in load order: `ORDER BY orderIndex, id` (C# orders by orderIndex only, Dart adds id).
 fn load_books(db: &Connection) -> Res<Vec<BookRow>> {
     let base = if has_column(db, "book", "isBaseBook")? { "isBaseBook" } else { "0" };
-    let dep = if has_column(db, "book", "dependenceType")? { "dependenceType" } else { "NULL" };
     let sql = format!(
-        "SELECT id, categoryId, title, {base}, {dep} FROM book ORDER BY orderIndex, id"
+        "SELECT id, categoryId, title, {base} FROM book ORDER BY orderIndex, id"
     );
     let mut st = db.prepare(&sql).map_err(e("books"))?;
     let rows = st
         .query_map([], |r| {
-            let dep: Option<String> = r.get::<_, Option<rusqlite::types::Value>>(4)?.and_then(|v| match v {
-                rusqlite::types::Value::Text(s) => Some(s),
-                rusqlite::types::Value::Integer(i) => Some(i.to_string()),
-                _ => None,
-            });
             Ok(BookRow {
                 id: r.get(0)?,
                 category: r.get(1)?,
                 title: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 is_base: r.get::<_, Option<i64>>(3)?.unwrap_or(0) != 0,
-                is_dependent: dep.map(|s| !s.trim().is_empty()).unwrap_or(false),
             })
         })
         .map_err(e("books"))?
@@ -136,44 +128,9 @@ fn load_books(db: &Connection) -> Res<Vec<BookRow>> {
     Ok(rows)
 }
 
-/// Simplified port of SeforimDbCatalogTextNormalizer.Tokenize for TITLE comparison only:
-/// whitespace split, keep letters/digits (lowercased), fold שלחן→שולחן. The abbreviation map
-/// (quoted acronyms only on the index side) and the daf/amud step are NOT ported.
-fn title_tokens(s: &str) -> Vec<String> {
-    let mut out: Vec<String> = s
-        .split_whitespace()
-        .filter_map(|w| {
-            let t: String = w
-                .chars()
-                .filter(|c| c.is_alphanumeric())
-                .flat_map(|c| c.to_lowercase())
-                .collect();
-            if t.is_empty() {
-                None
-            } else if t == "שלחן" {
-                Some("שולחן".to_string())
-            } else {
-                Some(t)
-            }
-        })
-        .collect();
-    if out.len() > 1 && ["ספר", "מדרש", "מסכת"].contains(&out[0].as_str()) {
-        out.remove(0);
-    }
-    out
-}
-
-/// SeforimDbBookTreeOrder.IsBaseText.
-fn is_base_text(b: &BookRow, folder_title: &str) -> bool {
-    if b.is_base {
-        return true;
-    }
-    if b.is_dependent {
-        return false;
-    }
-    let a = title_tokens(&b.title);
-    let f = title_tokens(folder_title);
-    !a.is_empty() && a == f
+/// SeforimDbBookTreeOrder.IsBaseText: the isBaseBook flag only (issue #6).
+fn is_base_text(b: &BookRow, _folder_title: &str) -> bool {
+    b.is_base
 }
 
 /// Port of SeforimDbBookTreeOrder.Compute: per folder (1) own base texts, (2) subfolders

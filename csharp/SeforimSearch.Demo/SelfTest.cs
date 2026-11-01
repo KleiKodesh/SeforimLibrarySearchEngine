@@ -33,7 +33,7 @@ namespace SeforimSearch.Demo
                 ("abandoned enumerator does not keep a pooled connection", AbandonedEnumerator),
                 ("concurrent rents get distinct connections", ConcurrentRent),
                 ("file change reopens", FileChangeReopens),
-                ("end to end: build tantivy12 + search in catalog order", EndToEnd),
+                ("end to end: build tantivy13 + search in catalog order", EndToEnd),
                 ("stream: chunks, resume, Restarted, cancellation (Core's StreamSearch)", Stream),
             };
             int failed = 0;
@@ -202,7 +202,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             Check(engine.Index.IsBuilt, "built");
             string meta = File.ReadAllText(Path.Combine(index, "meta.json"));
             Check(meta.Contains("sort_by_field") && meta.Contains("\"position\""), "index not sorted by position");
-            Check(FtsLib.Fts5.TantivySeforimIndex.IndexFormatVersion == "tantivy12", "format version");
+            Check(FtsLib.Fts5.TantivySeforimIndex.IndexFormatVersion == "tantivy13", "format version");
 
             // ABI edges: a helper's text output is pointer + length (an embedded NUL
             // survives); ids live in 0..=long.MaxValue, a negative id is rejected

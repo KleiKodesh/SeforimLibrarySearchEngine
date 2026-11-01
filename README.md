@@ -274,6 +274,11 @@ positioned union. `PhraseScorer` is public (its constructor already was), so
 the relevance order scores a phrase with tantivy's own BM25 over a union of
 the matched terms per position. `FuzzyTermQuery`'s Debug text is unchanged (the new fields
 are not printed), so upstream's query-parser tests stay as they are.
+`MmapDirectory`'s atomic write (`meta.json` on commit) replaces the file with
+`std::fs::rename` (POSIX semantics on Windows, so a reader holding it open with
+delete sharing does not block), and on Windows retries access-denied / sharing
+errors for about 500 ms before a clear error; a failed commit keeps the pending
+changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
 
 ### hebrew-fts
 - **Tokenizer.** A port of FtsLib's `HtmlWordScanner`:

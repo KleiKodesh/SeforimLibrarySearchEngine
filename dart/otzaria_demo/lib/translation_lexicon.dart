@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'lexicon_text.dart';
+
 /// Port of Otzaria's `TranslationLexicon` (otzaria_search_engine v5.0.0,
 /// `rust/src/lexicons.rs`): Aramaic↔Hebrew single-word translations from the
-/// app's `assets/dictionary.json`, both directions, for the "תרגום ארמי"
-/// option. The expansions become word alternatives (an OR group), exactly as
+/// app's `assets/dictionary.json`, both directions, for the Aramaic
+/// translation option. The expansions become word alternatives (an OR group), exactly as
 /// Otzaria injects them into `alternative_words`.
 ///
 /// This is host-side on purpose: the dictionary is an Otzaria app asset, not
@@ -28,19 +30,23 @@ class TranslationLexicon {
       throw const FormatException('translation dictionary: expected a top-level {name: [entries]} object');
     }
     final forward = <String, List<String>>{}, reverse = <String, List<String>>{};
-    for (final list in top.values) {
+    // dictionaries and head words in Otzaria's (sorted) order, not the
+    // file's: the caps and the reverse lists depend on it
+    for (final name in sortedKeys(top)) {
+      final list = top[name];
       if (list is! List) continue;
       for (final entry in list) {
         if (entry is! Map) continue;
-        entry.forEach((headword, gloss) {
-          if (headword is! String || gloss is! String) return;
+        for (final headword in sortedKeys(entry)) {
+          final gloss = entry[headword];
+          if (gloss is! String) continue;
           final head = _normalize(headword.trim());
-          if (head.isEmpty) return;
+          if (head.isEmpty) continue;
           for (final word in _glossWords(gloss)) {
             _pushCapped(forward, head, word);
             _pushCapped(reverse, word, head);
           }
-        });
+        }
       }
     }
     return TranslationLexicon._(forward, reverse);
@@ -103,16 +109,6 @@ class TranslationLexicon {
     return out;
   }
 
-  /// Otzaria `normalize_for_index` for dictionary words: attached nikud and
-  /// te'amim (U+0591–U+05C7 except maqaf, paseq, sof pasuq, nun hafukha) and
-  /// general combining marks dropped, lower-cased.
-  static String _normalize(String text) {
-    final b = StringBuffer();
-    for (final r in text.runes) {
-      final attached = r >= 0x0591 && r <= 0x05C7 && r != 0x05BE && r != 0x05C0 && r != 0x05C3 && r != 0x05C6;
-      final combining = r >= 0x0300 && r <= 0x036F;
-      if (!attached && !combining && r != 0xFB1E) b.writeCharCode(r);
-    }
-    return b.toString().toLowerCase();
-  }
+  /// Otzaria `normalize_for_index` (see [normalizeLexiconWord]).
+  static String _normalize(String text) => normalizeLexiconWord(text);
 }

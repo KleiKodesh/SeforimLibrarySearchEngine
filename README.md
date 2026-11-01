@@ -893,6 +893,10 @@ are not printed), so upstream's query-parser tests stay as they are.
   the text with FtsLib's distance rule, which lets a repeated word fill a
   gap). `locate` tries the main query, then each phrase, and marks the words
   of whichever matched. The acronym dictionary itself stays in the host.
+  The Dart demo's lexicons (acronyms, Aramaic translation; `lexicon_text.dart`)
+  fold gershayim / geresh to ASCII `"` / `'` and presentation forms in keys
+  and values, and read keys sorted by code point as Otzaria does (serde_json
+  BTreeMap), so the caps and reverse lists do not follow the file's order.
 - **Otzaria word proximity** (`proximity` in the request, `ProximitySpec`;
   C# `SearchRequest.Proximity` = `Proximity.Ordered(gaps)` /
   `Proximity.AnyOrder(distance)`, Dart `Proximity.ordered` / `.anyOrder`;

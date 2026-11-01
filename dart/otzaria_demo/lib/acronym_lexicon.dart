@@ -1,12 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'lexicon_text.dart';
 import 'otzaria_query.dart' show splitQueryWords;
 
 /// Port of Otzaria's `AcronymLexicon` (otzaria_search_engine v5.0.0,
 /// `rust/src/lexicons.rs`) over the app's `assets/Acronyms.json`
-/// (`{"רמב\"ם": ["רבי משה בן מיימון"], ...}`), for the "ראשי תיבות" option.
-/// Keys are kept quote-free (רמבם); single-word expansions are skipped.
+/// (`{acronym: [expansion phrases], ...}`), for the acronyms option.
+/// Keys are kept quote-free; single-word expansions are skipped.
 ///
 /// Host-side on purpose: the dictionary is an Otzaria app asset. The engine
 /// only gets the result, as `SearchRequest.phraseAlternatives`.
@@ -27,9 +28,12 @@ class AcronymLexicon {
       throw const FormatException('acronyms dictionary: expected a top-level {acronym: [expansions]} object');
     }
     final forward = <String, List<List<String>>>{}, reverse = <String, List<String>>{};
-    top.forEach((acronym, expansions) {
+    // keys in Otzaria's (sorted) order, not the file's: the caps and the
+    // reverse lists depend on it
+    for (final acronym in sortedKeys(top)) {
+      final expansions = top[acronym];
       final key = _stripQuotes(_normalize(acronym));
-      if (key.isEmpty || expansions is! List) return;
+      if (key.isEmpty || expansions is! List) continue;
       for (final e in expansions) {
         if (e is! String) continue;
         final words = splitQueryWords(_normalize(e));
@@ -42,7 +46,7 @@ class AcronymLexicon {
           if (r.length < maxExpansions && !r.contains(key)) r.add(key);
         }
       }
-    });
+    }
     return AcronymLexicon._(forward, reverse);
   }
 
@@ -70,16 +74,10 @@ class AcronymLexicon {
   static bool _same(List<String> a, List<String> b) =>
       a.length == b.length && Iterable.generate(a.length).every((i) => a[i] == b[i]);
 
+  /// Otzaria `strip_quote_chars`: ASCII and Hebrew geresh / gershayim (the
+  /// Hebrew ones are already folded to ASCII by [normalizeLexiconWord]).
   static String _stripQuotes(String s) => s.replaceAll(RegExp('["\']'), '');
 
-  /// Otzaria `normalize_for_index`: attached marks dropped, lower-cased.
-  static String _normalize(String text) {
-    final b = StringBuffer();
-    for (final r in text.runes) {
-      final attached = r >= 0x0591 && r <= 0x05C7 && r != 0x05BE && r != 0x05C0 && r != 0x05C3 && r != 0x05C6;
-      final combining = r >= 0x0300 && r <= 0x036F;
-      if (!attached && !combining && r != 0xFB1E) b.writeCharCode(r);
-    }
-    return b.toString().toLowerCase();
-  }
+  /// Otzaria `normalize_for_index` (see [normalizeLexiconWord]).
+  static String _normalize(String text) => normalizeLexiconWord(text);
 }

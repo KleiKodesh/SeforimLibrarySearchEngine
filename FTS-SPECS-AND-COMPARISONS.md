@@ -10,6 +10,7 @@ Current index formats: ours `tantivy13`, FtsLib `fts11`.
 > - `tantivy11` sorts the index by catalog position (search skips its sort on the merged segment) and the C# / Dart hosts keep seforim.db open across searches: index build time and size, and the first-page profile, need a full-DB rerun.
 > - `tantivy12` / `fts10`: a `<sup>` holding a vocalized Hebrew letter mid-word is transparent (issue #2 H58), and a keep_marks term drops U+034F (combining grapheme joiner, issue #2 H02): both full-DB rebuilds and the parity sets need a rerun.
 > - `tantivy13` / `fts11`: catalog order (= position / rowid) counts a base text by the `isBaseBook` flag only (the title-equals-folder rule is gone, issue #6), so a few books move: both full-DB rebuilds and the parity sets need a rerun.
+> - In order + word distance (issue #4 follow-up): the distance is read from the tightest ORDERED window, so a line whose only close pair is out of order drops; snippet windows and marks follow the order: the parity sets with in-order queries need a rerun (both engines changed together).
 > - Hit-count comparison: the rows classified as our bugs (unterminated `<`, cross-line enumerators) and the fuzzy transposition rows are expected to change; not rerun yet.
 
 ## Engines compared

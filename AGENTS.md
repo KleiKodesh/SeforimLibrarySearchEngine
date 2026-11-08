@@ -17,7 +17,11 @@ often.
   plumbing, skip it and say so.
 - **The index is the bare minimum.** No seforim.db / SQLite code in Rust or tantivy; the
   host reads the DB and feeds lines.
-- **No hacks.** A missing search capability is built properly into the engine.
+- **No hacks, ever, even if a hack looks faster or simpler.** We own all the source code:
+  the engine, our tantivy copy (`tantivy/`), FtsLib / KitveiHakodesh Core and the hosts. So
+  any feature that is needed is built in properly, at the right layer, even when that means
+  changing tantivy or FtsLib. Never approximate a feature by composing existing calls,
+  post-filtering, host-side workarounds or shortcuts that drop correctness.
 - **Never add an AI co-author or any AI attribution line** to a commit or PR, in this repo
   or in `tantivy/`.
 - **Quick tests only** (unit tests, small fixtures, builds). Full-DB rebuilds, parity sets

@@ -193,6 +193,20 @@ struct WindowCounts {
     matched: usize,
 }
 
+/// What a locate returns for a text that passes (issues #14 / #23; FtsLib
+/// `SnippetMatchMode`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MatchMode {
+    /// The best window and the marks of its occurrences (the default,
+    /// unchanged).
+    #[default]
+    BestWindow,
+    /// The whole text: the window is `[0, text length)` and the marks are
+    /// EVERY token of the text that is a query term (same word rules). The
+    /// pass decision, `score` and `word_distance` are the best window's.
+    AllMatches,
+}
+
 /// Ints per entry in [`SnippetDescriptor::mark_ranges`]: start, length, term
 /// ordinal.
 pub const MARK_STRIDE: usize = 3;
@@ -283,6 +297,11 @@ pub struct SnippetWindowLocator {
     word: String,
     /// Scratch for the occurrence marks (issue #4).
     marks: MarkScratch,
+    /// See [`set_match_mode`](Self::set_match_mode).
+    match_mode: MatchMode,
+    /// Scratch for [`find_all_matches`](Self::find_all_matches).
+    unquoted: String,
+    run: Vec<usize>,
 }
 
 impl Default for SnippetWindowLocator {
@@ -320,7 +339,116 @@ impl SnippetWindowLocator {
             positioned: false,
             word: String::new(),
             marks: MarkScratch::default(),
+            match_mode: MatchMode::BestWindow,
+            unquoted: String::new(),
+            run: Vec::new(),
         }
+    }
+
+    /// What the locate calls return for a passing text (see [`MatchMode`]).
+    /// All matches needs the whole text tokenized: use it with
+    /// [`tokenize`](Self::tokenize) / [`tokenize_pair`](Self::tokenize_pair),
+    /// not [`tokenize_positioned`](Self::tokenize_positioned) (which stops early).
+    pub fn set_match_mode(&mut self, mode: MatchMode) {
+        self.match_mode = mode;
+    }
+
+    /// The current [`MatchMode`].
+    pub fn match_mode(&self) -> MatchMode {
+        self.match_mode
+    }
+
+    /// Every occurrence of `prepared`'s terms in `text` (find in an open
+    /// text, no index; issues #14 / #23, FtsLib `FindAllMatches`) as flat
+    /// (start, length, term ordinal) triples, document order, UTF-16
+    /// offsets; the same word rules as the locate calls (HTML, entities,
+    /// marks as this locator's tokenizer treats them).
+    ///
+    /// `phrase`: only tokens of a run of consecutive positions holding
+    /// groups 0, 1, ... in order (repeated and overlapping runs all count;
+    /// a token is listed once); else every term token. `ignore_quotes`: a
+    /// token is looked up with its quotes removed (the prepared terms must
+    /// then be quote-free too). The view is valid until the next call.
+    pub fn find_all_matches(
+        &mut self,
+        text: &str,
+        prepared: &PreparedQueryGroups,
+        phrase: bool,
+        ignore_quotes: bool,
+    ) -> &[usize] {
+        self.mark_ranges.clear();
+        if text.is_empty() || prepared.is_empty() {
+            return &self.mark_ranges;
+        }
+        let k = prepared.group_count();
+        let keep = self.text_tokens.keeps_marks();
+        let SnippetWindowLocator { text_tokens, ordinals, mark_ranges, marks, unquoted, run, break_token, positioned, .. } =
+            self;
+        let mut lookup = |norm: &str| -> u32 {
+            let key = if ignore_quotes && norm.bytes().any(crate::chars::is_term_quote_byte) {
+                unquoted.clear();
+                unquoted.extend(norm.chars().filter(|&c| !crate::chars::is_term_quote(c)));
+                if unquoted.is_empty() {
+                    return NO_TERM;
+                }
+                unquoted.as_str()
+            } else {
+                norm
+            };
+            prepared.get(key).map_or(NO_TERM, |p| p.ordinal as u32)
+        };
+        if !phrase || k <= 1 {
+            // every term token: straight off the scan, no token list kept
+            // (the same words, offsets and marks as `tokenize`)
+            crate::scanner::scan_with(text, keep, |word, span| {
+                let ordinal = lookup(word);
+                if ordinal != NO_TERM {
+                    mark_ranges.extend([span.utf16_start, span.utf16_end - span.utf16_start, ordinal as usize]);
+                }
+            });
+            return mark_ranges;
+        }
+        // as `tokenize`: the locate calls then read this text
+        text_tokens.tokenize(text);
+        *break_token = None;
+        *positioned = false;
+        let tokens = text_tokens.tokens();
+        ordinals.clear();
+        ordinals.extend(tokens.iter().map(|t| lookup(text_tokens.norm_of(t))));
+        let n = tokens.len();
+        let mask = &mut marks.mask;
+        mask.clear();
+        mask.resize(n, false);
+        for t in 0..n {
+            if !in_group(ordinals, prepared, t, 0) {
+                continue;
+            }
+            let p = tokens[t].position;
+            run.clear();
+            run.push(t);
+            let mut u = t;
+            for g in 1..k {
+                // the token holding group g at position p + g (a paired
+                // reading puts two tokens at one position)
+                while u < n && tokens[u].position < p + g {
+                    u += 1;
+                }
+                let mut v = u;
+                while v < n && tokens[v].position == p + g && !in_group(ordinals, prepared, v, g) {
+                    v += 1;
+                }
+                if v < n && tokens[v].position == p + g {
+                    run.push(v);
+                } else {
+                    break;
+                }
+            }
+            if run.len() == k {
+                run.iter().for_each(|&v| mask[v] = true);
+            }
+        }
+        collect_mark_ranges(tokens, ordinals, 0, usize::MAX, mark_ranges, Some((&mask[..], 0)));
+        mark_ranges
     }
 
     /// Partial matching (Otzaria's wordMatchMode anyWord / mostWords /
@@ -557,6 +685,7 @@ impl SnippetWindowLocator {
             token_terms,
             positioned,
             marks,
+            match_mode,
             ..
         } = self;
         let brk = *break_token;
@@ -627,6 +756,21 @@ impl SnippetWindowLocator {
 
         let is_match = !ordered || ordered_best.is_some();
 
+        if *match_mode == MatchMode::AllMatches && is_match {
+            collect_mark_ranges(tokens, ordinals, 0, raw_len, mark_ranges, None);
+            return SnippetDescriptor {
+                is_match,
+                score,
+                word_distance: word_dist,
+                window_word_count: tokens.len(),
+                snap_start: 0,
+                snap_end: raw_len,
+                leading_ellipsis: false,
+                trailing_ellipsis: false,
+                mark_ranges,
+            };
+        }
+
         SnippetDescriptor {
             is_match,
             score,
@@ -677,6 +821,7 @@ impl SnippetWindowLocator {
             token_terms,
             positioned,
             marks,
+            match_mode,
             ..
         } = self;
         let brk = *break_token;
@@ -695,6 +840,20 @@ impl SnippetWindowLocator {
         let Some((i_left, i_right, score)) = found else {
             return SnippetDescriptor::NO_MATCH;
         };
+        if *match_mode == MatchMode::AllMatches {
+            collect_mark_ranges(tokens, ordinals, 0, raw_len, mark_ranges, None);
+            return SnippetDescriptor {
+                is_match: true,
+                score,
+                word_distance: (tokens[i_right].position - tokens[i_left].position).saturating_sub(k.saturating_sub(1)),
+                window_word_count: tokens.len(),
+                snap_start: 0,
+                snap_end: raw_len,
+                leading_ellipsis: false,
+                trailing_ellipsis: false,
+                mark_ranges,
+            };
+        }
         let (snap_start, snap_end, s_idx, e_idx) =
             expand_window(tokens, raw_len, i_left, i_right, *context_words);
         // Marks: only the tokens of full occurrences inside the snippet (issue #4).

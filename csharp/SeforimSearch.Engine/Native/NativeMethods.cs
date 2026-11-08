@@ -107,6 +107,13 @@ namespace SeforimSearch.Engine.Native
         public static extern ulong se_search_copy_hits(SearchHandle search, ulong offset, ulong count, ulong* output);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_search_set_match_mode(SearchHandle search, uint mode);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern SeBuffer se_find_all_matches(byte* text, UIntPtr textLen, IntPtr* words, UIntPtr* wordLens,
+                                                          UIntPtr wordCount, uint flags);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern SeBuffer se_search_locate_batch(SearchHandle search, IntPtr* texts, UIntPtr* lens, UIntPtr count);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

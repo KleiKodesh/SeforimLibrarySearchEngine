@@ -82,6 +82,28 @@ impl PreparedQueryGroups {
         Self::freeze(building, query_terms.len())
     }
 
+    /// Literal terms for find in an open text
+    /// ([`SnippetWindowLocator::find_all_matches`](crate::SnippetWindowLocator::find_all_matches)):
+    /// every word of `words` as the line scanner normalizes it (`keep_marks`:
+    /// as a marks-keeping locator does), in order, each its own group; with
+    /// `ignore_quotes` its quotes removed (a word left with none is dropped).
+    pub fn from_text_words<T: AsRef<str>>(words: &[T], keep_marks: bool, ignore_quotes: bool) -> PreparedQueryGroups {
+        let mut terms: Vec<String> = Vec::new();
+        for w in words {
+            crate::scanner::scan_with(w.as_ref(), keep_marks, |term, _| {
+                let term: String = if ignore_quotes {
+                    term.chars().filter(|&c| !crate::chars::is_term_quote(c)).collect()
+                } else {
+                    term.to_string()
+                };
+                if !term.is_empty() {
+                    terms.push(term);
+                }
+            });
+        }
+        Self::from_literal_terms(&terms)
+    }
+
     fn slot_for(
         term: &str,
         building: &mut Vec<(String, Vec<usize>)>,

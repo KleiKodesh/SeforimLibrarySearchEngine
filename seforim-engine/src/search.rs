@@ -636,6 +636,8 @@ pub struct SnippetSession {
     /// Terms matched only by [`GroupSpec::Unmarked`] members: their marks
     /// are dropped. Empty (the usual case): nothing is checked.
     unmarked: std::collections::HashSet<String>,
+    /// See [`set_match_mode`](Self::set_match_mode).
+    match_mode: hebrew_fts::MatchMode,
 }
 
 /// Term id -> ordinal maps of a positioned locate (see `crate::positioned`):
@@ -845,7 +847,27 @@ impl SnippetSession {
             positions: None,
             force_positions: false,
             unmarked: Default::default(),
+            match_mode: hebrew_fts::MatchMode::BestWindow,
         }
+    }
+
+    /// What the locate calls return for a passing hit (issues #14 / #23):
+    /// [`MatchMode::BestWindow`](hebrew_fts::MatchMode) (the default, the
+    /// snippet window) or `AllMatches` (the whole text, `start` 0, `end` its
+    /// UTF-16 length, and a mark for EVERY token of the text that is one of
+    /// the passing matcher's terms). Which hits pass, the order and the
+    /// counts do not change. All matches locates from the text (an index
+    /// with positions is not read). A line-regex search keeps its own
+    /// snippet.
+    pub fn set_match_mode(&mut self, mode: hebrew_fts::MatchMode) {
+        self.match_mode = mode;
+        self.locator.set_match_mode(mode);
+        self.pool.iter_mut().for_each(|l| l.set_match_mode(mode));
+    }
+
+    /// The current match mode (see [`set_match_mode`](Self::set_match_mode)).
+    pub fn match_mode(&self) -> hebrew_fts::MatchMode {
+        self.match_mode
     }
 
     /// Locates the snippet in one matched line. None when the line does not
@@ -944,7 +966,9 @@ impl SnippetSession {
     /// [`try_locate_pairs`](Self::try_locate_pairs).
     pub fn try_locate_lines(&mut self, hits: &[HitLines<'_>]) -> Result<Vec<Option<Snippet>>> {
         let joined: Vec<std::borrow::Cow<'_, str>> = hits.iter().map(|h| join_lines(h.lines)).collect();
-        if self.positions.is_none() || self.line.is_some() || self.matchers.is_empty() {
+        // all matches needs every word of the text: the text path
+        let all = self.match_mode == hebrew_fts::MatchMode::AllMatches;
+        if self.positions.is_none() || self.line.is_some() || self.matchers.is_empty() || all {
             let refs: Vec<&str> = joined.iter().map(|j| j.as_ref()).collect();
             return self.try_locate_many(&refs);
         }
@@ -1189,11 +1213,13 @@ impl SnippetSession {
             // buffers are already grown, so a batch allocates nothing per line.
             let (context, keep_marks) = (self.context_words, self.keep_marks);
             while self.pool.len() < threads {
-                self.pool.push(if keep_marks {
+                let mut locator = if keep_marks {
                     SnippetWindowLocator::keeping_marks(context)
                 } else {
                     SnippetWindowLocator::new(context)
-                });
+                };
+                locator.set_match_mode(self.match_mode);
+                self.pool.push(locator);
             }
             let mut parts: Vec<Option<Vec<T>>> = (0..chunks).map(|_| None).collect();
             let f = &f;
@@ -2133,6 +2159,7 @@ impl LineIndex {
             positions: None,
             force_positions: false,
             unmarked: Default::default(),
+            match_mode: hebrew_fts::MatchMode::BestWindow,
         };
         if section {
             session.require_ordered = false;

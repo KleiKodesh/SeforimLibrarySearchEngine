@@ -24,11 +24,12 @@ namespace SeforimSearch.Demo
             Console.OutputEncoding = Encoding.UTF8;
             if (args.Length == 0)
             {
-                Console.Error.WriteLine("usage: build|search [--db path] [--index dir] ...");
+                Console.Error.WriteLine("usage: build|search|findall [--db path] [--index dir] ...");
                 return 2;
             }
             string command = args[0];
             if (command == "selftest") return SelfTest.Run(args);
+            if (command == "findall") return FindAllCommand.Run(args);
             string? db = Option(args, "--db") ?? ResolveSeforimDb();
             string index = Option(args, "--index") ?? Path.Combine(AppContext.BaseDirectory, "TantivyIndex");
             if (db == null || !File.Exists(db))

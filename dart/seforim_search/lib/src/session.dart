@@ -73,6 +73,17 @@ final class SearchSession implements Finalizable {
     }
   }
 
+  SnippetMatchMode _matchMode = SnippetMatchMode.bestWindow;
+
+  /// What [locateBatch], [locateLines] and [locatePairs] return for a passing
+  /// hit (issues #14 / #23): the best window (default) or every match in the
+  /// whole text. Which hits pass does not change.
+  SnippetMatchMode get matchMode => _matchMode;
+  set matchMode(SnippetMatchMode mode) {
+    if (_n.searchSetMatchMode(_h, mode.index) != 0) throw _n.error();
+    _matchMode = mode;
+  }
+
   /// Locates the snippets of a batch of matched lines' texts. Null entries are
   /// lines that do not pass the filters. Offsets index each text.
   List<Snippet?> locateBatch(List<String> texts) {
@@ -353,4 +364,59 @@ class SearchInfo {
 
   static SearchInfo fromJson(Map<String, dynamic> j) => SearchInfo((j['notices'] as List).cast<String>(),
       truncated: j['truncated'] as bool, orderStamp: (j['order_stamp'] as String?) ?? '');
+}
+
+/// What a session's locate calls return for a passing hit (issues #14 / #23;
+/// FtsLib `SnippetMatchMode`). The index is the engine's code.
+enum SnippetMatchMode {
+  /// The best window and its occurrences' marks (the default).
+  bestWindow,
+
+  /// The whole text (start 0, end its length) and a mark for EVERY token of
+  /// the text that is a query term.
+  allMatches,
+}
+
+/// One occurrence found by [findAllMatches]: UTF-16 [start] and [length] in
+/// the text, and the [term] ordinal (first-seen distinct query word).
+final class TextMatch {
+  const TextMatch(this.start, this.length, this.term);
+  final int start;
+  final int length;
+  final int term;
+
+  @override
+  bool operator ==(Object other) =>
+      other is TextMatch && other.start == start && other.length == length && other.term == term;
+
+  @override
+  int get hashCode => Object.hash(start, length, term);
+
+  @override
+  String toString() => '[$start+$length] #$term';
+}
+
+/// Find in an open text, no index or session (issues #14 / #23): every
+/// occurrence of [words] (each normalized by the line scanner, its words in
+/// order) in [text], with the engine's own word rules (HTML, entities, marks,
+/// quotes). [phrase]: only runs of the words in order at consecutive
+/// positions; [ignoreQuotes]: geresh / gershayim ignored; [matchMarks]: nikud
+/// / te'amim must match as typed (by default both sides drop them).
+List<TextMatch> findAllMatches(String text, List<String> words,
+    {bool phrase = false, bool ignoreQuotes = false, bool matchMarks = false}) {
+  if (text.isEmpty || words.isEmpty) return const [];
+  final n = SeforimNative.instance;
+  final flags = (phrase ? 1 : 0) | (ignoreQuotes ? 2 : 0) | (matchMarks ? 4 : 0);
+  final data = using((a) {
+    final (tp, tl) = utf8Native(text, a);
+    final ptrs = a<Pointer<Uint8>>(words.length);
+    final lens = a<Size>(words.length);
+    for (var i = 0; i < words.length; i++) {
+      final (p, l) = utf8Native(words[i], a);
+      ptrs[i] = p;
+      lens[i] = l;
+    }
+    return n.takeBuffer(n.findAllMatches(tp, tl, ptrs, lens, words.length, flags));
+  });
+  return [for (var i = 0; i + 2 < data.length; i += 3) TextMatch(data[i], data[i + 1], data[i + 2])];
 }

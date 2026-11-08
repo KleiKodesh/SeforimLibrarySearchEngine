@@ -44,7 +44,7 @@ pub use grammar_query::HebrewGrammarQuery;
 pub use prepared::{PreparedQueryGroups, PreparedTerm};
 pub use query_parser::{quoted_phrases, tokenize_query, QueryTerm, QueryToken, MAX_FUZZY_DISTANCE};
 pub use scanner::{scan, scan_with, word_count, TextToken, TextTokens, WordSpan};
-pub use snippet::{Proximity, SnippetDescriptor, SnippetWindowLocator, DEFAULT_CONTEXT_WORDS, MARK_STRIDE};
+pub use snippet::{MatchMode, Proximity, SnippetDescriptor, SnippetWindowLocator, DEFAULT_CONTEXT_WORDS, MARK_STRIDE};
 pub use set_automaton::SetAutomaton;
 pub use user_regex::{HebrewRegexQuery, UserRegex, UserRegexError};
 pub use tokenizer::{register_hebrew_tokenizer, HebrewTokenizer, HEBREW_TOKENIZER_NAME};

@@ -71,6 +71,39 @@ void main() {
     s.close();
   });
 
+  test('matchMode allMatches: whole text, every occurrence (issues #14 / #23)', () {
+    final word = text.split(' ').first;
+    final s = index.searchRequest(SearchRequest(groups: [QueryGroup.word(word)], contextWords: 0));
+    final line = '$word x x x x <b>$word</b> y $word';
+    final best = s.locateBatch([line])[0]!;
+    expect(s.matchMode, SnippetMatchMode.bestWindow);
+    s.matchMode = SnippetMatchMode.allMatches;
+    final all = s.locateBatch([line])[0]!;
+    expect(all.start, 0);
+    expect(all.end, line.length);
+    expect(all.marks.map((m) => m.start).toList(), [0, 18, 31]);
+    s.matchMode = SnippetMatchMode.bestWindow;
+    final again = s.locateBatch([line])[0]!;
+    expect([again.start, again.end, again.marks.length], [best.start, best.end, best.marks.length]);
+    s.close();
+  });
+
+  test('findAllMatches: words, phrase, marks, quotes, UTF-16 (issues #14 / #23)', () {
+    const a = 'אב', b = 'גד';
+    final t = '$a $b $a <b>$b</b> $a';
+    expect(findAllMatches(t, [a]).map((m) => m.start).toList(), [0, 6, 19]);
+    expect(findAllMatches(t, [a, b]).map((m) => m.term).toList(), [0, 1, 0, 1, 0]);
+    expect(findAllMatches(t, ['$a $b'], phrase: true).map((m) => m.start).toList(), [0, 3, 6, 12]);
+    expect(findAllMatches('$a $a $a', [a, a], phrase: true).length, 3);
+    expect(findAllMatches('אָב x', [a]), [const TextMatch(0, 3, 0)]);
+    expect(findAllMatches('$a אָב', ['אָב'], matchMarks: true).map((m) => m.start).toList(), [3]);
+    const q = 'אב"ג', plain = 'אבג';
+    expect(findAllMatches('x $q', [plain]), isEmpty);
+    expect(findAllMatches('x $q', [plain], ignoreQuotes: true), [const TextMatch(2, 4, 0)]);
+    expect(findAllMatches('\u{1F600} $a', [a]).single.start, 3);
+    expect(findAllMatches('', [a]), isEmpty);
+  });
+
   test('locateLines: same snippets as locateBatch on the joined lines', () {
     final word = text.split(' ').first;
     final a = index.searchRequest(SearchRequest(groups: [QueryGroup.word(word)]));

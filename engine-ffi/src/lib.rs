@@ -895,6 +895,86 @@ pub unsafe extern "C" fn se_search_locate_batch(
     })
 }
 
+/// Match mode of a search's locate calls (`se_search_locate_batch` /
+/// `_lines` / `_pairs`; issues #14 / #23): 0 = best window (the default),
+/// 1 = all matches (the whole text, start 0, end its UTF-16 length, a mark
+/// for every token of the text that is a query term; which hits pass does
+/// not change). Returns 0, or -1 on error.
+///
+/// # Safety
+/// `search` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_set_match_mode(search: *mut SearchResult, mode: u32) -> i32 {
+    guard(-1, || {
+        let search = search.as_mut().ok_or("null search")?;
+        let mode = match mode {
+            0 => hebrew_fts::MatchMode::BestWindow,
+            1 => hebrew_fts::MatchMode::AllMatches,
+            m => return Err(format!("unknown match mode {m}")),
+        };
+        search.session.set_match_mode(mode);
+        Ok(0)
+    })
+}
+
+/// `se_find_all_matches` flag: only runs of the words in order at
+/// consecutive positions (a phrase); else every word anywhere.
+pub const SE_FIND_PHRASE: u32 = 1;
+/// `se_find_all_matches` flag: quotes (geresh / gershayim) ignored.
+pub const SE_FIND_IGNORE_QUOTES: u32 = 2;
+/// `se_find_all_matches` flag: nikud / te'amim must match as typed (the
+/// default ignores them on both sides).
+pub const SE_FIND_MATCH_MARKS: u32 = 4;
+
+thread_local! {
+    /// Find-in-text locators, one per thread: [plain, marks kept].
+    static FIND_LOCATORS: RefCell<[hebrew_fts::SnippetWindowLocator; 2]> = RefCell::new([
+        hebrew_fts::SnippetWindowLocator::new(hebrew_fts::DEFAULT_CONTEXT_WORDS),
+        hebrew_fts::SnippetWindowLocator::keeping_marks(hebrew_fts::DEFAULT_CONTEXT_WORDS),
+    ]);
+}
+
+/// Find in an open text, no session or index (issues #14 / #23): every
+/// occurrence of `words` (`word_count` UTF-8 strings as pointer / length
+/// arrays; each is normalized by the line scanner, its words in order) in
+/// `text` (UTF-8, `text_len` bytes), with the locator's word rules (HTML,
+/// entities, marks, quotes). `flags`: `SE_FIND_*`. Output: flat u32
+/// triples (start, length, term ordinal = first-seen distinct word),
+/// UTF-16 offsets into `text`, document order; an empty buffer when none.
+/// Free with `se_buffer_free`.
+///
+/// # Safety
+/// `text` valid for `text_len` bytes; the word arrays hold `word_count`
+/// entries. All UTF-8 (not re-checked).
+#[no_mangle]
+pub unsafe extern "C" fn se_find_all_matches(
+    text: *const u8,
+    text_len: usize,
+    words: *const *const u8,
+    word_lens: *const usize,
+    word_count: usize,
+    flags: u32,
+) -> SeBuffer {
+    let empty = SeBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    guard(empty, || {
+        let text = text_args(&text, &text_len, 1)?[0];
+        let words = text_args(words, word_lens, word_count)?;
+        let (phrase, quotes, marks) =
+            (flags & SE_FIND_PHRASE != 0, flags & SE_FIND_IGNORE_QUOTES != 0, flags & SE_FIND_MATCH_MARKS != 0);
+        let prepared = hebrew_fts::PreparedQueryGroups::from_text_words(&words, marks, quotes);
+        let out: Vec<u32> = FIND_LOCATORS.with(|l| {
+            let mut l = l.borrow_mut();
+            let locator = &mut l[usize::from(marks)];
+            locator.find_all_matches(text, &prepared, phrase, quotes).iter().map(|&v| v as u32).collect()
+        });
+        Ok(SeBuffer::from_vec(out))
+    })
+}
+
 /// Locates a batch of hits given as their LINES (`SnippetSession::try_locate_lines`):
 /// hit `h` is `line_counts[h]` consecutive entries of the flat `line_ids` /
 /// `texts` / `lens` arrays (the matched line, and for a short window its
@@ -1479,6 +1559,60 @@ mod tests {
             assert_eq!(other, (String::new(), String::new()));
             assert_eq!(se_last_error_message(), here);
         }
+    }
+
+    /// Issues #14 / #23: a session's all-matches mode and find in an open text.
+    #[test]
+    fn all_matches_through_c_abi() {
+        let a = "\u{05d0}\u{05d1}";
+        let text = format!("{a} \u{05d2}\u{05d3} <b>{a}</b> x {a}");
+        let dir = std::env::temp_dir().join(format!("se_ffi_all_{}", std::process::id()));
+        let d = dir.to_string_lossy().into_owned();
+        unsafe {
+            let index = se_index_create(d.as_ptr(), d.len(), ptr::null(), 0);
+            assert!(!index.is_null(), "{:?}", CStr::from_ptr(se_last_error()));
+            let writer = se_writer_open(index, 30_000_000, 1);
+            assert_eq!(se_writer_add(writer, 1, 0, 1, text.as_ptr(), text.len()), 0);
+            assert_eq!(se_writer_commit(writer, ptr::null(), 0), 0);
+            se_writer_close(writer);
+            let req = format!(r#"{{"groups":[{{"kind":"word","word":"{a}"}}],"context_words":0}}"#);
+            let search = se_search(index, req.as_ptr(), req.len());
+            assert!(!search.is_null(), "{:?}", CStr::from_ptr(se_last_error()));
+            let (ptrs, lens) = ([text.as_ptr()], [text.len()]);
+            let locate = |search| {
+                let buf = se_search_locate_batch(search, ptrs.as_ptr(), lens.as_ptr(), 1);
+                let v = std::slice::from_raw_parts(buf.data, buf.len).to_vec();
+                se_buffer_free(buf);
+                v
+            };
+            let best = locate(search);
+            assert_eq!(best[7], 1); // one mark in a 0-context window
+            assert_eq!(se_search_set_match_mode(search, 1), 0);
+            let all = locate(search);
+            let len16 = text.encode_utf16().count() as u32;
+            assert_eq!((all[4], all[5]), (0, len16)); // the whole text
+            assert_eq!(all[7], 3);
+            let starts: Vec<u32> = all[8..].chunks(3).map(|m| m[0]).collect();
+            assert_eq!(starts, vec![0, 9, 18]);
+            assert_eq!(se_search_set_match_mode(search, 0), 0);
+            assert_eq!(locate(search), best);
+            assert_eq!(se_search_set_match_mode(search, 7), -1);
+            se_search_close(search);
+            se_index_close(index);
+
+            // no session
+            let words = [a.as_ptr()];
+            let wl = [a.len()];
+            let buf = se_find_all_matches(text.as_ptr(), text.len(), words.as_ptr(), wl.as_ptr(), 1, 0);
+            let v = std::slice::from_raw_parts(buf.data, buf.len).to_vec();
+            se_buffer_free(buf);
+            // a mark spans to the next visible char (closing tag included), as every locate
+            assert_eq!(v, vec![0, 2, 0, 9, 6, 0, 18, 2, 0]);
+            let buf = se_find_all_matches(text.as_ptr(), text.len(), words.as_ptr(), wl.as_ptr(), 0, 0);
+            assert_eq!(buf.len, 0);
+            se_buffer_free(buf);
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn se_last_error_message() -> String {

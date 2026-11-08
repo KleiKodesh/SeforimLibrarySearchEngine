@@ -174,6 +174,7 @@ md.append(f"""## Engines compared
 | User regex `/.../` (word, sequence, line kinds) | done |
 | Relevance / generation order (option; catalog default) + notice when positions are needed | done |
 | Truncated flag when a cap is hit | done |
+| Locate match mode: best window (default) or ALL MATCHES (whole text, every query-term token, session locates); find in an open text without an index (`se_find_all_matches`: words or phrase, quotes / marks options; both engines) | done; unit tests |
 | Footnotes (schema 7 `line_note`) as a virtual notes book after each book; ids in a reserved 64-bit range (2^52+, JS-safe), hit maps to the source line (both engines) | done; unit tests; full-DB rerun pending |
 | Cross-line phrases (one break, any search type; line-edge enumerators skipped as Otzaria) and same-section scope | built; unit tests; full-DB verification pending |
 | Fuzzy: a swap of two adjacent letters is one edit (Otzaria; FtsLib changed too) | done |
@@ -436,7 +437,7 @@ claude_block = "\n".join([
     f"ours `{INDEX_FORMAT}`, FtsLib `{FTSLIB_FORMAT}`. Features: FtsLib syntax + parity, per-word Otzaria "
     f"options as FST walks (cap per request, default 2000, global across segments), proximity / word match, vocalized walks, user regex "
     f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, resume after position, "
-    f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, positions snippets, FM sidecar, "
+    f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, positions snippets, FM sidecar, all-matches locate + find in an open text, "
     f"morphology forms from the host (lexical tier, unmarked forms).",
     "Builds: " + "; ".join(l.strip("| ").replace(" | ", " ") for l in build_lines()) + ".",
     ("Parity with FtsLib: all sets identical (" + ", ".join(x[0] for x in PAR_RUN) + "; both flavours)."

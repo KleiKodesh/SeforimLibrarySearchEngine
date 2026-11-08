@@ -68,6 +68,21 @@ namespace SeforimSearch.Engine
                     yield return hit;
         }
 
+        private SnippetMatchMode _matchMode;
+
+        /// <summary>What <see cref="LocateBatch"/>, <see cref="LocateLines"/> and
+        /// <see cref="LocatePairs"/> return for a passing hit (issues #14 / #23): the best
+        /// window (default) or every match in the whole text.</summary>
+        public SnippetMatchMode MatchMode
+        {
+            get => _matchMode;
+            set
+            {
+                Interop.Check(NativeMethods.se_search_set_match_mode(_handle, (uint)value));
+                _matchMode = value;
+            }
+        }
+
         /// <summary>
         /// Locates the snippets of a batch of matched lines' texts. Null entries
         /// are lines that do not pass (not all groups, wrong order, or too far

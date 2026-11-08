@@ -123,6 +123,10 @@ fn main() {
     only("locate only: ftslib d=8", &mut loc, &mut sink, &|l| {
         l.locate_tokenized_within(&prepared, &[], false, 0, 8).mark_ranges.len()
     });
+    only("locate only: ftslib in order", &mut loc, &mut sink, &|l| l.locate_tokenized(&prepared, true, 0).mark_ranges.len());
+    only("locate only: ftslib in order d=8", &mut loc, &mut sink, &|l| {
+        l.locate_tokenized_within(&prepared, &[], true, 0, 8).mark_ranges.len()
+    });
     only("locate only: ordered", &mut loc, &mut sink, &|l| l.locate_proximity_tokenized(&prepared, &ordered).mark_ranges.len());
     only("locate only: any order", &mut loc, &mut sink, &|l| l.locate_proximity_tokenized(&prepared, &any).mark_ranges.len());
     println!("(sink {sink})");

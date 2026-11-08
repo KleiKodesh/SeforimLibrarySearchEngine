@@ -572,7 +572,16 @@ impl SnippetWindowLocator {
         let all_groups = prepared.group_count();
         let partial = *min_groups > 0 && *min_groups < all_groups;
         let required = if partial { *min_groups } else { all_groups };
-        let (i_left, i_right, score) = find_window(tokens, ordinals, prepared, group_count, required, brk);
+        // In order (FtsLib's "in order" option): the best window is the
+        // tightest ORDERED covering window and the marks the tokens of ordered
+        // occurrences; the order check is this window's existence. Order off:
+        // unchanged.
+        let ordered = !partial && require_ordered && all_groups > 1;
+        let ordered_best = if ordered { ordered_cover_window(tokens, ordinals, prepared, brk, marks) } else { None };
+        let (i_left, i_right, score) = match ordered_best {
+            Some(w) => w,
+            None => find_window(tokens, ordinals, prepared, group_count, required, brk),
+        };
         if score == usize::MAX {
             return SnippetDescriptor::NO_MATCH;
         }
@@ -598,13 +607,14 @@ impl SnippetWindowLocator {
         // distance every term token in the snippet is in a covering window
         // (crossing the break too, when the best one does), so only a
         // distance narrows them; partial matching marks every term.
+        let max_span = max_word_distance.saturating_add(denominator - 1);
         let masked = !partial
-            && max_word_distance != usize::MAX
+            && (max_word_distance != usize::MAX || ordered_best.is_some())
             && occurrence_marks(
                 tokens,
                 ordinals,
                 prepared,
-                &MarkRule::Cover { max_span: max_word_distance.saturating_add(denominator - 1) },
+                &if ordered_best.is_some() { MarkRule::OrderedCover { max_span } } else { MarkRule::Cover { max_span } },
                 (s_idx, e_idx),
                 (i_left, i_right),
                 brk,
@@ -615,13 +625,7 @@ impl SnippetWindowLocator {
         // reading shares its first reading's position).
         let word_dist = (tokens[i_right].position - tokens[i_left].position).saturating_sub(denominator - 1);
 
-        let is_match = partial
-            || !(require_ordered
-                && all_groups > 1
-                && !match brk {
-                    None => has_ordered_match(ordinals, prepared),
-                    Some(b) => has_ordered_match_across(ordinals, prepared, b),
-                });
+        let is_match = !ordered || ordered_best.is_some();
 
         SnippetDescriptor {
             is_match,
@@ -1040,11 +1044,62 @@ fn any_order_window(
 
 const FREE: usize = usize::MAX;
 
+/// FtsLib in order: the tightest (i_left, i_right, char span) window holding
+/// one token per group in query order (by token index, a token in one slot),
+/// the earliest on a tie. Per group the latest chain start so far; a chain
+/// ending at a token of the last group starts there. Cross-line (`brk`): the
+/// chain starts on the first line and ends on the next. None without one.
+#[inline(never)]
+fn ordered_cover_window(
+    tokens: &[TextToken],
+    ordinals: &[u32],
+    prepared: &PreparedQueryGroups,
+    brk: Option<usize>,
+    sc: &mut MarkScratch,
+) -> Option<(usize, usize, usize)> {
+    let k = prepared.group_count();
+    let MarkScratch { last, starts, .. } = sc;
+    last.clear();
+    last.resize(k, FREE);
+    let mut best: Option<(usize, usize, usize)> = None;
+    for t in 0..tokens.len() {
+        if ordinals[t] == NO_TERM {
+            continue;
+        }
+        let gs = prepared.groups_at(ordinals[t] as usize);
+        starts.clear();
+        starts.extend(gs.iter().map(|&g| {
+            if g == 0 {
+                if brk.is_none_or(|b| t < b) { t } else { FREE }
+            } else {
+                last[g - 1]
+            }
+        }));
+        for (&g, &v) in gs.iter().zip(starts.iter()) {
+            if v == FREE {
+                continue;
+            }
+            if g == k - 1 {
+                if brk.is_none_or(|b| t >= b) {
+                    let span = tokens[t].utf16_end - tokens[v].utf16_start;
+                    if best.is_none_or(|b| span < b.2) {
+                        best = Some((v, t, span));
+                    }
+                }
+            } else if last[g] == FREE || v > last[g] {
+                last[g] = v;
+            }
+        }
+    }
+    best
+}
+
 // ── Ordered-match validation ──────────────────────────────────────────
 
 /// True when there exists a position where each query group is satisfied by
 /// a token appearing strictly after the token satisfying the previous group.
 /// Greedy forward scan.
+#[cfg(test)]
 fn has_ordered_match(ordinals: &[u32], prepared: &PreparedQueryGroups) -> bool {
     let num_groups = prepared.group_count();
     if num_groups <= 1 {
@@ -1068,36 +1123,6 @@ fn has_ordered_match(ordinals: &[u32], prepared: &PreparedQueryGroups) -> bool {
             pos += 1;
         }
         if next_group == num_groups {
-            return true;
-        }
-    }
-    false
-}
-
-/// [`has_ordered_match`] across a line break at token `b`: an ordered match
-/// whose first group is on the first line and whose last group is on the
-/// next. Greedy: the earliest tokens for the middle groups, then any token
-/// of the last group at or after both them and the break.
-fn has_ordered_match_across(ordinals: &[u32], prepared: &PreparedQueryGroups, b: usize) -> bool {
-    let k = prepared.group_count();
-    if k < 2 {
-        return false;
-    }
-    let in_group = |t: usize, g: usize| ordinals[t] != NO_TERM && prepared.groups_at(ordinals[t] as usize).contains(&g);
-    let n = ordinals.len();
-    for start in 0..b.min(n) {
-        if !in_group(start, 0) {
-            continue;
-        }
-        let mut pos = start + 1;
-        let mut g = 1;
-        while g < k - 1 && pos < n {
-            if in_group(pos, g) {
-                g += 1;
-            }
-            pos += 1;
-        }
-        if g == k - 1 && (pos.max(b)..n).any(|t| in_group(t, k - 1)) {
             return true;
         }
     }
@@ -1221,6 +1246,9 @@ enum MarkRule<'a> {
     /// FtsLib: a token range covering every group whose ends are at most
     /// `max_span` positions apart (`max_word_distance + groups - 1`).
     Cover { max_span: usize },
+    /// FtsLib in order: an ordered chain (one token per group, in query
+    /// order, by token index) whose ends are at most `max_span` positions apart.
+    OrderedCover { max_span: usize },
     /// Otzaria's ordered proximity (per-pair gaps).
     Ordered(&'a [u32]),
     /// Otzaria's any-order proximity.
@@ -1236,6 +1264,11 @@ struct MarkScratch {
     /// Ordered: per (group, token) chain prefix / suffix reachability.
     fwd: Vec<bool>,
     bwd: Vec<bool>,
+    /// In order: per group the latest chain start so far; per (group,
+    /// token) the latest prefix start / earliest suffix end (`FREE` = none).
+    last: Vec<usize>,
+    starts: Vec<usize>,
+    ends: Vec<usize>,
     /// Any order: group of each token, token of each group, visit stamps.
     owner: Vec<usize>,
     taken: Vec<usize>,
@@ -1270,6 +1303,8 @@ fn occurrence_marks(
         }
     }
     if !outside && (matches!(rule, MarkRule::Cover { .. }) || n_terms == k) {
+        // (in order: the best window is an ordered chain; with exactly k
+        // term tokens every one of them is in it)
         return false;
     }
     let w = e - s + 1;
@@ -1341,6 +1376,7 @@ fn occurrence_marks(
                 }
             }
         }
+        MarkRule::OrderedCover { max_span } => ordered_cover_marks(tokens, ordinals, prepared, (s, e), brk, max_span, sc),
         MarkRule::Ordered(gaps) => {
             // A chain through t at slot g = a prefix chain ending at t and
             // a suffix chain starting at t.
@@ -1438,6 +1474,73 @@ fn occurrence_marks(
         }
     }
     true
+}
+
+/// [`MarkRule::OrderedCover`] marks (see [`occurrence_marks`]); out of line so
+/// the order-off paths keep their code layout.
+#[inline(never)]
+fn ordered_cover_marks(
+    tokens: &[TextToken],
+    ordinals: &[u32],
+    prepared: &PreparedQueryGroups,
+    (s, e): (usize, usize),
+    brk: Option<usize>,
+    max_span: usize,
+    sc: &mut MarkScratch,
+) {
+    let k = prepared.group_count();
+    let w = e - s + 1;
+    let groups_of = |t: usize| -> &[usize] {
+        if ordinals[t] == NO_TERM {
+            &[]
+        } else {
+            prepared.groups_at(ordinals[t] as usize)
+        }
+    };
+    let pos = |t: usize| tokens[t].position;
+    // t in slot g is in an occurrence when the latest prefix chain
+    // start ending at t and the earliest suffix chain end starting
+    // at t are at most max_span positions apart.
+    let MarkScratch { last, starts, ends, mask, .. } = sc;
+    starts.clear();
+    starts.resize(k * w, FREE);
+    ends.clear();
+    ends.resize(k * w, FREE);
+    last.clear();
+    last.resize(k, FREE);
+    for t in s..=e {
+        // slots read the previous group's state before this token
+        // updates it (a token fills one slot of a chain)
+        for &g in groups_of(t).iter() {
+            let v = if g == 0 { if brk.is_none_or(|b| t < b) { t } else { FREE } } else { last[g - 1] };
+            starts[g * w + t - s] = v;
+        }
+        for &g in groups_of(t).iter() {
+            let v = starts[g * w + t - s];
+            if v != FREE && (last[g] == FREE || v > last[g]) {
+                last[g] = v;
+            }
+        }
+    }
+    last.fill(FREE);
+    for t in (s..=e).rev() {
+        for &g in groups_of(t).iter() {
+            let v = if g == k - 1 { if brk.is_none_or(|b| t >= b) { t } else { FREE } } else { last[g + 1] };
+            ends[g * w + t - s] = v;
+        }
+        for &g in groups_of(t).iter() {
+            let v = ends[g * w + t - s];
+            if v != FREE && (last[g] == FREE || v < last[g]) {
+                last[g] = v;
+            }
+        }
+    }
+    for t in s..=e {
+        mask[t - s] = groups_of(t).iter().any(|&g| {
+            let (a, z) = (starts[g * w + t - s], ends[g * w + t - s]);
+            a != FREE && z != FREE && pos(z) - pos(a) <= max_span
+        });
+    }
 }
 
 /// Whether every group gets its own token of `a..=hi`, the `forced`
@@ -1967,8 +2070,12 @@ mod tests {
                 let d = loc.locate_tokenized_within(&p, m, true, 0, 0);
                 assert_eq!(marked(&text, &d), want, "ftslib ctx {ctx} positioned {positioned}");
                 // FtsLib without a distance: every query word in the snippet (unchanged)
-                let d = loc.locate_tokenized_within(&p, m, true, 0, usize::MAX);
+                let d = loc.locate_tokenized_within(&p, m, false, 0, usize::MAX);
                 assert_eq!(d.marks().count(), if ctx == 0 { 2 } else { 3 });
+                // in order: only the ordered occurrence (the last word has no
+                // second word after it)
+                let d = loc.locate_tokenized_within(&p, m, true, 0, usize::MAX);
+                assert_eq!(marked(&text, &d), want, "in order ctx {ctx} positioned {positioned}");
             }
         }
     }
@@ -2034,6 +2141,115 @@ mod tests {
         let d = loc.locate_tokenized_within(&p, &[], false, 0, 0);
         assert_eq!(d.marks().map(|m| m.0).collect::<Vec<_>>(), [at - 2, at + 1]);
         assert_eq!(marked(&joined, &d), [a, b]);
+    }
+
+    #[test]
+    fn in_order_window_and_marks_follow_the_query_order() {
+        // "B A B", query A B in order: the window and the marks are the
+        // ordered "A B", not the equally tight (and earlier) "B A".
+        let (a, b) = ("\u{05D0}\u{05D1}", "\u{05D2}\u{05D3}");
+        let text = format!("{b} {a} {b}");
+        let p = PreparedQueryGroups::from_groups(&[vec![a], vec![b]]);
+        let terms: Vec<String> = vec![a.into(), b.into()];
+        let map: Vec<u32> = terms.iter().map(|t| p.get(t).map_or(u32::MAX, |x| x.ordinal as u32)).collect();
+        let occ = postings_of(&text, &terms);
+        for ctx in [0, 8] {
+            for positioned in [false, true] {
+                let mut loc = SnippetWindowLocator::new(ctx);
+                if positioned {
+                    assert!(loc.tokenize_positioned(&text, &[0], &[&occ], &terms));
+                } else {
+                    loc.tokenize(&text);
+                }
+                let m: &[u32] = if positioned { &map } else { &[] };
+                for dist in [usize::MAX, 0, 5] {
+                    let d = loc.locate_tokenized_within(&p, m, true, 0, dist);
+                    assert!(d.is_match);
+                    assert_eq!(d.word_distance, 0);
+                    assert_eq!(marked(&text, &d), [a, b], "ctx {ctx} positioned {positioned} dist {dist}");
+                    assert_eq!(d.marks().next().unwrap().0, 3, "the window starts at the ordered a");
+                }
+                // order off: unchanged (the earlier "B A" window)
+                let d = loc.locate_tokenized_within(&p, m, false, 0, usize::MAX);
+                assert_eq!(d.marks().next().unwrap().0, 0);
+                assert_eq!(d.marks().count(), if ctx == 0 { 2 } else { 3 });
+            }
+        }
+        // reversed only: no ordered match
+        let text = format!("{b} {a}");
+        let mut loc = SnippetWindowLocator::new(8);
+        assert!(!loc.locate(&text, &p, true, 0).is_match);
+        assert!(loc.locate(&text, &p, false, 0).is_match);
+    }
+
+    #[test]
+    fn in_order_equals_brute_force() {
+        let words = ["\u{05D0}\u{05D1}", "\u{05D2}\u{05D3}", "\u{05D4}\u{05D5}", "\u{05D6}\u{05D7}"];
+        let groups: Vec<Vec<&str>> = vec![vec![words[0]], vec![words[1], words[2]], vec![words[2]]];
+        let k = groups.len();
+        let p = PreparedQueryGroups::from_groups(&groups);
+        let mut seed = 11u64;
+        let mut loc = SnippetWindowLocator::new(2);
+        let mut checked = 0;
+        fn rec(g: usize, k: usize, from: usize, n: usize, a: &mut Vec<usize>, gs: &dyn Fn(usize) -> Vec<usize>, out: &mut Vec<Vec<usize>>) {
+            if g == k {
+                out.push(a.clone());
+                return;
+            }
+            for t in from..n {
+                if gs(t).contains(&g) {
+                    a.push(t);
+                    rec(g + 1, k, t + 1, n, a, gs, out);
+                    a.pop();
+                }
+            }
+        }
+        for case in 0..4000usize {
+            let n = 3 + (case % 10);
+            let picks: Vec<usize> = (0..n)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    ((seed >> 33) % 4) as usize
+                })
+                .collect();
+            let text = picks.iter().map(|&i| words[i]).collect::<Vec<_>>().join(" ");
+            let starts: Vec<usize> = (0..n).map(|t| t * 3).collect();
+            let gs = |t: usize| -> Vec<usize> { (0..k).filter(|&g| groups[g].contains(&words[picks[t]])).collect() };
+            // every ordered chain (strictly increasing tokens)
+            let mut chains: Vec<Vec<usize>> = Vec::new();
+            rec(0, k, 0, n, &mut Vec::new(), &gs, &mut chains);
+            let dist = [usize::MAX, 0, 1, 3][case % 4];
+            loc.tokenize(&text);
+            let ords: Vec<u32> = (0..n).map(|t| p.get(words[picks[t]]).map_or(NO_TERM, |x| x.ordinal as u32)).collect();
+            assert_eq!(has_ordered_match(&ords, &p), !chains.is_empty());
+            let d = loc.locate_tokenized_within(&p, &[], true, 0, dist);
+            assert_eq!(d.is_match, !chains.is_empty(), "case {case}");
+            if chains.is_empty() {
+                continue;
+            }
+            checked += 1;
+            // tightest chain (equal-width words: tokens), earliest end on a tie
+            let best = chains.iter().map(|c| (c[k - 1] - c[0], c[k - 1], c[0])).min().unwrap();
+            assert_eq!(d.word_distance, best.0 - (k - 1), "case {case} picks {picks:?}");
+            let s_idx = starts.iter().rposition(|&x| x <= d.snap_start).unwrap();
+            let e_idx = starts.iter().rposition(|&x| x < d.snap_end).unwrap();
+            assert_eq!((s_idx, e_idx), (best.2.saturating_sub(2), (best.1 + 2).min(n - 1)), "case {case} picks {picks:?}");
+            if d.word_distance > dist {
+                continue; // the caller drops the hit
+            }
+            let mut want = vec![false; n];
+            for c in &chains {
+                if c[0] >= s_idx && c[k - 1] <= e_idx && c[k - 1] - c[0] <= dist.saturating_add(k - 1) {
+                    for &t in c {
+                        want[t] = true;
+                    }
+                }
+            }
+            let got: Vec<usize> = d.marks().map(|(s, _, _)| starts.iter().position(|&x| x == s).unwrap()).collect();
+            let want: Vec<usize> = (0..n).filter(|&t| want[t]).collect();
+            assert_eq!(got, want, "case {case} dist {dist} picks {picks:?}");
+        }
+        assert!(checked > 1000);
     }
 
     /// Brute force: a token is marked iff some assignment of the groups to

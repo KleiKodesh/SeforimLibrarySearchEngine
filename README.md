@@ -762,8 +762,9 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     slot (fuzzy, dictionary forms) and the phrase allows at most one word
     between neighbours, in order (Otzaria's lexical fuzzy phrase, slop 1;
     `SearchRequest::required_phrase_gaps`, per pair; a whole quoted query
-    is per line then). A fuzzy `~N` stays at the end of its piece, after the
-    closing quote (`"a~1 b"~1 c~1`).
+    is per line then). A fuzzy suffix before a closing quote is still the
+    word's suffix (`"a~1 b~1" c~1`), in both parsers: outside lexical fuzzy
+    mode (and in FtsLib) the phrase words stay literal, with no stray digit.
   - Word options, for every word: `grammar_prefixes`, `grammar_suffixes`,
     `aramaic_prefixes`, `aramaic_suffixes`, `ktiv_male_haser`,
     `part_of_word`, `advanced_prefixes`, `advanced_suffixes`,

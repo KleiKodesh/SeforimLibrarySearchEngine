@@ -123,24 +123,15 @@ List<(String, int?)> splitQueryWordsWithPhrases(String query) {
 
 /// [words] joined into the engine's query, each quoted phrase's run of
 /// words wrapped in `"` (the engine searches it as a literal phrase; in
-/// lexical fuzzy mode as Otzaria's lexical fuzzy phrase). A fuzzy `~N`
-/// suffix stays at the end of its piece, after the closing quote.
+/// lexical fuzzy mode as Otzaria's lexical fuzzy phrase).
 String joinWithPhrases(List<String> words, List<int?> phrases) {
   final out = StringBuffer();
-  final fuzzy = RegExp(r'~[1-9]?$');
   for (var i = 0; i < words.length; i++) {
     final p = phrases[i];
     final open = p != null && (i == 0 || phrases[i - 1] != p);
     final close = p != null && (i == words.length - 1 || phrases[i + 1] != p);
     if (i > 0) out.write(' ');
-    var word = words[i];
-    var suffix = '';
-    final m = close ? fuzzy.firstMatch(word) : null;
-    if (m != null) {
-      suffix = m.group(0)!;
-      word = word.substring(0, m.start);
-    }
-    out.write('${open ? '"' : ''}$word${close ? '"' : ''}$suffix');
+    out.write('${open ? '"' : ''}${words[i]}${close ? '"' : ''}');
   }
   return out.toString();
 }

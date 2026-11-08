@@ -1919,8 +1919,7 @@ mod tests {
         let docs: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| line(i as u64, i as u64, 1, t)).collect();
         let forms = WordOptions { lexical_forms: vec![shalom.into()], ..Default::default() };
         let fuzzy = SearchOptions {
-            // the `~N` suffix ends the piece, after its closing quote
-            query: format!("\"{torah}~1 {moshe}\"~1 {rabbenu}~1"),
+            query: format!("\"{torah}~1 {moshe}~1\" {rabbenu}~1"),
             words: [(0, forms)].into_iter().collect(),
             lexical_fuzzy: true,
             ..Default::default()

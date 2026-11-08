@@ -207,7 +207,8 @@ fn parse_piece(raw: &str, keep_marks: bool) -> Vec<Option<QueryTerm>> {
     let mut text = raw;
     let mut fuzzy = None;
     if let Some(tilde) = raw.rfind('~') {
-        let suffix = &raw[tilde + 1..];
+        // a closing quote after the suffix (`"a b~1"`) is punctuation
+        let suffix = raw[tilde + 1..].trim_end_matches(is_quote);
         let b = suffix.as_bytes();
         if b.is_empty() || (b.len() == 1 && (b'1'..=b'9').contains(&b[0])) {
             let d = if b.is_empty() { 1 } else { b[0] - b'0' };
@@ -294,6 +295,20 @@ mod tests {
                 Some(Grammar { word: TORAH.into(), prefixes: true, suffixes: true }),
                 Some(Word("\u{05D0}".into())),
                 Some(Word(TORAH.into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn fuzzy_suffix_before_a_closing_quote() {
+        use QueryTerm::*;
+        let q = format!("\"{TORAH}~1 {SHALOM}~2\" {SHALOM}~\"");
+        assert_eq!(
+            terms(&q),
+            vec![
+                Some(Fuzzy { word: TORAH.into(), distance: 1 }),
+                Some(Fuzzy { word: SHALOM.into(), distance: 2 }),
+                Some(Fuzzy { word: SHALOM.into(), distance: 1 }),
             ]
         );
     }

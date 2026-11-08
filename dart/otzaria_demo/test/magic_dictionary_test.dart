@@ -128,10 +128,9 @@ void main() {
     expect(o.words[1]!.maxExpandedTerms, 256 - 3);
     expect(o.proximity!.toJson(), {'mode': 'ordered', 'gaps': [1]});
     // a quoted part of a longer query: Otzaria's lexical fuzzy phrase in the
-    // engine, each word with its forms and the 256-term budget, the `~N`
-    // after the closing quote
+    // engine, each word with its forms and the 256-term budget
     o = s('"$halachti $lachtoch" $shuv', SearchMode.fuzzy).toOptions();
-    expect(o.query, '"$halachti~1 $lachtoch"~1 $shuv~1');
+    expect(o.query, '"$halachti~1 $lachtoch~1" $shuv~1');
     expect(o.words[0]!.lexicalForms, [hlkFinal, holechFinal]);
     expect(o.words[0]!.maxExpandedTerms, 256 - 3);
     expect(o.words[1]!.unmarkedLexicalForms, [ken, veken]);

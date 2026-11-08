@@ -672,6 +672,16 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     bounds its candidates, and its full scan treats earlier lines as out of
     scope (`scope_lines` counts the rest). Totals and counts are the rest's,
     as FtsLib's resumed query sees only the rest.
+  - Resume guard (issue #12): every search reports an `order_stamp`
+    (`SearchInfo`; C# `SearchInfo.OrderStamp`, Dart `orderStamp`), a hash
+    of the searched snapshot's segment ids and delete opstamps. Passed back
+    as `resume_stamp` (C# `ResumeStamp`, Dart `resumeStamp`) with
+    `after_position`, a changed index (rebuild, update, merge) fails with
+    `Error::StaleResume` (message prefix `stale resume:`; C#
+    `SeforimEngineException.IsStaleResume`, Dart `StaleResumeException`)
+    instead of skipping or repeating hits: the host restarts. No stamp = no
+    check (FtsLib). The C# FtsLib facade resumes by line id, re-placed on
+    the current index (Core's Restarted), so it needs no stamp.
   - C# demo, as Core: `SeforimDbFtsEngine.PositionOfLine(lineId)` (book
     position ranges cached, plus the line's rank in its book:
     `FtsLineRankInBook`), `SeforimDbFtsSearcher.SearchInBatches(...,

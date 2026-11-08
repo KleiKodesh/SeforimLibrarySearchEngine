@@ -280,6 +280,14 @@ void main() {
     // resume after a position: the rest of the catalog-order run
     expect(ids(SearchOptions(q, grammarPrefixes: true, afterPosition: 0)), [7]);
     expect(ids(SearchOptions(q, grammarPrefixes: true, afterPosition: 1)), <int>[]);
+    // issue #12: the resume carries the first page's order stamp; a stale one throws
+    final first = index.search(SearchOptions(q, grammarPrefixes: true));
+    final stamp = first.info().orderStamp;
+    first.close();
+    expect(stamp.length, 16);
+    expect(ids(SearchOptions(q, grammarPrefixes: true, afterPosition: 0, resumeStamp: stamp)), [7]);
+    expect(() => index.search(SearchOptions(q, grammarPrefixes: true, afterPosition: 0, resumeStamp: 'stale')),
+        throwsA(isA<StaleResumeException>()));
     expect(ids(SearchOptions(q, grammarPrefixes: true, order: ResultsOrder.relevance)), [7, 8]);
     expect(
         ids(SearchOptions(q,

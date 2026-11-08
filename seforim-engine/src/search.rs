@@ -400,6 +400,15 @@ pub struct SearchRequest {
     /// totals and counts are those of the rest. Costs nothing when None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_position: Option<u64>,
+    /// The order identity a resume continues (issue #12): the
+    /// [`SearchInfo::order_stamp`] of the search whose pages are resumed.
+    /// With `after_position` set, a stamp that differs from the index's
+    /// current one (the index was rebuilt or updated between the pages, so
+    /// positions may have moved) fails with [`Error::StaleResume`] instead
+    /// of silently skipping or repeating hits; the host restarts the search.
+    /// None: no check (FtsLib's behaviour). Ignored without `after_position`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_stamp: Option<String>,
     /// The expansion cap: how many index terms one query word (walk,
     /// wildcard, fuzzy, `%`, regex word) may expand to, one cap across all
     /// segments, shortest first (the exact word typed always kept). Default
@@ -429,6 +438,7 @@ impl Default for SearchRequest {
             same_section: false,
             line_regex: None,
             after_position: None,
+            resume_stamp: None,
             max_expanded_terms: hebrew_fts::DEFAULT_MAX_EXPANDED_TERMS,
         }
     }
@@ -1258,6 +1268,8 @@ pub struct SearchResult {
     truncated: bool,
     /// A user regex of Otzaria's `Line` kind (see `crate::line_search`).
     pub(crate) line: Option<crate::line_search::LineRun>,
+    /// See [`SearchInfo::order_stamp`].
+    order_stamp: String,
 }
 
 /// How a search was served (see [`SearchResult::info`]).
@@ -1267,6 +1279,12 @@ pub struct SearchInfo {
     pub notices: Vec<String>,
     /// See [`SearchResult::truncated`].
     pub truncated: bool,
+    /// The identity of the catalog order the hits' positions belong to
+    /// (the index snapshot searched: its segments and their deletes). Pass
+    /// it back as `resume_stamp` with `after_position` to resume safely
+    /// (issue #12); any commit, merge or rebuild changes it.
+    #[serde(default)]
+    pub order_stamp: String,
 }
 
 /// Exact totals of a search: the lines that pass every filter (including
@@ -1293,7 +1311,7 @@ struct CountTally {
 
 impl SearchResult {
     pub(crate) fn new(hits: Vec<PlacedHit>, session: SnippetSession) -> SearchResult {
-        SearchResult { hits, session, tally: CountTally::default(), scores: None, notices: Vec::new(), truncated: false, line: None }
+        SearchResult { hits, session, tally: CountTally::default(), scores: None, notices: Vec::new(), truncated: false, line: None, order_stamp: String::new() }
     }
 
     fn with_notices(mut self, notices: Vec<String>) -> SearchResult {
@@ -1324,7 +1342,7 @@ impl SearchResult {
 
     /// How the search was served (the C ABI's `se_search_info`).
     pub fn info(&self) -> SearchInfo {
-        SearchInfo { notices: self.notices.clone(), truncated: self.truncated() }
+        SearchInfo { notices: self.notices.clone(), truncated: self.truncated(), order_stamp: self.order_stamp.clone() }
     }
 
     /// The relevance score of each hit (aligned with `hits`), when the
@@ -1978,6 +1996,37 @@ impl LineIndex {
     /// [`search`](Self::search) with a cancel token (see
     /// [`search_options_cancellable`](Self::search_options_cancellable)).
     pub fn search_cancellable(&self, request: &SearchRequest, cancel: Option<CancelToken>) -> Result<SearchResult> {
+        // Resume guard (issue #12): positions are only comparable within
+        // one order identity. (A commit landing between this stamp and the
+        // search's own snapshot is caught by the next page's check.)
+        let stamp = self.order_stamp()?;
+        if request.after_position.is_some() && request.resume_stamp.as_ref().is_some_and(|s| *s != stamp) {
+            return Err(Error::StaleResume);
+        }
+        let mut result = self.search_unstamped(request, cancel)?;
+        result.order_stamp = stamp;
+        Ok(result)
+    }
+
+    /// The index's current order identity (see [`SearchInfo::order_stamp`]):
+    /// a hash of the searchable segments' ids and delete opstamps, read from
+    /// the index meta (no reader is opened).
+    pub fn order_stamp(&self) -> Result<String> {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for &b in bytes {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        for segment in self.index.searchable_segment_metas()? {
+            eat(segment.id().uuid_string().as_bytes());
+            eat(&segment.delete_opstamp().map_or(u64::MAX, |o| o).to_le_bytes());
+        }
+        Ok(format!("{h:016x}"))
+    }
+
+    fn search_unstamped(&self, request: &SearchRequest, cancel: Option<CancelToken>) -> Result<SearchResult> {
         CancelToken::check(cancel.as_ref())?;
         if let Some(pattern) = &request.line_regex {
             return self.line_regex_search(pattern, request, cancel);

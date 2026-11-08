@@ -126,6 +126,9 @@ pub struct SearchOptions {
     /// strictly after this one (see `SearchRequest::after_position`).
     /// None = from the start.
     pub after_position: Option<u64>,
+    /// The order identity the resume continues (see
+    /// `SearchRequest::resume_stamp`): the first page's `order_stamp`.
+    pub resume_stamp: Option<String>,
     /// The expansion cap: how many index terms one query word (walk,
     /// wildcard, fuzzy, `%`, regex word) may expand to, one cap across all
     /// segments, shortest first (the exact word typed always kept). Default
@@ -173,6 +176,7 @@ impl Default for SearchOptions {
             cross_line: false,
             same_section: false,
             after_position: None,
+            resume_stamp: None,
             max_expanded_terms: hebrew_fts::DEFAULT_MAX_EXPANDED_TERMS,
         }
     }
@@ -311,6 +315,7 @@ impl SearchOptions {
                         base_books: self.base_books.clone(),
                         cross_line: self.cross_line,
                         after_position: self.after_position,
+                        resume_stamp: self.resume_stamp.clone(),
                         max_expanded_terms: self.max_expanded_terms,
                         ..Default::default()
                     });
@@ -325,6 +330,7 @@ impl SearchOptions {
                             context_words: self.context_words,
                             books: self.books.clone(),
                             after_position: self.after_position,
+                            resume_stamp: self.resume_stamp.clone(),
                         max_expanded_terms: self.max_expanded_terms,
                             ..Default::default()
                         });
@@ -495,6 +501,7 @@ impl SearchOptions {
             same_section: self.same_section,
             line_regex: None,
             after_position: self.after_position,
+            resume_stamp: self.resume_stamp.clone(),
             max_expanded_terms: self.max_expanded_terms,
         })
     }

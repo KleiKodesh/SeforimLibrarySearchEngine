@@ -50,6 +50,10 @@ pub enum Error {
     Unsupported(String),
     /// The search was cancelled through its [`CancelToken`].
     Cancelled,
+    /// A resume (`after_position`) carried a `resume_stamp` that is not the
+    /// index's current order identity: the index changed between the
+    /// pages, so the host must restart the search (issue #12).
+    StaleResume,
 }
 
 impl std::fmt::Display for Error {
@@ -59,9 +63,15 @@ impl std::fmt::Display for Error {
             Error::Io(e) => write!(f, "{e}"),
             Error::Unsupported(m) => write!(f, "{m}"),
             Error::Cancelled => write!(f, "search cancelled"),
+            Error::StaleResume => write!(f, "{STALE_RESUME_MESSAGE}"),
         }
     }
 }
+
+/// [`Error::StaleResume`]'s message; hosts recognize it by this prefix
+/// (`stale resume:`).
+pub const STALE_RESUME_MESSAGE: &str =
+    "stale resume: the index changed since the first page (order stamp differs); restart the search";
 
 impl std::error::Error for Error {}
 
@@ -1054,6 +1064,49 @@ mod tests {
         w.merge_all().unwrap();
         assert!(index.catalog_ordered(&searcher()));
         check("merged");
+    }
+
+    /// Issue #12: a resume carrying the first page's order stamp works while
+    /// the index is unchanged, and fails with `StaleResume` (instead of
+    /// skipping or repeating hits) once a commit changed it; no stamp = no
+    /// check; the line-regex path and the options path carry it too.
+    #[test]
+    fn resume_with_stale_order_stamp_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let mut w = index.writer(60_000_000, 1).unwrap();
+        for p in 0..10u64 {
+            w.add(&line(p + 1, p, 0, "alpha beta")).unwrap();
+        }
+        w.commit(None).unwrap();
+        let req = |after: Option<u64>, stamp: Option<String>| SearchRequest {
+            groups: vec![GroupSpec::Wildcard { pattern: "alph*".into(), ignore_quotes: false }],
+            after_position: after,
+            resume_stamp: stamp,
+            ..Default::default()
+        };
+        let first = index.search(&req(None, None)).unwrap();
+        let stamp = first.info().order_stamp;
+        assert_eq!(stamp.len(), 16);
+        assert_eq!(stamp, index.order_stamp().unwrap());
+        let page2 = index.search(&req(Some(4), Some(stamp.clone()))).unwrap();
+        assert_eq!(page2.hits.len(), 5);
+        assert_eq!(page2.info().order_stamp, stamp);
+        // a stamp without after_position is ignored
+        assert!(index.search(&req(None, Some("x".into()))).is_ok());
+        // the order changes: line 1 moves to the end
+        w.delete(1);
+        w.add(&line(1, 20, 0, "alpha beta")).unwrap();
+        w.commit(None).unwrap();
+        assert_ne!(index.order_stamp().unwrap(), stamp);
+        assert!(matches!(index.search(&req(Some(4), Some(stamp.clone()))), Err(Error::StaleResume)));
+        let o = SearchOptions { query: "alpha".into(), after_position: Some(4), resume_stamp: Some(stamp.clone()), ..Default::default() };
+        assert!(matches!(index.search_options(&o), Err(Error::StaleResume)));
+        let o = SearchOptions { query: "/al.*ta/".into(), after_position: Some(4), resume_stamp: Some(stamp.clone()), ..Default::default() };
+        assert!(matches!(index.search_options(&o), Err(Error::StaleResume)));
+        assert!(Error::StaleResume.to_string().starts_with("stale resume:"));
+        // no stamp: FtsLib's unchecked resume
+        assert!(index.search(&req(Some(4), None)).is_ok());
     }
 
     /// The parity diff that found the bug: FtsLib's quote-free index has

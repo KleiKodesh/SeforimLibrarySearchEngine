@@ -20,6 +20,15 @@ class SearchCancelledException extends SeforimEngineException {
   String toString() => 'SearchCancelledException: $message';
 }
 
+/// Thrown when a resume ([SearchOptions.afterPosition] with
+/// [SearchOptions.resumeStamp]) found the index changed since the first
+/// page: restart the search from the start (issue #12).
+class StaleResumeException extends SeforimEngineException {
+  StaleResumeException(super.message);
+  @override
+  String toString() => 'StaleResumeException: $message';
+}
+
 /// `SeBuffer {u32* data; usize len; usize cap}` — returned by value.
 final class SeBuffer extends Struct {
   external Pointer<Uint32> data;
@@ -240,7 +249,8 @@ final class SeforimNative {
   SeforimEngineException error([String fallback = 'native call failed']) {
     final msg = lastError().toDartString();
     final text = msg.isEmpty ? fallback : msg;
-    return lastErrorCancelled() != 0 ? SearchCancelledException(text) : SeforimEngineException(text);
+    if (lastErrorCancelled() != 0) return SearchCancelledException(text);
+    return text.startsWith('stale resume:') ? StaleResumeException(text) : SeforimEngineException(text);
   }
 
   Pointer<Void> checkPtr(Pointer<Void> p) {

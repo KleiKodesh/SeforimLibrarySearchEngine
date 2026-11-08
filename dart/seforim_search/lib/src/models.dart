@@ -610,6 +610,7 @@ class SearchOptions {
     this.crossLine = false,
     this.sameSection = false,
     this.afterPosition,
+    this.resumeStamp,
     this.maxExpandedTerms,
   })  : words = words ?? {},
         phraseAlternatives = phraseAlternatives ?? [],
@@ -635,6 +636,13 @@ class SearchOptions {
   /// strictly after this one ([PlacedHit.position], from 0). Null: from the
   /// start. Totals and counts are then those of the rest.
   int? afterPosition;
+
+  /// The order identity a resume continues: the first page's
+  /// [SearchInfo.orderStamp]. With [afterPosition] set and the index changed
+  /// since (rebuilt or updated), the search throws a
+  /// [StaleResumeException] instead of skipping or repeating hits (issue
+  /// #12). Null: no check (FtsLib's behaviour).
+  String? resumeStamp;
 
   /// The expansion cap: how many index terms one query word (walk,
   /// wildcard, fuzzy, `%`, regex word) may expand to, one cap across all
@@ -713,6 +721,7 @@ class SearchOptions {
         if (crossLine) 'cross_line': true,
         if (sameSection) 'same_section': true,
         if (afterPosition != null) 'after_position': afterPosition,
+        if (resumeStamp != null) 'resume_stamp': resumeStamp,
         if (maxExpandedTerms != null) 'max_expanded_terms': maxExpandedTerms,
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,

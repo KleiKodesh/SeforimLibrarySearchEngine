@@ -8,6 +8,11 @@ namespace SeforimSearch.Engine
     public sealed class SeforimEngineException : Exception
     {
         public SeforimEngineException(string message) : base(message) { }
+
+        /// <summary>A resume (<see cref="SearchOptions.AfterPosition"/> with
+        /// <see cref="SearchOptions.ResumeStamp"/>) found the index changed since the first
+        /// page: restart the search from the start (issue #12).</summary>
+        public bool IsStaleResume => Message.StartsWith("stale resume:", StringComparison.Ordinal);
     }
 
     /// <summary>How an index is built. Fixed at creation.</summary>
@@ -671,6 +676,12 @@ namespace SeforimSearch.Engine
         /// after this one (<see cref="PlacedHit.Position"/>, 0-based). Null: from the start.
         /// Totals and counts are then those of the rest.</summary>
         public long? AfterPosition { get; set; }
+        /// <summary>The order identity a resume continues: the first page's
+        /// <see cref="SearchInfo.OrderStamp"/>. With <see cref="AfterPosition"/> set and the index
+        /// changed since (rebuilt or updated), the search throws a
+        /// <see cref="SeforimEngineException"/> with <see cref="SeforimEngineException.IsStaleResume"/>
+        /// instead of skipping or repeating hits. Null: no check (FtsLib's behaviour).</summary>
+        public string? ResumeStamp { get; set; }
         /// <summary>The expansion cap: how many index terms one query word (walk, wildcard,
         /// fuzzy, %, regex word) may expand to, one cap across all segments, shortest first, the
         /// exact word typed always kept. Null: 2000 (FtsLib's). 0: uncapped. Hitting it sets
@@ -683,6 +694,7 @@ namespace SeforimSearch.Engine
             var sb = new StringBuilder("{\"query\":");
             Json.WriteString(sb, Query ?? "");
             if (AfterPosition.HasValue) sb.Append(",\"after_position\":").Append(AfterPosition.Value.ToString(inv));
+            if (ResumeStamp != null) { sb.Append(",\"resume_stamp\":"); Json.WriteString(sb, ResumeStamp); }
             if (MaxExpandedTerms.HasValue)
             {
                 if (MaxExpandedTerms.Value < 0) throw new ArgumentOutOfRangeException(nameof(MaxExpandedTerms));

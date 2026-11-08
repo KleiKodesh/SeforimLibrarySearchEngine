@@ -293,7 +293,8 @@ namespace SeforimSearch.Engine
             var o = (Dictionary<string, object?>)Json.Parse(Interop.TakeString(NativeMethods.se_search_info(_handle)))!;
             var notices = new List<string>();
             foreach (var n in (List<object?>)o["notices"]!) notices.Add((string)n!);
-            return new SearchInfo(notices, (bool)o["truncated"]!);
+            return new SearchInfo(notices, (bool)o["truncated"]!,
+                o.TryGetValue("order_stamp", out var stamp) ? (string?)stamp ?? "" : "");
         }
 
         // -- User regex, Otzaria's Line kind --
@@ -426,11 +427,17 @@ namespace SeforimSearch.Engine
         /// catalog order.</summary>
         public const string RelevanceNeedsPositions = "relevance_needs_positions";
 
-        public SearchInfo(IReadOnlyList<string> notices, bool truncated)
+        public SearchInfo(IReadOnlyList<string> notices, bool truncated, string orderStamp = "")
         {
             Notices = notices;
             Truncated = truncated;
+            OrderStamp = orderStamp;
         }
+
+        /// <summary>The identity of the catalog order the hits' positions belong to (the
+        /// index snapshot searched). Pass it as <see cref="SearchOptions.ResumeStamp"/> with
+        /// <see cref="SearchOptions.AfterPosition"/> to resume safely (issue #12).</summary>
+        public string OrderStamp { get; }
 
         /// <summary>Notices about the search (not errors), e.g. <see cref="RelevanceNeedsPositions"/>.</summary>
         public IReadOnlyList<string> Notices { get; }

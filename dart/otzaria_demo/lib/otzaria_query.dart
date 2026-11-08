@@ -46,6 +46,19 @@ abstract final class OtzariaOption {
   static const unsupported = <String>{};
 }
 
+/// Named space entities and numeric entities (decimal / hex, any case, `;`
+/// optional), the latter folded only when the code point is whitespace or a
+/// Unicode separator (Z*): the engine's scanner separates words there.
+final _spaceEntity = RegExp(r'&(?:(nbsp|ensp|emsp|thinsp)|#(?:x([0-9a-f]+)|([0-9]+)));?', caseSensitive: false);
+final _separator = RegExp(r'^[\s\p{Z}]$', unicode: true);
+
+String _spaceEntityToSpace(Match m) {
+  if (m[1] != null) return ' ';
+  final cp = m[2] != null ? int.tryParse(m[2]!, radix: 16) : int.tryParse(m[3]!);
+  if (cp == null || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return m[0]!;
+  return _separator.hasMatch(String.fromCharCode(cp)) ? ' ' : m[0]!;
+}
+
 /// Otzaria's query sanitizer: `&nbsp;` and the other space entities and
 /// every char the engine's scanner does not keep in a word become spaces,
 /// presentation forms fold to letters + marks; ״/׳ → "/', maqaf, hyphen and `|` → space
@@ -67,7 +80,7 @@ List<String> splitQueryWords(String query) => [for (final w in splitQueryWordsWi
 List<(String, int?)> splitQueryWordsWithPhrases(String query) {
   // one char for one char, so offsets hold for the phrase spans
   final q = SeforimIndex.reducePairedReadings(foldPresentationForms(query)
-          .replaceAll(RegExp(r'&(nbsp|ensp|emsp|thinsp|#160|#x0*a0);', caseSensitive: false), ' '))
+          .replaceAllMapped(_spaceEntity, _spaceEntityToSpace))
       .replaceAll(RegExp('[״“”„]'), '"')
       .replaceAll('׳', "'")
       .replaceAll(RegExp('[־|-]'), ' ')

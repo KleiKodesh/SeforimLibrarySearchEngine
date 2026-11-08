@@ -171,6 +171,13 @@ void main() {
     const a = '\u05D0\u05D1', b = '\u05D2\u05D3';
     expect(splitQueryWords('$a&nbsp;$b'), [a, b]);
     expect(splitQueryWords('$a&NBSP;$b&#160;$a&ensp;$b&#xa0;$a'), [a, b, a, b, a]);
+    // any numeric entity of a space / separator, decimal or hex, any case
+    expect(splitQueryWords('$a&#8194;$b&#x2002;$a&#X2003;$b&#xA0;$a&#32;$b&#x3000;$a&#x2028;$b'),
+        [a, b, a, b, a, b, a, b]);
+    // trailing ';' optional
+    expect(splitQueryWords('$a&#xa0$b&nbsp$a&#160$b&emsp$a'), [a, b, a, b, a]);
+    // a numeric entity of a non-space char is not folded to a space
+    expect(splitQueryWords('$a&#65;$b'), [a, '65', b]);
     // U+FB2E (alef + patah) -> U+05D0 U+05B7; U+FB31 (bet + dagesh) -> U+05D1 U+05BC
     expect(splitQueryWords('\uFB2E\uFB31'), ['\u05D0\u05B7\u05D1\u05BC']);
   });

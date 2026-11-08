@@ -39,7 +39,7 @@ Feature specs and the latest numbers: [FTS-SPECS-AND-COMPARISONS.md](../../FTS-S
 | `parity` | for every set: FtsLibDump dumps FtsLib's hits (first 20,000), the demo dumps ours (pos and nopos), `tools/parity/compare.py` diffs lines, snippets and marks | the engine must return exactly what FtsLib returns |
 | `speed` | every query of every speed set through each engine as a separate process: one warm-up, then RUNS (3) timed runs, median; every hit is read; strictly sequential | speed |
 | `hitcount` | ours vs Otzaria hit counts with equivalent options (`hitcount.py`); differences carry the hand classification in `hitcount-classes.json` (our bug / Otzaria bug / deliberate deviation / not equivalent query / mixed), else `unclassified` | Otzaria parity of results |
-| `report` | `tools/report/specs_report.py <out> --prefix ""` regenerates the specs md + README/CLAUDE.md blocks; `<out>/machine.txt` holds the machine inventory | one report |
+| `report` | publishes this run's small result files from `OUT_DIR` into `RESULTS_DIR` (committed `bench-results/`), then `tools/report/specs_report.py` regenerates the specs md + README/CLAUDE.md blocks from there; `machine.txt` holds the machine inventory | one report |
 
 **Timing definitions** (see `tools/report/search_report.py`): total = the whole search call
 from the host's side, every hit read; first batch = from the search call to the first page
@@ -98,7 +98,7 @@ throttles on battery).
 ## 4. Running
 
 Configuration: `tools/bench/bench.env` (copy to `bench.local.env` for local overrides):
-`DB_PATH`, `OUT_DIR` (default `~/seforim-bench`), `KITVEI_DIR`, index dirs, `STEPS`, `RUNS`,
+`DB_PATH`, `OUT_DIR` (default `~/seforim-bench`), `RESULTS_DIR` (default `bench-results/`), `KITVEI_DIR`, index dirs, `STEPS`, `RUNS`,
 sets. Flags: `--steps a,b`, `--db PATH`, `--out DIR`, `--force`, `--dry-run`.
 
 Outputs in `OUT_DIR`: `logs/` (full log of every unit with `EXIT <code> (<min>)`),
@@ -109,8 +109,8 @@ redo that unit, or `--force`).
 Reading the report: FTS-SPECS-AND-COMPARISONS.md has build tables, parity, per-set speed
 charts and per-query stage tables, and the hit-count table with classes.
 
-Copying results back: commit `FTS-SPECS-AND-COMPARISONS.md`, `README.md`, `CLAUDE.md`
-(the generated blocks) by explicit path. Never commit indexes or the DB. To keep raw runs,
+Copying results back: commit `bench-results/` (see its README), `FTS-SPECS-AND-COMPARISONS.md`,
+`README.md`, `CLAUDE.md` (the generated blocks) by explicit path. Never commit indexes or the DB. To keep raw runs,
 zip `OUT_DIR` without `indexes/` and `data/`.
 
 ## Troubleshooting

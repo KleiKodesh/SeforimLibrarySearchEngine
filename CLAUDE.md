@@ -54,8 +54,12 @@ in one or two lines. Remove entries that turn out to be wrong.
 - **`FTS-SPECS-AND-COMPARISONS.md` (repo root) stays up to date** (user's rule): feature specs,
   index builds, FtsLib parity, speed comparison with charts (ours both flavours, FtsLib,
   Otzaria) and the Otzaria hit-count comparison. Regenerate it with
-  `python -I -X utf8 tools/report/specs_report.py <scratchpad>` after every build, parity or
-  speed run, and update its specs table with every feature change, in the same commit.
+  `python -I -X utf8 tools/report/specs_report.py` (no argument: reads the committed
+  `bench-results/`) after every build, parity or speed run, and update its specs table with
+  every feature change, in the same commit. Full-run results go to `bench-results/` (the
+  run-all `report` step publishes them there), NEVER only to a scratchpad: scratchpads vanish
+  and the measured numbers were once lost that way. A new stale note goes into the script's
+  `STALE` list, never by hand into the generated blocks.
 - **Specs are generated together:** the "Current specs" block here, README's Specs section
   and FTS-SPECS-AND-COMPARISONS.md all come from `tools/report/specs_report.py`; never
   hand-edit text between the `SPECS:BEGIN` / `SPECS:END` markers, rerun the script.

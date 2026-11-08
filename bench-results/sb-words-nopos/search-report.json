@@ -1,0 +1,170 @@
+{
+ "_note": "Reconstructed from FTS-SPECS-AND-COMPARISONS.md at commit cae7954 (raw output lost with a temporary scratchpad); times rounded as printed there.",
+ "rows": [
+  {
+   "n": 0,
+   "query": "ה' אלהים",
+   "dist": null,
+   "hits": 28579,
+   "walks_collect_ms": 21.0,
+   "host_ms": 3600.0,
+   "first_ms": 325.0,
+   "total_ms": 3600.0,
+   "exit": 0
+  },
+  {
+   "n": 1,
+   "query": "ר' עקיבא",
+   "dist": "0",
+   "hits": 10117,
+   "walks_collect_ms": 18.0,
+   "host_ms": 3000.0,
+   "first_ms": 335.0,
+   "total_ms": 3000.0,
+   "exit": 0
+  },
+  {
+   "n": 2,
+   "query": "אמר ר",
+   "dist": "0",
+   "hits": 36706,
+   "walks_collect_ms": 37.0,
+   "host_ms": 14400.0,
+   "first_ms": 338.0,
+   "total_ms": 14400.0,
+   "exit": 0
+  },
+  {
+   "n": 3,
+   "query": "ב ג",
+   "dist": null,
+   "hits": 124360,
+   "walks_collect_ms": 34.0,
+   "host_ms": 10800.0,
+   "first_ms": 258.0,
+   "total_ms": 10800.0,
+   "exit": 0
+  },
+  {
+   "n": 4,
+   "query": "משה אהרן",
+   "dist": "1",
+   "hits": 3531,
+   "walks_collect_ms": 15.0,
+   "host_ms": 1800.0,
+   "first_ms": 225.0,
+   "total_ms": 1800.0,
+   "exit": 0
+  },
+  {
+   "n": 5,
+   "query": "משה ו אהרן",
+   "dist": "0",
+   "hits": 1,
+   "walks_collect_ms": 10.0,
+   "host_ms": 732.0,
+   "first_ms": 595.0,
+   "total_ms": 743.0,
+   "exit": 0
+  },
+  {
+   "n": 6,
+   "query": "פרק 1",
+   "dist": null,
+   "hits": 4266,
+   "walks_collect_ms": 6.0,
+   "host_ms": 408.0,
+   "first_ms": 228.0,
+   "total_ms": 413.0,
+   "exit": 0
+  },
+  {
+   "n": 7,
+   "query": "סימן 12",
+   "dist": null,
+   "hits": 228,
+   "walks_collect_ms": 5.0,
+   "host_ms": 226.0,
+   "first_ms": 228.0,
+   "total_ms": 231.0,
+   "exit": 0
+  },
+  {
+   "n": 8,
+   "query": "דף 2 עמוד",
+   "dist": "1",
+   "hits": 0,
+   "walks_collect_ms": 5.0,
+   "host_ms": 183.0,
+   "first_ms": null,
+   "total_ms": 188.0,
+   "exit": 0
+  },
+  {
+   "n": 9,
+   "query": "ב5",
+   "dist": null,
+   "hits": 2,
+   "walks_collect_ms": 3.0,
+   "host_ms": 204.0,
+   "first_ms": 205.0,
+   "total_ms": 207.0,
+   "exit": 0
+  },
+  {
+   "n": 10,
+   "query": "12*",
+   "dist": null,
+   "hits": 14733,
+   "walks_collect_ms": 9.0,
+   "host_ms": 1200.0,
+   "first_ms": 213.0,
+   "total_ms": 1200.0,
+   "exit": 0
+  },
+  {
+   "n": 11,
+   "query": "א~1",
+   "dist": null,
+   "hits": 4843052,
+   "walks_collect_ms": 436.0,
+   "host_ms": 199200.0,
+   "first_ms": 1800.0,
+   "total_ms": 200400.0,
+   "exit": 0
+  },
+  {
+   "n": 12,
+   "query": "אמר ה",
+   "dist": "2",
+   "hits": 23367,
+   "walks_collect_ms": 35.0,
+   "host_ms": 10200.0,
+   "first_ms": 224.0,
+   "total_ms": 10200.0,
+   "exit": 0
+  },
+  {
+   "n": 13,
+   "query": "ס\"ק 3",
+   "dist": "0",
+   "hits": 1,
+   "walks_collect_ms": 5.0,
+   "host_ms": 284.0,
+   "first_ms": 288.0,
+   "total_ms": 289.0,
+   "exit": 0
+  }
+ ],
+ "summary": {
+  "total_sum_ms": 247200.0,
+  "median_ms": 1200.0,
+  "first_median_ms": 258.0,
+  "slowest": [
+   11,
+   200400.0
+  ],
+  "common_total_ms": 246000.0,
+  "common_first_median_ms": 258.0
+ }
+}

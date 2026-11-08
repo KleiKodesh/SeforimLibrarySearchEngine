@@ -1,0 +1,247 @@
+{
+ "_note": "Reconstructed from FTS-SPECS-AND-COMPARISONS.md at commit cae7954 (raw output lost with a temporary scratchpad); times rounded as printed there.",
+ "rows": [
+  {
+   "n": 0,
+   "query": "ע.ש",
+   "dist": null,
+   "hits": 270946,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 79.0,
+   "total_ms": 21600.0,
+   "exit": 0
+  },
+  {
+   "n": 1,
+   "query": "עש",
+   "dist": null,
+   "hits": 270946,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 90.0,
+   "total_ms": 19800.0,
+   "exit": 0
+  },
+  {
+   "n": 2,
+   "query": "א.ב",
+   "dist": null,
+   "hits": 53485,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 70.0,
+   "total_ms": 6000.0,
+   "exit": 0
+  },
+  {
+   "n": 3,
+   "query": "וי[א]מר",
+   "dist": null,
+   "hits": 68072,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 53.0,
+   "total_ms": 6600.0,
+   "exit": 0
+  },
+  {
+   "n": 4,
+   "query": "ויאמר‏ משה",
+   "dist": "0",
+   "hits": 3174,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 120.0,
+   "total_ms": 688.0,
+   "exit": 0
+  },
+  {
+   "n": 5,
+   "query": "the",
+   "dist": null,
+   "hits": 1393,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 66.0,
+   "total_ms": 91.0,
+   "exit": 0
+  },
+  {
+   "n": 6,
+   "query": "torah",
+   "dist": null,
+   "hits": 20,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 44.0,
+   "total_ms": 45.0,
+   "exit": 0
+  },
+  {
+   "n": 7,
+   "query": "de la",
+   "dist": null,
+   "hits": 3,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 360.0,
+   "total_ms": 362.0,
+   "exit": 0
+  },
+  {
+   "n": 8,
+   "query": "בabc",
+   "dist": null,
+   "hits": 0,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 36.0,
+   "total_ms": 31.0,
+   "exit": 0
+  },
+  {
+   "n": 9,
+   "query": "και",
+   "dist": null,
+   "hits": 0,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 33.0,
+   "total_ms": 32.0,
+   "exit": 0
+  },
+  {
+   "n": 10,
+   "query": "תוס'",
+   "dist": null,
+   "hits": 155773,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 95.0,
+   "total_ms": 12600.0,
+   "exit": 0
+  },
+  {
+   "n": 11,
+   "query": "תוס' ד״ה",
+   "dist": "2",
+   "hits": 42598,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 231.0,
+   "total_ms": 7800.0,
+   "exit": 0
+  },
+  {
+   "n": 12,
+   "query": "ר' יוחנן",
+   "dist": "0",
+   "hits": 39427,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 123.0,
+   "total_ms": 13200.0,
+   "exit": 0
+  },
+  {
+   "n": 13,
+   "query": "רש”י",
+   "dist": null,
+   "hits": 320864,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 77.0,
+   "total_ms": 26400.0,
+   "exit": 0
+  },
+  {
+   "n": 14,
+   "query": "ז’ל",
+   "dist": null,
+   "hits": 32,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 68.0,
+   "total_ms": 56.0,
+   "exit": 0
+  },
+  {
+   "n": 15,
+   "query": "רמב”ם הלכות",
+   "dist": "3",
+   "hits": 1383,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 134.0,
+   "total_ms": 568.0,
+   "exit": 0
+  },
+  {
+   "n": 16,
+   "query": "שׂלום",
+   "dist": null,
+   "hits": 53339,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 62.0,
+   "total_ms": 4800.0,
+   "exit": 0
+  },
+  {
+   "n": 17,
+   "query": "(הוצא) [היצא]",
+   "dist": null,
+   "hits": 229,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 85.0,
+   "total_ms": 87.0,
+   "exit": 0
+  },
+  {
+   "n": 18,
+   "query": "היצא אותם",
+   "dist": "1",
+   "hits": 1,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 569.0,
+   "total_ms": 421.0,
+   "exit": 0
+  },
+  {
+   "n": 19,
+   "query": "משה אאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאא רבנו",
+   "dist": "1",
+   "hits": 0,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 43.0,
+   "total_ms": 44.0,
+   "exit": 0
+  },
+  {
+   "n": 20,
+   "query": "משה רבנו",
+   "dist": "0",
+   "hits": 1633,
+   "walks_collect_ms": null,
+   "host_ms": null,
+   "first_ms": 128.0,
+   "total_ms": 706.0,
+   "exit": 0
+  }
+ ],
+ "summary": {
+  "total_sum_ms": 122400.0,
+  "median_ms": 688.0,
+  "first_median_ms": 79.0,
+  "slowest": [
+   13,
+   26400.0
+  ],
+  "common_total_ms": 122400.0,
+  "common_first_median_ms": 78.8
+ }
+}

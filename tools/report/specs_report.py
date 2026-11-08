@@ -3,20 +3,24 @@ and search_report.py JSON runs, and rewrites the generated specs summary between
 the SPECS markers in README.md and CLAUDE.md from the same data, so the three stay
 consistent. Rerun it whenever new runs land or the engine changes.
 
-    python -I -X utf8 tools/report/specs_report.py <results dir> [--prefix P]
+    python -I -X utf8 tools/report/specs_report.py [<results dir>] [--prefix P]
 
-<results dir> holds the run dirs <P>sb-<set>-<engine> and logs/<P>build-<flavour>.log
-(tools/bench/run-all.sh writes them with an empty prefix; the default "r11-" reads the
-older scratchpad naming).
+<results dir> (default: bench-results/ at the repo root, committed, so any machine or
+session regenerates the docs with the measured numbers) holds the run dirs
+<P>sb-<set>-<engine>, logs/<P>build-<flavour>.log, logs/<P>parity-<set>-<flavour>-compare.log,
+otz-hitcount.json and machine.txt. tools/bench/run-all.sh writes them there with an empty
+prefix (the default); --prefix r11- reads the older scratchpad naming.
 """
 import json, os, re, statistics, sys, datetime
 
-SP = sys.argv[1]
-P = sys.argv[sys.argv.index("--prefix") + 1] if "--prefix" in sys.argv else "r11-"
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_args = [a for i, a in enumerate(sys.argv[1:], 1) if a != "--prefix" and sys.argv[i - 1] != "--prefix"]
+SP = _args[0] if _args else os.path.join(ROOT, "bench-results")
+P = sys.argv[sys.argv.index("--prefix") + 1] if "--prefix" in sys.argv else ""
 OUT = os.path.join(ROOT, "FTS-SPECS-AND-COMPARISONS.md")
 INDEX_FORMAT = "tantivy13"   # C# TantivySeforimIndex.IndexFormatVersion
 FTSLIB_FORMAT = "fts11"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
+MEASURED_FTSLIB = "fts8"      # FtsLib format of the runs in the results dir (= FTSLIB_FORMAT once rerun)
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
 STALE = [
     "Index builds, parity and search speed below were measured on `tantivy9` / FtsLib `fts8`. "
@@ -63,6 +67,9 @@ def t(ms):
     return f"{ms:,.0f} ms" if ms < 1000 else f"{ms / 60000:.2f} min"
 
 
+RUNS_ON = f"; runs below on {MEASURED_FTSLIB}" if MEASURED_FTSLIB != FTSLIB_FORMAT else ""
+
+
 def load(set_, pattern):
     p = os.path.join(SP, pattern.format(set=set_), "search-report.json")
     if not os.path.exists(p):
@@ -72,7 +79,9 @@ def load(set_, pattern):
     except Exception:
         return None
     rows = [r for r in d.get("rows", []) if r.get("exit", 1) == 0 and r.get("total_ms") is not None]
-    return {"rows": {r["n"]: r for r in rows}, "all": d.get("rows", [])}
+    # "summary": aggregates as originally measured, kept by runs reconstructed from rounded per-query
+    # values (bench-results/README.md); a real run has none and the aggregates are computed.
+    return {"rows": {r["n"]: r for r in rows}, "all": d.get("rows", []), "summary": d.get("summary", {})}
 
 
 def build(log):
@@ -134,13 +143,13 @@ if STALE:
     md.extend(f"> - {s}" for s in STALE)
     md.append("")
 
-md.append("""## Engines compared
+md.append(f"""## Engines compared
 
 | Engine | What it is |
 |---|---|
 | ours, positions | this repo: modified tantivy + hebrew-fts walks, index with positions (span queries) |
 | ours, no positions | same engine, index without positions; distance/order checked on the text by the locator |
-| FtsLib | KitveiHakodesh FtsLib (SQLite FTS5, `detail=none`, index fts11) |
+| FtsLib | KitveiHakodesh FtsLib (SQLite FTS5, `detail=none`, index {FTSLIB_FORMAT}{RUNS_ON}) |
 | Otzaria | otzaria_search_engine v5.0.0 (tantivy), driven by the scratchpad driver |
 
 ## Feature specs (ours)
@@ -171,19 +180,20 @@ bl = [(name, build(log)) for name, log in BUILDS]
 
 
 def ref_build(log, label, fallback):
-    """FtsLib / Otzaria build row from this run's log (total + size), else the reference numbers."""
+    """FtsLib / Otzaria build row from this run's log (total + size), else the reference numbers
+    (label, time text, size text) measured earlier."""
     p = os.path.join(SP, "logs", log)
     if os.path.exists(p):
         s = open(p, encoding="utf-8", errors="replace").read()
         tot = re.search(r"^build: .*? in ([\d.]+)s", s, re.M)
         size = re.search(r"index size: ([\d.]+) MB", s)
         if tot and size:
-            return (label, float(tot.group(1)) * 1000, float(size.group(1)), True)
-    return (label, fallback[0], fallback[1], False)
+            return (label, t(float(tot.group(1)) * 1000), f"{float(size.group(1)):,.1f} MB", True)
+    return fallback + (False,)
 
 
-REF_BUILDS = [ref_build(P + "build-ftslib.log", f"FtsLib ({FTSLIB_FORMAT})", (16.2 * 60000, 746.0)),
-              ref_build(P + "build-otzaria.log", "Otzaria v5.0.0", (8.1 * 60000, 1914.0))]
+REF_BUILDS = [ref_build(P + "build-ftslib.log", f"FtsLib ({FTSLIB_FORMAT})", ("FtsLib (fts8)", "16.2 min", "746.0 MB")),
+              ref_build(P + "build-otzaria.log", "Otzaria v5.0.0", ("Otzaria v5.0.0", "8.1 min", "1,914 MB"))]
 PARITY_SETS = [("diff10", "queries-diff10"), ("large", "queries-large"), ("words", "queries-words"),
                ("rules", "queries-rules"), ("ketiv", "queries-ketiv (ketiv on)")]
 
@@ -215,9 +225,12 @@ for name, b in bl:
     st = b["stages"]
     g = lambda k: next((v for kk, v in st.items() if kk.startswith(k)), None)
     md.append(f"| {name} | {t(g('indexing'))} | {t(g('merge'))} | {t(g('FM'))} | {t(b['total'])} | {b['size']:,.1f} MB |")
-for label, ms, mb, measured in REF_BUILDS:
-    md.append(f"| {label}{'' if measured else ' (reference, measured earlier)'} | n/a | n/a | n/a | {t(ms)} | {mb:,.1f} MB |")
-md.append("\nOtzaria's index is not merged to one segment.\n")
+for label, tm, mb, measured in REF_BUILDS:
+    if measured:
+        md.append(f"| {label} | n/a | n/a | n/a | {tm} | {mb} |")
+_ref = [f"{label.replace('(', '').replace(')', '')} {tm} / {mb}" for label, tm, mb, measured in REF_BUILDS if not measured]
+md.append("\nReference builds measured earlier: " + "; ".join(_ref) + " (not merged to one segment).\n" if _ref
+          else "\nOtzaria's index is not merged to one segment.\n")
 for name, b in bl:
     if b and b["files"]:
         md.append(f"**{name}, per file:** " + ", ".join(f"`{f}` {m:,.1f} MB" for f, m in b["files"]) + "\n")
@@ -228,7 +241,6 @@ if ok:
     md.append(bar_chart("Index size (MB)", "MB", [n for n, _ in ok], [("size", [b["size"] for _, b in ok])], 1))
 
 md.append("## Parity with FtsLib (identical lines, first 20,000 hits, both index flavours)\n")
-md.append("From this run's compare logs (`logs/parity-<set>-<flavour>-compare.log`).\n")
 md.append("| Set | Positions | No positions |\n|---|---|---|")
 for set_, title, a, b in PAR:
     md.append(f"| {title} | {a or 'not run'} | {b or 'not run'} |")
@@ -251,8 +263,12 @@ for set_, title in SETS:
         tot = [r["total_ms"] for r in rows]
         first = [r["first_ms"] for r in rows if r.get("first_ms") is not None]
         slow = max(rows, key=lambda r: r["total_ms"])
-        md.append(f"| {name} | {len(rows)} | {t(sum(tot))} | {t(statistics.median(tot))} | "
-                  f"{t(statistics.median(first)) if first else 'n/a'} | q{slow['n'] + 1}: {t(slow['total_ms'])} |")
+        sm = d["summary"]
+        slow_n, slow_ms = sm.get("slowest", (slow["n"], slow["total_ms"]))
+        first_med = sm.get("first_median_ms", statistics.median(first) if first else None)
+        md.append(f"| {name} | {len(rows)} | {t(sm.get('total_sum_ms', sum(tot)))} | "
+                  f"{t(sm.get('median_ms', statistics.median(tot)))} | "
+                  f"{t(first_med) if first_med is not None else 'n/a'} | q{slow_n + 1}: {t(slow_ms)} |")
         have.append((name, d))
     md.append("")
     if not have:
@@ -262,9 +278,12 @@ for set_, title in SETS:
     if len(have) > 1 and common:
         md.append(f"Over the {len(common)} queries every engine ran:\n")
         md.append(bar_chart(f"{set_}: total time over common queries (minutes)", "minutes", [n for n, _ in have],
-                            [("total", [sum(d['rows'][q]['total_ms'] for q in common) for _, d in have])], 60000))
+                            [("total", [d["summary"].get("common_total_ms", sum(d['rows'][q]['total_ms'] for q in common))
+                                        for _, d in have])], 60000))
         md.append(bar_chart(f"{set_}: median first batch (ms)", "ms", [n for n, _ in have],
-                            [("first", [statistics.median([d['rows'][q].get('first_ms') or 0 for q in common]) for _, d in have])], 1))
+                            [("first", [d["summary"].get("common_first_median_ms",
+                                                         statistics.median([d['rows'][q].get('first_ms') or 0 for q in common]))
+                                        for _, d in have])], 1))
     qs = sorted(set.union(*[set(d["rows"]) for _, d in have]))
     md.append(bar_chart(f"{set_}: total per query (minutes)", "minutes", [f"q{q + 1}" for q in qs],
                         [(n, [d["rows"].get(q, {}).get("total_ms") for q in qs]) for n, d in have], 60000))
@@ -361,8 +380,10 @@ def speed_lines():
             if d and d["rows"]:
                 rows = list(d["rows"].values())
                 first = [r["first_ms"] for r in rows if r.get("first_ms") is not None]
-                cells.append(f"{name}: median {t(statistics.median([r['total_ms'] for r in rows]))}"
-                             + (f", first batch {t(statistics.median(first))}" if first else ""))
+                sm = d["summary"]
+                first_med = sm.get("first_median_ms", statistics.median(first) if first else None)
+                cells.append(f"{name}: median {t(sm.get('median_ms', statistics.median([r['total_ms'] for r in rows])))}"
+                             + (f", first batch {t(first_med)}" if first_med is not None else ""))
         out.append(f"| {title} | " + "; ".join(cells) + " |")
     return out
 
@@ -372,8 +393,8 @@ def build_lines():
     for name, b in bl:
         if b:
             out.append(f"| {name} | {t(b['total'])} | {b['size']:,.1f} MB |")
-    for label, ms, mb, measured in REF_BUILDS:
-        out.append(f"| {label}{'' if measured else ' (reference)'} | {t(ms)} | {mb:,.1f} MB |")
+    for label, tm, mb, measured in REF_BUILDS:
+        out.append(f"| {label} | {tm} | {mb} |")
     return out
 
 
@@ -392,7 +413,9 @@ readme_block = "\n".join([
     "",
     "**Index builds (full DB, 7,080,797 lines):**", "",
     "| Build | Total | Size |", "|---|---|---|", *build_lines(), "",
-    "**Parity with FtsLib** (identical lines, first 20,000 hits): " + parity_summary() + ".", "",
+    ("**Parity with FtsLib** (identical lines, first 20,000 hits, both flavours): "
+     + ", ".join(f"{x[0]} {x[2]}" for x in PAR_RUN) + "." if PAR_ALL_SAME
+     else "**Parity with FtsLib** (identical lines, first 20,000 hits): " + parity_summary() + "."), "",
     *([f"**Machine:** {MACHINE_LINE}", ""] if MACHINE_LINE else []),
     "**Search speed** (every hit read, median per query):", "",
     "| Set | Per engine |", "|---|---|", *speed_lines(), "",

@@ -1141,7 +1141,7 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
 
 ## Build and search reports
 
-Full comparison on any machine (index builds, parity, speed, Otzaria hit counts, report) with one command: [tools/bench/README.md](tools/bench/README.md) (`tools/bench/run-all.sh`).
+Full comparison on any machine (index builds, parity, speed, Otzaria hit counts, report) with one command: [tools/bench/README.md](tools/bench/README.md) (`tools/bench/run-all.sh`). Its small result files are committed in [bench-results/](bench-results/README.md); `python -I -X utf8 tools/report/specs_report.py` (no argument) regenerates the specs docs from them.
 
 - `SeforimSearch.Demo build` prints progress, then each stage's time
   (indexing, merge into one segment, FM-index sidecar), the total, and the

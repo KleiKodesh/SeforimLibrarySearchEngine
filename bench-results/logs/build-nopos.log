@@ -1,0 +1,11 @@
+# Reconstructed from FTS-SPECS-AND-COMPARISONS.md at commit cae7954 (raw output lost with a temporary scratchpad); times rounded as printed there.
+stage: indexing: 320.400s
+stage: merge: 51.600s
+stage: FM sidecar: 2.400s
+index size: 748.6 MB
+  .idx 579.3 MB
+  .fast 45.1 MB
+  .fmi 43.9 MB
+  .term 37.7 MB
+  .store 28.5 MB
+  .fieldnorm 14.2 MB

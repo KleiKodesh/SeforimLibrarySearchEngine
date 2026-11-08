@@ -22,8 +22,8 @@ Background: [README.md](README.md) (what is tested and why). Repo rules: `CLAUDE
 6. `--steps parity` (~30 min). Every compare log must say identical; a difference is analysed (our gap or FtsLib bug) before anything is fixed, and reported.
 7. `--steps speed` (1-3 h). Nothing else on the machine.
 8. `--steps hitcount` (~10 min). New non-zero diffs come out `unclassified`: analyse (diff lines, read samples) and add the class + reason to `hitcount-classes.json`.
-9. `--steps report`. The generator writes the machine (`OUT_DIR/machine.txt`: OS, CPU, cores, RAM, disk), the FtsLib / Otzaria build rows (from `logs/build-ftslib.log`, `logs/build-otzaria.log`; reference numbers only when a log is missing) and the parity table (from the compare logs) into FTS-SPECS-AND-COMPARISONS.md; check them.
-10. Commit FTS-SPECS-AND-COMPARISONS.md, README.md, CLAUDE.md (+ hitcount-classes.json if changed) and push.
+9. `--steps report`. It first publishes the run's small result files into `bench-results/` (`RESULTS_DIR`); the generator then writes the machine (`OUT_DIR/machine.txt`: OS, CPU, cores, RAM, disk), the FtsLib / Otzaria build rows (from `logs/build-ftslib.log`, `logs/build-otzaria.log`; reference numbers only when a log is missing) and the parity table (from the compare logs) into FTS-SPECS-AND-COMPARISONS.md; check them.
+10. Results now on the current index format: set `MEASURED_FTSLIB` and drop the rerun items from `STALE` in `tools/report/specs_report.py`, rerun `--steps report`. Commit `bench-results/`, FTS-SPECS-AND-COMPARISONS.md, README.md, CLAUDE.md (+ hitcount-classes.json if changed) and push.
 
 Recovery: rerun the same command; finished units are skipped (`OUT_DIR/.done/`). `--force` redoes all requested units; delete one marker to redo one unit. An index is rebuilt automatically when its format string changed.
 

@@ -57,6 +57,7 @@ for c in python3 python; do "$c" -c "import sys" >/dev/null 2>&1 && { PY="$c"; b
 wp() { if [ "$PLAT" = windows ] && command -v cygpath >/dev/null; then cygpath -m "$1"; else echo "$1"; fi; }
 
 OUT_DIR="${OUT_DIR/#\~/$HOME}"
+RESULTS_DIR="${RESULTS_DIR:-$ROOT/bench-results}"; RESULTS_DIR="${RESULTS_DIR/#\~/$HOME}"
 LOGS="$OUT_DIR/logs"; DONE="$OUT_DIR/.done"
 IDX_POS="${IDX_POS:-$OUT_DIR/indexes/ours-pos}"
 IDX_NOPOS="${IDX_NOPOS:-$OUT_DIR/indexes/ours-nopos}"
@@ -226,10 +227,33 @@ step_hitcount() {
   run hitcount hitcount "$PY" -I -X utf8 "$(wp "$HERE/hitcount.py")" "$(wp "$NATIVE")" "$(wp "$IDX_POS")" "$(wp "$OUT_DIR")" && [ $DRY = 0 ] && mark hitcount
 }
 
+publish_results() {
+  # Copy this run's small result files from OUT_DIR into RESULTS_DIR (committed bench-results/),
+  # so any machine or session regenerates the docs. Only files this run produced are replaced;
+  # build and compare logs keep just the lines specs_report.py reads (full logs stay in OUT_DIR).
+  mkdir -p "$RESULTS_DIR/logs"
+  local f b
+  for f in "$OUT_DIR"/logs/build-{pos,nopos,marks,ftslib,otzaria}.log; do
+    [ -f "$f" ] || continue
+    grep -E '^[[:space:]]*(stage: |index size: |build: |EXIT )|^[[:space:]]+\.[[:alnum:]_]+[[:space:]]+[0-9.]+ MB' "$f" > "$RESULTS_DIR/logs/$(basename "$f")"
+  done
+  for f in "$OUT_DIR"/logs/parity-*-compare.log; do
+    [ -f "$f" ] || continue
+    grep -E 'queries identical|^EXIT ' "$f" > "$RESULTS_DIR/logs/$(basename "$f")"
+  done
+  for f in "$OUT_DIR"/sb-*/search-report.json; do
+    [ -f "$f" ] || continue
+    b="$(basename "$(dirname "$f")")"; mkdir -p "$RESULTS_DIR/$b"
+    cp "$f" "$RESULTS_DIR/$b/"; [ -f "$OUT_DIR/$b/search-report.md" ] && cp "$OUT_DIR/$b/search-report.md" "$RESULTS_DIR/$b/"
+  done
+  for f in otz-hitcount.json machine.txt; do [ -f "$OUT_DIR/$f" ] && cp "$OUT_DIR/$f" "$RESULTS_DIR/"; done
+  echo "results published to $RESULTS_DIR"
+}
+
 step_report() {
-  # Build logs are where specs_report.py expects them: <out>/logs/build-<flavour>.log.
   [ $DRY = 0 ] && detect > "$OUT_DIR/machine.txt" 2>&1
-  run report report "$PY" -I -X utf8 tools/report/specs_report.py "$(wp "$OUT_DIR")" --prefix ""
+  [ $DRY = 0 ] && publish_results
+  run report report "$PY" -I -X utf8 tools/report/specs_report.py "$(wp "$RESULTS_DIR")"
 }
 
 # ---------------- main ----------------

@@ -229,4 +229,30 @@ void main() {
     }
     db.close();
   });
+
+  test('db: heRefs and sectionsOf over 33000+ ids read in chunks (issue #9 CB08)', () {
+    final path = '${dir.path}/big.db';
+    final w = create(path);
+    w.execute('CREATE TABLE line_toc (lineId INTEGER PRIMARY KEY, tocEntryId INTEGER)');
+    w.execute('BEGIN');
+    const n = 34000;
+    for (var i = 1; i <= n; i++) {
+      w.execute('INSERT INTO line (id, bookId, lineIndex, content, heRef) VALUES (?, 1, ?, ?, ?)',
+          [i, i, 'x', 'r$i']);
+      w.execute('INSERT INTO line_toc VALUES (?, ?)', [i, i % 7]);
+    }
+    w.execute('COMMIT');
+    w.close();
+    final db = SeforimDb.open(path);
+    final ids = [for (var i = 1; i <= n + 5; i++) i];
+    final refs = db.heRefs(ids);
+    expect(refs.length, n);
+    expect(refs[1], 'r1');
+    expect(refs[n], 'r$n');
+    final secs = db.sectionsOf(ids);
+    expect(secs.length, n);
+    expect(secs[n], n % 7);
+    expect(db.countLines(), n); // the read transaction was closed
+    db.close();
+  });
 }

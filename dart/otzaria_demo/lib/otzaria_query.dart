@@ -1,6 +1,7 @@
 import 'package:seforim_search/seforim_search.dart';
 
 import 'acronym_lexicon.dart';
+import 'lexicon_text.dart' show foldPresentationForms;
 import 'translation_lexicon.dart';
 
 /// Otzaria's search modes (`SearchMode`).
@@ -41,11 +42,13 @@ abstract final class OtzariaOption {
   static const teamim = 'טעמים';
 
   /// Options exact mode allows (Otzaria `exactWordOptionKeys`).
-  static const exactAllowed = {grammaticalPrefixes, grammaticalSuffixes, prefixes, suffixes, fullOrDefective};
+  static const exactAllowed = {grammaticalPrefixes, grammaticalSuffixes, fullOrDefective, partial, typoTolerance};
   static const unsupported = <String>{};
 }
 
-/// Otzaria's query sanitizer: ״/׳ → "/', maqaf, hyphen and `|` → space
+/// Otzaria's query sanitizer: `&nbsp;` and the other space entities and
+/// every char the engine's scanner does not keep in a word become spaces,
+/// presentation forms fold to letters + marks; ״/׳ → "/', maqaf, hyphen and `|` → space
 /// (Otzaria: `|` separates; the engine cuts typed words there too), collapse
 /// spaces; `"` at a word edge separates, between letters it stays (רמב"ם);
 /// `''` → `"`.
@@ -63,10 +66,14 @@ List<String> splitQueryWords(String query) => [for (final w in splitQueryWordsWi
 /// quotes are folded to `"` with gershayim.
 List<(String, int?)> splitQueryWordsWithPhrases(String query) {
   // one char for one char, so offsets hold for the phrase spans
-  final q = SeforimIndex.reducePairedReadings(query)
+  final q = SeforimIndex.reducePairedReadings(foldPresentationForms(query)
+          .replaceAll(RegExp(r'&(nbsp|ensp|emsp|thinsp|#160|#x0*a0);', caseSensitive: false), ' '))
       .replaceAll(RegExp('[״“”„]'), '"')
       .replaceAll('׳', "'")
-      .replaceAll(RegExp('[־|-]'), ' ');
+      .replaceAll(RegExp('[־|-]'), ' ')
+      // every other char the engine's scanner does not keep in a word
+      // (letters, marks, ASCII digits, quotes) separates, as it does there
+      .replaceAll(RegExp(r'''[^\p{L}\p{M}0-9"']''', unicode: true), ' ');
   bool letter(int? c) => c != null && c >= 0x05D0 && c <= 0x05EA;
   final spans = <(int, int)>[];
   int? start;

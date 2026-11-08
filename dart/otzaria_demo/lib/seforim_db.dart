@@ -134,9 +134,32 @@ class SeforimDb {
     _dataVersion = o.dataVersion;
   }
 
+  bool _inReadTx = false;
+
+  /// Runs [body] inside ONE read transaction, so every chunked query in it
+  /// sees the same snapshot (a writer committing between chunks is not seen).
+  T _readSnapshot<T>(T Function() body) {
+    _ensureCurrent();
+    _db.execute('BEGIN');
+    _inReadTx = true;
+    try {
+      return body();
+    } finally {
+      _inReadTx = false;
+      _db.execute('COMMIT');
+    }
+  }
+
+  /// [ids] in chunks of at most 900 (under SQLite's bound-parameter limit).
+  static Iterable<List<int>> _chunks(List<int> ids) sync* {
+    for (var i = 0; i < ids.length; i += 900) {
+      yield ids.sublist(i, i + 900 > ids.length ? ids.length : i + 900);
+    }
+  }
+
   /// Runs [sql] through its kept prepared statement.
   ResultSet _select(String sql, [List<Object?> params = const []]) {
-    _ensureCurrent();
+    if (!_inReadTx) _ensureCurrent();
     if (_statements.length >= 64 && !_statements.containsKey(sql)) {
       // IN-lists of every remainder size: bound the cache
       for (final stmt in _statements.values) {
@@ -374,33 +397,35 @@ class SeforimDb {
   /// Each line's section (TOC entry) for grouping, straight from the DB: the
   /// engine only returns line ids. `line_toc` is the authoritative map
   /// (`line.tocEntryId` is NULL for most lines). Lines without one are absent.
-  Map<int, int> sectionsOf(Iterable<int> ids) {
-    final hasLineToc =
-        _select("SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_toc'").isNotEmpty;
-    final out = <int, int>{};
-    final list = ids.toList();
-    for (var i = 0; i < list.length; i += 900) {
-      final chunk = list.sublist(i, i + 900 > list.length ? list.length : i + 900);
-      final marks = List.filled(chunk.length, '?').join(',');
-      final rs = _select(
-          hasLineToc
-              ? 'SELECT lineId, tocEntryId FROM line_toc WHERE lineId IN ($marks)'
-              : 'SELECT id, tocEntryId FROM line WHERE tocEntryId IS NOT NULL AND id IN ($marks)',
-          chunk);
-      for (final r in rs) {
-        out[r.columnAt(0) as int] = r.columnAt(1) as int;
-      }
-    }
-    return out;
-  }
+  Map<int, int> sectionsOf(Iterable<int> ids) => _readSnapshot(() {
+        final hasLineToc =
+            _select("SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_toc'").isNotEmpty;
+        final out = <int, int>{};
+        for (final chunk in _chunks(ids.toList())) {
+          final marks = List.filled(chunk.length, '?').join(',');
+          final rs = _select(
+              hasLineToc
+                  ? 'SELECT lineId, tocEntryId FROM line_toc WHERE lineId IN ($marks)'
+                  : 'SELECT id, tocEntryId FROM line WHERE tocEntryId IS NOT NULL AND id IN ($marks)',
+              chunk);
+          for (final r in rs) {
+            out[r.columnAt(0) as int] = r.columnAt(1) as int;
+          }
+        }
+        return out;
+      });
 
-  /// heRef of line ids.
+  /// heRef of line ids, read in chunks of at most 900 ids inside one read
+  /// transaction (one snapshot for every chunk).
   Map<int, String> heRefs(Iterable<int> ids) {
     final list = ids.toList();
     if (list.isEmpty) return {};
-    final rs = _select(
-        'SELECT id, heRef FROM line WHERE id IN (${List.filled(list.length, '?').join(',')})', list);
-    return {for (final r in rs) r['id'] as int: (r['heRef'] as String?) ?? ''};
+    return _readSnapshot(() => {
+          for (final chunk in _chunks(list))
+            for (final r in _select(
+                'SELECT id, heRef FROM line WHERE id IN (${List.filled(chunk.length, '?').join(',')})', chunk))
+              r['id'] as int: (r['heRef'] as String?) ?? '',
+        });
   }
 
   Map<int, String> bookTitles() =>

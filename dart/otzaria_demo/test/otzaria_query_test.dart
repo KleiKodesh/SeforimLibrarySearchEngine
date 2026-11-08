@@ -138,4 +138,40 @@ void main() {
       'gaps': [0]
     });
   });
+
+  test('exact mode allows Otzaria exactWordOptionKeys only (issue #9 CB04)', () {
+    expect(OtzariaOption.exactAllowed, {
+      OtzariaOption.grammaticalPrefixes,
+      OtzariaOption.grammaticalSuffixes,
+      OtzariaOption.fullOrDefective,
+      OtzariaOption.partial,
+      OtzariaOption.typoTolerance,
+    });
+  });
+
+  // Engine scanner word counts (FtsLib / Otzaria word model: runs of letters,
+  // marks and ASCII digits; quotes stay only between letters).
+  test('words split as the engine scanner does (issue #9 CB05)', () {
+    const a = '\u05D0\u05D1', b = '\u05D2\u05D3', c = '\u05D4\u05D5';
+    final cases = <String, List<String>>{
+      '$a,$b': [a, b],
+      '$a.$b;$c': [a, b, c],
+      '$a:$b!$c?': [a, b, c],
+      '$a($b)': [a, b],
+      '$a\u05C3 $b\u05C0$c': [a, b, c], // sof pasuq, paseq
+      '$a\u2013$b \u00A0$c': [a, b, c], // en dash, nbsp
+      '${a}5,$b': ['${a}5', b],
+      '\u05D0"\u05D1, $b': ['\u05D0"\u05D1', b],
+      '$a/$b+$c': [a, b, c],
+    };
+    cases.forEach((q, want) => expect(splitQueryWords(q), want, reason: q.codeUnits.toString()));
+  });
+
+  test('sanitizer folds space entities and presentation forms (issue #9 CB06)', () {
+    const a = '\u05D0\u05D1', b = '\u05D2\u05D3';
+    expect(splitQueryWords('$a&nbsp;$b'), [a, b]);
+    expect(splitQueryWords('$a&NBSP;$b&#160;$a&ensp;$b&#xa0;$a'), [a, b, a, b, a]);
+    // U+FB2E (alef + patah) -> U+05D0 U+05B7; U+FB31 (bet + dagesh) -> U+05D1 U+05BC
+    expect(splitQueryWords('\uFB2E\uFB31'), ['\u05D0\u05B7\u05D1\u05BC']);
+  });
 }

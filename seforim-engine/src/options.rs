@@ -229,7 +229,12 @@ pub struct ExcludeOptions {
     pub phrase_alternatives: Vec<PhraseOptions>,
     pub max_word_distance: Option<usize>,
     pub require_ordered: bool,
-    /// Per typed word of `query`, as [`SearchOptions::proximity`].
+    /// Per typed word of `query`, as [`SearchOptions::proximity`]. None
+    /// (with no `max_word_distance` / `require_ordered`) = the positive
+    /// query's rule, as Otzaria's negativeDistance defaults to its distance:
+    /// an any-order distance as is, an ordered rule with one distance for
+    /// every pair; per-pair custom spacing is not inherited. Without a
+    /// proximity, the query's `max_word_distance` / `require_ordered`.
     pub proximity: Option<ProximitySpec>,
     /// Otzaria's SameSection negative scope: a section holding every
     /// negative word is dropped whole (see `ExcludeSpec::same_section`).
@@ -426,15 +431,34 @@ impl SearchOptions {
                     Some(w) => (w.apply(global), w.alternatives.as_slice()),
                     None => (global, &[]),
                 });
-                let (groups, proximity) = match &e.proximity {
+                // No rule of its own: the positive query's (Otzaria's
+                // `negativeDistance ?? distance` with the query's any order;
+                // its negative custom spacing defaults to none).
+                let own_rule = e.proximity.is_some() || e.max_word_distance.is_some() || e.require_ordered;
+                // (FtsLib's distance / order fields, when the positive
+                // query has no proximity, are inherited as they are; the
+                // user's rule is kept even when a whole quoted phrase
+                // replaces it for the positive query, as Otzaria passes
+                // its distance to the negative query then too)
+                let (max_word_distance, require_ordered) = if own_rule || self.proximity.is_some() {
+                    (e.max_word_distance, e.require_ordered)
+                } else {
+                    (self.max_word_distance, self.require_ordered)
+                };
+                let inherited = if !own_rule {
+                    self.proximity.as_ref().and_then(|p| inherited_proximity(p, ex.typed.len()))
+                } else {
+                    None
+                };
+                let (groups, proximity) = match e.proximity.as_ref().or(inherited.as_ref()) {
                     Some(p) => (ex.searched_groups(), Some(ex.lower(p)?)),
                     None => (ex.groups.clone(), None),
                 };
                 Some(ExcludeSpec {
                     proximity,
                     groups,
-                    max_word_distance: e.max_word_distance,
-                    require_ordered: e.require_ordered,
+                    max_word_distance,
+                    require_ordered,
                     gaps: None,
                     phrase_alternatives: phrases(&e.phrase_alternatives, keep_marks),
                     // Otzaria: `voc.or(options_vocalized_flags(negative_search_options))`
@@ -762,6 +786,25 @@ impl Slots {
     }
 }
 
+/// The positive query's proximity rule for a negative query of `typed`
+/// typed words: its any-order distance as is, an ordered rule when its gaps
+/// are one distance (that distance for every negative pair). Per-pair
+/// custom spacing is not inherited (Otzaria's negative custom spacing
+/// defaults to none, and the plain distance under it is not in the
+/// request), nor a resolved `Window`.
+fn inherited_proximity(p: &ProximitySpec, typed: usize) -> Option<ProximitySpec> {
+    match p {
+        ProximitySpec::AnyOrder { distance } => Some(ProximitySpec::AnyOrder { distance: *distance }),
+        ProximitySpec::Ordered { gaps } => {
+            let d = *gaps.first()?;
+            gaps.iter()
+                .all(|&g| g == d)
+                .then(|| ProximitySpec::Ordered { gaps: vec![d; typed.saturating_sub(1)] })
+        }
+        ProximitySpec::Window { .. } => None,
+    }
+}
+
 /// FtsLib's grouping of the tokens (`QueryParser.Parse`): a `|` joins its
 /// neighbours into one OR slot; a word that cannot search is skipped
 /// without breaking a pending `|`. `word(i)` gives typed word i's options
@@ -894,6 +937,51 @@ mod tests {
         assert!(matches!(&lower(format!("%{word}"), false)[0], GroupSpec::Grammar { .. }));
         assert_eq!(star_core("**ab*"), Some(("**", "ab", "*")));
         assert_eq!(star_core("a*b"), None);
+    }
+
+    /// Issue #10: a negative query with no rule of its own takes the
+    /// positive query's (Otzaria's negativeDistance ?? distance).
+    #[test]
+    fn exclude_proximity_defaults_to_the_positive_rule() {
+        let (a, b, c) = ("\u{05D0}\u{05D1}", "\u{05D2}\u{05D3}", "\u{05D4}\u{05D5}");
+        let ex = |e: ExcludeOptions, p: Option<ProximitySpec>| {
+            let o = SearchOptions { query: format!("{a} {b}"), proximity: p, exclude: Some(e), ..Default::default() };
+            o.to_request(false).unwrap().exclude.unwrap().proximity
+        };
+        let three = || ExcludeOptions { query: format!("{a} {b} {c}"), ..Default::default() };
+        let ordered = |g: Vec<u32>| Some(ProximitySpec::Ordered { gaps: g });
+        // one distance: every negative pair
+        assert_eq!(ex(three(), ordered(vec![2])), ordered(vec![2, 2]));
+        // any order: its distance, resolved for three words
+        assert_eq!(
+            ex(three(), Some(ProximitySpec::AnyOrder { distance: 3 })),
+            Some(ProximitySpec::AnyOrder { distance: 3 })
+        );
+        // none on the positive query: anywhere in the line
+        assert_eq!(ex(three(), None), None);
+        // its own rule wins, and so do its own distance / order fields
+        let own = ExcludeOptions { proximity: ordered(vec![0, 1]), ..three() };
+        assert_eq!(ex(own, ordered(vec![2])), ordered(vec![0, 1]));
+        let dist = ExcludeOptions { max_word_distance: Some(4), ..three() };
+        assert_eq!(ex(dist, ordered(vec![2])), None);
+        // per-pair custom spacing is not inherited
+        let o = SearchOptions {
+            query: format!("{a} {b} {c}"),
+            proximity: ordered(vec![0, 3]),
+            exclude: Some(three()),
+            ..Default::default()
+        };
+        assert_eq!(o.to_request(false).unwrap().exclude.unwrap().proximity, None);
+        // FtsLib's distance / order fields are inherited as they are
+        let o = SearchOptions {
+            query: format!("{a} {b}"),
+            max_word_distance: Some(5),
+            require_ordered: true,
+            exclude: Some(three()),
+            ..Default::default()
+        };
+        let e = o.to_request(false).unwrap().exclude.unwrap();
+        assert_eq!((e.max_word_distance, e.require_ordered, e.proximity), (Some(5), true, None));
     }
 
     fn word_of(g: &GroupSpec) -> (&str, WalkOptionsSpec) {

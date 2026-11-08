@@ -878,6 +878,11 @@ namespace SeforimSearch.Engine
         public List<PhraseOptions> PhraseAlternatives { get; } = new List<PhraseOptions>();
         public int? MaxWordDistance { get; set; }
         public bool RequireOrdered { get; set; }
+        /// <summary>Per typed negative word. Null (and no MaxWordDistance / RequireOrdered) =
+        /// the positive query's rule, as Otzaria's negativeDistance defaults to its distance:
+        /// an any-order distance as is, an ordered rule with one distance for every pair;
+        /// per-pair custom spacing is not inherited. Without a proximity, the query's
+        /// MaxWordDistance / RequireOrdered.</summary>
         public Proximity? Proximity { get; set; }
         /// <summary>Otzaria's SameSection negative scope: a section holding every negative
         /// word is dropped whole.</summary>

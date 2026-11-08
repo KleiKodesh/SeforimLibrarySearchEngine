@@ -862,6 +862,13 @@ class ExcludeOptions {
   final List<PhraseOptions> phraseAlternatives;
   int? maxWordDistance;
   bool requireOrdered;
+
+  /// Per typed negative word. Null (and no [maxWordDistance] /
+  /// [requireOrdered]) = the positive query's rule, as Otzaria's
+  /// negativeDistance defaults to its distance: an any-order distance as is,
+  /// an ordered rule with one distance for every pair; per-pair custom
+  /// spacing is not inherited. Without a proximity, the query's
+  /// maxWordDistance / requireOrdered.
   Proximity? proximity;
 
   /// Otzaria's SameSection negative scope: a section holding every negative

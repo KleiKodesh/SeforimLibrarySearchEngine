@@ -883,7 +883,15 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   [--exclude-scope distance|paragraph|section]`): the words to drop, as a query of their own
   with its own distance, order and spacing, every word required (Otzaria's
   `apply_advanced_negative_query`, which builds it with the positive's
-  builder). Options are PER WORD, as for the positive words: the global
+  builder). With no rule of its own (no `proximity`, `max_word_distance`
+  or `require_ordered`) it takes the positive query's proximity, as
+  Otzaria's negativeDistance defaults to its distance (issue #10): an
+  any-order distance as is, an ordered rule with one distance for every
+  negative pair; per-pair custom spacing is not inherited (Otzaria's
+  negative custom spacing defaults to none). Without a proximity, the
+  query's `max_word_distance` / `require_ordered` are inherited; the user's
+  rule is inherited even when a whole quoted phrase replaces it for the
+  positive query (Otzaria passes its distance then too). Options are PER WORD, as for the positive words: the global
   word options are the default, `exclude.words[i]` (`WordOptions`: any
   option, plus `alternatives` ORed into the word's slot) overrides them for
   negative word i (Otzaria's `negative_search_options` /

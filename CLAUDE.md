@@ -140,6 +140,11 @@ in one or two lines. Remove entries that turn out to be wrong.
 - **Keep README.md current automatically**: every commit that adds, changes or
   removes a feature, option, layout item, known difference or open item updates
   README.md in the SAME commit. Never leave it for later; don't wait to be asked.
+- **C ABI version (issue #17):** every C ABI change (function added / removed / renamed,
+  signature, struct layout, JSON shape, enum / flag value) bumps engine-ffi `SE_ABI_VERSION`,
+  Dart `seforimAbiVersion` and C# `NativeAbi.Expected` together, in the same commit;
+  `tools/release/check_sync.py` fails CI otherwise. Releases: README "Packaging and releases";
+  only the user pushes a version tag.
 - **Multi-platform**: any native OS through one C ABI; web goes through a server.
   The index is shipped prebuilt AND must be buildable/updatable on the user's machine.
 - Answer short. Confirm understanding before big work when asked. Report honest

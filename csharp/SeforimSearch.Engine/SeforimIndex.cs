@@ -19,7 +19,7 @@ namespace SeforimSearch.Engine
         internal IndexHandle Handle => _handle;
 
         /// <summary>The native library's version.</summary>
-        public static string NativeVersion => Interop.FromUtf8Z(NativeMethods.se_version());
+        public static string NativeVersion { get { NativeAbi.EnsureLoaded(); return Interop.FromUtf8Z(NativeMethods.se_version()); } }
 
         /// <summary>
         /// Otzaria's query sanitizer step: every paired reading <c>(X) [Y]</c> becomes
@@ -28,6 +28,7 @@ namespace SeforimSearch.Engine
         /// </summary>
         public static string ReducePairedReadings(string query)
         {
+            NativeAbi.EnsureLoaded();
             byte[] q = Interop.ToUtf8(query);
             fixed (byte* p = q)
             {
@@ -41,6 +42,7 @@ namespace SeforimSearch.Engine
         /// each line's text: <see cref="SearchSession.GetLineRegexStatus"/>). Set <see cref="SearchOptions.UserRegex"/> to search /.../ as a regex.</summary>
         public static string UserRegexKind(string query)
         {
+            NativeAbi.EnsureLoaded();
             byte[] q = Interop.ToUtf8(query);
             fixed (byte* p = q)
                 return (string)Json.Parse(Interop.TakeString(NativeMethods.se_user_regex_kind(p, (UIntPtr)q.Length)))!;
@@ -49,6 +51,7 @@ namespace SeforimSearch.Engine
         /// <summary>Creates a fresh index in <paramref name="directory"/>, WIPING it.</summary>
         public static SeforimIndex Create(string directory, IndexOptions? options = null)
         {
+            NativeAbi.EnsureLoaded();
             byte[] dir = Interop.ToUtf8(directory);
             byte[] opts = Interop.ToUtf8((options ?? new IndexOptions()).ToJson());
             fixed (byte* d = dir)
@@ -60,6 +63,7 @@ namespace SeforimSearch.Engine
         /// <summary>Opens an existing index.</summary>
         public static SeforimIndex Open(string directory)
         {
+            NativeAbi.EnsureLoaded();
             byte[] dir = Interop.ToUtf8(directory);
             fixed (byte* d = dir)
                 return new SeforimIndex(Interop.Check(NativeMethods.se_index_open(d, (UIntPtr)dir.Length)));
@@ -68,6 +72,7 @@ namespace SeforimSearch.Engine
         /// <summary>True when <paramref name="directory"/> holds an index.</summary>
         public static bool Exists(string directory)
         {
+            NativeAbi.EnsureLoaded();
             byte[] dir = Interop.ToUtf8(directory);
             fixed (byte* d = dir)
                 return NativeMethods.se_index_exists(d, (UIntPtr)dir.Length) == 1;

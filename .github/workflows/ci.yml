@@ -1,0 +1,18 @@
+# Every push / PR: package versions, C ABI version and pinned native hashes in
+# sync, third-party notices current, and the native library builds.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git submodule update --init tantivy
+      - run: python3 -I -X utf8 tools/release/check_sync.py
+      - run: python3 -I -X utf8 tools/release/third_party.py --check
+      - run: cargo build --release --locked -p engine-ffi

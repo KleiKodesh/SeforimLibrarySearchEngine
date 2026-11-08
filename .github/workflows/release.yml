@@ -1,0 +1,131 @@
+# Release: on a version tag v<version>, build seforim_search_native for every
+# target in tools/release/targets.py, attach them (+ SHA256SUMS, the pinned
+# Dart hashes file and the NuGet package) to the GitHub release, and open a
+# pull request that pins the hashes in the Dart package.
+# Cutting a release: see README "Releasing". Nothing here runs without a tag push.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -I -X utf8 tools/release/check_sync.py --tag "${GITHUB_REF_NAME}"
+
+  desktop:
+    needs: check
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: windows-x64,   triple: x86_64-pc-windows-msvc,    os: windows-latest }
+          - { name: windows-arm64, triple: aarch64-pc-windows-msvc,   os: windows-latest }
+          - { name: linux-x64,     triple: x86_64-unknown-linux-gnu,  os: ubuntu-22.04 }
+          - { name: linux-arm64,   triple: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { name: macos-x64,     triple: x86_64-apple-darwin,       os: macos-latest }
+          - { name: macos-arm64,   triple: aarch64-apple-darwin,      os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: git submodule update --init tantivy
+      - run: rustup target add ${{ matrix.triple }}
+      - name: build
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --release --locked -p engine-ffi --target ${{ matrix.triple }} 2>&1 | tee build.log
+      - name: collect
+        shell: bash
+        run: |
+          mkdir out
+          read built rel < <(python -I -c "import sys; sys.path.insert(0,'tools/release'); from targets import *; print(built_file('${{ matrix.name }}'), release_file('${{ matrix.name }}'))" | tr -d '')
+          cp "target/${{ matrix.triple }}/release/$built" "out/$rel"
+      - uses: actions/upload-artifact@v4
+        with: { name: native-${{ matrix.name }}, path: out/* }
+
+  mobile:
+    needs: check
+    continue-on-error: true   # best effort: a mobile failure does not block the desktop release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: android-arm64, triple: aarch64-linux-android,   abi: arm64-v8a,   os: ubuntu-latest }
+          - { name: android-x64,   triple: x86_64-linux-android,    abi: x86_64,      os: ubuntu-latest }
+          - { name: android-arm,   triple: armv7-linux-androideabi, abi: armeabi-v7a, os: ubuntu-latest }
+          - { name: ios-arm64,     triple: aarch64-apple-ios,       os: macos-latest }
+          - { name: ios_sim-arm64, triple: aarch64-apple-ios-sim,   os: macos-latest }
+          - { name: ios_sim-x64,   triple: x86_64-apple-ios,        os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: git submodule update --init tantivy
+      - run: rustup target add ${{ matrix.triple }}
+      - name: build (android)
+        if: startsWith(matrix.name, 'android')
+        run: |
+          cargo install cargo-ndk --locked
+          cargo ndk -t ${{ matrix.abi }} --platform 24 build --release --locked -p engine-ffi
+      - name: build (ios)
+        if: startsWith(matrix.name, 'ios')
+        run: cargo build --release --locked -p engine-ffi --target ${{ matrix.triple }}
+      - name: collect
+        run: |
+          mkdir out
+          read built rel < <(python3 -I -c "import sys; sys.path.insert(0,'tools/release'); from targets import *; print(built_file('${{ matrix.name }}'), release_file('${{ matrix.name }}'))")
+          if [[ "${{ matrix.name }}" == ios* ]]; then
+            install_name_tool -id "@rpath/$built" "target/${{ matrix.triple }}/release/$built"
+          fi
+          cp "target/${{ matrix.triple }}/release/$built" "out/$rel"
+      - uses: actions/upload-artifact@v4
+        with: { name: native-${{ matrix.name }}, path: out/* }
+
+  release:
+    needs: [desktop, mobile]
+    if: ${{ always() && needs.desktop.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: native-*, path: dist, merge-multiple: true }
+      - name: hashes
+        run: |
+          cd dist && sha256sum seforim_search_native-* > SHA256SUMS && cat SHA256SUMS && cd ..
+          python3 -I -X utf8 tools/release/pin_hashes.py "${GITHUB_REF_NAME}" dist/SHA256SUMS
+          cp dart/seforim_search/lib/src/hook/asset_hashes.g.dart dist/
+          python3 -I -X utf8 tools/release/check_sync.py --tag "${GITHUB_REF_NAME}" --pinned
+      - name: NuGet package (all RIDs)
+        run: |
+          python3 -I - <<'EOF'
+          import os, shutil, sys
+          sys.path.insert(0, 'tools/release')
+          from targets import TARGETS, release_file, built_file
+          for name, _, rid, _ in TARGETS:
+              if rid:
+                  os.makedirs(f'native-artifacts/{rid}', exist_ok=True)
+                  shutil.copy(f'dist/{release_file(name)}', f'native-artifacts/{rid}/{built_file(name)}')
+          EOF
+          dotnet pack csharp/SeforimSearch.Engine/SeforimSearch.Engine.csproj -c Release -o dist
+      - name: GitHub release
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 && gh release upload "${GITHUB_REF_NAME}" dist/* --clobber || gh release create "${GITHUB_REF_NAME}" dist/* --title "${GITHUB_REF_NAME}" --notes "Native libraries, SHA256SUMS and the NuGet package for ${GITHUB_REF_NAME}. The Dart package downloads these only after the pin pull request is merged."
+      - name: pin pull request
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          branch="pin-native-${GITHUB_REF_NAME}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add dart/seforim_search/lib/src/hook/asset_hashes.g.dart
+          git commit -m "Pin native library hashes for ${GITHUB_REF_NAME}"
+          git push -f origin "$branch"
+          gh pr view "$branch" >/dev/null 2>&1 || gh pr create --base master --head "$branch" --title "Pin native library hashes for ${GITHUB_REF_NAME}" --body "Generated by the release workflow from the release's SHA256SUMS."

@@ -66,6 +66,87 @@ pub extern "C" fn se_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
 }
 
+/// The C ABI version. Bump it on EVERY change to the C ABI (a function
+/// added, removed or renamed, a signature, a struct layout, a JSON shape or
+/// an enum / flag value the hosts read). The C# and Dart packages carry the
+/// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
+/// refuse to load a library with another value. `tools/release/check_sync.py`
+/// fails CI when the three disagree.
+pub const SE_ABI_VERSION: u32 = 1;
+
+/// The C ABI version of this library (see [`SE_ABI_VERSION`]).
+#[no_mangle]
+pub extern "C" fn se_abi_version() -> u32 {
+    SE_ABI_VERSION
+}
+
+/// The file path this library was loaded from (UTF-8, null-terminated;
+/// static, do not free; "" when the OS cannot tell). Hosts that load the
+/// library through a packaging layer (Dart native assets) open it again by
+/// this path, and name it in load errors.
+#[no_mangle]
+pub extern "C" fn se_native_library_path() -> *const c_char {
+    static PATH: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| CString::new(module_path::own_path().unwrap_or_default().replace('\0', " ")).unwrap_or_default())
+        .as_ptr()
+}
+
+mod module_path {
+    #[cfg(windows)]
+    pub fn own_path() -> Option<String> {
+        use std::ffi::c_void;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetModuleHandleExW(flags: u32, address: *const u16, module: *mut *mut c_void) -> i32;
+            fn GetModuleFileNameW(module: *mut c_void, name: *mut u16, size: u32) -> u32;
+        }
+        const FROM_ADDRESS: u32 = 0x4;
+        const UNCHANGED_REFCOUNT: u32 = 0x2;
+        let mut module = std::ptr::null_mut();
+        let anchor = super::se_abi_version as *const u16;
+        // SAFETY: plain Win32 calls with valid out pointers and a buffer of the size passed.
+        unsafe {
+            if GetModuleHandleExW(FROM_ADDRESS | UNCHANGED_REFCOUNT, anchor, &mut module) == 0 {
+                return None;
+            }
+            let mut buf = vec![0u16; 32768];
+            let n = GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) as usize;
+            if n == 0 || n >= buf.len() {
+                return None;
+            }
+            Some(String::from_utf16_lossy(&buf[..n]))
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn own_path() -> Option<String> {
+        use std::ffi::{c_char, c_void, CStr};
+        #[repr(C)]
+        struct DlInfo {
+            fname: *const c_char,
+            fbase: *mut c_void,
+            sname: *const c_char,
+            saddr: *mut c_void,
+        }
+        extern "C" {
+            fn dladdr(addr: *const c_void, info: *mut DlInfo) -> i32;
+        }
+        let mut info = DlInfo { fname: std::ptr::null(), fbase: std::ptr::null_mut(), sname: std::ptr::null(), saddr: std::ptr::null_mut() };
+        // SAFETY: dladdr fills `info`; fname points into the loader's static data.
+        unsafe {
+            if dladdr(super::se_abi_version as *const c_void, &mut info) == 0 || info.fname.is_null() {
+                return None;
+            }
+            Some(CStr::from_ptr(info.fname).to_string_lossy().into_owned())
+        }
+    }
+
+    #[cfg(not(any(windows, unix)))]
+    pub fn own_path() -> Option<String> {
+        None
+    }
+}
+
 /// Otzaria's query sanitizer step `keep_second_of_paired_readings`: every
 /// paired reading `(X) [Y]` (ketiv and qere) in `query` becomes ` Y `, as the
 /// engine's query parser does. A host that numbers the query's words itself

@@ -31,6 +31,12 @@ namespace SeforimSearch.Engine.Native
         public static extern IntPtr se_version();
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint se_abi_version();
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_native_library_path();
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr se_reduce_paired_readings(byte* query, UIntPtr queryLen, out UIntPtr outLen);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

@@ -39,6 +39,7 @@ namespace SeforimSearch.Demo
                 ("end to end: build tantivy16 + search in catalog order", EndToEnd),
                 ("stream: chunks, resume, Restarted, cancellation (Core's StreamSearch)", Stream),
                 ("async engine API (issue #16): batches = sync hits, cancel, abandon, errors", AsyncEngine),
+                ("native ABI check (issue #17): loaded = expected, mismatch names both and the path", AbiCheck),
                 ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
             };
             int failed = 0;
@@ -60,6 +61,20 @@ namespace SeforimSearch.Demo
             SqliteConnection.ClearAllPools();
             try { Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
             return failed == 0 ? 0 : 1;
+        }
+
+        private static void AbiCheck(string db, string dir)
+        {
+            NativeAbi.EnsureLoaded();
+            Check(NativeAbi.Loaded == NativeAbi.Expected, "loaded ABI " + NativeAbi.Loaded);
+            string path = NativeAbi.LoadedPath;
+            Check(path.IndexOf("seforim_search_native", StringComparison.OrdinalIgnoreCase) >= 0, "loaded path: " + path);
+            string? message = null;
+            try { NativeAbi.Verify(NativeAbi.Loaded, path, NativeAbi.Expected + 1); }
+            catch (SeforimEngineException e) { message = e.Message; }
+            Check(message != null, "a mismatch must throw");
+            Check(message!.Contains("needs ABI " + (NativeAbi.Expected + 1)) && message.Contains("has ABI " + NativeAbi.Expected)
+                  && message.Contains(path), "message names both versions and the path: " + message);
         }
 
         private static void Check(bool ok, string what)

@@ -16,6 +16,7 @@
     <RootNamespace>SeforimSearch.Engine</RootNamespace>
     <PackageId>SeforimSearch.Engine</PackageId>
     <Version>0.1.0</Version>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <Description>Hebrew full-text search engine (tantivy) with FtsLib-compatible snippets.</Description>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
@@ -26,32 +27,48 @@
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
   </ItemGroup>
 
-  <!-- The native library. Built by: cargo build (release) of the engine-ffi crate.
-       Copied next to the consuming app's output (works for .NET Framework,
-       which has no runtimes/ resolution) and packed under runtimes/ for
-       NuGet consumers on .NET (Core). -->
+  <!-- The native library.
+       Dev build: cargo build (release) of the engine-ffi crate; the host
+       platform's library in target/release is copied next to the consuming
+       app's output (works for .NET Framework, which has no runtimes/
+       resolution).
+       Release pack: the release workflow (.github/workflows/release.yml)
+       downloads every platform's library into $(NativeArtifactsDir)<rid>/
+       and packs each under runtimes/<rid>/native/ for NuGet consumers on
+       .NET (Core). When that folder exists, the dev library is not packed. -->
   <PropertyGroup>
     <NativeLibDir>$(MSBuildThisFileDirectory)..\..\target\release\</NativeLibDir>
+    <NativeArtifactsDir Condition="'$(NativeArtifactsDir)' == ''">$(MSBuildThisFileDirectory)..\..\native-artifacts\</NativeArtifactsDir>
+    <PackDevNative>true</PackDevNative>
+    <PackDevNative Condition="Exists('$(NativeArtifactsDir)')">false</PackDevNative>
   </PropertyGroup>
   <ItemGroup>
     <Content Include="$(NativeLibDir)seforim_search_native.dll" Condition="Exists('$(NativeLibDir)seforim_search_native.dll')">
       <Link>seforim_search_native.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <PackagePath>runtimes/win-x64/native/</PackagePath>
-      <Pack>true</Pack>
+      <Pack>$(PackDevNative)</Pack>
     </Content>
     <Content Include="$(NativeLibDir)libseforim_search_native.so" Condition="Exists('$(NativeLibDir)libseforim_search_native.so')">
       <Link>libseforim_search_native.so</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <PackagePath>runtimes/linux-x64/native/</PackagePath>
-      <Pack>true</Pack>
+      <Pack>$(PackDevNative)</Pack>
     </Content>
     <Content Include="$(NativeLibDir)libseforim_search_native.dylib" Condition="Exists('$(NativeLibDir)libseforim_search_native.dylib')">
       <Link>libseforim_search_native.dylib</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <PackagePath>runtimes/osx/native/</PackagePath>
-      <Pack>true</Pack>
+      <PackagePath>runtimes/osx-arm64/native/</PackagePath>
+      <Pack>$(PackDevNative)</Pack>
     </Content>
+  </ItemGroup>
+  <ItemGroup Condition="Exists('$(NativeArtifactsDir)')">
+    <None Include="$(NativeArtifactsDir)win-x64\seforim_search_native.dll" Pack="true" PackagePath="runtimes/win-x64/native/" />
+    <None Include="$(NativeArtifactsDir)win-arm64\seforim_search_native.dll" Pack="true" PackagePath="runtimes/win-arm64/native/" />
+    <None Include="$(NativeArtifactsDir)linux-x64\libseforim_search_native.so" Pack="true" PackagePath="runtimes/linux-x64/native/" />
+    <None Include="$(NativeArtifactsDir)linux-arm64\libseforim_search_native.so" Pack="true" PackagePath="runtimes/linux-arm64/native/" />
+    <None Include="$(NativeArtifactsDir)osx-x64\libseforim_search_native.dylib" Pack="true" PackagePath="runtimes/osx-x64/native/" />
+    <None Include="$(NativeArtifactsDir)osx-arm64\libseforim_search_native.dylib" Pack="true" PackagePath="runtimes/osx-arm64/native/" />
   </ItemGroup>
 
 </Project>

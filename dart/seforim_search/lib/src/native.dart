@@ -29,6 +29,32 @@ class StaleResumeException extends SeforimEngineException {
   String toString() => 'StaleResumeException: $message';
 }
 
+/// The C ABI version this package was built for: the native library's
+/// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
+/// `tools/release/check_sync.py` keeps the two in sync).
+const int seforimAbiVersion = 1;
+
+/// Thrown at load when the native library's C ABI version is not the one
+/// this package was built for.
+class NativeAbiMismatchException extends SeforimEngineException {
+  NativeAbiMismatchException(this.expected, this.loaded, this.path)
+      : super('seforim_search_native ABI mismatch: the Dart package needs ABI $expected, '
+            'the library at "$path" has ABI ${loaded == 0 ? '0 (older than ABI versioning)' : loaded}. '
+            'Use the native library built for this package version.');
+  final int expected;
+  final int loaded;
+  final String path;
+  @override
+  String toString() => 'NativeAbiMismatchException: $message';
+}
+
+/// The library's own path; resolved through the Dart native asset the
+/// package's build hook bundles (`hook/build.dart`). Throws when no asset is
+/// bundled (e.g. a plain `dart compile` without hooks).
+@Native<Pointer<Utf8> Function()>(
+    symbol: 'se_native_library_path', assetId: 'package:seforim_search/seforim_search_native')
+external Pointer<Utf8> _assetLibraryPath();
+
 /// `SeBuffer {u32* data; usize len; usize cap}` — returned by value.
 final class SeBuffer extends Struct {
   external Pointer<Uint32> data;
@@ -44,9 +70,12 @@ typedef _CloseD = void Function(Pointer<Void>);
 /// The loaded native library and its entry points.
 ///
 /// Loading order: [SeforimNative.load] with an explicit path, else the
-/// `SEFORIM_SEARCH_NATIVE` environment variable, else the platform file name
+/// `SEFORIM_SEARCH_NATIVE` environment variable (dev override), else the
+/// native asset bundled by the package's build hook (prebuilt download,
+/// cargo build or local file: see README), else the platform file name
 /// (`seforim_search_native.dll` / `libseforim_search_native.so` /
 /// `libseforim_search_native.dylib`) through the OS loader search path.
+/// Every load checks the library's C ABI version ([seforimAbiVersion]).
 final class SeforimNative {
   SeforimNative._(this.lib)
       : version = lib.lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>('se_version'),
@@ -238,13 +267,44 @@ final class SeforimNative {
     final existing = _instance;
     if (existing != null) return existing;
     path ??= Platform.environment['SEFORIM_SEARCH_NATIVE'];
+    path ??= _bundledAssetPath();
     final DynamicLibrary lib;
     if (Platform.isIOS && path == null) {
       lib = DynamicLibrary.process(); // statically linked into the app
     } else {
       lib = DynamicLibrary.open(path ?? defaultFileName);
     }
+    checkAbi(lib, path ?? defaultFileName);
     return _instance = SeforimNative._(lib);
+  }
+
+  static String? _bundledAssetPath() {
+    try {
+      final p = _assetLibraryPath().toDartString();
+      return p.isEmpty ? null : p;
+    } on Object {
+      return null; // no native asset bundled
+    }
+  }
+
+  /// The C ABI version of [lib] (0 for a library older than ABI versioning).
+  static int abiVersionOf(DynamicLibrary lib) {
+    if (!lib.providesSymbol('se_abi_version')) return 0;
+    return lib.lookupFunction<Uint32 Function(), int Function()>('se_abi_version')();
+  }
+
+  /// Throws [NativeAbiMismatchException] unless [lib]'s ABI version is
+  /// [expected]; [requested] names the library when the OS cannot tell its path.
+  static void checkAbi(DynamicLibrary lib, String requested, {int expected = seforimAbiVersion}) {
+    final loaded = abiVersionOf(lib);
+    if (loaded == expected) return;
+    var where = requested;
+    if (lib.providesSymbol('se_native_library_path')) {
+      final p = lib.lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>('se_native_library_path')()
+          .toDartString();
+      if (p.isNotEmpty) where = p;
+    }
+    throw NativeAbiMismatchException(expected, loaded, where);
   }
 
   static SeforimNative get instance => _instance ?? load();

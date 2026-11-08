@@ -171,6 +171,7 @@ md.append(f"""## Engines compared
 | Vocalized matching (nikud / te'amim) as a walk on a keep-marks index | done |
 | Exact totals + per-book counts, cancellation, pull streaming | done |
 | Non-blocking search in the packages (Dart worker isolate `SearchWorker`, C# `SearchAsync` / `IAsyncEnumerable` batches) | done |
+| Packaging (issue #17): C ABI version check at load (`se_abi_version`), Dart Native Assets hook (SHA-256 pinned prebuilt download / cargo / local file), NuGet RIDs win/linux/osx x64+arm64, release workflow + sync check | done |
 | Resume after a catalog position (FtsLib's `afterPosition`; C# demo `PositionOfLine`, Core's `StreamSearch` with `Restarted`) | done |
 | User regex `/.../` (word, sequence, line kinds) | done |
 | Relevance / generation order (option; catalog default) + notice when positions are needed | done |

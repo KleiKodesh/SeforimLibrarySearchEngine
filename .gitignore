@@ -2,5 +2,5 @@
 target/
 # extra target dirs agents use when the shared one is locked (target-a11, ...)
 target-*/
-Cargo.lock
 __pycache__/
+native-artifacts/

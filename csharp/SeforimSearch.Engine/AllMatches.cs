@@ -49,6 +49,7 @@ namespace SeforimSearch.Engine
         public static TextMatch[] FindAllMatches(string text, IReadOnlyList<string> words,
                                                  FindMatchOptions options = FindMatchOptions.None)
         {
+            NativeAbi.EnsureLoaded();
             if (words == null) throw new ArgumentNullException(nameof(words));
             if (string.IsNullOrEmpty(text) || words.Count == 0) return Array.Empty<TextMatch>();
             int n = words.Count;

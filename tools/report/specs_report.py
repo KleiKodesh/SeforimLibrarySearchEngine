@@ -19,7 +19,7 @@ SP = _args[0] if _args else os.path.join(ROOT, "bench-results")
 P = sys.argv[sys.argv.index("--prefix") + 1] if "--prefix" in sys.argv else ""
 OUT = os.path.join(ROOT, "FTS-SPECS-AND-COMPARISONS.md")
 INDEX_FORMAT = "tantivy16"   # C# TantivySeforimIndex.IndexFormatVersion
-FTSLIB_FORMAT = "fts12"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
+FTSLIB_FORMAT = "fts13"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
 MEASURED_FTSLIB = "fts8"      # FtsLib format of the runs in the results dir (= FTSLIB_FORMAT once rerun)
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
 STALE = [
@@ -43,6 +43,8 @@ STALE = [
     "`tantivy14` / `fts12`: schema-7 footnotes (`line_note`) are indexed as a virtual notes book right after "
     "each book with notes (issue #13; about 263k notes in 614 books on the local DB): positions, line counts, "
     "both full-DB rebuilds, the parity sets and the Otzaria hit-count comparison need a rerun.",
+    "`tantivy16` / `fts13`: the notes ids are 64-bit and JS-safe (R = 2^52, line = R + (lineId << 16) + noteIndex, "
+    "issue #13): only the virtual ids change, the same full-DB reruns cover it.",
     "Hit-count comparison: the rows classified as our bugs (unterminated `<`, cross-line enumerators) "
     "and the fuzzy transposition rows are expected to change; not rerun yet.",
 ]

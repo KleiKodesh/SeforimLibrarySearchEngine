@@ -1385,6 +1385,11 @@ every differing query.
     in the Dart demo, with sections read from SQLite (`line_toc`) by the
     hits' line ids. The sameSection scope and its exclusion are the
     engine's (section ids in the index).
+  - Category (facet) counts, Otzaria's search navigation tree, a one-snapshot
+    result page (counts + category counts + one page grouped by book then
+    section) and the count status label (exact / partial / truncated) are
+    host-side in the Dart demo (`lib/facets.dart`, issue #11): the engine's
+    per-book counts summed up seforim.db's category tree; no engine change.
 - Full-DB rerun pending for index format `tantivy13` / FtsLib `fts11`
   (unterminated `<`, cross-line content edges, fuzzy swap = one edit; doc
   order = catalog order; transparent vocalized `<sup>`; base text = `isBaseBook` flag only, issue #6): the unit tests pass; the rebuilds, parity sets,

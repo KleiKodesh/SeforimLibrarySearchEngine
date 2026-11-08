@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:otzaria_demo/otzaria_query.dart';
 import 'package:otzaria_demo/seforim_db.dart';
 import 'package:otzaria_demo/acronym_lexicon.dart';
+import 'package:otzaria_demo/facets.dart';
 import 'package:otzaria_demo/grouping.dart';
 import 'package:otzaria_demo/translation_lexicon.dart';
 import 'package:seforim_search/seforim_search.dart';
@@ -471,14 +472,7 @@ void _lineRegex(SeforimDb db, SearchSession session, LineRegexStatus status, Lis
 /// validates them.
 void _printCounts(SeforimDb db, SearchSession session, Map<int, String> titles) {
   final sw = Stopwatch()..start();
-  if (session.countNeedsText) {
-    for (var o = 0; o < session.hitCount; o += 4096) {
-      final batch = session.hits(o, 4096);
-      final texts = db.lineTexts([...batch.map((h) => h.lineId), for (final h in batch) if (h.nextLineId != null) h.nextLineId!]);
-      session.countBatchPairs([for (final h in batch) texts[h.lineId] ?? ''],
-          [for (final h in batch) h.nextLineId == null ? null : texts[h.nextLineId] ?? '']);
-    }
-  }
+  completeCounts(db, session);
   final c = session.counts();
   stdout.writeln('Exact count: ${c.total} lines in ${c.byBook.length} books '
       '(${session.countNeedsText ? 'texts validated' : 'no text needed'}, '

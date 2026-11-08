@@ -8,3 +8,4 @@ export 'src/models.dart';
 export 'src/native.dart' show SeforimNative, SeforimEngineException, SearchCancelledException, StaleResumeException;
 export 'src/index.dart';
 export 'src/session.dart';
+export 'src/async_search.dart';

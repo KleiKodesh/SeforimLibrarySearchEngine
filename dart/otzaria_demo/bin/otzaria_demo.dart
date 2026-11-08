@@ -69,7 +69,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
 
 int? _int(Map<String, String?> o, String k) => o[k] == null ? null : int.parse(o[k]!);
 
-void main(List<String> args) {
+Future<void> main(List<String> args) async {
   if (args.isEmpty) {
     stdout.write(_usage);
     exit(64);
@@ -90,7 +90,7 @@ void main(List<String> args) {
         _build(db, indexDir, o);
       case 'search':
         db.clearUnreadable();
-        _search(db, indexDir, o, rest.join(' '));
+        await _search(db, indexDir, o, rest.join(' '));
         // issue #13: unreadable rows were read as empty, never silently
         if (db.unreadableLineIds.isNotEmpty) {
           final ids = db.unreadableLineIds.take(20).join(', ');
@@ -206,7 +206,7 @@ String _withContext(String window, SnippetText text, Snippet s, int words) {
   return out;
 }
 
-void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
+Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String query) async {
   if (query.trim().isEmpty) {
     stderr.writeln('empty query');
     exit(64);
@@ -310,6 +310,17 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
 
   final limit = _int(o, 'limit') ?? 100, offset = _int(o, 'offset') ?? 0;
   final titles = db.bookTitles();
+  // The plain result page goes through the package's non-blocking API
+  // (issue #16): the search runs on a worker isolate, hits and snippets come
+  // back as Futures, texts are still read here. Grouping, exact counts and a
+  // line regex keep the sync session.
+  if (!const {'section', 'identical'}.contains(o['group']) &&
+      !o.containsKey('count') &&
+      !(request.userRegex && SeforimIndex.userRegexKind(request.query) == 'line')) {
+    index.close();
+    await _pageAsync(db, dir, o['native'], request, contextWords, titles, limit, offset);
+    return;
+  }
   final sw = Stopwatch()..start();
   final session = index.search(request);
   final searchMs = sw.elapsedMilliseconds;
@@ -408,6 +419,67 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   }
   session.close();
   index.close();
+}
+
+/// The result page through [SearchWorker] (issue #16): the same hits,
+/// snippets and output as the sync path, with the engine on a worker isolate.
+Future<void> _pageAsync(SeforimDb db, String dir, String? nativePath, SearchOptions request, int contextWords,
+    Map<int, String> titles, int limit, int offset) async {
+  final worker = await SearchWorker.spawn(dir, nativePath: nativePath);
+  final sw = Stopwatch()..start(); // as the sync path: the search, not the isolate start
+  final cancel = SearchCancelToken();
+  try {
+    final session = await worker.search(request, cancel: cancel);
+    final searchMs = sw.elapsedMilliseconds;
+    try {
+      final searchInfo = await session.info();
+      for (final n in searchInfo.notices) {
+        stderr.writeln('notice: $n');
+      }
+      if (searchInfo.truncated) stderr.writeln('truncated: a walk hit its expansion cap');
+      final results = <(PlacedHit, String, Snippet)>[];
+      var passed = 0;
+      for (var hitNo = 0; hitNo < session.hitCount && results.length < limit; hitNo += 256) {
+        final batch = await session.hits(hitNo, 256);
+        if (batch.isEmpty) break;
+        final texts = db.lineTexts(
+            [...batch.map((h) => h.lineId), for (final h in batch) if (h.nextLineId != null) h.nextLineId!]);
+        final lineTexts = [for (final h in batch) texts[h.lineId] ?? ''];
+        final nextTexts = [for (final h in batch) h.nextLineId == null ? null : texts[h.nextLineId] ?? ''];
+        final snippets = batch.any((h) => h.nextLineId != null)
+            ? await session.locatePairs(lineTexts, nextTexts)
+            : await session.locateLines([
+                for (var i = 0; i < batch.length; i++) HitLines(hitNo + i, [(batch[i].lineId, lineTexts[i])])
+              ]);
+        for (var i = 0; i < batch.length && results.length < limit; i++) {
+          final s = snippets[i];
+          if (s == null) continue;
+          if (passed++ < offset) continue;
+          final joined = s.breakAt == null ? lineTexts[i] : '${lineTexts[i]}\n${nextTexts[i]}';
+          results.add((batch[i], joined, s));
+        }
+      }
+      final refs = db.heRefs(results.map((r) => r.$1.lineId));
+      final terms = await session.takeNewTerms();
+      stdout.writeln('Query: ${request.query}, matching lines: ${session.hitCount}'
+          ', search ${searchMs}ms, page ${sw.elapsedMilliseconds}ms (worker isolate)');
+      stdout.writeln('Matched words: ${terms.take(30).join(', ')}${terms.length > 30 ? ' …' : ''}');
+      bool isShort(Snippet s) => s.isShort(contextWords) && s.breakAt == null;
+      final context = db.snippetTexts(const [], [for (final r in results) if (isShort(r.$3)) r.$1.lineId]);
+      var n = offset;
+      for (final (h, text, s) in results) {
+        final shown = isShort(s) && context[h.lineId] != null
+            ? _withContext(_render(text, s), context[h.lineId]!, s, contextWords)
+            : _render(text, s);
+        stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})${_noteTag(db, h.lineId, h.bookId)}');
+        stdout.writeln('   $shown');
+      }
+    } finally {
+      await session.close();
+    }
+  } finally {
+    await worker.close();
+  }
 }
 
 /// A user regex of Otzaria's Line kind: the engine matches each line's text.

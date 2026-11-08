@@ -38,6 +38,7 @@ namespace SeforimSearch.Demo
                 ("codec: base64 text vs base64 frame, errors name the line", CodecBase64AndErrors),
                 ("end to end: build tantivy16 + search in catalog order", EndToEnd),
                 ("stream: chunks, resume, Restarted, cancellation (Core's StreamSearch)", Stream),
+                ("async engine API (issue #16): batches = sync hits, cancel, abandon, errors", AsyncEngine),
                 ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
             };
             int failed = 0;
@@ -679,6 +680,86 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
         private static bool Throws<T>(Action a) where T : Exception
         {
             try { a(); return false; } catch (T) { return true; }
+        }
+
+        /// <summary>Issue #16: the engine package's async API over its own small index.</summary>
+        private static void AsyncEngine(string db, string dir)
+        {
+            string idx = Path.Combine(dir, "async-index");
+            using (var index = SeforimIndex.Create(idx))
+            {
+                using (var w = index.OpenWriter(30000000, 1))
+                {
+                    for (int i = 0; i < 50; i++)
+                        w.Add(new LineDocument { LineId = 100 + i, Position = i, BookId = 1 + i % 3, Text = "gamma x" + i });
+                    w.Commit();
+                }
+                var opts = new SearchOptions("gamma");
+                List<long> want;
+                using (var s = index.Search(opts)) want = s.AllHits().Select(h => h.LineId).ToList();
+                Check(want.Count == 50, "sync hits " + want.Count);
+
+                var got = new List<long>();
+                int batches = 0;
+                Task.Run(async () =>
+                {
+                    await foreach (var page in index.SearchBatchesAsync(opts, 7))
+                    {
+                        batches++;
+                        got.AddRange(page.Select(h => h.LineId));
+                    }
+                }).GetAwaiter().GetResult();
+                Check(batches == 8 && got.SequenceEqual(want), "async batches differ from sync hits");
+
+                // session calls on the thread pool
+                using (var s = index.SearchAsync(opts).GetAwaiter().GetResult())
+                {
+                    Check(s.GetHitsAsync(10, 3).GetAwaiter().GetResult().Length == 3, "GetHitsAsync");
+                    Check(s.GetCountsAsync().GetAwaiter().GetResult().Total == 50, "GetCountsAsync");
+                    Check(s.LocateBatchAsync(new[] { "gamma x0" }).GetAwaiter().GetResult()[0] != null, "LocateBatchAsync");
+                }
+
+                // cancel mid-stream: OperationCanceledException, session disposed by the iterator
+                using (var cts = new CancellationTokenSource())
+                {
+                    bool canceled = false;
+                    int seen = 0;
+                    try
+                    {
+                        Task.Run(async () =>
+                        {
+                            await foreach (var page in index.SearchBatchesAsync(opts, 5, cts.Token))
+                            {
+                                if (++seen == 1) cts.Cancel();
+                            }
+                        }).GetAwaiter().GetResult();
+                    }
+                    catch (OperationCanceledException) { canceled = true; }
+                    Check(canceled && seen == 1, "cancel mid-stream: canceled " + canceled + ", pages " + seen);
+                }
+
+                // abandoned enumeration (break) and a pre-cancelled token
+                Task.Run(async () =>
+                {
+                    await foreach (var page in index.SearchBatchesAsync(opts, 5)) break;
+                }).GetAwaiter().GetResult();
+                using (var cts = new CancellationTokenSource())
+                {
+                    cts.Cancel();
+                    Check(Throws<OperationCanceledException>(() => index.SearchAsync(opts, cts.Token).GetAwaiter().GetResult()),
+                          "a cancelled token must cancel SearchAsync");
+                }
+
+                // errors propagate typed
+                bool stale = false;
+                try
+                {
+                    index.SearchAsync(new SearchOptions("gamma") { AfterPosition = 3, ResumeStamp = "not-this-index" })
+                         .GetAwaiter().GetResult().Dispose();
+                }
+                catch (SeforimEngineException e) { stale = e.IsStaleResume; }
+                Check(stale, "stale resume must surface as SeforimEngineException.IsStaleResume");
+            }
         }
     }
 }

@@ -21,6 +21,11 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
+  <!-- IAsyncEnumerable for netstandard2.0 / net48 (SearchBatchesAsync, issue #16). -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
+  </ItemGroup>
+
   <!-- The native library. Built by: cargo build (release) of the engine-ffi crate.
        Copied next to the consuming app's output (works for .NET Framework,
        which has no runtimes/ resolution) and packed under runtimes/ for

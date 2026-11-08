@@ -21,6 +21,15 @@ in one or two lines. Remove entries that turn out to be wrong.
 
 ## The user's rules (stated explicitly, follow them)
 
+- **THIS IS A REUSABLE SEARCH LIBRARY, NOT OTZARIA.** It provides the search features
+  Otzaria (and KitveiHakodesh) need, but nothing in it is Otzaria-specific. Otzaria's
+  app code (its other sources such as user books / attached libraries, downloaders,
+  UI trees, its own DBs and settings) is NOT our work and NOT an engine gap: never port
+  it, never open issues or plan work for it. When auditing "what Otzaria has", ask only:
+  is this a SEARCH capability a host needs? If yes, build it generically (engine) or in
+  the host demo as an example; if it is Otzaria app plumbing, skip it and say so.
+  (User, 2026-11-08, after agents repeatedly treated Otzaria app features as our gaps.)
+
 - **THE INDEX IS THE BARE MINIMUM (engine + seforim.db in tandem).** The engine is
   always used together with the seforim.db SQLite DB, so the index stores only the
   postings (+freqs/positions when built with positions, for span/slop) plus

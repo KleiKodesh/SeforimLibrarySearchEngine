@@ -98,7 +98,8 @@ void main() {
     expect(findAllMatches('אָב x', [a]), [const TextMatch(0, 3, 0)]);
     expect(findAllMatches('$a אָב', ['אָב'], matchMarks: true).map((m) => m.start).toList(), [3]);
     const q = 'אב"ג', plain = 'אבג';
-    expect(findAllMatches('x $q', [plain]), isEmpty);
+    expect(findAllMatches('x $q', [plain]), [const TextMatch(2, 4, 0)]); // quotes read as the walks do
+    expect(findAllMatches('x $plain', [q]), isEmpty);
     expect(findAllMatches('x $q', [plain], ignoreQuotes: true), [const TextMatch(2, 4, 0)]);
     expect(findAllMatches('\u{1F600} $a', [a]).single.start, 3);
     expect(findAllMatches('', [a]), isEmpty);

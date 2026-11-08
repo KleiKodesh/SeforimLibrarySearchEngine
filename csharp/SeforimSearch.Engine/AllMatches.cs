@@ -11,8 +11,9 @@ namespace SeforimSearch.Engine
     {
         /// <summary>The best window and its occurrences' marks (the default).</summary>
         BestWindow = 0,
-        /// <summary>The whole text (Start 0, End its length) and a mark for EVERY token of the
-        /// text that is a query term. Which hits pass does not change.</summary>
+        /// <summary>The whole text (Start 0, End its length) and the marks of EVERY full
+        /// occurrence in it (the best window's occurrence rule). Which hits pass does not
+        /// change.</summary>
         AllMatches = 1,
     }
 

@@ -61,7 +61,8 @@ fn all_matches_proximity() {
     l.tokenize(&line);
     let d = l.locate_proximity_tokenized(&prepared, &Proximity::Ordered { gaps: vec![0] });
     assert!(d.is_match);
-    assert_eq!(starts(d.mark_ranges), occ(&line, &[A, B]));
+    // the last A has no B right after it: no occurrence
+    assert_eq!(starts(d.mark_ranges), occ(&line, &[A, B])[..4].to_vec());
 }
 
 #[test]
@@ -97,14 +98,55 @@ fn all_matches_marks_quotes_utf16() {
     let p = PreparedQueryGroups::from_text_words(&[voc], true, false);
     let mut l = SnippetWindowLocator::keeping_marks(8);
     assert_eq!(starts(l.find_all_matches(&format!("{A} {voc}"), &p, false, false)), vec![3]);
+    // a plain word in marks mode finds only the plain token
+    let plain_a = PreparedQueryGroups::from_text_words(&[A], true, false);
+    assert_eq!(starts(l.find_all_matches(&format!("{A} {voc}"), &plain_a, false, false)), vec![0]);
+    // canonical order: two marks of one letter typed in either order (as FtsLib's test)
+    let typed = PreparedQueryGroups::from_text_words(&["\u{05d1}\u{05b8}\u{05bc}\u{05d0}"], true, false);
+    assert_eq!(starts(l.find_all_matches("\u{05d1}\u{05bc}\u{05b8}\u{05d0} x", &typed, false, false)), vec![0]);
     let q = "\u{05d0}\u{05d1}\"\u{05d2}";
     let plain = "\u{05d0}\u{05d1}\u{05d2}";
     let quoted = find(&format!("x {q}"), &[plain], false, false);
     let ignored = find(&format!("x {q}"), &[plain], false, true);
     assert_eq!((starts(&ignored), ignored[1]), (vec![2], 4));
-    // without the option the quote is part of the token (Otzaria's terms keep it)
-    assert!(quoted.is_empty());
+    // quotes as the walks read them: a quote-free word finds the quoted
+    // token (as FtsLib); a typed quote needs the quote unless ignored
+    assert_eq!((starts(&quoted), quoted[1]), (vec![2], 4));
+    assert!(find(&format!("x {plain}"), &[q], false, false).is_empty());
+    assert_eq!(starts(&find(&format!("x {plain}"), &[q], false, true)), vec![2]);
     // UTF-16 offsets: an astral char before the word counts 2 units
     let m = find(&format!("\u{1F600} {A}"), &[A], false, false);
     assert_eq!(starts(&m), vec![3]);
+}
+
+/// All matches marks follow the best window's occurrence rule (issue #4):
+/// only tokens of full occurrences, anywhere in the text.
+#[test]
+fn all_matches_marks_only_full_occurrences() {
+    let prepared = PreparedQueryGroups::from_groups(&[vec![A], vec![B]]);
+    // FtsLib distance 0: only adjacent pairs
+    let line = format!("{A} {B} x x {A} x x x {B} {B} {A} y");
+    let mut l = SnippetWindowLocator::new(1);
+    l.set_match_mode(MatchMode::AllMatches);
+    l.tokenize(&line);
+    let d = l.locate_tokenized_within(&prepared, &[], false, 0, 0);
+    assert!(d.is_match);
+    let w = |i: usize| occ(&line, &[A, B])[i];
+    assert_eq!(starts(d.mark_ranges), vec![w(0), w(1), w(4), w(5)]);
+    // in order: B A is no occurrence
+    let d = l.locate_tokenized_within(&prepared, &[], true, 0, 0);
+    assert_eq!(starts(d.mark_ranges), vec![w(0), w(1)]);
+    // no distance: every term token
+    let d = l.locate_tokenized_within(&prepared, &[], false, 0, usize::MAX);
+    assert_eq!(starts(d.mark_ranges), occ(&line, &[A, B]));
+    // a phrase (ordered, no gap): only the runs
+    let line = format!("{A} {B} {B} {A} x {A} {B}");
+    l.tokenize(&line);
+    let d = l.locate_proximity_tokenized(&prepared, &Proximity::Ordered { gaps: vec![0] });
+    let o = occ(&line, &[A, B]);
+    assert_eq!(starts(d.mark_ranges), vec![o[0], o[1], o[4], o[5]]);
+    // partial matching keeps every query word
+    l.set_min_groups(1);
+    let d = l.locate_tokenized_within(&prepared, &[], false, 0, 0);
+    assert_eq!(starts(d.mark_ranges), o);
 }

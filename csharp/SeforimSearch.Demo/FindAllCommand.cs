@@ -27,6 +27,10 @@ namespace SeforimSearch.Demo
             Check(TextMatcher.FindAllMatches("x אב\"ג", new[] { "אבג" }, FindMatchOptions.IgnoreQuotes)
                   .Select(m => (m.Start, m.Length)).SequenceEqual(new[] { (2, 4) }), "quotes ignored");
             Check(TextMatcher.FindAllMatches("אָב x", new[] { a }).Single().Length == 3, "marks ignored");
+            Check(TextMatcher.FindAllMatches("x אב\"ג", new[] { "אבג" }).Length == 1,
+                  "quote-free word finds the quoted token");
+            Check(TextMatcher.FindAllMatches("x אבג", new[] { "אב\"ג" }).Length == 0,
+                  "a typed quote needs the quote");
             Check(TextMatcher.FindAllMatches("", new[] { a }).Length == 0, "empty text");
             Console.WriteLine(failed == 0 ? "findall: checks passed" : $"findall: {failed} FAILED");
 

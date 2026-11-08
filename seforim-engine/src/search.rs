@@ -854,8 +854,8 @@ impl SnippetSession {
     /// What the locate calls return for a passing hit (issues #14 / #23):
     /// [`MatchMode::BestWindow`](hebrew_fts::MatchMode) (the default, the
     /// snippet window) or `AllMatches` (the whole text, `start` 0, `end` its
-    /// UTF-16 length, and a mark for EVERY token of the text that is one of
-    /// the passing matcher's terms). Which hits pass, the order and the
+    /// UTF-16 length, and the marks of EVERY full occurrence of the passing
+    /// matcher in the text, by the best window's occurrence rule). Which hits pass, the order and the
     /// counts do not change. All matches locates from the text (an index
     /// with positions is not read). A line-regex search keeps its own
     /// snippet.

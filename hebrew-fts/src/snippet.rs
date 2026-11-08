@@ -202,8 +202,10 @@ pub enum MatchMode {
     #[default]
     BestWindow,
     /// The whole text: the window is `[0, text length)` and the marks are
-    /// EVERY token of the text that is a query term (same word rules). The
-    /// pass decision, `score` and `word_distance` are the best window's.
+    /// the tokens of EVERY full occurrence in the text, by the best window's
+    /// own rule (issue #4: distance / order, proximity, a phrase, crossing
+    /// the break; partial matching and no distance: every query-term token).
+    /// The pass decision, `score` and `word_distance` are the best window's.
     AllMatches,
 }
 
@@ -366,9 +368,11 @@ impl SnippetWindowLocator {
     ///
     /// `phrase`: only tokens of a run of consecutive positions holding
     /// groups 0, 1, ... in order (repeated and overlapping runs all count;
-    /// a token is listed once); else every term token. `ignore_quotes`: a
-    /// token is looked up with its quotes removed (the prepared terms must
-    /// then be quote-free too). The view is valid until the next call.
+    /// a token is listed once); else every term token. Quotes as the walks
+    /// read them: a token matches as written or without its quotes (a
+    /// quote-free word finds `X"Y`); `ignore_quotes`: also a typed quote is
+    /// ignored (the prepared terms must then be quote-free, as
+    /// `from_text_words` makes them). The view is valid until the next call.
     pub fn find_all_matches(
         &mut self,
         text: &str,
@@ -384,18 +388,26 @@ impl SnippetWindowLocator {
         let keep = self.text_tokens.keeps_marks();
         let SnippetWindowLocator { text_tokens, ordinals, mark_ranges, marks, unquoted, run, break_token, positioned, .. } =
             self;
+        // Quotes as the walks read them (Otzaria's QuoteTransparent, the
+        // index terms keep them): a token matches as written, or with its
+        // quotes removed (a quote-free word finds the quoted token; a typed
+        // quote still needs it). `ignore_quotes`: the words are quote-free
+        // too, so only the second form can match.
         let mut lookup = |norm: &str| -> u32 {
-            let key = if ignore_quotes && norm.bytes().any(crate::chars::is_term_quote_byte) {
-                unquoted.clear();
-                unquoted.extend(norm.chars().filter(|&c| !crate::chars::is_term_quote(c)));
-                if unquoted.is_empty() {
-                    return NO_TERM;
+            if !ignore_quotes {
+                if let Some(p) = prepared.get(norm) {
+                    return p.ordinal as u32;
                 }
-                unquoted.as_str()
-            } else {
-                norm
-            };
-            prepared.get(key).map_or(NO_TERM, |p| p.ordinal as u32)
+            }
+            if !norm.bytes().any(crate::chars::is_term_quote_byte) {
+                return if ignore_quotes { prepared.get(norm).map_or(NO_TERM, |p| p.ordinal as u32) } else { NO_TERM };
+            }
+            unquoted.clear();
+            unquoted.extend(norm.chars().filter(|&c| !crate::chars::is_term_quote(c)));
+            if unquoted.is_empty() {
+                return NO_TERM;
+            }
+            prepared.get(unquoted.as_str()).map_or(NO_TERM, |p| p.ordinal as u32)
         };
         if !phrase || k <= 1 {
             // every term token: straight off the scan, no token list kept
@@ -757,7 +769,22 @@ impl SnippetWindowLocator {
         let is_match = !ordered || ordered_best.is_some();
 
         if *match_mode == MatchMode::AllMatches && is_match {
-            collect_mark_ranges(tokens, ordinals, 0, raw_len, mark_ranges, None);
+            // every full occurrence in the text, by the best window's own
+            // rule (issue #4): the whole text is the window
+            let last = tokens.len() - 1;
+            let masked = !partial
+                && (max_word_distance != usize::MAX || ordered_best.is_some())
+                && occurrence_marks(
+                    tokens,
+                    ordinals,
+                    prepared,
+                    &if ordered_best.is_some() { MarkRule::OrderedCover { max_span } } else { MarkRule::Cover { max_span } },
+                    (0, last),
+                    (i_left, i_right),
+                    brk,
+                    marks,
+                );
+            collect_mark_ranges(tokens, ordinals, 0, raw_len, mark_ranges, masked.then_some((&marks.mask[..], 0)));
             return SnippetDescriptor {
                 is_match,
                 score,
@@ -841,7 +868,14 @@ impl SnippetWindowLocator {
             return SnippetDescriptor::NO_MATCH;
         };
         if *match_mode == MatchMode::AllMatches {
-            collect_mark_ranges(tokens, ordinals, 0, raw_len, mark_ranges, None);
+            // every full occurrence in the text (issue #4 rule, whole text)
+            let rule = match proximity {
+                Proximity::Ordered { gaps } => MarkRule::Ordered(gaps),
+                Proximity::AnyOrder { max_span } => MarkRule::AnyOrder(*max_span as usize),
+            };
+            let last = tokens.len() - 1;
+            let masked = occurrence_marks(tokens, ordinals, prepared, &rule, (0, last), (i_left, i_right), brk, marks);
+            collect_mark_ranges(tokens, ordinals, 0, raw_len, mark_ranges, masked.then_some((&marks.mask[..], 0)));
             return SnippetDescriptor {
                 is_match: true,
                 score,

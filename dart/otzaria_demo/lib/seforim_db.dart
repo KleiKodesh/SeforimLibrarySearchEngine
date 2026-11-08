@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:sqlite3/sqlite3.dart';
 
+import 'note_ids.dart';
 import 'zstd.dart';
 
 /// Default DB path resolution (see repo CLAUDE.md): Otzaria, then Zayit.
@@ -49,6 +50,26 @@ class SnippetText {
   final String text, before, after;
 }
 
+/// How reading one line's text went (issue #13): found, no text row, or a row
+/// that cannot be decoded ([error] names the line id, issue #8).
+enum LineStatus { found, missing, unreadable }
+
+class LineRead {
+  const LineRead.found(String this.text)
+      : status = LineStatus.found,
+        error = null;
+  const LineRead.missing()
+      : status = LineStatus.missing,
+        text = null,
+        error = null;
+  const LineRead.unreadable(Object this.error)
+      : status = LineStatus.unreadable,
+        text = null;
+  final LineStatus status;
+  final String? text;
+  final Object? error;
+}
+
 class SeforimDb {
   SeforimDb._(this.path, this._zstdLib, _Open o)
       : _db = o.db,
@@ -56,7 +77,8 @@ class SeforimDb {
         compressed = o.compressed,
         _zstd = o.zstd,
         _stamp = o.stamp,
-        _dataVersion = o.dataVersion;
+        _dataVersion = o.dataVersion,
+        hasNotes = o.notes;
 
   final String path;
   final String? _zstdLib;
@@ -71,6 +93,18 @@ class SeforimDb {
   String _stamp;
   int _dataVersion;
   bool _closed = false;
+
+  /// Schema 7: the DB has `line_note`; its notes are indexed as virtual notes
+  /// books (issue #13, ids in note_ids.dart).
+  bool hasNotes;
+
+  /// Line ids whose row could not be decoded on a lenient (search-path) read:
+  /// read as empty, recorded here so 0 hits is never silently wrong (issue #13).
+  /// Accumulates until [clearUnreadable].
+  final Set<int> unreadableLineIds = {};
+
+  /// Empties [unreadableLineIds] (call before a search to count only its rows).
+  void clearUnreadable() => unreadableLineIds.clear();
 
   /// Prepared statements kept with the connection, by SQL text.
   final _statements = <String, PreparedStatement>{};
@@ -110,7 +144,7 @@ class SeforimDb {
         if (dicts.isEmpty) throw StateError('zstd_dict table is empty: compressed content cannot be decoded');
         dec = ZstdDictDecoder(Zstd.load(zstdLib), dicts, reload: () => _readDictionaries(db));
       }
-      return _Open(db, split, compressed, dec, stamp, dataVersion);
+      return _Open(db, split, compressed, dec, stamp, dataVersion, table('line_note'));
     } catch (_) {
       db.close();
       rethrow;
@@ -132,6 +166,7 @@ class SeforimDb {
     _zstd = o.zstd;
     _stamp = o.stamp;
     _dataVersion = o.dataVersion;
+    hasNotes = o.notes;
   }
 
   bool _inReadTx = false;
@@ -181,6 +216,11 @@ class SeforimDb {
   /// be. A frame that fails (missing dictionary, bad data) and malformed UTF-8
   /// raise a [FormatException] naming [lineId] (issue #8).
   String decode(Object? v, [int? lineId]) {
+    final s = _decodeRaw(v, lineId);
+    return s.startsWith('\uFEFF') ? s.substring(1) : s; // one leading BOM (issue #13)
+  }
+
+  String _decodeRaw(Object? v, int? lineId) {
     if (v == null) return '';
     if (v is String) {
       if (_zstd == null || v.length < 8 || !v.startsWith('KLUv')) return v;
@@ -211,6 +251,71 @@ class SeforimDb {
       return utf8.decode(bytes);
     } on FormatException catch (e) {
       throw FormatException('line ${lineId ?? '?'}: content is not valid UTF-8: ${e.message}');
+    }
+  }
+
+  /// [raw] (a row of line [lineId], or the note body of virtual line
+  /// [lineId]) decoded. Throws like [decode], naming the line id.
+  String lineText(int lineId, Object? raw) => decode(raw, lineId);
+
+  /// The raw body of virtual line [id]; [missing] when there is no such note.
+  Object? _noteBody(int id, {required void Function() missing}) {
+    final src = noteSourceOf(id)!;
+    final rs = !hasNotes
+        ? null
+        : _select('SELECT n.body FROM line_note n JOIN line l ON l.id = n.lineId WHERE n.lineId = ? AND n.noteIndex = ?', [src.sourceLineId, src.noteIndex]);
+    if (rs == null || rs.isEmpty) {
+      missing();
+      return null;
+    }
+    return rs.first.columnAt(0);
+  }
+
+  /// The note text of virtual line ids (search path: unreadable recorded, or
+  /// thrown with [strict]); absent when missing.
+  Map<int, String> _noteTexts(Iterable<int> ids, bool strict) {
+    final out = <int, String>{};
+    for (final id in ids) {
+      var gone = false;
+      final raw = _noteBody(id, missing: () => gone = true);
+      if (gone) continue;
+      final t = strict ? lineText(id, raw) : _lenientText(id, raw);
+      if (t != null) out[id] = t;
+    }
+    return out;
+  }
+
+  /// [lineText] that records an unreadable row in [unreadableLineIds] and
+  /// returns null instead of throwing (search path).
+  String? _lenientText(int lineId, Object? raw) {
+    try {
+      return lineText(lineId, raw);
+    } catch (_) {
+      // any decode failure (base64, zstd, UTF-8, missing dictionary) is an unreadable row
+      unreadableLineIds.add(lineId);
+    }
+    return null;
+  }
+
+  /// One line's text (a virtual id: its note body), tri-state: found,
+  /// missing (no text row) or unreadable (the error names the line id).
+  LineRead readLine(int lineId) {
+    Object? raw;
+    if (isVirtualId(lineId)) {
+      var gone = false;
+      raw = _noteBody(lineId, missing: () => gone = true);
+      if (gone) return const LineRead.missing();
+    } else {
+      final rs = _select('SELECT content FROM ${splitContent ? 'line_content' : 'line'} WHERE id = ?', [lineId]);
+      if (rs.isEmpty) return const LineRead.missing();
+      raw = rs.first.columnAt(0);
+    }
+    try {
+      return LineRead.found(lineText(lineId, raw));
+    } on FormatException catch (e) {
+      return LineRead.unreadable(e);
+    } on StateError catch (e) {
+      return LineRead.unreadable(e);
     }
   }
 
@@ -264,7 +369,53 @@ class SeforimDb {
 
     roots.forEach(walk);
     order.addAll(orphans);
-    return order;
+    if (!hasNotes) return order;
+    // issue #13: each book's notes book right after it
+    final withNotes = booksWithNotes();
+    return [
+      for (final b in order) ...[b, if (withNotes.contains(b)) notesBookId(b)]
+    ];
+  }
+
+  /// Real book ids that have `line_note` rows (empty without the table).
+  Set<int> booksWithNotes() => !hasNotes
+      ? {}
+      : {
+          for (final r in _select('SELECT DISTINCT l.bookId FROM line_note n JOIN line l ON l.id = n.lineId'))
+            r.columnAt(0) as int
+        };
+
+  /// The index build's loud guard (issue #13): throws, naming the id, when a
+  /// real line / book id or a note does not fit the virtual id scheme.
+  void checkNoteIds() {
+    if (!hasNotes) return;
+    final l = _select('SELECT max(id) FROM line').first.columnAt(0) as int?;
+    final b = _select('SELECT max(id) FROM book').first.columnAt(0) as int?;
+    final n = _select('SELECT max(lineId), min(noteIndex), max(noteIndex) FROM line_note').first;
+    checkNoteIdLimits(
+        maxLineId: l,
+        maxBookId: b,
+        maxNoteLineId: n.columnAt(0) as int?,
+        minNoteIndex: n.columnAt(1) as int?,
+        maxNoteIdx: n.columnAt(2) as int?);
+  }
+
+  /// How many lines [bookId] feeds (a notes book: its notes).
+  int bookLineCount(int bookId) {
+    final src = sourceBookOf(bookId);
+    if (src == null) return _select('SELECT COUNT(*) FROM line WHERE bookId = ?', [bookId]).first.columnAt(0) as int;
+    if (!hasNotes) return 0;
+    return _select('SELECT COUNT(*) FROM line_note n JOIN line l ON l.id = n.lineId WHERE l.bookId = ?', [src])
+        .first
+        .columnAt(0) as int;
+  }
+
+  /// The source of a hit on a notes line (line id >= 2^30): its source line,
+  /// note index and source book; null for a real line.
+  ({int sourceLineId, int noteIndex, int sourceBookId})? noteSource(int lineId, int bookId) {
+    final s = noteSourceOf(lineId);
+    if (s == null) return null;
+    return (sourceLineId: s.sourceLineId, noteIndex: s.noteIndex, sourceBookId: sourceBookOf(bookId) ?? -1);
   }
 
   /// The open connection (reopened first if the file changed).
@@ -283,6 +434,11 @@ class SeforimDb {
   /// early stop (`take`, `break`, an exception in the consumer) leaks nothing
   /// and a reopen between chunks never closes the DB under a live cursor.
   Iterable<DbLine> bookLines(int bookId) sync* {
+    final src = sourceBookOf(bookId);
+    if (src != null) {
+      yield* _noteLines(bookId, src);
+      return;
+    }
     var lastIndex = -(1 << 62), lastId = -(1 << 62);
     while (true) {
       // the section: `line_toc` (the authoritative map) when the DB has it
@@ -298,7 +454,7 @@ class SeforimDb {
       final chunk = [
         for (final r in rows)
           DbLine(r.columnAt(0) as int, bookId, r.columnAt(1) as int, r.columnAt(2) as int,
-              decode(r.columnAt(3), r.columnAt(0) as int)),
+              lineText(r.columnAt(0) as int, r.columnAt(3))),
       ];
       yield* chunk;
       if (chunk.length < bookLinesChunk) return;
@@ -307,12 +463,39 @@ class SeforimDb {
     }
   }
 
+  /// A notes book's lines: every note of [src]'s lines in source order
+  /// (lineIndex, line id, noteIndex), as virtual lines (no section).
+  Iterable<DbLine> _noteLines(int bookId, int src) sync* {
+    if (!hasNotes) return;
+    var a = -(1 << 62), b = -(1 << 62), c = -(1 << 62);
+    while (true) {
+      final rows = _select(
+          'SELECT l.lineIndex, l.id, n.noteIndex, n.body FROM line_note n JOIN line l ON l.id = n.lineId'
+          ' WHERE l.bookId = ? AND (l.lineIndex, l.id, n.noteIndex) > (?, ?, ?)'
+          ' ORDER BY l.lineIndex, l.id, n.noteIndex LIMIT $bookLinesChunk',
+          [src, a, b, c]);
+      final chunk = <DbLine>[];
+      for (final r in rows) {
+        a = r.columnAt(0) as int;
+        b = r.columnAt(1) as int;
+        c = r.columnAt(2) as int;
+        final id = noteLineId(b, c);
+        chunk.add(DbLine(id, bookId, a, 0, lineText(id, r.columnAt(3))));
+      }
+      yield* chunk;
+      if (chunk.length < bookLinesChunk) return;
+    }
+  }
+
   /// Texts of the given line ids: id + content only, by primary key from the table that
   /// holds the text (`line_content` on a split database, no join), what verification reads.
-  /// A line with no text row is absent (callers read it as empty).
-  Map<int, String> lineTexts(Iterable<int> ids) {
-    final out = <int, String>{};
-    final list = ids.toList();
+  /// A line with no text row is absent (callers read it as empty). A virtual
+  /// notes line reads its note body. An unreadable row is absent too and recorded in
+  /// [unreadableLineIds]; with [strict] it throws instead (naming the line id).
+  Map<int, String> lineTexts(Iterable<int> ids, {bool strict = false}) {
+    final all = ids.toList();
+    final out = _noteTexts(all.where(isVirtualId), strict);
+    final list = [for (final id in all) if (!isVirtualId(id)) id];
     final table = splitContent ? 'line_content' : 'line';
     for (var i = 0; i < list.length; i += 500) {
       final chunk = list.sublist(i, i + 500 > list.length ? list.length : i + 500);
@@ -320,7 +503,9 @@ class SeforimDb {
           'SELECT id, content FROM $table WHERE id IN (${List.filled(chunk.length, '?').join(',')})',
           chunk);
       for (final r in rs) {
-        out[r.columnAt(0) as int] = decode(r.columnAt(1), r.columnAt(0) as int);
+        final id = r.columnAt(0) as int;
+        final text = strict ? lineText(id, r.columnAt(1)) : _lenientText(id, r.columnAt(1));
+        if (text != null) out[id] = text;
       }
     }
     return out;
@@ -335,10 +520,14 @@ class SeforimDb {
   /// the table that holds the text; [shortLineIds] also get their non-empty
   /// same-book neighbours within [snippetNeighbourLineRadius], each side
   /// joined by single spaces in document order (plain context, never located).
-  /// A line with no text row is absent.
+  /// A line with no text row is absent. A virtual notes line is its note
+  /// alone. An unreadable row (each neighbour checked by its OWN line id) is
+  /// read as empty and recorded in [unreadableLineIds].
   Map<int, SnippetText> snippetTexts(Iterable<int> lineIds, Iterable<int> shortLineIds) {
-    final shortSet = shortLineIds.toSet();
-    final plain = [for (final id in lineIds) if (!shortSet.contains(id)) id];
+    // a notes line is its note alone: no neighbour context
+    final notes = _noteTexts({...lineIds, ...shortLineIds}.where(isVirtualId), false);
+    final shortSet = shortLineIds.where((id) => !isVirtualId(id)).toSet();
+    final plain = [for (final id in lineIds) if (!shortSet.contains(id) && !isVirtualId(id)) id];
     final shorts = shortSet.toList();
     final texts = <int, String>{};
     final before = <int, Map<int, String>>{};
@@ -352,13 +541,13 @@ class SeforimDb {
       final parts = <String>[];
       final params = <Object?>[];
       if (plainCount > 0) {
-        parts.add('SELECT id, 0, content FROM ${splitContent ? 'line_content' : 'line'}'
+        parts.add('SELECT id, 0, id, content FROM ${splitContent ? 'line_content' : 'line'}'
             ' WHERE id IN (${List.filled(plainCount, '?').join(',')})');
         params.addAll(plain.sublist(p, p + plainCount));
       }
       if (shortCount > 0) {
         // the content join must come AFTER this JOIN's own ON clause
-        parts.add('SELECT m.id, n.lineIndex - m.lineIndex, ${splitContent ? 'lc.content' : 'n.content'}'
+        parts.add('SELECT m.id, n.lineIndex - m.lineIndex, n.id, ${splitContent ? 'lc.content' : 'n.content'}'
             ' FROM line m JOIN line n ON n.bookId = m.bookId'
             ' AND n.lineIndex BETWEEN m.lineIndex - ? AND m.lineIndex + ?'
             ' AND (n.lineIndex <> m.lineIndex OR n.id = m.id)'
@@ -374,7 +563,7 @@ class SeforimDb {
       for (final r in _select(parts.join(' UNION ALL '), params)) {
         final id = r.columnAt(0) as int;
         final delta = r.columnAt(1) as int;
-        final text = decode(r.columnAt(2), id);
+        final text = _lenientText(r.columnAt(2) as int, r.columnAt(3)) ?? '';
         if (delta == 0) {
           texts[id] = text;
           continue;
@@ -391,6 +580,7 @@ class SeforimDb {
 
     return {
       for (final e in texts.entries) e.key: SnippetText(e.key, e.value, side(before[e.key]), side(after[e.key])),
+      for (final e in notes.entries) e.key: SnippetText(e.key, e.value, '', ''),
     };
   }
 
@@ -420,16 +610,33 @@ class SeforimDb {
   Map<int, String> heRefs(Iterable<int> ids) {
     final list = ids.toList();
     if (list.isEmpty) return {};
-    return _readSnapshot(() => {
-          for (final chunk in _chunks(list))
+    // a notes line shows its source line's ref
+    final src = {for (final id in list) if (isVirtualId(id)) id: noteSourceOf(id)!.sourceLineId};
+    final real = {for (final id in list) isVirtualId(id) ? src[id]! : id}.toList();
+    final refs = _readSnapshot(() => {
+          for (final chunk in _chunks(real))
             for (final r in _select(
                 'SELECT id, heRef FROM line WHERE id IN (${List.filled(chunk.length, '?').join(',')})', chunk))
               r['id'] as int: (r['heRef'] as String?) ?? '',
         });
+    return {
+      for (final id in list)
+        if (refs[src[id] ?? id] case final r?) id: r,
+    };
   }
 
-  Map<int, String> bookTitles() =>
-      {for (final r in _select('SELECT id, title FROM book')) r['id'] as int: r['title'] as String};
+  /// Book titles; a notes book is titled with the Hebrew word for notes + its
+  /// book's title (issue #13).
+  Map<int, String> bookTitles() {
+    final out = {for (final r in _select('SELECT id, title FROM book')) r['id'] as int: r['title'] as String};
+    for (final b in booksWithNotes()) {
+      out[notesBookId(b)] = '$notesTitlePrefix ${out[b] ?? b}';
+    }
+    return out;
+  }
+
+  /// The notes book title prefix (the Hebrew word for notes).
+  static const notesTitlePrefix = '\u05D4\u05E2\u05E8\u05D5\u05EA';
 
   /// Book ids whose title, or an ancestor category's title, contains [needle].
   Set<int> booksMatching(String needle) {
@@ -469,10 +676,11 @@ class SeforimDb {
 
 /// One opening of the database: connection, schema probe, decoder, file stamp.
 class _Open {
-  _Open(this.db, this.split, this.compressed, this.zstd, this.stamp, this.dataVersion);
+  _Open(this.db, this.split, this.compressed, this.zstd, this.stamp, this.dataVersion, this.notes);
   final Database db;
   final bool split, compressed;
   final ZstdDictDecoder? zstd;
   final String stamp;
   final int dataVersion;
+  final bool notes;
 }

@@ -114,12 +114,15 @@ namespace SeforimSearch.Demo
             TimeSpan? first = null;
             int total = 0, shown = run == 1 ? 0 : 10, frames = 0;
             string? error = null;
+            int unreadableRows = 0;
+            string? unreadableError = null;
             coordinator.StreamSearch(query, distance, requireOrdered: false, contextWords: 8, chunk =>
             {
                 if (frames++ == 0 && chunk.Restarted)
                     Console.Error.WriteLine("restarted: true (the resume line cannot be placed; results are from the start)");
                 if (!chunk.Ready) error = "index not built";
                 if (chunk.Error != null) error = chunk.Error;
+                if (chunk.Done) { unreadableRows = chunk.UnreadableRowCount; unreadableError = chunk.UnreadableError; }
                 terms.AddRange(chunk.NewTerms);
                 if (chunk.Results.Count > 0) first ??= sw.Elapsed;
                 total += chunk.Results.Count;
@@ -141,6 +144,8 @@ namespace SeforimSearch.Demo
             if (FtsLib.Fts5.HostTiming.Enabled) Console.Error.WriteLine(FtsLib.Fts5.HostTiming.Report());
             Console.Error.WriteLine($"search: {total:N0} hits in {sw.Elapsed.TotalMilliseconds:F0} ms " +
                                     $"(first batch {first?.TotalMilliseconds:F0} ms); terms: {string.Join(", ", terms)}");
+            if (unreadableRows > 0)
+                Console.Error.WriteLine($"{unreadableRows} rows unreadable (first: {unreadableError})");
             }
             return 0;
         }
@@ -218,13 +223,15 @@ namespace SeforimSearch.Demo
                 string query = parts[0];
                 int distance = parts.Length > 1 ? int.Parse(parts[1]) : int.MaxValue;
                 var terms = new FtsTermTable();
+                var unreadable = new SeforimDbFtsUnreadableRows();
                 var sw = Stopwatch.StartNew();
                 int count = 0;
                 using (var w = new StreamWriter(Path.Combine(outDir, n + ".jsonl"), false, new UTF8Encoding(false)))
                 {
                     w.WriteLine("{\"query\":" + JsonStr(query) + ",\"distance\":" + distance + "}");
                     foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
-                                 engine, query, distance, false, SeforimDbFtsSearcher.DefaultContextWords, dumpWordOptions, terms))
+                                 engine, query, distance, false, SeforimDbFtsSearcher.DefaultContextWords, dumpWordOptions, terms,
+                                 unreadable: unreadable))
                     {
                         var all = terms.All();
                         foreach (var h in batch.Hits)
@@ -247,7 +254,8 @@ namespace SeforimSearch.Demo
                         if (count >= maxHits) break;
                     }
                 }
-                Console.Error.WriteLine($"[tantivy] #{n} \"{query}\" dist={distance}: {count} hits in {sw.ElapsedMilliseconds} ms");
+                Console.Error.WriteLine($"[tantivy] #{n} \"{query}\" dist={distance}: {count} hits in {sw.ElapsedMilliseconds} ms" +
+                                        (unreadable.Count > 0 ? $"; {unreadable.Count} rows unreadable (first: {unreadable.FirstError})" : ""));
                 n++;
             }
             return 0;

@@ -18,8 +18,8 @@ _args = [a for i, a in enumerate(sys.argv[1:], 1) if a != "--prefix" and sys.arg
 SP = _args[0] if _args else os.path.join(ROOT, "bench-results")
 P = sys.argv[sys.argv.index("--prefix") + 1] if "--prefix" in sys.argv else ""
 OUT = os.path.join(ROOT, "FTS-SPECS-AND-COMPARISONS.md")
-INDEX_FORMAT = "tantivy13"   # C# TantivySeforimIndex.IndexFormatVersion
-FTSLIB_FORMAT = "fts11"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
+INDEX_FORMAT = "tantivy14"   # C# TantivySeforimIndex.IndexFormatVersion
+FTSLIB_FORMAT = "fts12"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
 MEASURED_FTSLIB = "fts8"      # FtsLib format of the runs in the results dir (= FTSLIB_FORMAT once rerun)
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
 STALE = [
@@ -38,6 +38,9 @@ STALE = [
     "In order + word distance (issue #4 follow-up): the distance is read from the tightest ORDERED window, "
     "so a line whose only close pair is out of order drops; snippet windows and marks follow the order: "
     "the parity sets with in-order queries need a rerun (both engines changed together).",
+    "`tantivy14` / `fts12`: schema-7 footnotes (`line_note`) are indexed as a virtual notes book right after "
+    "each book with notes (issue #13; about 263k notes in 614 books on the local DB): positions, line counts, "
+    "both full-DB rebuilds, the parity sets and the Otzaria hit-count comparison need a rerun.",
     "Hit-count comparison: the rows classified as our bugs (unterminated `<`, cross-line enumerators) "
     "and the fuzzy transposition rows are expected to change; not rerun yet.",
 ]
@@ -169,6 +172,7 @@ md.append(f"""## Engines compared
 | User regex `/.../` (word, sequence, line kinds) | done |
 | Relevance / generation order (option; catalog default) + notice when positions are needed | done |
 | Truncated flag when a cap is hit | done |
+| Footnotes (schema 7 `line_note`) as a virtual notes book after each book; ids in a reserved range (2^30+), hit maps to the source line (both engines) | done; unit tests; full-DB rerun pending |
 | Cross-line phrases (one break, any search type; line-edge enumerators skipped as Otzaria) and same-section scope | built; unit tests; full-DB verification pending |
 | Fuzzy: a swap of two adjacent letters is one edit (Otzaria; FtsLib changed too) | done |
 | Quoted phrases (Otzaria's rule, both engines): a whole-query phrase is literal and may cross a line (ours); a phrase among words is required in the line; in lexical fuzzy mode each quoted word keeps its slot (fuzzy, forms), in order, at most 1 word between | done; unit tests; FtsLib per line only |

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:otzaria_demo/otzaria_query.dart';
 import 'package:otzaria_demo/seforim_db.dart';
+import 'package:otzaria_demo/note_ids.dart';
 import 'package:otzaria_demo/acronym_lexicon.dart';
 import 'package:otzaria_demo/magic_dictionary.dart';
 import 'package:otzaria_demo/facets.dart';
@@ -88,7 +89,14 @@ void main(List<String> args) {
       case 'build':
         _build(db, indexDir, o);
       case 'search':
+        db.clearUnreadable();
         _search(db, indexDir, o, rest.join(' '));
+        // issue #13: unreadable rows were read as empty, never silently
+        if (db.unreadableLineIds.isNotEmpty) {
+          final ids = db.unreadableLineIds.take(20).join(', ');
+          stderr.writeln('${db.unreadableLineIds.length} rows unreadable (line ids: $ids'
+              '${db.unreadableLineIds.length > 20 ? ', ...' : ''})');
+        }
       default:
         stdout.write(_usage);
         exit(64);
@@ -100,6 +108,7 @@ void main(List<String> args) {
 
 void _build(SeforimDb db, String dir, Map<String, String?> o) {
   final maxLines = _int(o, 'max-lines') ?? 0;
+  db.checkNoteIds(); // issue #13: fail loudly before any line goes in
   final sw = Stopwatch()..start();
   stdout.writeln('DB: ${db.path} (split=${db.splitContent}, zstd=${db.compressed})');
   final index = SeforimIndex.create(
@@ -121,7 +130,7 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
             // the section (TOC entry; 0 = none: a section of its own) and
             // Otzaria's rule: a heading interrupts the text (no cross-line phrase)
             sectionId: line.tocEntryId == 0 ? null : line.tocEntryId,
-            noCross: line.text.startsWith('<h')));
+            noCross: line.text.startsWith('<h') || isVirtualId(line.id))); // a footnote stands alone (issue #13)
         if (batch.length == 1000) {
           w.addAll(batch);
           batch.clear();
@@ -130,7 +139,7 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
       }
     }
     w.addAll(batch);
-    w.commit('{"lines":$position,"db":"${db.fingerprint()}"}');
+    w.commit('{"lines":$position,"db":"${db.fingerprint()}","notes":${db.hasNotes ? 1 : 0}}');
   } catch (_) {
     w.rollback();
     rethrow;
@@ -144,6 +153,12 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
   stdout.writeln('Indexed $position lines into $dir in ${sw.elapsed.inMilliseconds} ms; '
       'payload ${index.info().payload}');
   index.close();
+}
+
+/// Issue #13: a hit on a notes line names its source.
+String _noteTag(SeforimDb db, int lineId, int bookId) {
+  final s = db.noteSource(lineId, bookId);
+  return s == null ? '' : ' [note ${s.noteIndex} of line ${s.sourceLineId}, book ${s.sourceBookId}]';
 }
 
 const _open = '⟦', _close = '⟧';
@@ -388,7 +403,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
   final rendered = renderAll(results);
   for (var i = 0; i < results.length; i++) {
     final h = results[i].$1;
-    stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})');
+    stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})${_noteTag(db, h.lineId, h.bookId)}');
     stdout.writeln('   ${rendered[i]}');
   }
   session.close();
@@ -433,7 +448,7 @@ void _lineRegex(SeforimDb db, SearchSession session, LineRegexStatus status, Lis
     for (final bookId in db.catalogBookOrder()) {
       if (scope != null && !scope.contains(bookId)) {
         // keep the build's numbering without reading the book
-        position += db.db.select('SELECT COUNT(*) FROM line WHERE bookId = ?', [bookId]).first.columnAt(0) as int;
+        position += db.bookLineCount(bookId);
         continue;
       }
       for (final line in db.bookLines(bookId)) {
@@ -465,7 +480,7 @@ void _lineRegex(SeforimDb db, SearchSession session, LineRegexStatus status, Lis
       at = e;
     }
     b.write(text.substring(at));
-    stdout.writeln('${++n}. ${titles[book] ?? book} | ${refs[id] ?? ''}  (line $id)');
+    stdout.writeln('${++n}. ${titles[book] ?? book} | ${refs[id] ?? ''}  (line $id)${_noteTag(db, id, book)}');
     stdout.writeln('   ${b.toString().replaceAll(RegExp(r'<[^>]*>'), '')}');
   }
 }
@@ -567,7 +582,7 @@ void _grouped(
   var k = 0;
   for (final (g, h, _, _) in cards) {
     final count = '${g.members.length}${truncated ? '+' : ''}';
-    stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId}) '
+    stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})${_noteTag(db, h.lineId, h.bookId)} '
         '[$count results]');
     stdout.writeln('   ${rendered[k++]}');
     for (final m in g.members.where((m) => m != h).take(mergedSiblingsCap)) {

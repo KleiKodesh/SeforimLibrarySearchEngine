@@ -107,7 +107,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             FtsTermTable terms,
             CancellationToken cancellationToken = default,
             Action<string>? onStage = null,
-            long afterPosition = 0)
+            long afterPosition = 0,
+            SeforimDbFtsUnreadableRows? unreadable = null)
         {
             if (engine == null) throw new ArgumentNullException(nameof(engine));
             if (terms == null) throw new ArgumentNullException(nameof(terms));
@@ -139,30 +140,50 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             // pass, over this one corpus kept for the whole search (opened on first need).
             SeforimDbFtsCorpus? corpus = null;
             SeforimDbFtsCorpus Corpus() => corpus ??= engine.OpenCorpus();
+            // Undecodable rows are skipped as empty and counted, never abort the search (issue
+            // #13, Core 02236a02). The scope is entered around each pull only, never across a yield.
+            unreadable ??= new SeforimDbFtsUnreadableRows();
+            IEnumerator<SearchResult>? hits = null;
             try
             {
-                foreach (var hit in index.Search(query, searchOptions, cancellationToken, stage, BatchSizeAt, withPlacement: false,
-                                                 afterPosition: afterPosition))
+                using (unreadable.Enter())
+                    hits = index.Search(query, searchOptions, cancellationToken, stage, BatchSizeAt, withPlacement: false,
+                                        afterPosition: afterPosition).GetEnumerator();
+                while (true)
                 {
+                    bool more;
+                    using (unreadable.Enter()) more = hits.MoveNext();
+                    if (!more) break;
                     cancellationToken.ThrowIfCancellationRequested();
-                    batch.Add(hit);
+                    batch.Add(hits.Current);
                     if (batch.Count < BatchSizeAt(batchIndex)) continue;
 
-                    var built = BuildBatch(index, Corpus, batch, requireOrdered, contextWords, maxWordDistance, terms, seedLeft, cancellationToken, stage);
+                    SeforimDbFtsHitBatch built;
+                    using (unreadable.Enter())
+                        built = BuildBatch(index, Corpus, batch, requireOrdered, contextWords, maxWordDistance, terms, seedLeft, cancellationToken, stage);
+                    built.UnreadableLineIds = unreadable.TakeNew();
                     batch.Clear();
                     batchIndex++;
                     seedLeft = Math.Max(0, seedLeft - built.Hits.Count);
-                    if (built.Hits.Count > 0) yield return built;
+                    if (built.Hits.Count > 0 || built.UnreadableLineIds.Count > 0) yield return built;
                     stage?.Invoke("fetch");   // engine only reports its first fetch
                 }
 
-                if (batch.Count > 0)
                 {
-                    var built = BuildBatch(index, Corpus, batch, requireOrdered, contextWords, maxWordDistance, terms, seedLeft, cancellationToken, stage);
-                    if (built.Hits.Count > 0) yield return built;
+                    SeforimDbFtsHitBatch built;
+                    using (unreadable.Enter())
+                        built = batch.Count > 0
+                            ? BuildBatch(index, Corpus, batch, requireOrdered, contextWords, maxWordDistance, terms, seedLeft, cancellationToken, stage)
+                            : new SeforimDbFtsHitBatch(new List<FtsHit>(), new List<FtsSnippetText>());
+                    built.UnreadableLineIds = unreadable.TakeNew();
+                    if (built.Hits.Count > 0 || built.UnreadableLineIds.Count > 0) yield return built;
                 }
             }
-            finally { corpus?.Dispose(); }
+            finally
+            {
+                hits?.Dispose();
+                corpus?.Dispose();
+            }
         }
 
         /// <summary>

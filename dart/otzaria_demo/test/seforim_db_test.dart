@@ -6,6 +6,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:otzaria_demo/note_ids.dart';
 import 'package:otzaria_demo/seforim_db.dart';
 import 'package:otzaria_demo/zstd.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -224,7 +225,7 @@ void main() {
     final db = SeforimDb.open(path);
     expect(db.lineTexts([1, 2, 3]), {1: 'KLUv is how it starts', 2: 'KLUvAAAAAAAA', 3: 'gamma'});
     for (final id in [4, 5, 6]) {
-      expect(() => db.lineTexts([id]),
+      expect(() => db.lineTexts([id], strict: true),
           throwsA(isA<FormatException>().having((e) => e.message, 'message', contains('line $id'))));
     }
     db.close();
@@ -253,6 +254,125 @@ void main() {
     expect(secs.length, n);
     expect(secs[n], n % 7);
     expect(db.countLines(), n); // the read transaction was closed
+    db.close();
+  });
+  test('note ids: boundaries, roundtrip and the guard (issue #13)', () {
+    expect(noteLineId(maxNoteSourceLineId, 63), (1 << 31) - 1);
+    expect(noteLineId(0, 0), noteIdBase);
+    expect(noteSourceOf(noteLineId(12345, 7)), (sourceLineId: 12345, noteIndex: 7));
+    expect(noteSourceOf(noteIdBase - 1), isNull);
+    expect(sourceBookOf(notesBookId(8440)), 8440);
+    expect(() => noteLineId(1 << 24, 0), throwsStateError);
+    expect(() => noteLineId(1, 64), throwsStateError);
+    expect(() => notesBookId(noteIdBase), throwsStateError);
+    checkNoteIdLimits(maxLineId: noteIdBase - 1, maxBookId: noteIdBase - 1, maxNoteLineId: maxNoteSourceLineId,
+        minNoteIndex: 0, maxNoteIdx: 63);
+    expect(() => checkNoteIdLimits(maxLineId: noteIdBase),
+        throwsA(isA<StateError>().having((e) => e.message, 'message', contains('$noteIdBase'))));
+    expect(() => checkNoteIdLimits(maxBookId: noteIdBase), throwsStateError);
+    expect(() => checkNoteIdLimits(maxNoteLineId: 1 << 24), throwsStateError);
+    expect(() => checkNoteIdLimits(maxNoteIdx: 64), throwsStateError);
+    expect(() => checkNoteIdLimits(minNoteIndex: -1), throwsStateError);
+  });
+
+  test('db: schema 7 notes books: order, feed, texts, snippets, source mapping, BOM (issue #13)', () {
+    final path = '${dir.path}/notes.db';
+    final w = sqlite3.open(path);
+    w.execute('CREATE TABLE category (id INTEGER PRIMARY KEY, parentId INTEGER, title TEXT, level INTEGER)');
+    w.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, categoryId INTEGER, title TEXT, orderIndex INTEGER)');
+    w.execute("INSERT INTO category VALUES (1, NULL, 'c', 0)");
+    w.execute("INSERT INTO book VALUES (1, 1, 'one', 0), (2, 1, 'two', 1), (3, 1, 'three', 2)");
+    w.execute('CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER, lineIndex INTEGER, heRef TEXT, tocEntryId INTEGER)');
+    w.execute('CREATE TABLE line_content (id INTEGER PRIMARY KEY, content)');
+    w.execute('CREATE TABLE zstd_dict (id INTEGER PRIMARY KEY, dict BLOB)');
+    w.execute('INSERT INTO zstd_dict (dict) VALUES (?)', [d1]);
+    w.execute('CREATE TABLE line_note (lineId INTEGER NOT NULL, noteIndex INTEGER NOT NULL, charPos INTEGER, '
+        'hasMarker INTEGER, body, PRIMARY KEY (lineId, noteIndex)) WITHOUT ROWID');
+    // book 1: lines 11 (index 1) and 10 (index 0); book 3: line 30; book 2: none
+    for (final (id, book, idx, text) in [(10, 1, 0, 'a'), (11, 1, 1, 'b'), (20, 2, 0, 'c'), (30, 3, 0, '﻿d')]) {
+      w.execute("INSERT INTO line VALUES (?, ?, ?, 'ref$id', 0)", [id, book, idx]);
+      w.execute('INSERT INTO line_content VALUES (?, ?)', [id, text]);
+    }
+    w.execute('INSERT INTO line_note VALUES (11, 0, 0, 1, ?)', ['zeta note']);
+    w.execute('INSERT INTO line_note VALUES (10, 1, 0, 1, ?)', [zw.compress(d1, utf8.encode('﻿packed note'))]);
+    w.execute('INSERT INTO line_note VALUES (10, 0, 0, 1, ?)', [base64.encode(zw.compress(d1, utf8.encode('b64 note')))]);
+    w.execute('INSERT INTO line_note VALUES (30, 63, 0, 0, ?)', ['last note']);
+    w.close();
+    final db = SeforimDb.open(path);
+    expect(db.hasNotes, isTrue);
+    db.checkNoteIds();
+    final n1 = notesBookId(1), n3 = notesBookId(3);
+    expect(db.catalogBookOrder(), [1, n1, 2, 3, n3]);
+    final feed = [for (final b in db.catalogBookOrder()) ...db.bookLines(b)];
+    expect([for (final l in feed) l.id],
+        [10, 11, noteLineId(10, 0), noteLineId(10, 1), noteLineId(11, 0), 20, 30, noteLineId(30, 63)]);
+    expect([for (final l in feed) l.text], ['a', 'b', 'b64 note', 'packed note', 'zeta note', 'c', 'd', 'last note']);
+    expect(feed[2].bookId, n1);
+    expect(feed.last.bookId, n3);
+    expect(feed.last.tocEntryId, 0);
+    expect(db.bookLineCount(n1), 3);
+    expect(db.bookLineCount(1), 2);
+    final v = noteLineId(10, 1);
+    expect(db.lineTexts([10, v, noteLineId(20, 0)]), {10: 'a', v: 'packed note'});
+    expect(db.readLine(v).text, 'packed note');
+    expect(db.readLine(noteLineId(20, 0)).status, LineStatus.missing);
+    final sn = db.snippetTexts([noteLineId(30, 63)], [v, 11]);
+    expect((sn[v]!.text, sn[v]!.before, sn[v]!.after), ('packed note', '', '')); // the note alone
+    expect(sn[noteLineId(30, 63)]!.text, 'last note');
+    expect(sn[11]!.before, 'a'); // a real line keeps its real neighbours only
+    expect(db.noteSource(v, n1), (sourceLineId: 10, noteIndex: 1, sourceBookId: 1));
+    expect(db.noteSource(10, 1), isNull);
+    expect(db.heRefs([v, 11]), {v: 'ref10', 11: 'ref11'});
+    final titles = db.bookTitles();
+    expect(titles[n1], '${SeforimDb.notesTitlePrefix} one');
+    expect(titles.containsKey(notesBookId(2)), isFalse);
+    expect(db.unreadableLineIds, isEmpty);
+    db.close();
+  });
+
+  test('db: no line_note table, nothing changes (issue #13)', () {
+    final path = '${dir.path}/plain.db';
+    final w = create(path);
+    w.execute("INSERT INTO line VALUES (1, 1, 0, '﻿alpha', '', 0)");
+    w.close();
+    final db = SeforimDb.open(path);
+    expect(db.hasNotes, isFalse);
+    db.checkNoteIds();
+    expect(db.lineTexts([1]), {1: 'alpha'}); // BOM stripped
+    db.close();
+  });
+
+  test('db: the build guard names a real id in the reserved range (issue #13)', () {
+    final path = '${dir.path}/guard.db';
+    final w = create(path);
+    w.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)');
+    w.execute('CREATE TABLE line_note (lineId INTEGER, noteIndex INTEGER, charPos INTEGER, hasMarker INTEGER, body)');
+    w.execute("INSERT INTO line VALUES (?, 1, 0, 'x', '', 0)", [noteIdBase]);
+    w.close();
+    final db = SeforimDb.open(path);
+    expect(db.checkNoteIds, throwsA(isA<StateError>().having((e) => e.message, 'message', contains('$noteIdBase'))));
+    db.close();
+  });
+
+  test('db: an unreadable row is counted, not thrown, on the search path (issue #13)', () {
+    final path = '${dir.path}/bad.db';
+    final w = create(path, dicts: [d1]);
+    w.execute("INSERT INTO line VALUES (1, 1, 0, 'good', '', 0)");
+    w.execute("INSERT INTO line VALUES (2, 1, 1, ?, '', 0)", [zw.compress(d3, utf8.encode('x'))]);
+    w.execute("INSERT INTO line VALUES (3, 1, 2, 'next', '', 0)");
+    w.close();
+    final db = SeforimDb.open(path);
+    expect(db.lineTexts([1, 2, 3]), {1: 'good', 3: 'next'});
+    expect(db.unreadableLineIds, {2});
+    final sn = db.snippetTexts([2], [1]);
+    expect(sn[2]!.text, ''); // read as empty
+    expect(sn[1]!.after, 'next'); // the bad neighbour is skipped as empty
+    final r = db.readLine(2);
+    expect(r.status, LineStatus.unreadable);
+    expect(r.error.toString(), contains('line 2'));
+    expect(db.readLine(1).text, 'good');
+    db.clearUnreadable();
+    expect(db.unreadableLineIds, isEmpty);
     db.close();
   });
 }

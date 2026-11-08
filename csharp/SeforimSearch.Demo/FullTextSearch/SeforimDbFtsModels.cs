@@ -30,6 +30,19 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// <summary>The window holds fewer words than the requested context: the line is too
         /// short to fill it, so the page fetches its neighbour lines with it.</summary>
         public const int SnippetFlagShort = 4;
+
+        // Hit -> source (issue #13, Core 02236a02): a hit in a virtual notes book (LineId >= 2^30,
+        // see SeforimDb.SeforimDbNoteIds) opens its SOURCE line with the note shown. Derived
+        // from the ids.
+
+        /// <summary>The hit is a footnote (a line of a virtual notes book).</summary>
+        public bool IsNote => SeforimDb.SeforimDbNoteIds.IsVirtual(LineId);
+        /// <summary>The line to open: the note's source line, else <see cref="LineId"/>.</summary>
+        public int SourceLineId => SeforimDb.SeforimDbNoteIds.SourceLineOf(LineId);
+        /// <summary>The note's index in its source line; -1 for a plain line.</summary>
+        public int NoteIndex => SeforimDb.SeforimDbNoteIds.TryDecodeLine(LineId, out _, out int n) ? n : -1;
+        /// <summary>The book to open: the notes book's source book, else <see cref="BookId"/>.</summary>
+        public int SourceBookId => SeforimDb.SeforimDbNoteIds.SourceBookOf(BookId);
     }
 
     /// <summary>
@@ -44,6 +57,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         public string Text { get; set; } = "";
         public string Before { get; set; } = "";
         public string After { get; set; } = "";
+        /// <summary>The line's row could not be decoded: <see cref="Text"/> is empty (issue #13).</summary>
+        public bool Unreadable { get; set; }
     }
 
     /// <summary>One pushed frame of a streaming search (Core's FtsStreamChunk, same fields).
@@ -68,6 +83,12 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// enrich). Until the first results frame a stage change is a frame of its own; after
         /// it, the latest stage rides on the next results frame.</summary>
         public string? Stage { get; set; }
+        /// <summary>Matched rows first found undecodable in this frame (skipped as empty, issue
+        /// #13); the receiver sums them. The Done frame carries the total in
+        /// <see cref="UnreadableRowCount"/> with the first error.</summary>
+        public List<int> UnreadableLineIds { get; set; } = new List<int>();
+        public int UnreadableRowCount { get; set; }
+        public string? UnreadableError { get; set; }
     }
 
     /// <summary>One search's matched-term strings, numbered in first-seen order

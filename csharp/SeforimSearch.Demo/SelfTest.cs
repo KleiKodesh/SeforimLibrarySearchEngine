@@ -36,8 +36,9 @@ namespace SeforimSearch.Demo
                 ("WAL commit (data_version) reopens on rent", DataVersionReopens),
                 ("codec: dictionary appended via WAL is picked up", CodecReloadsNewDictionary),
                 ("codec: base64 text vs base64 frame, errors name the line", CodecBase64AndErrors),
-                ("end to end: build tantivy13 + search in catalog order", EndToEnd),
+                ("end to end: build tantivy14 + search in catalog order", EndToEnd),
                 ("stream: chunks, resume, Restarted, cancellation (Core's StreamSearch)", Stream),
+                ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
             };
             int failed = 0;
             foreach (var (name, body) in tests)
@@ -317,7 +318,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             Check(engine.Index.IsBuilt, "built");
             string meta = File.ReadAllText(Path.Combine(index, "meta.json"));
             Check(meta.Contains("sort_by_field") && meta.Contains("\"position\""), "index not sorted by position");
-            Check(FtsLib.Fts5.TantivySeforimIndex.IndexFormatVersion == "tantivy13", "format version");
+            Check(FtsLib.Fts5.TantivySeforimIndex.IndexFormatVersion == "tantivy14", "format version");
 
             // ABI edges: a helper's text output is pointer + length (an embedded NUL
             // survives); ids live in 0..=long.MaxValue, a negative id is rejected
@@ -469,6 +470,185 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
         private static IEnumerable<int> Marks(FtsHit h)
         {
             for (int i = 2; i < h.SnippetMarks.Length; i += 3) yield return h.SnippetMarks[i];
+        }
+
+        // ── Notes books (issue #13, Core 02236a02 NotesBookCheck) ─────────────────────
+
+        /// <summary>Footnotes as virtual notes books on a synthetic schema-7 database (a
+        /// <c>line_note</c> table): the id encoding's boundaries, catalog order, a search finding
+        /// a note word through the engine, the note's snippet text (no neighbour context), the
+        /// hit mapping back to its source line, BOM stripping, unreadable rows counted on the
+        /// search path while indexing stays strict, and the id guard.</summary>
+        private static void NotesBooks(string unusedDb, string dir)
+        {
+            const int R = SeforimDb.SeforimDbNoteIds.ReservedStart;
+            Check(R == 1073741824, "R = 2^30");
+            Check(!SeforimDb.SeforimDbNoteIds.IsVirtual(R - 1) && SeforimDb.SeforimDbNoteIds.IsVirtual(R), "R-1 real, R virtual");
+            Check(SeforimDb.SeforimDbNoteIds.EncodeLine((1 << 24) - 1, 63) == int.MaxValue, "lineId 2^24-1 / note 63 -> 2^31-1");
+            Check(SeforimDb.SeforimDbNoteIds.EncodeLine(0, 0) == R, "lineId 0 / note 0 -> R");
+            int v = SeforimDb.SeforimDbNoteIds.EncodeLine(10350062, 54);
+            Check(SeforimDb.SeforimDbNoteIds.TryDecodeLine(v, out int dl, out int dn) && dl == 10350062 && dn == 54, "line roundtrip");
+            Check(SeforimDb.SeforimDbNoteIds.TryDecodeBook(SeforimDb.SeforimDbNoteIds.EncodeBook(8440), out int db8) && db8 == 8440, "book roundtrip");
+            Check(Throws<ArgumentOutOfRangeException>(() => SeforimDb.SeforimDbNoteIds.EncodeLine(1 << 24, 0)), "lineId 2^24 rejected");
+            Check(Throws<ArgumentOutOfRangeException>(() => SeforimDb.SeforimDbNoteIds.EncodeLine(1, 64)), "noteIndex 64 rejected");
+            Check(Throws<ArgumentOutOfRangeException>(() => SeforimDb.SeforimDbNoteIds.EncodeBook(R)), "book R rejected");
+            Check(!Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(R - 1, R - 1, (1 << 24) - 1, 0, 63)), "guard: R-1 ok");
+            Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(R, 1, 1, 0, 0)), "guard: line.id R rejected");
+            Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(1, R, 1, 0, 0)), "guard: book.id R rejected");
+            Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(1, 1, 1 << 24, 0, 0)), "guard: note lineId 2^24 rejected");
+            Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(1, 1, 1, -1, 0)), "guard: noteIndex -1 rejected");
+            Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(1, 1, 1, 0, 64)), "guard: noteIndex 64 rejected");
+
+            // ---- order, reads, search, hit -> source, unreadable
+            string db = CreateNotesDb(dir, "notes",
+                "INSERT INTO line (id, bookId, lineIndex, content) VALUES (10, 1, 0, 'alpha beta'), (11, 1, 1, 'gamma delta'), (12, 1, 2, 'epsilon'), (20, 2, 0, 'omega');" +
+                "INSERT INTO line_note VALUES (11, 1, 3, 1, char(65279) || 'zetanote kappa'), (11, 0, 1, 1, 'etanote'), (10, 0, 2, 0, 'thetanote');");
+            int n10 = SeforimDb.SeforimDbNoteIds.EncodeLine(10, 0), n110 = SeforimDb.SeforimDbNoteIds.EncodeLine(11, 0), n111 = SeforimDb.SeforimDbNoteIds.EncodeLine(11, 1);
+            int notesBook = SeforimDb.SeforimDbNoteIds.EncodeBook(1);
+            using (var corpus = new SeforimDbFtsCorpus(db))
+            {
+                var order = corpus.ReadDocumentsWithSectionInResultOrder(0).ToList();
+                Check(string.Join(",", order.Select(d => d.Id)) == string.Join(",", new[] { 10, 11, 12, n10, n110, n111, 20 }),
+                      "order: book lines, its notes book in source order, next book: " + string.Join(",", order.Select(d => d.Id)));
+                Check(order.Where(d => SeforimDb.SeforimDbNoteIds.IsVirtual(d.Id)).All(d => d.BookId == notesBook && d.SectionId == null),
+                      "notes carry the virtual book id and no section");
+                Check(order.First(d => d.Id == n111).Text == "zetanote kappa", "BOM stripped from a note body");
+                Check(corpus.CountDocuments() == 7, "count includes notes");
+                var resumed = corpus.ReadDocumentsInResultOrder(4).Select(d => d.Id).ToList();
+                Check(resumed.Count == 3 && resumed[0] == n110, "resume skip lands inside the notes book");
+                var ranges = corpus.BookPositionRanges();
+                Check(ranges.TryGetValue(notesBook, out var nr) && nr.First == 4 && nr.Count == 3, "notes book position range");
+                Check(corpus.PositionOfLine(n111, ranges) == 6, "position of a note");
+                Check(corpus.PositionOfLine(20, ranges) == 7, "position of a later real line unchanged");
+                var placement = corpus.FetchPlacements(new[] { n110, 12 });
+                Check(placement[n110].BookId == notesBook && placement[12].BookId == 1, "placements: virtual book for a note");
+                Check(corpus.GetDocumentText(n10) == "thetanote", "document text of a note");
+                var texts = corpus.FetchSnippetTexts(new[] { n111 }, new[] { n10 });
+                Check(texts.Count == 2 && texts.All(t => t.Before == "" && t.After == ""), "snippet text of a note has no neighbour context");
+                Check(texts.First(t => t.LineId == n10).Text == "thetanote", "snippet text = note text");
+            }
+
+            string index = Path.Combine(dir, "index-notes");
+            using (var engine = new SeforimDbFtsEngine(index, db))
+            {
+                engine.Index.BuildLines(linesPerCommit: 500, heapBytes: 60_000_000);
+                Check(engine.Index.IsBuilt, "index build with notes");
+
+                var hits = NotesSearch(engine, "zetanote", out var clean);
+                Check(hits.Count == 1 && hits[0].LineId == n111, "search finds a note word: " + hits.Count);
+                var h = hits[0];
+                Check(h.IsNote && h.SourceLineId == 11 && h.NoteIndex == 1 && h.SourceBookId == 1 && h.BookId == notesBook,
+                      "hit maps back to its source line / note / book");
+                var plain = NotesSearch(engine, "gamma", out _);
+                Check(plain.Count == 1 && !plain[0].IsNote && plain[0].SourceLineId == 11 && plain[0].NoteIndex == -1 && plain[0].SourceBookId == 1,
+                      "plain hit is not a note");
+                Check(clean.Count == 0, "no unreadable rows on a clean db");
+                Check(engine.PositionOfLine(n111) == 6, "resume position of a note through the engine");
+
+                // A row that went bad after the build: the search counts it instead of failing.
+                using (var c = new SqliteConnection("Data Source=" + db + ";Pooling=False"))
+                {
+                    c.Open();
+                    using var cmd = c.CreateCommand();
+                    cmd.CommandText = "UPDATE line SET content = X'28B52FFD00' WHERE id = 11; UPDATE line_note SET body = X'28B52FFD00' WHERE lineId = 10;";
+                    cmd.ExecuteNonQuery();
+                }
+                SqliteConnection.ClearAllPools();
+                var afterHits = NotesSearch(engine, "gamma", out var bad);
+                Check(afterHits.Count == 0 && bad.Count == 1 && bad.LineIds()[0] == 11, "unreadable line counted, search not aborted: " + bad.Count);
+                Check(bad.FirstError?.Contains("Line 11") == true, "error names the line: " + bad.FirstError);
+                NotesSearch(engine, "thetanote", out var badNote);
+                Check(badNote.Count == 1 && badNote.LineIds()[0] == n10, "unreadable note counted by its virtual id");
+
+                // The streamed search reports the total on its Done frame.
+                var coordinator = new SeforimDbFtsIndexCoordinator(engine);
+                int doneCount = -1, frameIds = 0;
+                coordinator.StreamSearch("gamma", int.MaxValue, false, 5, chunk =>
+                {
+                    frameIds += chunk.UnreadableLineIds.Count;
+                    if (chunk.Done) doneCount = chunk.UnreadableRowCount;
+                    return Task.CompletedTask;
+                }, CancellationToken.None).GetAwaiter().GetResult();
+                Check(doneCount == 1 && frameIds == 1, $"stream: unreadable total {doneCount}, frame ids {frameIds}");
+            }
+            using (var corpus = new SeforimDbFtsCorpus(db))
+            {
+                var t = corpus.FetchSnippetTexts(new[] { 11 }, Array.Empty<int>());
+                Check(t.Count == 1 && t[0].Unreadable && t[0].Text == "", "snippet text of an unreadable row is flagged");
+                var tn = corpus.FetchSnippetTexts(new[] { n10 }, Array.Empty<int>());
+                Check(tn.Count == 1 && tn[0].Unreadable && tn[0].Text == "", "snippet text of an unreadable note is flagged");
+            }
+
+            // ---- indexing stays strict
+            string strict = CreateNotesDb(dir, "strict",
+                "INSERT INTO line (id, bookId, lineIndex, content) VALUES (10, 1, 0, 'alpha');" +
+                "INSERT INTO line_note VALUES (10, 0, 0, 0, X'28B52FFD00');");
+            using (var corpus = new SeforimDbFtsCorpus(strict))
+            {
+                string? message = null;
+                try { corpus.ReadDocumentsWithSectionInResultOrder(0).ToList(); }
+                catch (SeforimDb.SeforimDbContentCodecException e) { message = e.Message; }
+                Check(message?.Contains("line 10") == true, "indexing an unreadable note throws naming its line: " + message);
+            }
+
+            // ---- the guard
+            string guard = CreateNotesDb(dir, "guard",
+                "INSERT INTO line (id, bookId, lineIndex, content) VALUES (1073741824, 1, 0, 'alpha');" +
+                "INSERT INTO line_note VALUES (5, 0, 0, 0, 'x');");
+            using (var corpus = new SeforimDbFtsCorpus(guard))
+            {
+                string? message = null;
+                try { corpus.ReadDocumentsWithSectionInResultOrder(0).ToList(); }
+                catch (SeforimDb.SeforimDbNoteIdRangeException e) { message = e.Message; }
+                Check(message?.Contains("1073741824") == true, "guard fails the build naming the id");
+            }
+
+            // ---- BOM on a plain line too (the codec strips it for every row)
+            string bom = CreateNotesDb(dir, "bom", "INSERT INTO line (id, bookId, lineIndex, content) VALUES (10, 1, 0, char(65279) || 'alpha');");
+            using (var corpus = new SeforimDbFtsCorpus(bom))
+                Check(corpus.GetDocumentText(10) == "alpha", "BOM stripped from a line");
+        }
+
+        /// <summary>A schema-7-shaped database (Zayit text content plus <c>line_note</c>), two
+        /// books in one category, filled by <paramref name="fill"/>.</summary>
+        private static string CreateNotesDb(string dir, string name, string fill)
+        {
+            string path = Path.Combine(dir, name + ".db");
+            using var c = new SqliteConnection($"Data Source={path};Pooling=False");
+            c.Open();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText =
+                "CREATE TABLE category (id INTEGER PRIMARY KEY NOT NULL, parentId INTEGER, title TEXT NOT NULL," +
+                "  level INTEGER NOT NULL DEFAULT 0, orderIndex INTEGER NOT NULL DEFAULT 999);" +
+                "CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, categoryId INTEGER NOT NULL, sourceId INTEGER NOT NULL DEFAULT 0," +
+                "  title TEXT NOT NULL, heRef TEXT, orderIndex INTEGER NOT NULL DEFAULT 999, totalLines INTEGER NOT NULL DEFAULT 0," +
+                "  isBaseBook INTEGER NOT NULL DEFAULT 0);" +
+                "CREATE TABLE line (id INTEGER PRIMARY KEY NOT NULL, bookId INTEGER NOT NULL, lineIndex INTEGER NOT NULL," +
+                "  content TEXT NOT NULL, heRef TEXT, tocEntryId INTEGER);" +
+                "CREATE INDEX idx_line_book_index ON line(bookId, lineIndex);" +
+                "CREATE TABLE author (id INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL);" +
+                "CREATE TABLE book_author (bookId INTEGER NOT NULL, authorId INTEGER NOT NULL);" +
+                "CREATE TABLE line_note (lineId INTEGER NOT NULL, noteIndex INTEGER NOT NULL, charPos INTEGER, hasMarker INTEGER, body BLOB," +
+                "  PRIMARY KEY (lineId, noteIndex));" +
+                "INSERT INTO category (id, parentId, title, level, orderIndex) VALUES (1, NULL, 'cat', 0, 1);" +
+                "INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'first', 1), (2, 1, 'second', 2);" + fill;
+            cmd.ExecuteNonQuery();
+            return path;
+        }
+
+        private static List<FtsHit> NotesSearch(SeforimDbFtsEngine engine, string query, out SeforimDbFtsUnreadableRows unreadable)
+        {
+            unreadable = new SeforimDbFtsUnreadableRows();
+            var hits = new List<FtsHit>();
+            foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
+                         engine, query, 50, false, 5, null, new FtsTermTable(), unreadable: unreadable))
+                hits.AddRange(batch.Hits);
+            return hits;
+        }
+
+        private static bool Throws<T>(Action a) where T : Exception
+        {
+            try { a(); return false; } catch (T) { return true; }
         }
     }
 }

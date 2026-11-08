@@ -2,6 +2,7 @@ import 'package:seforim_search/seforim_search.dart';
 
 import 'acronym_lexicon.dart';
 import 'lexicon_text.dart' show foldPresentationForms;
+import 'magic_dictionary.dart';
 import 'translation_lexicon.dart';
 
 /// Otzaria's search modes (`SearchMode`).
@@ -160,6 +161,7 @@ class OtzariaSearch {
     Map<int, List<String>>? negativeAlternativeWords,
     this.translations,
     this.acronymLexicon,
+    this.magicDictionary,
   })  :globalOptions = globalOptions ?? {},
         wordOptions = wordOptions ?? {},
         alternativeWords = alternativeWords ?? {},
@@ -228,6 +230,12 @@ class OtzariaSearch {
 
   /// Otzaria's acronym dictionary for "ראשי תיבות"; null = not loaded.
   final AcronymLexicon? acronymLexicon;
+
+  /// Otzaria's MagicDictionary over lexical.db; null = not loaded. As in
+  /// Otzaria, only the fuzzy mode uses it: each word's dictionary forms
+  /// join its slot as exact words (Otzaria's lexical TermSetQuery), the
+  /// forms of a blacklisted lemma searched but not marked.
+  final MagicDictionary? magicDictionary;
 
   /// Otzaria acronym_alternatives: when any word has the option, the whole
   /// query's phrase alternatives (advanced mode only).
@@ -320,7 +328,8 @@ class OtzariaSearch {
 
   /// Word [i]'s overrides of the global options ([own] vs [global]) and its
   /// alternatives; null when it has neither.
-  WordOptions? _wordOverride(Set<String> own, Set<String> global, List<String> alternatives) {
+  WordOptions? _wordOverride(Set<String> own, Set<String> global, List<String> alternatives,
+      [({List<String> marked, List<String> unmarked})? forms]) {
     bool? d(String k) => own.contains(k) == global.contains(k) ? null : own.contains(k);
     final w = WordOptions(
       grammarPrefixes: d(OtzariaOption.grammaticalPrefixes),
@@ -335,9 +344,25 @@ class OtzariaSearch {
       ignoreQuotes: d(OtzariaOption.ignoreGershayim),
       matchNikud: d(OtzariaOption.nikud),
       matchTeamim: d(OtzariaOption.teamim),
-      alternatives: [for (final a in alternatives) _queryWord(a)],
+      alternatives: [for (final a in alternatives) _queryWord(a), ...?forms?.marked],
+      unmarkedAlternatives: forms?.unmarked,
     );
     return w.toJson().isEmpty ? null : w;
+  }
+
+  /// Word [word]'s dictionary forms (fuzzy mode with a [magicDictionary]),
+  /// exact words: Otzaria's `build_lexical_fuzzy_query` recall forms
+  /// minus the token and its quote-free spelling, split by its highlight
+  /// forms. None for a wildcard word or a quoted one (the engine searches
+  /// a quoted word as written).
+  ({List<String> marked, List<String> unmarked})? _magicForms(String word, bool quoted) {
+    final dict = magicDictionary;
+    if (dict == null || mode != SearchMode.fuzzy || quoted) return null;
+    if (word.contains('*') || word.contains('?')) return null;
+    final f = dict.formsFor(word);
+    // a form is one plain word; query operators would change its meaning
+    bool plain(String x) => !x.contains(RegExp(r'[*?~%|\s]'));
+    return (marked: f.marked.where(plain).toList(), unmarked: f.unmarked.where(plain).toList());
   }
 
   /// Negative word [i]'s options (Otzaria keys): its own set from
@@ -456,6 +481,14 @@ class OtzariaSearch {
     final words = [for (final w in keep) w.$1];
     // Quoted phrases stay quoted: the engine searches each as a literal phrase.
     final phrases = [for (final w in keep) w.$2];
+    // Otzaria's lexical fuzzy phrase (fuzzy mode with a magic dictionary,
+    // the whole query one quoted phrase): every word with its edit-distance
+    // matches and dictionary forms, in order, at most 1 word between
+    // neighbours (LEXICAL_FUZZY_PHRASE_SLOP), not the literal phrase.
+    final lexicalPhrase = mode == SearchMode.fuzzy &&
+        magicDictionary != null &&
+        words.length >= 2 &&
+        phrases.every((p) => p != null && p == phrases.first);
     final global = _globalSet();
     final perWord = <int, WordOptions>{};
     Set<String> optionsOf(int k) => {for (final i in merged[k]) ..._optionsFor(i)};
@@ -477,12 +510,12 @@ class OtzariaSearch {
       if (mode == SearchMode.advanced && o.contains(OtzariaOption.aramaicTranslation) && translations == null) {
         warnings.add('option "${OtzariaOption.aramaicTranslation}" needs --dictionary (Otzaria assets/dictionary.json)');
       }
-      final w = _wordOverride(o, global, alts);
+      final w = _wordOverride(o, global, alts, _magicForms(words[k], phrases[k] != null && !lexicalPhrase));
       if (w != null) perWord[k] = w;
     }
     final s = _withOptions(
       SearchOptions(
-        joinWithPhrases([for (final w in words) _queryWord(w)], phrases),
+        joinWithPhrases([for (final w in words) _queryWord(w)], lexicalPhrase ? List.filled(words.length, null) : phrases),
         words: perWord,
         contextWords: contextWords,
         exclude: _exclude(),
@@ -494,7 +527,11 @@ class OtzariaSearch {
     // it drops (no letters or digits) out of the proximity, merging their
     // gaps. A one-letter word is a word. A partial mode sends no proximity.
     if (mode == SearchMode.advanced) s.wordMatch = wordMatch;
-    if (words.length > 1 && !partial) s.proximity = _proximity(words.length, customSpacing);
+    if (lexicalPhrase) {
+      s.proximity = Proximity.ordered(List.filled(words.length - 1, 1));
+    } else if (words.length > 1 && !partial) {
+      s.proximity = _proximity(words.length, customSpacing);
+    }
     return s;
   }
 }

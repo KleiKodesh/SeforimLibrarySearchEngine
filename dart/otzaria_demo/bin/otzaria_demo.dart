@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:otzaria_demo/otzaria_query.dart';
 import 'package:otzaria_demo/seforim_db.dart';
 import 'package:otzaria_demo/acronym_lexicon.dart';
+import 'package:otzaria_demo/magic_dictionary.dart';
 import 'package:otzaria_demo/facets.dart';
 import 'package:otzaria_demo/grouping.dart';
 import 'package:otzaria_demo/translation_lexicon.dart';
@@ -24,6 +25,8 @@ search options (Otzaria names):
   --distance N        word gap (default 0)  --any-order
   --spacing a,b,..    gap per consecutive word pair (customSpacing; needs positions)
   --fuzzy-distance N  (fuzzy mode, 1..2)
+  --lexical path      Otzaria's lexical.db (MagicDictionary): fuzzy mode adds each word's
+                      dictionary forms (blacklisted lemmas searched, not marked)
   --match all|any|most|atleast  (wordMatchMode; default all)   --match-count N  (for atleast)
   --acronym           ראשי תיבות (needs --acronyms path to Otzaria's assets/Acronyms.json)
   --translation       תרגום ארמי (needs --dictionary path to Otzaria's assets/dictionary.json)
@@ -49,7 +52,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
     'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd', 'spacing', 'match',
     'match-count', 'exclude', 'exclude-scope', 'exclude-options', 'dictionary', 'acronyms', 'group', 'group-scan',
-    'order', 'scope',
+    'order', 'scope', 'lexical',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -257,6 +260,7 @@ void _search(SeforimDb db, String dir, Map<String, String?> o, String query) {
     negativeAlternativeWords: negAlts,
     acronymLexicon: o['acronyms'] == null ? null : AcronymLexicon.load(o['acronyms']!),
     translations: o['dictionary'] == null ? null : TranslationLexicon.load(o['dictionary']!),
+    magicDictionary: o['lexical'] == null ? null : MagicDictionary.open(o['lexical']!),
     negativeScope: switch (o['exclude-scope'] ?? 'distance') {
       'paragraph' => NegativeScope.sameParagraph,
       'section' => NegativeScope.sameSection,

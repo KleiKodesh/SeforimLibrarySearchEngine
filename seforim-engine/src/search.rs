@@ -112,6 +112,12 @@ pub enum GroupSpec {
     /// Alternatives that cannot search (empty word, rejected wildcard) are
     /// dropped; if none remain, the slot is skipped.
     Any { alternatives: Vec<GroupSpec> },
+    /// A member of an [`Any`](GroupSpec::Any) slot that is searched like
+    /// any other but whose terms are not marked in the snippet, unless a
+    /// marked member of the search matched the same term (Otzaria's
+    /// dictionary forms of a blacklisted lemma: they add hits, the
+    /// highlight leaves them out). Costs nothing when unused.
+    Unmarked { group: Box<GroupSpec> },
 }
 
 /// Serializable mirror of [`hebrew_fts::TypoMode`]: which typo behaviour
@@ -176,11 +182,21 @@ pub struct WalkOptionsSpec {
     pub grammar_prefix_max_letters: Option<u32>,
 }
 
+/// True when `group` has a [`GroupSpec::Unmarked`] member.
+fn has_unmarked(group: &GroupSpec) -> bool {
+    match group {
+        GroupSpec::Unmarked { .. } => true,
+        GroupSpec::Any { alternatives } => alternatives.iter().any(has_unmarked),
+        _ => false,
+    }
+}
+
 /// Sets `phrase_word` on every word of `group`.
 fn mark_phrase_word(group: &mut GroupSpec) {
     match group {
         GroupSpec::Word { options, .. } => options.phrase_word = true,
         GroupSpec::Any { alternatives } => alternatives.iter_mut().for_each(mark_phrase_word),
+        GroupSpec::Unmarked { group } => mark_phrase_word(group),
         _ => {}
     }
 }
@@ -582,6 +598,9 @@ pub struct SnippetSession {
     positions: Option<crate::positioned::PositionSource>,
     /// See [`force_positions`](Self::force_positions).
     force_positions: bool,
+    /// Terms matched only by [`GroupSpec::Unmarked`] members: their marks
+    /// are dropped. Empty (the usual case): nothing is checked.
+    unmarked: std::collections::HashSet<String>,
 }
 
 /// Term id -> ordinal maps of a positioned locate (see `crate::positioned`):
@@ -790,6 +809,7 @@ impl SnippetSession {
             line: Some(plan),
             positions: None,
             force_positions: false,
+            unmarked: Default::default(),
         }
     }
 
@@ -811,12 +831,8 @@ impl SnippetSession {
             return Some(self.number_line_marks(s, text));
         }
         let next = next.filter(|_| self.cross_line);
-        let (i, mut s) = locate_with(&self.matchers, &self.negative, &mut self.locator, (text, next))?;
-        let prepared = &self.matchers[i].prepared;
-        for m in s.marks.chunks_exact_mut(3) {
-            m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
-        }
-        Some(s)
+        let (i, s) = locate_with(&self.matchers, &self.negative, &mut self.locator, (text, next))?;
+        Some(self.number_marks(i, s))
     }
 
     /// Locates a batch of matched lines across all cores (one locator per
@@ -845,13 +861,7 @@ impl SnippetSession {
         Ok(located
             .into_iter()
             .map(|r| {
-                r.map(|(i, mut s)| {
-                    let prepared = &self.matchers[i].prepared;
-                    for m in s.marks.chunks_exact_mut(3) {
-                        m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
-                    }
-                    s
-                })
+                r.map(|(i, s)| self.number_marks(i, s))
             })
             .collect())
     }
@@ -879,13 +889,7 @@ impl SnippetSession {
         Ok(located
             .into_iter()
             .map(|r| {
-                r.map(|(i, mut s)| {
-                    let prepared = &self.matchers[i].prepared;
-                    for m in s.marks.chunks_exact_mut(3) {
-                        m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
-                    }
-                    s
-                })
+                r.map(|(i, s)| self.number_marks(i, s))
             })
             .collect())
     }
@@ -990,13 +994,7 @@ impl SnippetSession {
         Ok(located
             .into_iter()
             .map(|r| {
-                r.map(|(i, mut s)| {
-                    let prepared = &self.matchers[i].prepared;
-                    for m in s.marks.chunks_exact_mut(3) {
-                        m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
-                    }
-                    s
-                })
+                r.map(|(i, s)| self.number_marks(i, s))
             })
             .collect())
     }
@@ -1056,6 +1054,26 @@ impl SnippetSession {
             texts.iter().map(|&(t, _)| (t, None)).collect()
         };
         self.run_many(&items, |m, n, l, t| locate_with(m, n, l, t).is_some())
+    }
+
+    /// Matcher `i`'s snippet with its marks' term ordinals numbered as
+    /// search-wide term ids, the marks of unmarked-only terms dropped.
+    fn number_marks(&mut self, i: usize, mut s: Snippet) -> Snippet {
+        let prepared = &self.matchers[i].prepared;
+        if !self.unmarked.is_empty() {
+            let unmarked = &self.unmarked;
+            let mut kept = Vec::with_capacity(s.marks.len());
+            for m in s.marks.chunks_exact(3) {
+                if !unmarked.contains(prepared.term_at(m[2] as usize)) {
+                    kept.extend_from_slice(m);
+                }
+            }
+            s.marks = kept;
+        }
+        for m in s.marks.chunks_exact_mut(3) {
+            m[2] = self.terms.id_of(prepared.term_at(m[2] as usize));
+        }
+        s
     }
 
     /// A line-regex snippet's marks carry the matched source text; number
@@ -1595,6 +1613,7 @@ impl LineIndex {
                 q.set_max_expansions(walk.cap);
                 Some(q.span_slot(searcher)?)
             }
+            GroupSpec::Unmarked { group } => self.group_slot(group, sink, searcher, walk)?,
             GroupSpec::Any { alternatives } => {
                 let mut sources = Vec::new();
                 for a in alternatives {
@@ -1737,6 +1756,7 @@ impl LineIndex {
                 q.set_max_expansions(walk.cap);
                 Some(Box::new(q))
             }
+            GroupSpec::Unmarked { group } => self.group_query(group, sink, searcher, walk)?,
             GroupSpec::Any { alternatives } => {
                 let mut parts: Vec<(Occur, Box<dyn Query>)> = Vec::new();
                 for a in alternatives {
@@ -1751,6 +1771,48 @@ impl LineIndex {
                 }
             }
         })
+    }
+
+    /// The terms matched by the [`GroupSpec::Unmarked`] members of the main
+    /// query and not by any marked member of it or of its phrase
+    /// alternatives (Otzaria paints the union of the marked terms). The
+    /// members are walked again on their own, only when a search has one.
+    fn unmarked_terms(
+        &self,
+        request: &SearchRequest,
+        searcher: &tantivy::Searcher,
+        walk: Walk<'_>,
+    ) -> Result<std::collections::HashSet<String>> {
+        fn split<'g>(g: &'g GroupSpec, under: bool, u: &mut Vec<&'g GroupSpec>, m: &mut Vec<&'g GroupSpec>) {
+            match g {
+                GroupSpec::Any { alternatives } => alternatives.iter().for_each(|a| split(a, under, u, m)),
+                GroupSpec::Unmarked { group } => split(group, true, u, m),
+                _ if under => u.push(g),
+                _ => m.push(g),
+            }
+        }
+        let (mut u, mut m) = (Vec::new(), Vec::new());
+        for g in request.groups.iter().chain(request.phrase_alternatives.iter().flatten()) {
+            split(g, false, &mut u, &mut m);
+        }
+        let terms_of = |members: &[&GroupSpec]| -> Result<std::collections::HashSet<String>> {
+            let sink = MatchedTermsSink::new();
+            for g in members {
+                if let Some(q) = self.group_query(g, &sink, searcher, walk)? {
+                    let w = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(searcher))?;
+                    for segment in searcher.segment_readers() {
+                        let _ = w.scorer(segment, 1.0)?;
+                    }
+                }
+            }
+            Ok(sink.take_strings().into_iter().collect())
+        };
+        let unmarked = terms_of(&u)?;
+        if unmarked.is_empty() {
+            return Ok(unmarked);
+        }
+        let marked = terms_of(&m)?;
+        Ok(unmarked.into_iter().filter(|t| !marked.contains(t)).collect())
     }
 
     /// `query` restricted to the lines that carry an attached mark (the
@@ -1783,6 +1845,7 @@ impl LineIndex {
             match g {
                 GroupSpec::Word { options, .. } => options.match_nikud || options.match_teamim,
                 GroupSpec::Any { alternatives } => alternatives.iter().any(wants),
+                GroupSpec::Unmarked { group } => wants(group),
                 _ => false,
             }
         }
@@ -1986,6 +2049,7 @@ impl LineIndex {
             line: None,
             positions: None,
             force_positions: false,
+            unmarked: Default::default(),
         };
         if section {
             session.require_ordered = false;
@@ -2509,6 +2573,11 @@ impl LineIndex {
                 vocalized: false,
                 required: true,
             });
+        }
+
+        // Terms only unmarked members matched (see GroupSpec::Unmarked).
+        if request.groups.iter().chain(request.phrase_alternatives.iter().flatten()).any(has_unmarked) {
+            session.unmarked = self.unmarked_terms(request, &searcher, walk)?;
         }
 
         // The main query's matcher, if it can match at all.

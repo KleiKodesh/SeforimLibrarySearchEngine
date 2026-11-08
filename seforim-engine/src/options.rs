@@ -205,6 +205,11 @@ pub struct WordOptions {
     /// Extra words for this word's slot (Otzaria's alternativeWords), each
     /// in the query syntax, searched with this word's options.
     pub alternatives: Vec<String>,
+    /// Extra words searched as `alternatives` but never marked in the
+    /// snippet, unless a marked word of the search matched the same term
+    /// (Otzaria's dictionary forms of a blacklisted lemma: searched, not
+    /// highlighted).
+    pub unmarked_alternatives: Vec<String>,
 }
 
 /// The negative query (Otzaria's negativeQuery). Options are per word: a
@@ -340,8 +345,8 @@ impl SearchOptions {
         let quoted = hebrew_fts::quoted_phrases(&self.query);
         let literal: Vec<usize> = quoted.iter().flatten().copied().collect();
         let main = slots_with(&self.query, keep_marks, &literal, |i| match self.words.get(&i) {
-            Some(w) => (w.apply(global), w.alternatives.as_slice()),
-            None => (global, &[]),
+            Some(w) => (w.apply(global), w.alternatives.as_slice(), w.unmarked_alternatives.as_slice()),
+            None => (global, &[], &[]),
         });
         // One phrase holding every word that searches: Otzaria's literal
         // phrase search (`searchLiteralPhrase`, adjacent lines included):
@@ -428,8 +433,8 @@ impl SearchOptions {
                 // per word, exactly as the positive words: the global
                 // options are the default, `e.words` the word's own
                 let ex = slots(&e.query, keep_marks, |i| match e.words.get(&i) {
-                    Some(w) => (w.apply(global), w.alternatives.as_slice()),
-                    None => (global, &[]),
+                    Some(w) => (w.apply(global), w.alternatives.as_slice(), w.unmarked_alternatives.as_slice()),
+                    None => (global, &[], &[]),
                 });
                 // No rule of its own: the positive query's (Otzaria's
                 // `negativeDistance ?? distance` with the query's any order;
@@ -560,7 +565,7 @@ fn phrases(list: &[PhraseOptions], keep_marks: bool) -> Vec<Vec<GroupSpec>> {
     list.iter()
         .map(|p| {
             let o = WalkOptionsSpec { ignore_quotes: p.ignore_quotes, ..Default::default() };
-            slots(&p.query, keep_marks, |_| (o, &[])).groups
+            slots(&p.query, keep_marks, |_| (o, &[], &[])).groups
         })
         // A phrase with a word too long to be indexed can never match
         // (Otzaria: its literal matches no term).
@@ -675,6 +680,7 @@ fn is_long(g: &GroupSpec) -> bool {
     match g {
         GroupSpec::Unindexed { .. } => true,
         GroupSpec::Any { alternatives } => !alternatives.is_empty() && alternatives.iter().all(is_long),
+        GroupSpec::Unmarked { group } => is_long(group),
         _ => false,
     }
 }
@@ -810,8 +816,9 @@ fn inherited_proximity(p: &ProximitySpec, typed: usize) -> Option<ProximitySpec>
 /// without breaking a pending `|`. `word(i)` gives typed word i's options
 /// and alternatives, which go to every sub-word cut from it; the
 /// alternatives join the sub-word's slot (and stand for the word when it
-/// cannot search itself).
-fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String])) -> Slots {
+/// cannot search itself); the unmarked alternatives too, each as a
+/// [`GroupSpec::Unmarked`] member.
+fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String], &'a [String])) -> Slots {
     slots_with(query, keep_marks, &[], word)
 }
 
@@ -823,7 +830,7 @@ fn slots_with<'a>(
     query: &str,
     keep_marks: bool,
     literal: &[usize],
-    word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String]),
+    word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String], &'a [String]),
 ) -> Slots {
     let mut groups = Vec::new();
     let mut typed: Vec<Option<(usize, usize)>> = Vec::new();
@@ -845,17 +852,24 @@ fn slots_with<'a>(
         if typed.len() <= index {
             typed.resize(index + 1, None);
         }
-        let (o, alternatives) = word(index);
-        let (o, alternatives, term) = if literal.contains(&index) {
-            (exact_options(o), &[][..], term.map(|t| literal_term(t, keep_marks)))
+        let (o, alternatives, unmarked) = word(index);
+        let (o, alternatives, unmarked, term) = if literal.contains(&index) {
+            (exact_options(o), &[][..], &[][..], term.map(|t| literal_term(t, keep_marks)))
         } else {
-            (o, alternatives, term)
+            (o, alternatives, unmarked, term)
         };
         let mut members: Vec<GroupSpec> = term.into_iter().map(|t| group(t, o)).collect();
         for alt in alternatives {
             for t in tokenize_query(alt, keep_marks) {
                 if let QueryToken::Word { term: Some(t), .. } = t {
                     members.push(group(t, o));
+                }
+            }
+        }
+        for alt in unmarked {
+            for t in tokenize_query(alt, keep_marks) {
+                if let QueryToken::Word { term: Some(t), .. } = t {
+                    members.push(GroupSpec::Unmarked { group: Box::new(group(t, o)) });
                 }
             }
         }

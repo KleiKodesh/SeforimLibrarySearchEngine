@@ -840,6 +840,10 @@ namespace SeforimSearch.Engine
         /// <summary>Extra words for this word's slot (Otzaria's alternativeWords), in
         /// query syntax, searched with this word's options.</summary>
         public List<string> Alternatives { get; } = new List<string>();
+        /// <summary>Extra words searched as <see cref="Alternatives"/> but never marked in the
+        /// snippet, unless a marked word of the search matched the same term (Otzaria's
+        /// dictionary forms of a blacklisted lemma: searched, not highlighted).</summary>
+        public List<string> UnmarkedAlternatives { get; } = new List<string>();
 
         internal void WriteJson(StringBuilder sb)
         {
@@ -850,6 +854,16 @@ namespace SeforimSearch.Engine
                 Json.WriteString(sb, Alternatives[i]);
             }
             sb.Append(']');
+            if (UnmarkedAlternatives.Count > 0)
+            {
+                sb.Append(",\"unmarked_alternatives\":[");
+                for (int i = 0; i < UnmarkedAlternatives.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    Json.WriteString(sb, UnmarkedAlternatives[i]);
+                }
+                sb.Append(']');
+            }
             SearchOptions.WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes,
                 KtivMaleHaser, PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes,
                 SpellingErrors, MatchNikud, MatchTeamim, TypoMode, PrefixMaxLetters, SuffixMaxLetters,

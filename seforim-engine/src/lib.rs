@@ -679,6 +679,66 @@ mod tests {
     /// Options are per word: a negative word takes the global word options
     /// as its default and has its own overrides, alternatives and phrase
     /// alternatives, on both index flavours.
+    /// Issue #10: unmarked alternatives (Otzaria's blacklisted dictionary
+    /// forms) add hits, also next to a fuzzy word, but are not marked
+    /// unless a marked word of the search matched the same term.
+    #[test]
+    fn unmarked_alternatives_match_without_marks() {
+        let torah = "\u{05EA}\u{05D5}\u{05E8}\u{05D4}";
+        let shalom = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
+        let moshe = "\u{05DE}\u{05E9}\u{05D4}";
+        let texts = [
+            format!("{torah} \u{05D0}\u{05D1}"), // 1: the word
+            format!("{shalom} \u{05D0}\u{05D1}"), // 2: the unmarked form
+            format!("{moshe} \u{05D0}\u{05D1}"),  // 3: a plain alternative
+            format!("{torah} {shalom}"),          // 4: both
+        ];
+        let docs: Vec<LineDoc> =
+            texts.iter().enumerate().map(|(i, t)| line(i as u64 + 1, i as u64, 1, t)).collect();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &docs);
+            // (line id, marked terms) of every passing hit
+            let run = |o: &SearchOptions| -> Vec<(u64, Vec<String>)> {
+                let mut r = index.search_options(o).unwrap();
+                let hits = r.hits.clone();
+                hits.into_iter()
+                    .filter_map(|h| {
+                        let s = r.session.locate(&texts[h.line_id as usize - 1])?;
+                        let terms = r.session.all_terms().to_vec();
+                        Some((h.line_id, s.marks.chunks(3).map(|m| terms[m[2] as usize].clone()).collect()))
+                    })
+                    .collect()
+            };
+            for query in [torah.to_string(), format!("{torah}~1")] {
+                let w = WordOptions {
+                    alternatives: vec![moshe.into()],
+                    unmarked_alternatives: vec![shalom.into()],
+                    ..Default::default()
+                };
+                let o = SearchOptions { query: query.clone(), words: [(0, w)].into_iter().collect(), ..Default::default() };
+                assert_eq!(
+                    run(&o),
+                    [
+                        (1, vec![torah.to_string()]),
+                        (2, vec![]),
+                        (3, vec![moshe.to_string()]),
+                        (4, vec![torah.to_string()]),
+                    ],
+                    "positions={positions} {query}"
+                );
+                // the same form also a marked alternative: marked
+                let w = WordOptions {
+                    alternatives: vec![shalom.into()],
+                    unmarked_alternatives: vec![shalom.into()],
+                    ..Default::default()
+                };
+                let o = SearchOptions { query: query.clone(), words: [(0, w)].into_iter().collect(), ..Default::default() };
+                assert_eq!(run(&o)[1], (2, vec![shalom.to_string()]), "positions={positions} {query}");
+            }
+        }
+    }
+
     #[test]
     fn exclude_words_have_their_own_options() {
         let torah = "\u{05EA}\u{05D5}\u{05E8}\u{05D4}";

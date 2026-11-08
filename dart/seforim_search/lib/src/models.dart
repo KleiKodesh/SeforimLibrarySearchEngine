@@ -813,7 +813,9 @@ class WordOptions {
     this.partOfWordMaxLetters,
     this.grammarPrefixMaxLetters,
     List<String>? alternatives,
-  }) : alternatives = alternatives ?? [];
+    List<String>? unmarkedAlternatives,
+  })  : alternatives = alternatives ?? [],
+        unmarkedAlternatives = unmarkedAlternatives ?? [];
 
   bool? grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes;
   bool? ktivMaleHaser, partOfWord, advancedPrefixes, advancedSuffixes;
@@ -826,8 +828,14 @@ class WordOptions {
   /// syntax, searched with this word's options.
   final List<String> alternatives;
 
+  /// Extra words searched as [alternatives] but never marked in the snippet,
+  /// unless a marked word of the search matched the same term (Otzaria's
+  /// dictionary forms of a blacklisted lemma: searched, not highlighted).
+  final List<String> unmarkedAlternatives;
+
   Map<String, Object?> toJson() => {
         if (alternatives.isNotEmpty) 'alternatives': alternatives,
+        if (unmarkedAlternatives.isNotEmpty) 'unmarked_alternatives': unmarkedAlternatives,
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
             matchNikud, matchTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,

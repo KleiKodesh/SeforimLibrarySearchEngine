@@ -239,6 +239,7 @@ fn roots(g: &GroupSpec, out: &mut Vec<String>) {
         // a user regex's pattern is no typed form: its terms all fall in the last tier
         GroupSpec::Wildcard { pattern, .. } | GroupSpec::Regex { pattern } => out.push(pattern.clone()),
         GroupSpec::Any { alternatives } => alternatives.iter().for_each(|a| roots(a, out)),
+        GroupSpec::Unmarked { group } => roots(group, out),
     }
 }
 

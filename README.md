@@ -767,7 +767,16 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     (null = inherit), plus `alternatives` (extra words ORed into that
     word's slot, searched with its options; if the word itself cannot
     search, e.g. `,`, its alternatives stand in for it). This is Otzaria's
-    `wordOptions` / `alternativeWords`.
+    `wordOptions` / `alternativeWords`. `unmarked_alternatives` (C#
+    `UnmarkedAlternatives`, Dart `unmarkedAlternatives`; low level
+    `GroupSpec::Unmarked`) are searched the same way but their terms are
+    not marked in the snippet unless a marked word of the search (main
+    query or a phrase alternative) matched the same term: Otzaria's
+    dictionary forms of a blacklisted lemma, which add hits and stay out of
+    the highlight (issue #10). Costs nothing when unused; when used, those
+    members and the marked ones are walked once more to tell their terms apart.
+    The window is chosen as before (a slot matched only by an unmarked
+    term still has to be in it), and only its marks leave those terms out.
   - Query level: `max_word_distance`, `require_ordered`, `min_groups`,
     `word_match` (`{"mode":"all"|"any_word"|"most_words"}` /
     `{"mode":"at_least","count":N}`: Otzaria's wordMatchMode, the engine
@@ -927,6 +936,30 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   fold gershayim / geresh to ASCII `"` / `'` and presentation forms in keys
   and values, and read keys sorted by code point as Otzaria does (serde_json
   BTreeMap), so the caps and reverse lists do not follow the file's order.
+- **Morphology (Otzaria's MagicDictionary)** is host code, not engine code
+  (issue #10): the Dart demo's `magic_dictionary.dart` ports
+  `rust/src/magic/*` of otzaria_search_engine 0d7a33f step for step: opens
+  a `lexical.db` read-only (demo `--lexical path`; Otzaria's downloader is
+  app code, the host passes a path), the lookup keys and normalization,
+  the selection (32 forms per word: 24 from a family whose base is the
+  word, 8 from a family it is a surface of, 4 per family reached only
+  through a spelling variant with a shared stem; forms under 2 letters, and
+  variant-route surfaces under 3, dropped), the 512-entry cache and the
+  hallucination blacklist (bundled as `magic_blacklist.dart`, generated
+  from Otzaria's TSV). As in Otzaria only the fuzzy mode uses it: each
+  word's recall forms, minus the word and its quote-free spelling, join its
+  slot as exact words (`alternatives`), the forms of a blacklisted lemma
+  as `unmarked_alternatives` (searched, not highlighted). A whole query
+  quoted is Otzaria's lexical fuzzy phrase: every word fuzzy with its
+  forms, in order, at most 1 word between neighbours (ordered proximity,
+  gaps 1). Deviations: a quoted part of a longer fuzzy query stays a
+  literal phrase (Otzaria requires it within slop 1 with the forms, the
+  other words anywhere: one proximity rule cannot say both); a phrase
+  word's expansion is capped by the request cap (Otzaria: 256 terms per
+  phrase word); a typed word the word rule
+  splits (maqaf) is looked up whole, its forms going to every part
+  (Otzaria looks up each index token); Otzaria's vocalized fuzzy forms do
+  not arise (the demo's fuzzy mode carries no nikud option).
 - **Otzaria word proximity** (`proximity` in the request, `ProximitySpec`;
   C# `SearchRequest.Proximity` = `Proximity.Ordered(gaps)` /
   `Proximity.AnyOrder(distance)`, Dart `Proximity.ordered` / `.anyOrder`;
@@ -1053,9 +1086,9 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     plain word): a constant factor per query, the order inside a query is
     the same. Otzaria's flat-scored degrade path (phrases whose expansions
     pass its ceiling) is not ported: our walks cap instead of failing, so
-    every phrase is scored. Otzaria's fuzzy mode with its magic dictionary
-    (`build_lexical_fuzzy_query`, the lexical tier 30) is not ported: the
-    engine has no lexical forms; ours is its plain builder. In a vocalized
+    every phrase is scored. Otzaria's magic dictionary forms reach the
+    engine from the host as word alternatives, so they score in the
+    alternative-word tier, not Otzaria's lexical tier (30). In a vocalized
     search fuzzy words score 1 (Otzaria's vocalized fuzzy is unranked), and a
     fuzzy word at distance 0 scores 1 (Otzaria adds its quote-free
     spelling's BM25). A repeated word is a slot of its own in the count

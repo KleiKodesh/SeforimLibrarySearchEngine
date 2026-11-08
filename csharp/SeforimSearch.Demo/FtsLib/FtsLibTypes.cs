@@ -10,13 +10,13 @@ namespace FtsLib
     /// <summary>Where a line sits: book and reading position (FtsLib dropped the TOC entry).</summary>
     public readonly struct FtsDocumentPlacement
     {
-        public FtsDocumentPlacement(int bookId, int lineIndex)
+        public FtsDocumentPlacement(long bookId, int lineIndex)
         {
             BookId = bookId;
             LineIndex = lineIndex;
         }
 
-        public int BookId { get; }
+        public long BookId { get; }
         public int LineIndex { get; }
     }
 }
@@ -30,7 +30,7 @@ namespace FtsLib.SeforimDb
     /// </summary>
     public sealed class SearchResult
     {
-        internal SearchResult(int lineId, string content, FtsDocumentPlacement placement, Fts5.SearchSessionRef session,
+        internal SearchResult(long lineId, string content, FtsDocumentPlacement placement, Fts5.SearchSessionRef session,
                               long hitIndex = -1)
         {
             HitIndex = hitIndex;
@@ -41,7 +41,7 @@ namespace FtsLib.SeforimDb
         }
 
         /// <summary>The line ID in the seforim database.</summary>
-        public int LineId { get; }
+        public long LineId { get; }
 
         /// <summary>Kept for FtsLib compatibility; Core never reads it.</summary>
         public string BookTitle => string.Empty;

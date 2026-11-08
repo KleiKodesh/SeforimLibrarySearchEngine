@@ -273,14 +273,31 @@ class SeforimDb {
 
   /// The note text of virtual line ids (search path: unreadable recorded, or
   /// thrown with [strict]); absent when missing.
+  /// One statement per chunk of distinct source lines (IN-list, as C#
+  /// `FetchNotes`), never one query per note.
   Map<int, String> _noteTexts(Iterable<int> ids, bool strict) {
     final out = <int, String>{};
+    if (!hasNotes) return out;
+    final wanted = <int>{};
+    final sourceLines = <int>{};
     for (final id in ids) {
-      var gone = false;
-      final raw = _noteBody(id, missing: () => gone = true);
-      if (gone) continue;
-      final t = strict ? lineText(id, raw) : _lenientText(id, raw);
-      if (t != null) out[id] = t;
+      final src = noteSourceOf(id);
+      if (src == null || !wanted.add(id)) continue;
+      sourceLines.add(src.sourceLineId);
+    }
+    for (final chunk in _chunks(sourceLines.toList())) {
+      final rs = _select(
+          'SELECT n.lineId, n.noteIndex, n.body FROM line_note n JOIN line l ON l.id = n.lineId'
+          ' WHERE n.lineId IN (${List.filled(chunk.length, '?').join(',')})',
+          chunk);
+      for (final r in rs) {
+        final lineId = r.columnAt(0) as int, noteIndex = r.columnAt(1) as int;
+        if (lineId < 0 || lineId > maxNoteSourceLineId || noteIndex < 0 || noteIndex > maxNoteIndex) continue;
+        final id = noteLineId(lineId, noteIndex);
+        if (!wanted.contains(id)) continue;
+        final t = strict ? lineText(id, r.columnAt(2)) : _lenientText(id, r.columnAt(2));
+        if (t != null) out[id] = t;
+      }
     }
     return out;
   }
@@ -410,7 +427,7 @@ class SeforimDb {
         .columnAt(0) as int;
   }
 
-  /// The source of a hit on a notes line (line id >= 2^30): its source line,
+  /// The source of a hit on a notes line (line id >= 2^52): its source line,
   /// note index and source book; null for a real line.
   ({int sourceLineId, int noteIndex, int sourceBookId})? noteSource(int lineId, int bookId) {
     final s = noteSourceOf(lineId);

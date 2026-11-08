@@ -61,7 +61,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// (<see cref="FtsStreamChunk.Restarted"/> on the first frame).</param>
         public async Task StreamSearch(
             string query, int maxWordDistance, bool requireOrdered, int contextWords,
-            Func<FtsStreamChunk, Task> emit, CancellationToken clientCt, int resumeAfterLineId = 0)
+            Func<FtsStreamChunk, Task> emit, CancellationToken clientCt, long resumeAfterLineId = 0)
         {
             // Core: EnsureIndexing() and the related-forms rewrite ("rewrite" stage) come here.
             // The demo has no background build and no related-form expander (see README).
@@ -139,7 +139,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// again (the receiver maps them; Core does the same).</summary>
         private async Task RunSearchCoreAsync(
             string query, int maxWordDistance, bool requireOrdered, int contextWords, long afterPosition,
-            CancellationToken ct, Func<List<FtsHit>, List<string>, List<FtsSnippetText>, List<int>, Task> onBatch,
+            CancellationToken ct, Func<List<FtsHit>, List<string>, List<FtsSnippetText>, List<long>, Task> onBatch,
             Action<string>? onStage = null, SeforimDbFtsUnreadableRows? unreadable = null)
         {
             var terms = new FtsTermTable();

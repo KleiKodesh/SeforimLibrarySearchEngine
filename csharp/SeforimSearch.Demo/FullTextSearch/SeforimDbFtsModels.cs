@@ -15,8 +15,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// </summary>
     public sealed class FtsHit
     {
-        public int LineId { get; set; }
-        public int BookId { get; set; }
+        public long LineId { get; set; }
+        public long BookId { get; set; }
         public int Score { get; set; }
         public int WordDistance { get; set; }
         public int SnippetStart { get; set; }
@@ -38,11 +38,11 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// <summary>The hit is a footnote (a line of a virtual notes book).</summary>
         public bool IsNote => SeforimDb.SeforimDbNoteIds.IsVirtual(LineId);
         /// <summary>The line to open: the note's source line, else <see cref="LineId"/>.</summary>
-        public int SourceLineId => SeforimDb.SeforimDbNoteIds.SourceLineOf(LineId);
+        public long SourceLineId => SeforimDb.SeforimDbNoteIds.SourceLineOf(LineId);
         /// <summary>The note's index in its source line; -1 for a plain line.</summary>
         public int NoteIndex => SeforimDb.SeforimDbNoteIds.TryDecodeLine(LineId, out _, out int n) ? n : -1;
         /// <summary>The book to open: the notes book's source book, else <see cref="BookId"/>.</summary>
-        public int SourceBookId => SeforimDb.SeforimDbNoteIds.SourceBookOf(BookId);
+        public long SourceBookId => SeforimDb.SeforimDbNoteIds.SourceBookOf(BookId);
     }
 
     /// <summary>
@@ -53,7 +53,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// </summary>
     public sealed class FtsSnippetText
     {
-        public int LineId { get; set; }
+        public long LineId { get; set; }
         public string Text { get; set; } = "";
         public string Before { get; set; } = "";
         public string After { get; set; } = "";
@@ -86,7 +86,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// <summary>Matched rows first found undecodable in this frame (skipped as empty, issue
         /// #13); the receiver sums them. The Done frame carries the total in
         /// <see cref="UnreadableRowCount"/> with the first error.</summary>
-        public List<int> UnreadableLineIds { get; set; } = new List<int>();
+        public List<long> UnreadableLineIds { get; set; } = new List<long>();
         public int UnreadableRowCount { get; set; }
         public string? UnreadableError { get; set; }
     }
@@ -150,16 +150,16 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         public SeforimDbFtsCorpus OpenCorpus() => _corpora.Rent();
 
         private readonly object _lock = new object();
-        private System.Collections.Generic.Dictionary<int, (long First, long Count)>? _bookPositions;
+        private System.Collections.Generic.Dictionary<long, (long First, long Count)>? _bookPositions;
 
         /// <summary>
         /// The index position of a line (<see cref="SeforimDbFtsCorpus.PositionOfLine"/>), to
         /// resume a search after it. Null when the line cannot be placed (gone from the library,
         /// or a book this index does not hold): the caller then starts over. (Core 277de7a9.)
         /// </summary>
-        public long? PositionOfLine(int lineId)
+        public long? PositionOfLine(long lineId)
         {
-            System.Collections.Generic.Dictionary<int, (long First, long Count)> books;
+            System.Collections.Generic.Dictionary<long, (long First, long Count)> books;
             lock (_lock)
             {
                 if (_bookPositions == null)

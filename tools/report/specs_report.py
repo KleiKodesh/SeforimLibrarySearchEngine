@@ -18,7 +18,7 @@ _args = [a for i, a in enumerate(sys.argv[1:], 1) if a != "--prefix" and sys.arg
 SP = _args[0] if _args else os.path.join(ROOT, "bench-results")
 P = sys.argv[sys.argv.index("--prefix") + 1] if "--prefix" in sys.argv else ""
 OUT = os.path.join(ROOT, "FTS-SPECS-AND-COMPARISONS.md")
-INDEX_FORMAT = "tantivy14"   # C# TantivySeforimIndex.IndexFormatVersion
+INDEX_FORMAT = "tantivy16"   # C# TantivySeforimIndex.IndexFormatVersion
 FTSLIB_FORMAT = "fts12"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
 MEASURED_FTSLIB = "fts8"      # FtsLib format of the runs in the results dir (= FTSLIB_FORMAT once rerun)
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
@@ -27,6 +27,8 @@ STALE = [
     "`tantivy10` / `fts9` changed indexing (an unterminated `<` no longer swallows the rest of the line; "
     "per-line content edges for cross-line) and fuzzy (a swap of two adjacent letters is one edit): "
     "the full-DB rebuilds, parity sets and the Otzaria hit-count comparison need a rerun.",
+    "`tantivy16`: the notes ids are 64-bit and JS-safe (R = 2^52, line = R + (lineId << 16) + noteIndex, "
+    "issue #13): only the virtual ids change, the same full-DB reruns cover it.",
     "`tantivy11` sorts the index by catalog position (search skips its sort on the merged segment) and the "
     "C# / Dart hosts keep seforim.db open across searches: index build time and size, and the first-page "
     "profile, need a full-DB rerun.",
@@ -172,7 +174,7 @@ md.append(f"""## Engines compared
 | User regex `/.../` (word, sequence, line kinds) | done |
 | Relevance / generation order (option; catalog default) + notice when positions are needed | done |
 | Truncated flag when a cap is hit | done |
-| Footnotes (schema 7 `line_note`) as a virtual notes book after each book; ids in a reserved range (2^30+), hit maps to the source line (both engines) | done; unit tests; full-DB rerun pending |
+| Footnotes (schema 7 `line_note`) as a virtual notes book after each book; ids in a reserved 64-bit range (2^52+, JS-safe), hit maps to the source line (both engines) | done; unit tests; full-DB rerun pending |
 | Cross-line phrases (one break, any search type; line-edge enumerators skipped as Otzaria) and same-section scope | built; unit tests; full-DB verification pending |
 | Fuzzy: a swap of two adjacent letters is one edit (Otzaria; FtsLib changed too) | done |
 | Quoted phrases (Otzaria's rule, both engines): a whole-query phrase is literal and may cross a line (ours); a phrase among words is required in the line; in lexical fuzzy mode each quoted word keeps its slot (fuzzy, forms), in order, at most 1 word between | done; unit tests; FtsLib per line only |

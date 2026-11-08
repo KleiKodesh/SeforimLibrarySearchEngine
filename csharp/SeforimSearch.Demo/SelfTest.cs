@@ -36,7 +36,7 @@ namespace SeforimSearch.Demo
                 ("WAL commit (data_version) reopens on rent", DataVersionReopens),
                 ("codec: dictionary appended via WAL is picked up", CodecReloadsNewDictionary),
                 ("codec: base64 text vs base64 frame, errors name the line", CodecBase64AndErrors),
-                ("end to end: build tantivy14 + search in catalog order", EndToEnd),
+                ("end to end: build tantivy16 + search in catalog order", EndToEnd),
                 ("stream: chunks, resume, Restarted, cancellation (Core's StreamSearch)", Stream),
                 ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
             };
@@ -137,12 +137,12 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             using var pool = new SeforimDbFtsCorpusPool(db);
             // a fully enumerated sequence: the connection is pooled
             using (var ok = pool.Rent())
-                Check(ok.FetchPlacedDocuments(Enumerable.Range(1, 10)).Count() == 10, "fetch 10");
+                Check(ok.FetchPlacedDocuments(Enumerable.Range(1, 10).Select(i => (long)i)).Count() == 10, "fetch 10");
             Check(pool.IdleCount == 1, "pooled after a complete enumeration");
 
             var a = pool.Rent();
             var conn = a.Connection;
-            var e = a.FetchPlacedDocuments(Enumerable.Range(1, 2000)).GetEnumerator();
+            var e = a.FetchPlacedDocuments(Enumerable.Range(1, 2000).Select(i => (long)i)).GetEnumerator();
             Check(e.MoveNext(), "first row");
             a.Dispose(); // the enumerator is abandoned, never disposed
             Check(pool.IdleCount == 0, "a connection with an open sequence must not be pooled");
@@ -151,7 +151,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             Check(threw, "the abandoned enumerator must fail, not read a closed/pooled connection");
             using var b = pool.Rent();
             Check(!ReferenceEquals(b.Connection, conn), "the abandoned connection came back");
-            Check(b.FetchPlacedDocuments(Enumerable.Range(1, 2000)).Count() == 2000, "fresh connection works");
+            Check(b.FetchPlacedDocuments(Enumerable.Range(1, 2000).Select(i => (long)i)).Count() == 2000, "fresh connection works");
             GC.KeepAlive(e);
         }
 
@@ -318,7 +318,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             Check(engine.Index.IsBuilt, "built");
             string meta = File.ReadAllText(Path.Combine(index, "meta.json"));
             Check(meta.Contains("sort_by_field") && meta.Contains("\"position\""), "index not sorted by position");
-            Check(FtsLib.Fts5.TantivySeforimIndex.IndexFormatVersion == "tantivy14", "format version");
+            Check(FtsLib.Fts5.TantivySeforimIndex.IndexFormatVersion == "tantivy16", "format version");
 
             // ABI edges: a helper's text output is pointer + length (an embedded NUL
             // survives); ids live in 0..=long.MaxValue, a negative id is rejected
@@ -341,7 +341,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
 
             for (int round = 0; round < 2; round++) // the second round reuses the pooled DB
             {
-                var got = new List<int>();
+                var got = new List<long>();
                 int snippets = 0;
                 foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
                              engine, "beta", int.MaxValue, false, 8, null, new FtsTermTable()))
@@ -350,7 +350,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                         got.Add(hit.LineId);
                         if (hit.SnippetMarks.Length > 0) snippets++;
                     }
-                Check(got.SequenceEqual(expected), $"round {round}: hits {got.Count}, expected {expected.Count} in catalog order");
+                Check(got.SequenceEqual(expected.Select(i => (long)i)), $"round {round}: hits {got.Count}, expected {expected.Count} in catalog order");
                 Check(snippets == got.Count, "every hit has a marked snippet");
             }
 
@@ -363,7 +363,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             {
                 long? after = engine.PositionOfLine(expected[n - 1]);
                 Check(after.HasValue, $"resume line {expected[n - 1]} placed");
-                var rest = new List<int>();
+                var rest = new List<long>();
                 int restSeeded = 0;
                 foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
                              engine, "beta", int.MaxValue, false, 8, null, new FtsTermTable(), afterPosition: after!.Value))
@@ -371,7 +371,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                     restSeeded += batch.SnippetTexts.Count;
                     foreach (var hit in batch.Hits) rest.Add(hit.LineId);
                 }
-                Check(expected.Take(n).Concat(rest).SequenceEqual(expected),
+                Check(expected.Take(n).Select(i => (long)i).Concat(rest).SequenceEqual(expected.Select(i => (long)i)),
                       $"resume after hit {n}: first {n} + {rest.Count} resumed != full {expected.Count}");
                 Check(restSeeded == 0, "a resumed run seeds no snippet texts");
             }
@@ -397,7 +397,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             using (var corpus = engine.OpenCorpus())
             {
                 // plain id 4 (book 1, lineIndex 3) and short id 2 + LinesPerBook (book 2, index 1)
-                var texts = corpus.FetchSnippetTexts(new[] { 4 }, new[] { LinesPerBook + 2 });
+                var texts = corpus.FetchSnippetTexts(new long[] { 4 }, new long[] { LinesPerBook + 2 });
                 Check(texts.Count == 2, $"snippet texts {texts.Count}");
                 var plain = texts.Find(t => t.LineId == 4)!;
                 var shortText = texts.Find(t => t.LineId == LinesPerBook + 2)!;
@@ -408,7 +408,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
         }
 
         private static List<FtsStreamChunk> StreamAll(SeforimDbFtsIndexCoordinator c, string query,
-            int resumeAfterLineId = 0, CancellationToken ct = default)
+            long resumeAfterLineId = 0, CancellationToken ct = default)
         {
             var frames = new List<FtsStreamChunk>();
             c.StreamSearch(query, int.MaxValue, false, 8, f => { frames.Add(f); return Task.CompletedTask; },
@@ -481,34 +481,38 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
         /// search path while indexing stays strict, and the id guard.</summary>
         private static void NotesBooks(string unusedDb, string dir)
         {
-            const int R = SeforimDb.SeforimDbNoteIds.ReservedStart;
-            Check(R == 1073741824, "R = 2^30");
+            const long R = SeforimDb.SeforimDbNoteIds.ReservedStart;
+            const long MaxLine = (1L << 36) - 1;
+            Check(R == 4503599627370496L, "R = 2^52");
             Check(!SeforimDb.SeforimDbNoteIds.IsVirtual(R - 1) && SeforimDb.SeforimDbNoteIds.IsVirtual(R), "R-1 real, R virtual");
-            Check(SeforimDb.SeforimDbNoteIds.EncodeLine((1 << 24) - 1, 63) == int.MaxValue, "lineId 2^24-1 / note 63 -> 2^31-1");
+            Check(SeforimDb.SeforimDbNoteIds.EncodeLine(MaxLine, 65535) == (1L << 53) - 1, "lineId 2^36-1 / note 65535 -> 2^53-1 (JS-safe max)");
             Check(SeforimDb.SeforimDbNoteIds.EncodeLine(0, 0) == R, "lineId 0 / note 0 -> R");
-            int v = SeforimDb.SeforimDbNoteIds.EncodeLine(10350062, 54);
-            Check(SeforimDb.SeforimDbNoteIds.TryDecodeLine(v, out int dl, out int dn) && dl == 10350062 && dn == 54, "line roundtrip");
-            Check(SeforimDb.SeforimDbNoteIds.TryDecodeBook(SeforimDb.SeforimDbNoteIds.EncodeBook(8440), out int db8) && db8 == 8440, "book roundtrip");
-            Check(Throws<ArgumentOutOfRangeException>(() => SeforimDb.SeforimDbNoteIds.EncodeLine(1 << 24, 0)), "lineId 2^24 rejected");
-            Check(Throws<ArgumentOutOfRangeException>(() => SeforimDb.SeforimDbNoteIds.EncodeLine(1, 64)), "noteIndex 64 rejected");
+            long v = SeforimDb.SeforimDbNoteIds.EncodeLine(10350062, 54);
+            Check(SeforimDb.SeforimDbNoteIds.TryDecodeLine(v, out long dl, out int dn) && dl == 10350062 && dn == 54, "line roundtrip");
+            long vMax = SeforimDb.SeforimDbNoteIds.EncodeLine(MaxLine, 65535);
+            Check(SeforimDb.SeforimDbNoteIds.TryDecodeLine(vMax, out long dlm, out int dnm) && dlm == MaxLine && dnm == 65535, "max line roundtrip");
+            Check(SeforimDb.SeforimDbNoteIds.TryDecodeBook(SeforimDb.SeforimDbNoteIds.EncodeBook(8440), out long db8) && db8 == 8440, "book roundtrip");
+            Check(SeforimDb.SeforimDbNoteIds.TryDecodeBook(SeforimDb.SeforimDbNoteIds.EncodeBook(R - 1), out long dbm) && dbm == R - 1, "book R-1 roundtrip");
+            Check(Throws<ArgumentOutOfRangeException>(() => SeforimDb.SeforimDbNoteIds.EncodeLine(1L << 36, 0)), "lineId 2^36 rejected");
+            Check(Throws<ArgumentOutOfRangeException>(() => SeforimDb.SeforimDbNoteIds.EncodeLine(1, 65536)), "noteIndex 65536 rejected");
             Check(Throws<ArgumentOutOfRangeException>(() => SeforimDb.SeforimDbNoteIds.EncodeBook(R)), "book R rejected");
-            Check(!Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(R - 1, R - 1, (1 << 24) - 1, 0, 63)), "guard: R-1 ok");
+            Check(!Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(R - 1, R - 1, MaxLine, 0, 65535)), "guard: R-1 ok");
             Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(R, 1, 1, 0, 0)), "guard: line.id R rejected");
             Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(1, R, 1, 0, 0)), "guard: book.id R rejected");
-            Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(1, 1, 1 << 24, 0, 0)), "guard: note lineId 2^24 rejected");
+            Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(1, 1, 1L << 36, 0, 0)), "guard: note lineId 2^36 rejected");
             Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(1, 1, 1, -1, 0)), "guard: noteIndex -1 rejected");
-            Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(1, 1, 1, 0, 64)), "guard: noteIndex 64 rejected");
+            Check(Throws<SeforimDb.SeforimDbNoteIdRangeException>(() => SeforimDb.SeforimDbNoteIds.EnsureRepresentable(1, 1, 1, 0, 65536)), "guard: noteIndex 65536 rejected");
 
             // ---- order, reads, search, hit -> source, unreadable
             string db = CreateNotesDb(dir, "notes",
                 "INSERT INTO line (id, bookId, lineIndex, content) VALUES (10, 1, 0, 'alpha beta'), (11, 1, 1, 'gamma delta'), (12, 1, 2, 'epsilon'), (20, 2, 0, 'omega');" +
                 "INSERT INTO line_note VALUES (11, 1, 3, 1, char(65279) || 'zetanote kappa'), (11, 0, 1, 1, 'etanote'), (10, 0, 2, 0, 'thetanote');");
-            int n10 = SeforimDb.SeforimDbNoteIds.EncodeLine(10, 0), n110 = SeforimDb.SeforimDbNoteIds.EncodeLine(11, 0), n111 = SeforimDb.SeforimDbNoteIds.EncodeLine(11, 1);
-            int notesBook = SeforimDb.SeforimDbNoteIds.EncodeBook(1);
+            long n10 = SeforimDb.SeforimDbNoteIds.EncodeLine(10, 0), n110 = SeforimDb.SeforimDbNoteIds.EncodeLine(11, 0), n111 = SeforimDb.SeforimDbNoteIds.EncodeLine(11, 1);
+            long notesBook = SeforimDb.SeforimDbNoteIds.EncodeBook(1);
             using (var corpus = new SeforimDbFtsCorpus(db))
             {
                 var order = corpus.ReadDocumentsWithSectionInResultOrder(0).ToList();
-                Check(string.Join(",", order.Select(d => d.Id)) == string.Join(",", new[] { 10, 11, 12, n10, n110, n111, 20 }),
+                Check(string.Join(",", order.Select(d => d.Id)) == string.Join(",", new long[] { 10, 11, 12, n10, n110, n111, 20 }),
                       "order: book lines, its notes book in source order, next book: " + string.Join(",", order.Select(d => d.Id)));
                 Check(order.Where(d => SeforimDb.SeforimDbNoteIds.IsVirtual(d.Id)).All(d => d.BookId == notesBook && d.SectionId == null),
                       "notes carry the virtual book id and no section");
@@ -520,10 +524,10 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                 Check(ranges.TryGetValue(notesBook, out var nr) && nr.First == 4 && nr.Count == 3, "notes book position range");
                 Check(corpus.PositionOfLine(n111, ranges) == 6, "position of a note");
                 Check(corpus.PositionOfLine(20, ranges) == 7, "position of a later real line unchanged");
-                var placement = corpus.FetchPlacements(new[] { n110, 12 });
+                var placement = corpus.FetchPlacements(new long[] { n110, 12 });
                 Check(placement[n110].BookId == notesBook && placement[12].BookId == 1, "placements: virtual book for a note");
                 Check(corpus.GetDocumentText(n10) == "thetanote", "document text of a note");
-                var texts = corpus.FetchSnippetTexts(new[] { n111 }, new[] { n10 });
+                var texts = corpus.FetchSnippetTexts(new long[] { n111 }, new long[] { n10 });
                 Check(texts.Count == 2 && texts.All(t => t.Before == "" && t.After == ""), "snippet text of a note has no neighbour context");
                 Check(texts.First(t => t.LineId == n10).Text == "thetanote", "snippet text = note text");
             }
@@ -570,12 +574,38 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                     return Task.CompletedTask;
                 }, CancellationToken.None).GetAwaiter().GetResult();
                 Check(doneCount == 1 && frameIds == 1, $"stream: unreadable total {doneCount}, frame ids {frameIds}");
+
+                // The facade's exact count and line regex follow the same rule: lenient, counted.
+                var countRows = new SeforimDbFtsUnreadableRows();
+                bool countThrew = false;
+                HitCounts? counts = null;
+                try
+                {
+                    counts = engine.Index.CountByBook("gamma delta", new FtsLib.Fts5.TantivySearchOptions { MaxWordDistance = 5 },
+                                                      CancellationToken.None, 4096, out _, countRows);
+                }
+                catch (SeforimDb.SeforimDbContentCodecException) { countThrew = true; }
+                Check(!countThrew && counts!.Total == 0 && countRows.Count == 1 && countRows.LineIds()[0] == 11,
+                      $"CountByBook: unreadable row counted, not thrown (threw {countThrew}, rows {countRows.Count})");
+                var regexRows = new SeforimDbFtsUnreadableRows();
+                bool regexThrew = false;
+                try
+                {
+                    engine.Index.CountByBook("/gamma .* delta/", new FtsLib.Fts5.TantivySearchOptions { UserRegex = true },
+                                             CancellationToken.None, 4096, out _, regexRows);
+                }
+                catch (SeforimDb.SeforimDbContentCodecException) { regexThrew = true; }
+                Check(!regexThrew && regexRows.LineIds().Contains(11),
+                      $"RunLineRegex: unreadable row counted, not thrown (threw {regexThrew}, rows {regexRows.Count})");
+                Check(!Throws<SeforimDb.SeforimDbContentCodecException>(() =>
+                          engine.Index.CountByBook("gamma delta", new FtsLib.Fts5.TantivySearchOptions { MaxWordDistance = 5 })),
+                      "CountByBook without a rows object is lenient too");
             }
             using (var corpus = new SeforimDbFtsCorpus(db))
             {
-                var t = corpus.FetchSnippetTexts(new[] { 11 }, Array.Empty<int>());
+                var t = corpus.FetchSnippetTexts(new long[] { 11 }, Array.Empty<long>());
                 Check(t.Count == 1 && t[0].Unreadable && t[0].Text == "", "snippet text of an unreadable row is flagged");
-                var tn = corpus.FetchSnippetTexts(new[] { n10 }, Array.Empty<int>());
+                var tn = corpus.FetchSnippetTexts(new long[] { n10 }, Array.Empty<long>());
                 Check(tn.Count == 1 && tn[0].Unreadable && tn[0].Text == "", "snippet text of an unreadable note is flagged");
             }
 
@@ -593,14 +623,14 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
 
             // ---- the guard
             string guard = CreateNotesDb(dir, "guard",
-                "INSERT INTO line (id, bookId, lineIndex, content) VALUES (1073741824, 1, 0, 'alpha');" +
+                "INSERT INTO line (id, bookId, lineIndex, content) VALUES (4503599627370496, 1, 0, 'alpha');" +
                 "INSERT INTO line_note VALUES (5, 0, 0, 0, 'x');");
             using (var corpus = new SeforimDbFtsCorpus(guard))
             {
                 string? message = null;
                 try { corpus.ReadDocumentsWithSectionInResultOrder(0).ToList(); }
                 catch (SeforimDb.SeforimDbNoteIdRangeException e) { message = e.Message; }
-                Check(message?.Contains("1073741824") == true, "guard fails the build naming the id");
+                Check(message?.Contains("4503599627370496") == true, "guard fails the build naming the id");
             }
 
             // ---- BOM on a plain line too (the codec strips it for every row)

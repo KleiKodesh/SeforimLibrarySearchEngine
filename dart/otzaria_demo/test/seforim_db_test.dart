@@ -257,21 +257,24 @@ void main() {
     db.close();
   });
   test('note ids: boundaries, roundtrip and the guard (issue #13)', () {
-    expect(noteLineId(maxNoteSourceLineId, 63), (1 << 31) - 1);
+    expect(noteIdBase, 4503599627370496); // 2^52
+    expect(noteLineId(maxNoteSourceLineId, 65535), (1 << 53) - 1); // JS-safe max
+    expect(noteSourceOf((1 << 53) - 1), (sourceLineId: (1 << 36) - 1, noteIndex: 65535));
     expect(noteLineId(0, 0), noteIdBase);
     expect(noteSourceOf(noteLineId(12345, 7)), (sourceLineId: 12345, noteIndex: 7));
     expect(noteSourceOf(noteIdBase - 1), isNull);
     expect(sourceBookOf(notesBookId(8440)), 8440);
-    expect(() => noteLineId(1 << 24, 0), throwsStateError);
-    expect(() => noteLineId(1, 64), throwsStateError);
+    expect(sourceBookOf(notesBookId(noteIdBase - 1)), noteIdBase - 1);
+    expect(() => noteLineId(1 << 36, 0), throwsStateError);
+    expect(() => noteLineId(1, 65536), throwsStateError);
     expect(() => notesBookId(noteIdBase), throwsStateError);
     checkNoteIdLimits(maxLineId: noteIdBase - 1, maxBookId: noteIdBase - 1, maxNoteLineId: maxNoteSourceLineId,
-        minNoteIndex: 0, maxNoteIdx: 63);
+        minNoteIndex: 0, maxNoteIdx: 65535);
     expect(() => checkNoteIdLimits(maxLineId: noteIdBase),
         throwsA(isA<StateError>().having((e) => e.message, 'message', contains('$noteIdBase'))));
     expect(() => checkNoteIdLimits(maxBookId: noteIdBase), throwsStateError);
-    expect(() => checkNoteIdLimits(maxNoteLineId: 1 << 24), throwsStateError);
-    expect(() => checkNoteIdLimits(maxNoteIdx: 64), throwsStateError);
+    expect(() => checkNoteIdLimits(maxNoteLineId: 1 << 36), throwsStateError);
+    expect(() => checkNoteIdLimits(maxNoteIdx: 65536), throwsStateError);
     expect(() => checkNoteIdLimits(minNoteIndex: -1), throwsStateError);
   });
 
@@ -327,6 +330,42 @@ void main() {
     expect(titles[n1], '${SeforimDb.notesTitlePrefix} one');
     expect(titles.containsKey(notesBookId(2)), isFalse);
     expect(db.unreadableLineIds, isEmpty);
+    db.close();
+  });
+
+  test('db: note texts read in chunked IN-lists, lenient per note (issue #13)', () {
+    final path = '${dir.path}/notes_many.db';
+    final w = sqlite3.open(path);
+    w.execute('CREATE TABLE category (id INTEGER PRIMARY KEY, parentId INTEGER, title TEXT, level INTEGER)');
+    w.execute('CREATE TABLE book (id INTEGER PRIMARY KEY, categoryId INTEGER, title TEXT, orderIndex INTEGER)');
+    w.execute("INSERT INTO category VALUES (1, NULL, 'c', 0)");
+    w.execute("INSERT INTO book VALUES (1, 1, 'one', 0)");
+    w.execute('CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER, lineIndex INTEGER, heRef TEXT, tocEntryId INTEGER, content)');
+    w.execute('CREATE TABLE line_note (lineId INTEGER NOT NULL, noteIndex INTEGER NOT NULL, charPos INTEGER, '
+        'hasMarker INTEGER, body, PRIMARY KEY (lineId, noteIndex)) WITHOUT ROWID');
+    const lines = 2000; // > 2 chunks of 900 source lines
+    w.execute('BEGIN');
+    for (var i = 1; i <= lines; i++) {
+      w.execute("INSERT INTO line VALUES (?, 1, ?, '', 0, 'x')", [i, i]);
+      w.execute('INSERT INTO line_note VALUES (?, 0, 0, 1, ?)', [i, 'n$i a']);
+      w.execute('INSERT INTO line_note VALUES (?, 65535, 0, 1, ?)', [i, 'n$i b']);
+    }
+    // one undecodable note (a broken zstd frame): absent and counted, the rest still read
+    w.execute("UPDATE line_note SET body = X'28B52FFD00' WHERE lineId = 1500 AND noteIndex = 0");
+    w.execute('COMMIT');
+    w.close();
+    final db = SeforimDb.open(path);
+    final ids = [for (var i = 1; i <= lines; i++) ...[noteLineId(i, 0), noteLineId(i, 65535)], noteLineId(lines + 5, 0)];
+    final texts = db.lineTexts(ids);
+    expect(texts.length, 2 * lines - 1);
+    expect(texts[noteLineId(1, 0)], 'n1 a');
+    expect(texts[noteLineId(901, 65535)], 'n901 b');
+    expect(texts[noteLineId(lines, 65535)], 'n$lines b');
+    expect(texts.containsKey(noteLineId(1500, 0)), isFalse);
+    expect(db.unreadableLineIds, contains(noteLineId(1500, 0)));
+    final sn = db.snippetTexts([noteLineId(950, 0)], [noteLineId(1800, 65535)]);
+    expect((sn[noteLineId(950, 0)]!.text, sn[noteLineId(1800, 65535)]!.text), ('n950 a', 'n1800 b'));
+    expect(() => db.lineTexts([noteLineId(1500, 0)], strict: true), throwsA(anything));
     db.close();
   });
 

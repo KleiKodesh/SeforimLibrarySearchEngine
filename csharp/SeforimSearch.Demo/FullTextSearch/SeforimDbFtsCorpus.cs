@@ -78,36 +78,36 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         }
 
         public long CountDocuments() => C.CountDocuments();
-        public long CountDocumentsUpTo(int upToId) => C.CountDocumentsUpTo(upToId);
-        public string? GetDocumentText(int id) => C.GetDocumentText(id);
-        public IEnumerable<(int Id, string Text)> ReadDocuments(int limit, CancellationToken ct = default) =>
+        public long CountDocumentsUpTo(long upToId) => C.CountDocumentsUpTo(upToId);
+        public string? GetDocumentText(long id) => C.GetDocumentText(id);
+        public IEnumerable<(long Id, string Text)> ReadDocuments(int limit, CancellationToken ct = default) =>
             Guard(C.ReadDocuments(limit, ct));
-        public IEnumerable<(int Id, string Text)> ReadDocumentsInResultOrder(long skip, CancellationToken ct = default) =>
+        public IEnumerable<(long Id, string Text)> ReadDocumentsInResultOrder(long skip, CancellationToken ct = default) =>
             Guard(C.ReadDocumentsInResultOrder(skip, ct));
-        public IEnumerable<(int Id, string Text, int BookId)> ReadDocumentsWithBookInResultOrder(long skip,
+        public IEnumerable<(long Id, string Text, long BookId)> ReadDocumentsWithBookInResultOrder(long skip,
                                                                                                CancellationToken ct = default) =>
             Guard(C.ReadDocumentsWithBookInResultOrder(skip, ct));
-        public IEnumerable<(int Id, string Text, int BookId, long? SectionId)> ReadDocumentsWithSectionInResultOrder(long skip,
+        public IEnumerable<(long Id, string Text, long BookId, long? SectionId)> ReadDocumentsWithSectionInResultOrder(long skip,
                                                                                                CancellationToken ct = default) =>
             Guard(C.ReadDocumentsWithSectionInResultOrder(skip, ct));
-        public IEnumerable<(int Id, string Text)> ReadDocumentsAfter(int afterId, int limit = 0, CancellationToken ct = default) =>
+        public IEnumerable<(long Id, string Text)> ReadDocumentsAfter(long afterId, int limit = 0, CancellationToken ct = default) =>
             Guard(C.ReadDocumentsAfter(afterId, limit, ct));
-        public IEnumerable<(int Id, string Text, string Title)> FetchDocuments(IEnumerable<int> ids) =>
+        public IEnumerable<(long Id, string Text, string Title)> FetchDocuments(IEnumerable<long> ids) =>
             Guard(C.FetchDocuments(ids));
-        public IEnumerable<(int Id, string Text, FtsDocumentPlacement Placement)> FetchPlacedDocuments(IEnumerable<int> ids) =>
+        public IEnumerable<(long Id, string Text, FtsDocumentPlacement Placement)> FetchPlacedDocuments(IEnumerable<long> ids) =>
             Guard(C.FetchPlacedDocuments(ids));
-        public Dictionary<int, FtsDocumentPlacement> FetchPlacements(IReadOnlyList<int> ids) => C.FetchPlacements(ids);
-        public Dictionary<int, (long First, long Count)> BookPositionRanges() => C.BookPositionRanges();
+        public Dictionary<long, FtsDocumentPlacement> FetchPlacements(IReadOnlyList<long> ids) => C.FetchPlacements(ids);
+        public Dictionary<long, (long First, long Count)> BookPositionRanges() => C.BookPositionRanges();
         public HashSet<long> BaseBookIds() => C.BaseBookIds();
-        public long? PositionOfLine(int lineId, Dictionary<int, (long First, long Count)> books) =>
+        public long? PositionOfLine(long lineId, Dictionary<long, (long First, long Count)> books) =>
             C.PositionOfLine(lineId, books);
-        public List<FtsSnippetText> FetchSnippetTexts(IReadOnlyList<int> lineIds, IReadOnlyCollection<int> shortLineIds) =>
+        public List<FtsSnippetText> FetchSnippetTexts(IReadOnlyList<long> lineIds, IReadOnlyCollection<long> shortLineIds) =>
             C.FetchSnippetTexts(lineIds, shortLineIds);
 
         /// <summary>How many lines per side a SHORT snippet's context reaches (same book only;
         /// Core's SeforimDbFtsCorpus.SnippetNeighbourLineRadius).</summary>
         public const int SnippetNeighbourLineRadius = 2;
-        public IDictionary<int, (string Previous, string Next)> FetchNeighbourText(IReadOnlyList<int> ids, int radius) =>
+        public IDictionary<long, (string Previous, string Next)> FetchNeighbourText(IReadOnlyList<long> ids, int radius) =>
             C.FetchNeighbourText(ids, radius);
 
         /// <summary>Ends the lease, once: the connection goes back to the pool (kept open) or
@@ -209,7 +209,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             return lines + (long)command.ExecuteScalar()!;
         }
 
-        public long CountDocumentsUpTo(int upToId)
+        public long CountDocumentsUpTo(long upToId)
         {
             using var command = _connection.CreateCommand();
             command.CommandText = SeforimDbSqlStrings.FtsCountLinesUpTo;
@@ -217,7 +217,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             return (long)command.ExecuteScalar()!;
         }
 
-        public string? GetDocumentText(int id)
+        public string? GetDocumentText(long id)
         {
             if (_hasNotes && SeforimDbNoteIds.IsVirtual(id))
             {
@@ -230,7 +230,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             return _codec.Decode(command.ExecuteScalar(), id);
         }
 
-        public IEnumerable<(int Id, string Text)> ReadDocuments(int limit, CancellationToken ct = default)
+        public IEnumerable<(long Id, string Text)> ReadDocuments(int limit, CancellationToken ct = default)
         {
             using var command = _connection.CreateCommand();
             command.CommandText = SeforimDbSqlStrings.FtsReadLines(_schema, limit > 0);
@@ -240,7 +240,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             while (reader.Read())
             {
                 ct.ThrowIfCancellationRequested();
-                yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1, reader.GetInt32(0)));
+                yield return (reader.GetInt64(0), _codec.DecodeColumnOrEmpty(reader, 1, reader.GetInt64(0)));
             }
         }
 
@@ -252,7 +252,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// the end, by book id, so every line is indexed exactly once. <paramref name="skip"/>
         /// counts lines in this order: whole books are skipped by their line counts.
         /// </summary>
-        public IEnumerable<(int Id, string Text)> ReadDocumentsInResultOrder(long skip, CancellationToken ct = default)
+        public IEnumerable<(long Id, string Text)> ReadDocumentsInResultOrder(long skip, CancellationToken ct = default)
         {
             foreach (var d in ReadDocumentsWithBookInResultOrder(skip, ct))
                 yield return (d.Id, d.Text);
@@ -262,7 +262,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// engine index keeps for filtered search by book (the only placement it stores; the
         /// loop already reads book by book, so this costs no extra query). Not in Core: FtsLib
         /// stored no book id.</summary>
-        public IEnumerable<(int Id, string Text, int BookId)> ReadDocumentsWithBookInResultOrder(long skip,
+        public IEnumerable<(long Id, string Text, long BookId)> ReadDocumentsWithBookInResultOrder(long skip,
                                                                                                CancellationToken ct = default)
         {
             foreach (var d in ReadDocumentsWithSectionInResultOrder(skip, ct))
@@ -272,7 +272,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// <summary><see cref="ReadDocumentsWithBookInResultOrder"/> plus each line's section
         /// (its TOC entry; null when it has none), which the engine keeps for the same-section
         /// scope. Not in Core.</summary>
-        public IEnumerable<(int Id, string Text, int BookId, long? SectionId)> ReadDocumentsWithSectionInResultOrder(long skip,
+        public IEnumerable<(long Id, string Text, long BookId, long? SectionId)> ReadDocumentsWithSectionInResultOrder(long skip,
                                                                                                CancellationToken ct = default)
         {
             // The guard, once per build: an id the notes encoding cannot hold fails the build
@@ -288,11 +288,11 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             notes.CommandText = SeforimDbSqlStrings.FtsReadBookNotes;
             var pNotesBook = notes.Parameters.Add("@b", SqliteType.Integer);
             var pNotesSkip = notes.Parameters.Add("@skip", SqliteType.Integer);
-            foreach (int bookId in bookOrder)
+            foreach (long bookId in bookOrder)
             {
                 long lines = lineCounts[bookId];
                 if (skip >= lines) { skip -= lines; continue; }
-                if (SeforimDbNoteIds.TryDecodeBook(bookId, out int sourceBookId))
+                if (SeforimDbNoteIds.TryDecodeBook(bookId, out long sourceBookId))
                 {
                     // A notes book: the source book's notes in source order, the body alone,
                     // no section (a note is a plain content line of its notes book).
@@ -303,8 +303,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                     while (noteReader.Read())
                     {
                         ct.ThrowIfCancellationRequested();
-                        int id = SeforimDbNoteIds.EncodeLine(noteReader.GetInt32(0), noteReader.GetInt32(1));
-                        yield return (id, DecodeNote(noteReader.IsDBNull(2) ? null : noteReader.GetValue(2), id), bookId, null);
+                        long id = SeforimDbNoteIds.EncodeLine(noteReader.GetInt64(0), noteReader.GetInt64(1));
+                        yield return (id, DecodeNoteForSearch(noteReader.IsDBNull(2) ? null : noteReader.GetValue(2), id), bookId, null);
                     }
                     continue;
                 }
@@ -315,13 +315,14 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 while (reader.Read())
                 {
                     ct.ThrowIfCancellationRequested();
-                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1, reader.GetInt32(0)), bookId,
+                    long lineId = reader.GetInt64(0);
+                    yield return (lineId, DecodeForSearch(reader, 1, lineId), bookId,
                                   reader.IsDBNull(2) ? null : (long?)reader.GetInt64(2));
                 }
             }
         }
 
-        public IEnumerable<(int Id, string Text)> ReadDocumentsAfter(int afterId, int limit = 0, CancellationToken ct = default)
+        public IEnumerable<(long Id, string Text)> ReadDocumentsAfter(long afterId, int limit = 0, CancellationToken ct = default)
         {
             using var command = _connection.CreateCommand();
             command.CommandText = SeforimDbSqlStrings.FtsReadLinesAfter(_schema, limit > 0);
@@ -332,7 +333,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             while (reader.Read())
             {
                 ct.ThrowIfCancellationRequested();
-                yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1, reader.GetInt32(0)));
+                yield return (reader.GetInt64(0), _codec.DecodeColumnOrEmpty(reader, 1, reader.GetInt64(0)));
             }
         }
 
@@ -341,14 +342,14 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// holds the text (<see cref="SeforimDbSqlStrings.FtsFetchLines"/>). The Title slot is
         /// left empty on purpose: Core enriches hits with their book ID instead and never reads
         /// the engine's title.</summary>
-        public IEnumerable<(int Id, string Text, string Title)> FetchDocuments(IEnumerable<int> ids)
+        public IEnumerable<(long Id, string Text, string Title)> FetchDocuments(IEnumerable<long> ids)
         {
-            var chunk = new List<int>(SqliteInListChunkSize);
-            List<int>? noteIds = null;
+            var chunk = new List<long>(SqliteInListChunkSize);
+            List<long>? noteIds = null;
 
-            foreach (int id in ids)
+            foreach (long id in ids)
             {
-                if (_hasNotes && SeforimDbNoteIds.IsVirtual(id)) { (noteIds ??= new List<int>()).Add(id); continue; }
+                if (_hasNotes && SeforimDbNoteIds.IsVirtual(id)) { (noteIds ??= new List<long>()).Add(id); continue; }
                 chunk.Add(id);
                 if (chunk.Count == SqliteInListChunkSize)
                 {
@@ -365,7 +366,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                     yield return (note.Id, DecodeNoteForSearch(note.Body, note.Id), "");
         }
 
-        private IEnumerable<(int Id, string Text, string Title)> FetchTextChunk(List<int> ids)
+        private IEnumerable<(long Id, string Text, string Title)> FetchTextChunk(List<long> ids)
         {
             var (command, parameterNames, cached) =
                 Statement(SeforimDbSqlStrings.FtsFetchLines(_schema, ids.Count), ids.Count);
@@ -376,7 +377,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 
                 using var reader = command.ExecuteReader();
                 while (reader.Read())
-                    yield return (reader.GetInt32(0), DecodeForSearch(reader, 1, reader.GetInt32(0)), "");
+                    yield return (reader.GetInt64(0), DecodeForSearch(reader, 1, reader.GetInt64(0)), "");
             }
             finally
             {
@@ -389,46 +390,54 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// order, read by the build (<see cref="ReadDocumentsWithSectionInResultOrder"/>) and by
         /// <see cref="BookPositionRanges"/>, so the two can never disagree. (Core 277de7a9.)
         /// </summary>
-        private (List<int> BookOrder, Dictionary<int, long> LineCounts) BooksInResultOrder()
+        private (List<long> BookOrder, Dictionary<long, long> LineCounts) BooksInResultOrder()
         {
             var treeOrder = SeforimDbBookTreeOrder.Load(_connection);
 
-            var lineCounts = new Dictionary<int, long>();
+            var lineCounts = new Dictionary<long, long>();
             using (var count = _connection.CreateCommand())
             {
                 count.CommandText = SeforimDbSqlStrings.FtsLineCountsByBook;
                 using var r = count.ExecuteReader();
-                while (r.Read()) lineCounts[r.GetInt32(0)] = r.GetInt64(1);
+                while (r.Read()) lineCounts[r.GetInt64(0)] = r.GetInt64(1);
             }
 
-            var bookOrder = new List<int>(lineCounts.Keys);
+            var bookOrder = new List<long>(lineCounts.Keys);
             bookOrder.Sort((a, b) =>
             {
-                bool hasA = treeOrder.TryGetValue(a, out int rankA), hasB = treeOrder.TryGetValue(b, out int rankB);
+                bool hasA = TreeRank(treeOrder, a, out int rankA), hasB = TreeRank(treeOrder, b, out int rankB);
                 if (hasA != hasB) return hasA ? -1 : 1;
                 return hasA ? rankA.CompareTo(rankB) : a.CompareTo(b);
             });
             if (!_hasNotes) return (bookOrder, lineCounts);
 
             // Each book with notes is followed by its notes book (issue #13).
-            var noteCounts = new Dictionary<int, long>();
+            var noteCounts = new Dictionary<long, long>();
             using (var count = _connection.CreateCommand())
             {
                 count.CommandText = SeforimDbSqlStrings.FtsNoteCountsByBook;
                 using var r = count.ExecuteReader();
-                while (r.Read()) noteCounts[r.GetInt32(0)] = r.GetInt64(1);
+                while (r.Read()) noteCounts[r.GetInt64(0)] = r.GetInt64(1);
             }
             if (noteCounts.Count == 0) return (bookOrder, lineCounts);
-            var withNotes = new List<int>(bookOrder.Count + noteCounts.Count);
-            foreach (int bookId in bookOrder)
+            var withNotes = new List<long>(bookOrder.Count + noteCounts.Count);
+            foreach (long bookId in bookOrder)
             {
                 withNotes.Add(bookId);
                 if (!noteCounts.TryGetValue(bookId, out long notes)) continue;
-                int notesBook = SeforimDbNoteIds.EncodeBook(bookId);
+                long notesBook = SeforimDbNoteIds.EncodeBook(bookId);
                 withNotes.Add(notesBook);
                 lineCounts[notesBook] = notes;
             }
             return (withNotes, lineCounts);
+        }
+
+        /// <summary>A book's catalog rank; false when the catalog does not list it (the catalog
+        /// keys real book ids as int; a larger id is unlisted).</summary>
+        private static bool TreeRank(Dictionary<int, int> treeOrder, long bookId, out int rank)
+        {
+            rank = 0;
+            return bookId >= 0 && bookId <= int.MaxValue && treeOrder.TryGetValue((int)bookId, out rank);
         }
 
         /// <summary>The ids of the books flagged <c>book.isBaseBook</c> (the relevance order puts
@@ -450,12 +459,12 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// FtsLib's (its rowid, from 1), as Core; the engine's own positions are these minus one
         /// (TantivySeforimIndex.Search converts). (Core 277de7a9.)
         /// </summary>
-        public Dictionary<int, (long First, long Count)> BookPositionRanges()
+        public Dictionary<long, (long First, long Count)> BookPositionRanges()
         {
             var (bookOrder, lineCounts) = BooksInResultOrder();
-            var ranges = new Dictionary<int, (long First, long Count)>(bookOrder.Count);
+            var ranges = new Dictionary<long, (long First, long Count)>(bookOrder.Count);
             long next = 1;
-            foreach (int bookId in bookOrder)
+            foreach (long bookId in bookOrder)
             {
                 long count = lineCounts[bookId];
                 ranges[bookId] = (next, count);
@@ -469,9 +478,9 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// plus the line's rank in the book). Two primary-key / index reads. Null for a line that
         /// no longer exists or a book the ranges do not hold. (Core 277de7a9.)
         /// </summary>
-        public long? PositionOfLine(int lineId, Dictionary<int, (long First, long Count)> books)
+        public long? PositionOfLine(long lineId, Dictionary<long, (long First, long Count)> books)
         {
-            if (SeforimDbNoteIds.TryDecodeLine(lineId, out int sourceLineId, out int noteIndex))
+            if (SeforimDbNoteIds.TryDecodeLine(lineId, out long sourceLineId, out int noteIndex))
             {
                 foreach (var note in FetchNotes(new[] { lineId }))
                 {
@@ -503,23 +512,23 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// searcher reads AFTER verification, for the hits that passed
         /// (<see cref="SeforimDbSqlStrings.FtsFetchPlacements"/>). An id with no line is absent.
         /// </summary>
-        public Dictionary<int, FtsDocumentPlacement> FetchPlacements(IReadOnlyList<int> ids)
+        public Dictionary<long, FtsDocumentPlacement> FetchPlacements(IReadOnlyList<long> ids)
         {
-            var placements = new Dictionary<int, FtsDocumentPlacement>(ids?.Count ?? 0);
+            var placements = new Dictionary<long, FtsDocumentPlacement>(ids?.Count ?? 0);
             if (ids == null || ids.Count == 0) return placements;
 
             // A note is placed in its notes book; lineIndex = its source line's.
             if (_hasNotes)
             {
-                List<int>? noteIds = null, realIds = null;
-                foreach (int id in ids)
-                    if (SeforimDbNoteIds.IsVirtual(id)) (noteIds ??= new List<int>()).Add(id);
-                    else (realIds ??= new List<int>()).Add(id);
+                List<long>? noteIds = null, realIds = null;
+                foreach (long id in ids)
+                    if (SeforimDbNoteIds.IsVirtual(id)) (noteIds ??= new List<long>()).Add(id);
+                    else (realIds ??= new List<long>()).Add(id);
                 if (noteIds != null)
                 {
                     foreach (var note in FetchNotes(noteIds))
                         placements[note.Id] = new FtsDocumentPlacement(SeforimDbNoteIds.EncodeBook(note.BookId), note.LineIndex);
-                    ids = realIds ?? (IReadOnlyList<int>)Array.Empty<int>();
+                    ids = realIds ?? (IReadOnlyList<long>)Array.Empty<long>();
                     if (ids.Count == 0) return placements;
                 }
             }
@@ -536,8 +545,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 
                     using var reader = command.ExecuteReader();
                     while (reader.Read())
-                        placements[reader.GetInt32(0)] = new FtsDocumentPlacement(
-                            bookId: reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                        placements[reader.GetInt64(0)] = new FtsDocumentPlacement(
+                            bookId: reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                             lineIndex: reader.IsDBNull(2) ? 0 : reader.GetInt32(2));
                 }
                 finally
@@ -552,14 +561,14 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// from the one `line` row the content fetch reads - what lets the
         /// searcher finish a hit without a second query. See
         /// <see cref="SeforimDbSqlStrings.FtsFetchPlacedLines"/>.</summary>
-        public IEnumerable<(int Id, string Text, FtsDocumentPlacement Placement)> FetchPlacedDocuments(IEnumerable<int> ids)
+        public IEnumerable<(long Id, string Text, FtsDocumentPlacement Placement)> FetchPlacedDocuments(IEnumerable<long> ids)
         {
-            var chunk = new List<int>(SqliteInListChunkSize);
-            List<int>? noteIds = null;
+            var chunk = new List<long>(SqliteInListChunkSize);
+            List<long>? noteIds = null;
 
-            foreach (int id in ids)
+            foreach (long id in ids)
             {
-                if (_hasNotes && SeforimDbNoteIds.IsVirtual(id)) { (noteIds ??= new List<int>()).Add(id); continue; }
+                if (_hasNotes && SeforimDbNoteIds.IsVirtual(id)) { (noteIds ??= new List<long>()).Add(id); continue; }
                 chunk.Add(id);
                 if (chunk.Count == SqliteInListChunkSize)
                 {
@@ -577,7 +586,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                                   new FtsDocumentPlacement(SeforimDbNoteIds.EncodeBook(note.BookId), note.LineIndex));
         }
 
-        private IEnumerable<(int Id, string Text, FtsDocumentPlacement Placement)> FetchPlacedChunk(List<int> ids)
+        private IEnumerable<(long Id, string Text, FtsDocumentPlacement Placement)> FetchPlacedChunk(List<long> ids)
         {
             var (command, parameterNames, cached) =
                 Statement(SeforimDbSqlStrings.FtsFetchPlacedLines(_schema, ids.Count), ids.Count);
@@ -590,9 +599,9 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 while (reader.Read())
                 {
                     var placement = new FtsDocumentPlacement(
-                        bookId: reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                        bookId: reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                         lineIndex: reader.IsDBNull(3) ? 0 : reader.GetInt32(3));
-                    yield return (reader.GetInt32(0), DecodeForSearch(reader, 1, reader.GetInt32(0)), placement);
+                    yield return (reader.GetInt64(0), DecodeForSearch(reader, 1, reader.GetInt64(0)), placement);
                 }
             }
             finally
@@ -632,22 +641,22 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// each side joined by single spaces in document order. A line with no text row is
         /// absent. A short id need not also appear in <paramref name="lineIds"/>.
         /// </summary>
-        public List<FtsSnippetText> FetchSnippetTexts(IReadOnlyList<int> lineIds, IReadOnlyCollection<int> shortLineIds)
+        public List<FtsSnippetText> FetchSnippetTexts(IReadOnlyList<long> lineIds, IReadOnlyCollection<long> shortLineIds)
         {
-            var shortSet = new HashSet<int>(shortLineIds);
-            var plain = new List<int>(lineIds.Count);
-            foreach (int id in lineIds) if (!shortSet.Contains(id)) plain.Add(id);
-            var shortIds = new List<int>(shortSet);
+            var shortSet = new HashSet<long>(shortLineIds);
+            var plain = new List<long>(lineIds.Count);
+            foreach (long id in lineIds) if (!shortSet.Contains(id)) plain.Add(id);
+            var shortIds = new List<long>(shortSet);
 
-            var texts = new Dictionary<int, string>(plain.Count + shortIds.Count);
-            var unreadable = new HashSet<int>();
+            var texts = new Dictionary<long, string>(plain.Count + shortIds.Count);
+            var unreadable = new HashSet<long>();
 
             // A note's snippet is its text alone: no neighbour context (issue #13).
-            List<int>? noteIds = null;
+            List<long>? noteIds = null;
             if (_hasNotes)
             {
-                foreach (int id in plain) if (SeforimDbNoteIds.IsVirtual(id)) (noteIds ??= new List<int>()).Add(id);
-                foreach (int id in shortIds) if (SeforimDbNoteIds.IsVirtual(id)) (noteIds ??= new List<int>()).Add(id);
+                foreach (long id in plain) if (SeforimDbNoteIds.IsVirtual(id)) (noteIds ??= new List<long>()).Add(id);
+                foreach (long id in shortIds) if (SeforimDbNoteIds.IsVirtual(id)) (noteIds ??= new List<long>()).Add(id);
                 if (noteIds != null)
                 {
                     plain.RemoveAll(SeforimDbNoteIds.IsVirtual);
@@ -656,8 +665,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                         texts[note.Id] = DecodeNoteForSearch(note.Body, note.Id, unreadable);
                 }
             }
-            var before = new Dictionary<int, SortedList<int, string>>();
-            var after = new Dictionary<int, SortedList<int, string>>();
+            var before = new Dictionary<long, SortedList<int, string>>();
+            var after = new Dictionary<long, SortedList<int, string>>();
 
             // One chunk stays under SQLite's 999 variables (@radius is one more).
             const int perStatement = SqliteInListChunkSize - 1;
@@ -677,7 +686,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 using var reader = command.ExecuteReader();
                 while (reader.Read())
                 {
-                    int id = reader.GetInt32(0);
+                    long id = reader.GetInt64(0);
                     int delta = reader.GetInt32(1);
                     // A neighbour that cannot be read is context only: it is left out, and
                     // only the matched line itself is reported unreadable.
@@ -707,10 +716,10 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             return result;
         }
 
-        public IDictionary<int, (string Previous, string Next)> FetchNeighbourText(
-            IReadOnlyList<int> ids, int radius)
+        public IDictionary<long, (string Previous, string Next)> FetchNeighbourText(
+            IReadOnlyList<long> ids, int radius)
         {
-            var neighbours = new Dictionary<int, (string Previous, string Next)>(ids?.Count ?? 0);
+            var neighbours = new Dictionary<long, (string Previous, string Next)>(ids?.Count ?? 0);
             foreach (var entry in FetchNeighbourLines(ids, radius))
                 neighbours[entry.Key] = (entry.Value.Previous, entry.Value.Next);
             return neighbours;
@@ -724,16 +733,16 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// snippet context (that is <see cref="FetchSnippetTexts"/>) — so it only backs the
         /// plain corpus seam.
         /// </summary>
-        private IDictionary<int, SeforimDbFtsNeighbourLines> FetchNeighbourLines(
-            IReadOnlyList<int>? ids, int radius)
+        private IDictionary<long, SeforimDbFtsNeighbourLines> FetchNeighbourLines(
+            IReadOnlyList<long>? ids, int radius)
         {
-            var neighbours = new Dictionary<int, SeforimDbFtsNeighbourLines>(ids?.Count ?? 0);
+            var neighbours = new Dictionary<long, SeforimDbFtsNeighbourLines>(ids?.Count ?? 0);
             if (ids == null || ids.Count == 0 || radius <= 0) return neighbours;
 
             // Neighbour lines per matched id, keyed by their lineIndex delta, so each side joins
             // back in document order: previous = negative deltas ascending, next = positive.
-            var previousParts = new Dictionary<int, SortedList<int, (int Id, string Text)>>();
-            var nextParts = new Dictionary<int, SortedList<int, (int Id, string Text)>>();
+            var previousParts = new Dictionary<long, SortedList<int, (long Id, string Text)>>();
+            var nextParts = new Dictionary<long, SortedList<int, (long Id, string Text)>>();
 
             using (var command = _connection.CreateCommand())
             {
@@ -750,21 +759,21 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                     using var reader = command.ExecuteReader();
                     while (reader.Read())
                     {
-                        int matchedId = reader.GetInt32(0);
+                        long matchedId = reader.GetInt64(0);
                         int delta = reader.GetInt32(1);
-                        string text = _codec.DecodeColumnOrEmpty(reader, 2, reader.GetInt32(3));
+                        string text = _codec.DecodeColumnOrEmpty(reader, 2, reader.GetInt64(3));
                         if (text.Length == 0) continue;
-                        int neighbourId = reader.GetInt32(3);
+                        long neighbourId = reader.GetInt64(3);
 
                         var side = delta < 0 ? previousParts : nextParts;
                         if (!side.TryGetValue(matchedId, out var parts))
-                            side[matchedId] = parts = new SortedList<int, (int, string)>();
+                            side[matchedId] = parts = new SortedList<int, (long, string)>();
                         parts[delta] = (neighbourId, text);
                     }
                 }
             }
 
-            foreach (int id in ids)
+            foreach (long id in ids)
             {
                 var entry = new SeforimDbFtsNeighbourLines();
                 if (previousParts.TryGetValue(id, out var p)) Collect(p, entry.PreviousIds, out entry.Previous);
@@ -774,7 +783,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 
             return neighbours;
 
-            static void Collect(SortedList<int, (int Id, string Text)> parts, List<int> idsOut, out string joined)
+            static void Collect(SortedList<int, (long Id, string Text)> parts, List<long> idsOut, out string joined)
             {
                 var texts = new List<string>(parts.Count);
                 foreach (var part in parts.Values)
@@ -791,15 +800,15 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// lineIndex) and RAW body; the caller decodes. A note with no row (or no line row) is
         /// absent. One statement per chunk of distinct source lines. (Core 02236a02.)
         /// </summary>
-        private IEnumerable<(int Id, object? Body, int BookId, int LineIndex)> FetchNotes(IEnumerable<int> virtualIds)
+        private IEnumerable<(long Id, object? Body, long BookId, int LineIndex)> FetchNotes(IEnumerable<long> virtualIds)
         {
             if (!_hasNotes) yield break;
-            var wanted = new HashSet<int>();
-            var sourceLines = new List<int>();
-            var seenLines = new HashSet<int>();
-            foreach (int id in virtualIds)
+            var wanted = new HashSet<long>();
+            var sourceLines = new List<long>();
+            var seenLines = new HashSet<long>();
+            foreach (long id in virtualIds)
             {
-                if (!SeforimDbNoteIds.TryDecodeLine(id, out int lineId, out _) || !wanted.Add(id)) continue;
+                if (!SeforimDbNoteIds.TryDecodeLine(id, out long lineId, out _) || !wanted.Add(id)) continue;
                 if (seenLines.Add(lineId)) sourceLines.Add(lineId);
             }
             for (int start = 0; start < sourceLines.Count; start += SqliteInListChunkSize)
@@ -811,24 +820,24 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 using var reader = command.ExecuteReader();
                 while (reader.Read())
                 {
-                    int lineId = reader.GetInt32(0), noteIndex = reader.GetInt32(1);
+                    long lineId = reader.GetInt64(0), noteIndex = reader.GetInt64(1);
                     if (lineId < 0 || lineId > SeforimDbNoteIds.MaxSourceLineId || noteIndex < 0 || noteIndex > SeforimDbNoteIds.MaxNoteIndex) continue;
-                    int id = SeforimDbNoteIds.EncodeLine(lineId, noteIndex);
+                    long id = SeforimDbNoteIds.EncodeLine(lineId, noteIndex);
                     if (!wanted.Contains(id)) continue;
                     yield return (id, reader.IsDBNull(2) ? null : reader.GetValue(2),
-                                  reader.IsDBNull(3) ? 0 : reader.GetInt32(3), reader.IsDBNull(4) ? 0 : reader.GetInt32(4));
+                                  reader.IsDBNull(3) ? 0 : reader.GetInt64(3), reader.IsDBNull(4) ? 0 : reader.GetInt32(4));
                 }
             }
         }
 
         /// <summary>A note body, strict (the index build): an undecodable body throws an error
         /// naming the note and its line.</summary>
-        private string DecodeNote(object? body, int virtualId)
+        private string DecodeNote(object? body, long virtualId)
         {
             try { return _codec.Decode(body) ?? string.Empty; }
             catch (SeforimDbContentCodecException exception)
             {
-                SeforimDbNoteIds.TryDecodeLine(virtualId, out int lineId, out int noteIndex);
+                SeforimDbNoteIds.TryDecodeLine(virtualId, out long lineId, out int noteIndex);
                 throw new SeforimDbContentCodecException("Note " + noteIndex + " of line " + lineId + ": " + exception.Message);
             }
         }
@@ -839,8 +848,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// an undecodable row reads as empty and is recorded with its id (in the scope and in
         /// <paramref name="unreadable"/>); otherwise it throws, naming the line (issue #8).
         /// </summary>
-        private string DecodeForSearch(SqliteDataReader reader, int ordinal, int lineId,
-                                       HashSet<int>? unreadable = null, bool alwaysLenient = false)
+        private string DecodeForSearch(SqliteDataReader reader, int ordinal, long lineId,
+                                       HashSet<long>? unreadable = null, bool alwaysLenient = false)
         {
             try { return _codec.DecodeColumnOrEmpty(reader, ordinal, lineId); }
             catch (SeforimDbContentCodecException exception)
@@ -857,7 +866,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 
         /// <summary>DecodeForSearch for a note body. Snippet texts (<paramref name="unreadable"/>
         /// given) are always lenient.</summary>
-        private string DecodeNoteForSearch(object? body, int virtualId, HashSet<int>? unreadable = null)
+        private string DecodeNoteForSearch(object? body, long virtualId, HashSet<long>? unreadable = null)
         {
             try { return DecodeNote(body, virtualId); }
             catch (SeforimDbContentCodecException exception)
@@ -1003,7 +1012,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     {
         public string Previous = "";
         public string Next = "";
-        public readonly List<int> PreviousIds = new List<int>();
-        public readonly List<int> NextIds = new List<int>();
+        public readonly List<long> PreviousIds = new List<long>();
+        public readonly List<long> NextIds = new List<long>();
     }
 }

@@ -126,7 +126,7 @@ namespace FtsLib.Fts5
         public const int DefaultContextWords = 8;
 
         /// <summary>Bumped when the indexing pipeline changes; part of the provenance stamp.</summary>
-        public const string IndexFormatVersion = "tantivy15"; // 15: a line flag for a word too long to be a term (a line regex always reads the line), issue #15; 14: footnotes (line_note) indexed as virtual notes books, issue #13; 13: catalog order (= position) counts a base text by the isBaseBook flag only (no title-equals-folder rule; issue #6); 12: a <sup> holding a vocalized Hebrew letter mid-word is transparent (the word continues through it); a keep_marks term drops U+034F (combining grapheme joiner); 11: doc order = catalog order (index sorted by position; search skips its sort on the merged segment); 10: an unterminated '<' is a plain separator (the rest of the line is indexed, as Otzaria); per-line content edges (line_first / line_last, edge-enumerator flags) replace the word count, so cross-line matching skips enumerators like (x) {x} (49); 9: per-line word count, line flags (headings: no cross-line phrase) and section id (TOC entry); 2: trailing quotes dropped from terms; 3: bare-minimum schema (no line_index/toc_entry_id); 5: one-letter (and 30+ letter) words indexed with positions; 6: FtsLib word model = Otzaria's (digit runs are words, ב5 one word); 7: Otzaria's remaining tokenizer rules (. [ ] bidi chars join, no script split, geresh kept as ', trailing geresh, quote and presentation-form folding, paired readings share a position, a term of 128 bytes or more not indexed); 8: a keep_marks index keeps marks in canonical order, flags the lines carrying a mark, measures the 128-byte limit without marks
+        public const string IndexFormatVersion = "tantivy16"; // 16: 64-bit notes ids (R = 2^52), issue #13; 15: a line flag for a word too long to be a term (a line regex always reads the line), issue #15; 14: footnotes (line_note) indexed as virtual notes books, issue #13; 13: catalog order (= position) counts a base text by the isBaseBook flag only (no title-equals-folder rule; issue #6); 12: a <sup> holding a vocalized Hebrew letter mid-word is transparent (the word continues through it); a keep_marks term drops U+034F (combining grapheme joiner); 11: doc order = catalog order (index sorted by position; search skips its sort on the merged segment); 10: an unterminated '<' is a plain separator (the rest of the line is indexed, as Otzaria); per-line content edges (line_first / line_last, edge-enumerator flags) replace the word count, so cross-line matching skips enumerators like (x) {x} (49); 9: per-line word count, line flags (headings: no cross-line phrase) and section id (TOC entry); 2: trailing quotes dropped from terms; 3: bare-minimum schema (no line_index/toc_entry_id); 5: one-letter (and 30+ letter) words indexed with positions; 6: FtsLib word model = Otzaria's (digit runs are words, ב5 one word); 7: Otzaria's remaining tokenizer rules (. [ ] bidi chars join, no script split, geresh kept as ', trailing geresh, quote and presentation-form folding, paired readings share a position, a term of 128 bytes or more not indexed); 8: a keep_marks index keeps marks in canonical order, flags the lines carrying a mark, measures the 128-byte limit without marks
 
         private readonly string _indexPath;
         private readonly Func<SeforimDbFtsCorpus> _openCorpus;
@@ -194,26 +194,26 @@ namespace FtsLib.Fts5
                 if (hits.Length == 0) break;
 
                 if (firstFetch) { onStage?.Invoke("fetch"); firstFetch = false; }
-                var ids = new int[hits.Length];
-                for (int i = 0; i < hits.Length; i++) ids[i] = (int)hits[i].LineId;
+                var ids = new long[hits.Length];
+                for (int i = 0; i < hits.Length; i++) ids[i] = hits[i].LineId;
                 // withPlacement: false = the text only (all the locate reads); the placement
                 // carries just the book id the index already returned, and the caller reads
                 // the rest for the hits it keeps (FtsLib's Search(withPlacement) contract).
-                var byId = new Dictionary<int, (string Text, FtsDocumentPlacement Placement)>(hits.Length);
+                var byId = new Dictionary<long, (string Text, FtsDocumentPlacement Placement)>(hits.Length);
                 if (withPlacement)
                     foreach (var (id, text, placement) in corpus.FetchPlacedDocuments(ids))
                         byId[id] = (text, placement);
                 else
                 {
-                    var bookOf = new Dictionary<int, int>(hits.Length);
-                    foreach (var h in hits) bookOf[(int)h.LineId] = (int)h.BookId;
+                    var bookOf = new Dictionary<long, long>(hits.Length);
+                    foreach (var h in hits) bookOf[h.LineId] = h.BookId;
                     foreach (var (id, text, _) in corpus.FetchDocuments(ids))
                         byId[id] = (text, new FtsDocumentPlacement(bookOf[id], 0));
                 }
 
                 for (int i = 0; i < ids.Length; i++)
                 {
-                    int id = ids[i];
+                    long id = ids[i];
                     if (!byId.TryGetValue(id, out var row)) continue; // line gone from the DB
                     yield return new SearchResult(id, row.Text, row.Placement, session, first + i);
                 }
@@ -285,13 +285,22 @@ namespace FtsLib.Fts5
         /// also returning how the search was served (notices).</summary>
         public HitCounts CountByBook(string query, TantivySearchOptions? options, CancellationToken ct,
                                      int batchSize, out SearchInfo info)
+            => CountByBook(query, options, ct, batchSize, out info, null);
+
+        /// <summary><see cref="CountByBook(string, TantivySearchOptions?, CancellationToken, int, out SearchInfo)"/>
+        /// with the search's rule for unreadable rows (issue #13): an undecodable line or note
+        /// counts as empty text and is recorded in <paramref name="unreadable"/> (its count is the
+        /// caller's to surface), never aborting the count. Null = a private scope (lenient, not surfaced).</summary>
+        public HitCounts CountByBook(string query, TantivySearchOptions? options, CancellationToken ct,
+                                     int batchSize, out SearchInfo info, SeforimDbFtsUnreadableRows? unreadable)
         {
+            using var scope = (unreadable ?? new SeforimDbFtsUnreadableRows()).Enter();
             options ??= new TantivySearchOptions();
             using var session = Engine().Search(WithBaseBooks(ToRequest(query, options)), ct);
             var line = session.GetLineRegexStatus();
             if (line != null)
             {
-                RunLineRegex(session, line, ct, batchSize, null);
+                RunLineRegex(session, line, ct, batchSize, null, unreadable);
                 info = session.GetInfo();
                 return session.GetCounts();
             }
@@ -304,9 +313,9 @@ namespace FtsLib.Fts5
                 PlacedHit[] hits = session.GetHits(offset, batchSize);
                 if (hits.Length == 0) break;
                 offset += hits.Length;
-                var ids = new int[hits.Length];
-                for (int i = 0; i < hits.Length; i++) ids[i] = (int)hits[i].LineId;
-                var byId = new Dictionary<int, string>(hits.Length);
+                var ids = new long[hits.Length];
+                for (int i = 0; i < hits.Length; i++) ids[i] = hits[i].LineId;
+                var byId = new Dictionary<long, string>(hits.Length);
                 foreach (var (id, text, _) in corpus.FetchDocuments(ids)) byId[id] = text;
                 var texts = new string[hits.Length];
                 for (int i = 0; i < ids.Length; i++) texts[i] = byId.TryGetValue(ids[i], out var t) ? t : string.Empty;
@@ -324,7 +333,16 @@ namespace FtsLib.Fts5
         /// </summary>
         public void RunLineRegex(SearchSession session, LineRegexStatus status, CancellationToken ct, int batchSize,
                                  Action<long, string, (int Start, int End)[]>? onMatch)
+            => RunLineRegex(session, status, ct, batchSize, onMatch, null);
+
+        /// <summary><see cref="RunLineRegex(SearchSession, LineRegexStatus, CancellationToken, int, Action{long, string, ValueTuple{int, int}[]}?)"/>
+        /// with the search's rule for unreadable rows (issue #13): an undecodable row (candidate or
+        /// full scan) reads as empty and is recorded in <paramref name="unreadable"/>; null = a private
+        /// scope (lenient, not surfaced). The scope covers the calling thread for the whole run.</summary>
+        public void RunLineRegex(SearchSession session, LineRegexStatus status, CancellationToken ct, int batchSize,
+                                 Action<long, string, (int Start, int End)[]>? onMatch, SeforimDbFtsUnreadableRows? unreadable)
         {
+            using var scope = (unreadable ?? new SeforimDbFtsUnreadableRows()).Enter();
             using var corpus = _openCorpus();
             if (!status.FullScan)
             {
@@ -334,9 +352,9 @@ namespace FtsLib.Fts5
                     PlacedHit[] hits = session.GetHits(offset, batchSize);
                     if (hits.Length == 0) break;
                     offset += hits.Length;
-                    var ids = new int[hits.Length];
-                    for (int i = 0; i < hits.Length; i++) ids[i] = (int)hits[i].LineId;
-                    var byId = new Dictionary<int, string>(hits.Length);
+                    var ids = new long[hits.Length];
+                    for (int i = 0; i < hits.Length; i++) ids[i] = hits[i].LineId;
+                    var byId = new Dictionary<long, string>(hits.Length);
                     foreach (var (id, text, _) in corpus.FetchDocuments(ids)) byId[id] = text;
                     var texts = new string[hits.Length];
                     for (int i = 0; i < ids.Length; i++) texts[i] = byId.TryGetValue(ids[i], out var t) ? t : string.Empty;
@@ -424,7 +442,7 @@ namespace FtsLib.Fts5
         /// <summary>The build watermark, committed atomically with the documents.</summary>
         public sealed class BuildState
         {
-            public int LastLineId;
+            public long LastLineId;
             public long LinesDone;
             public long TotalLines;
             public bool Complete;
@@ -441,7 +459,7 @@ namespace FtsLib.Fts5
                 if (parts.Length != 6 || parts[0] != "v1") return null;
                 return new BuildState
                 {
-                    LastLineId = int.Parse(parts[1], CultureInfo.InvariantCulture),
+                    LastLineId = long.Parse(parts[1], CultureInfo.InvariantCulture),
                     LinesDone = long.Parse(parts[2], CultureInfo.InvariantCulture),
                     TotalLines = long.Parse(parts[3], CultureInfo.InvariantCulture),
                     Complete = parts[4] == "1",
@@ -457,7 +475,7 @@ namespace FtsLib.Fts5
         }
 
         /// <summary>Where an interrupted build stopped (FtsLib's GetResumeState).</summary>
-        public void GetResumeState(out int lineId, out long totalLines, out long resumeOffset)
+        public void GetResumeState(out long lineId, out long totalLines, out long resumeOffset)
         {
             lineId = 0; totalLines = 0; resumeOffset = 0;
             var state = ReadBuildState();
@@ -553,7 +571,7 @@ namespace FtsLib.Fts5
                 writer.Add(new LineDocument
                 {
                     LineId = id, Position = state.LinesDone, BookId = bookId, Text = text,
-                    SectionId = sectionId, NoCross = text.StartsWith("<h", StringComparison.Ordinal) || global::SeforimSearch.Demo.SeforimDb.SeforimDbNoteIds.IsVirtual((int)id),
+                    SectionId = sectionId, NoCross = text.StartsWith("<h", StringComparison.Ordinal) || global::SeforimSearch.Demo.SeforimDb.SeforimDbNoteIds.IsVirtual(id),
                 });
                 state.LinesDone++;
                 state.LastLineId = id;

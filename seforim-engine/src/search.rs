@@ -118,6 +118,13 @@ pub enum GroupSpec {
     /// dictionary forms of a blacklisted lemma: they add hits, the
     /// highlight leaves them out). Costs nothing when unused.
     Unmarked { group: Box<GroupSpec> },
+    /// A dictionary form of the slot's word (Otzaria's MagicDictionary,
+    /// fed by the host): searched as `group`; in relevance order it scores
+    /// Otzaria's lexical tier (`FUZZY_BOOST_LEXICAL`) beside its fuzzy word.
+    Lexical { group: Box<GroupSpec> },
+    /// `group` with its own expansion cap (one cap across all segments,
+    /// shortest first), instead of the request's `max_expanded_terms`.
+    Capped { group: Box<GroupSpec>, cap: usize },
 }
 
 /// Serializable mirror of [`hebrew_fts::TypoMode`]: which typo behaviour
@@ -187,6 +194,7 @@ fn has_unmarked(group: &GroupSpec) -> bool {
     match group {
         GroupSpec::Unmarked { .. } => true,
         GroupSpec::Any { alternatives } => alternatives.iter().any(has_unmarked),
+        GroupSpec::Lexical { group } | GroupSpec::Capped { group, .. } => has_unmarked(group),
         _ => false,
     }
 }
@@ -196,7 +204,9 @@ fn mark_phrase_word(group: &mut GroupSpec) {
     match group {
         GroupSpec::Word { options, .. } => options.phrase_word = true,
         GroupSpec::Any { alternatives } => alternatives.iter_mut().for_each(mark_phrase_word),
-        GroupSpec::Unmarked { group } => mark_phrase_word(group),
+        GroupSpec::Unmarked { group } | GroupSpec::Lexical { group } | GroupSpec::Capped { group, .. } => {
+            mark_phrase_word(group)
+        }
         _ => {}
     }
 }
@@ -414,6 +424,12 @@ pub struct SearchRequest {
     /// segments, shortest first (the exact word typed always kept). Default
     /// 2000 (FtsLib's); 0 = uncapped. Hitting it sets the truncated flag.
     pub max_expanded_terms: usize,
+    /// Otzaria's fuzzy mode with its magic dictionary loaded
+    /// (`build_lexical_fuzzy_query`): relevance scores the fuzzy slots as
+    /// its lexical query does (see `crate::relevance`). Recall is the
+    /// slots' own. Off: its plain fuzzy builder's score.
+    #[serde(default)]
+    pub lexical_fuzzy: bool,
 }
 
 impl Default for SearchRequest {
@@ -440,6 +456,7 @@ impl Default for SearchRequest {
             after_position: None,
             resume_stamp: None,
             max_expanded_terms: hebrew_fts::DEFAULT_MAX_EXPANDED_TERMS,
+            lexical_fuzzy: false,
         }
     }
 }
@@ -1631,7 +1648,10 @@ impl LineIndex {
                 q.set_max_expansions(walk.cap);
                 Some(q.span_slot(searcher)?)
             }
-            GroupSpec::Unmarked { group } => self.group_slot(group, sink, searcher, walk)?,
+            GroupSpec::Unmarked { group } | GroupSpec::Lexical { group } => {
+                self.group_slot(group, sink, searcher, walk)?
+            }
+            GroupSpec::Capped { group, cap } => self.group_slot(group, sink, searcher, Walk { cap: *cap, ..walk })?,
             GroupSpec::Any { alternatives } => {
                 let mut sources = Vec::new();
                 for a in alternatives {
@@ -1774,7 +1794,10 @@ impl LineIndex {
                 q.set_max_expansions(walk.cap);
                 Some(Box::new(q))
             }
-            GroupSpec::Unmarked { group } => self.group_query(group, sink, searcher, walk)?,
+            GroupSpec::Unmarked { group } | GroupSpec::Lexical { group } => {
+                self.group_query(group, sink, searcher, walk)?
+            }
+            GroupSpec::Capped { group, cap } => self.group_query(group, sink, searcher, Walk { cap: *cap, ..walk })?,
             GroupSpec::Any { alternatives } => {
                 let mut parts: Vec<(Occur, Box<dyn Query>)> = Vec::new();
                 for a in alternatives {
@@ -1805,6 +1828,7 @@ impl LineIndex {
             match g {
                 GroupSpec::Any { alternatives } => alternatives.iter().for_each(|a| split(a, under, u, m)),
                 GroupSpec::Unmarked { group } => split(group, true, u, m),
+                GroupSpec::Lexical { group } | GroupSpec::Capped { group, .. } => split(group, under, u, m),
                 _ if under => u.push(g),
                 _ => m.push(g),
             }
@@ -1863,7 +1887,9 @@ impl LineIndex {
             match g {
                 GroupSpec::Word { options, .. } => options.match_nikud || options.match_teamim,
                 GroupSpec::Any { alternatives } => alternatives.iter().any(wants),
-                GroupSpec::Unmarked { group } => wants(group),
+                GroupSpec::Unmarked { group } | GroupSpec::Lexical { group } | GroupSpec::Capped { group, .. } => {
+                    wants(group)
+                }
                 _ => false,
             }
         }
@@ -2822,6 +2848,7 @@ impl LineIndex {
                 field: self.fields.text,
                 vocalized: request.vocalized,
                 marked_terms: keep_marks,
+                lexical_fuzzy: request.lexical_fuzzy,
                 main: (main_ok && main_terms.len() == main_slots.len()).then(|| relevance::MainPlan {
                     shape,
                     slots: main_slots,

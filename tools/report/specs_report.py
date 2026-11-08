@@ -173,6 +173,8 @@ md.append(f"""## Engines compared
 | Fuzzy: a swap of two adjacent letters is one edit (Otzaria; FtsLib changed too) | done |
 | Quoted phrases (Otzaria's rule, both engines): a whole-query phrase is literal and may cross a line (ours); a phrase among words is required in the line | done; unit tests; FtsLib per line only |
 | Snippets from index positions (`locate_lines`, per-batch cost rule) | done |
+| Morphology (Otzaria's MagicDictionary) as host lexicon: dictionary forms as `lexical_forms` (lexical tier in relevance), blacklisted forms searched but not marked (`unmarked_alternatives` / `unmarked_lexical_forms`), per-word cap | done (Dart demo host); unit tests |
+| Negative query defaults to the positive proximity (Otzaria's negativeDistance; `proximity_base` under a custom spacing) | done |
 """)
 
 md.append("## Index builds (full DB, 7,080,797 lines)\n")
@@ -428,7 +430,8 @@ claude_block = "\n".join([
     f"ours `{INDEX_FORMAT}`, FtsLib `{FTSLIB_FORMAT}`. Features: FtsLib syntax + parity, per-word Otzaria "
     f"options as FST walks (cap per request, default 2000, global across segments), proximity / word match, vocalized walks, user regex "
     f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, resume after position, "
-    f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, positions snippets, FM sidecar.",
+    f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, positions snippets, FM sidecar, "
+    f"morphology forms from the host (lexical tier, unmarked forms).",
     "Builds: " + "; ".join(l.strip("| ").replace(" | ", " ") for l in build_lines()) + ".",
     ("Parity with FtsLib: all sets identical (" + ", ".join(x[0] for x in PAR_RUN) + "; both flavours)."
      if PAR_ALL_SAME else "Parity with FtsLib: " + parity_summary() + "."),

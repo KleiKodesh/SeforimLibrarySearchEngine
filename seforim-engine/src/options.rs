@@ -134,6 +134,15 @@ pub struct SearchOptions {
     /// segments, shortest first (the exact word typed always kept). Default
     /// 2000 (FtsLib's); 0 = uncapped. Hitting it sets the truncated flag.
     pub max_expanded_terms: usize,
+    /// Otzaria's fuzzy mode with its magic dictionary loaded (see
+    /// `SearchRequest::lexical_fuzzy`): the relevance score of its lexical
+    /// fuzzy query.
+    pub lexical_fuzzy: bool,
+    /// Otzaria's `distance` / `any_order` under `proximity` (which carries
+    /// its customSpacing when set): the negative query's default rule, as
+    /// Otzaria's negativeDistance defaults to its distance and its negative
+    /// custom spacing to none. None: taken from `proximity`.
+    pub proximity_base: Option<ProximityBase>,
 }
 
 impl Default for SearchOptions {
@@ -178,6 +187,8 @@ impl Default for SearchOptions {
             after_position: None,
             resume_stamp: None,
             max_expanded_terms: hebrew_fts::DEFAULT_MAX_EXPANDED_TERMS,
+            lexical_fuzzy: false,
+            proximity_base: None,
         }
     }
 }
@@ -214,6 +225,26 @@ pub struct WordOptions {
     /// (Otzaria's dictionary forms of a blacklisted lemma: searched, not
     /// highlighted).
     pub unmarked_alternatives: Vec<String>,
+    /// The word's dictionary forms (Otzaria's MagicDictionary recall forms,
+    /// read by the host): each an exact word in the word's slot (its
+    /// spelling with quotes inserted included, as Otzaria's spelling
+    /// terms), scored in Otzaria's lexical tier under relevance order.
+    pub lexical_forms: Vec<String>,
+    /// Dictionary forms of a blacklisted lemma: as `lexical_forms`, but not
+    /// marked (see `unmarked_alternatives`).
+    pub unmarked_lexical_forms: Vec<String>,
+    /// This word's own expansion cap (its walk / wildcard / fuzzy terms),
+    /// instead of the request's `max_expanded_terms` (0 = uncapped).
+    pub max_expanded_terms: Option<usize>,
+}
+
+/// Otzaria's plain `distance` and `any_order` under the query's rule
+/// (its `customSpacing` aside): the negative query's default rule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProximityBase {
+    pub distance: u32,
+    pub any_order: bool,
 }
 
 /// The negative query (Otzaria's negativeQuery). Options are per word: a
@@ -351,8 +382,8 @@ impl SearchOptions {
         let quoted = hebrew_fts::quoted_phrases(&self.query);
         let literal: Vec<usize> = quoted.iter().flatten().copied().collect();
         let main = slots_with(&self.query, keep_marks, &literal, |i| match self.words.get(&i) {
-            Some(w) => (w.apply(global), w.alternatives.as_slice(), w.unmarked_alternatives.as_slice()),
-            None => (global, &[], &[]),
+            Some(w) => (w.apply(global), Some(w)),
+            None => (global, None),
         });
         // One phrase holding every word that searches: Otzaria's literal
         // phrase search (`searchLiteralPhrase`, adjacent lines included):
@@ -439,8 +470,8 @@ impl SearchOptions {
                 // per word, exactly as the positive words: the global
                 // options are the default, `e.words` the word's own
                 let ex = slots(&e.query, keep_marks, |i| match e.words.get(&i) {
-                    Some(w) => (w.apply(global), w.alternatives.as_slice(), w.unmarked_alternatives.as_slice()),
-                    None => (global, &[], &[]),
+                    Some(w) => (w.apply(global), Some(w)),
+                    None => (global, None),
                 });
                 // No rule of its own: the positive query's (Otzaria's
                 // `negativeDistance ?? distance` with the query's any order;
@@ -451,13 +482,19 @@ impl SearchOptions {
                 // user's rule is kept even when a whole quoted phrase
                 // replaces it for the positive query, as Otzaria passes
                 // its distance to the negative query then too)
-                let (max_word_distance, require_ordered) = if own_rule || self.proximity.is_some() {
+                let (max_word_distance, require_ordered) = if own_rule || self.proximity_base.is_some() || self.proximity.is_some() {
                     (e.max_word_distance, e.require_ordered)
                 } else {
                     (self.max_word_distance, self.require_ordered)
                 };
                 let inherited = if !own_rule {
-                    self.proximity.as_ref().and_then(|p| inherited_proximity(p, ex.typed.len()))
+                    match self.proximity_base {
+                        Some(b) if b.any_order => Some(ProximitySpec::AnyOrder { distance: b.distance }),
+                        Some(b) => Some(ProximitySpec::Ordered {
+                            gaps: vec![b.distance; ex.typed.len().saturating_sub(1)],
+                        }),
+                        None => self.proximity.as_ref().and_then(|p| inherited_proximity(p, ex.typed.len())),
+                    }
                 } else {
                     None
                 };
@@ -503,6 +540,7 @@ impl SearchOptions {
             after_position: self.after_position,
             resume_stamp: self.resume_stamp.clone(),
             max_expanded_terms: self.max_expanded_terms,
+            lexical_fuzzy: self.lexical_fuzzy,
         })
     }
 }
@@ -572,7 +610,7 @@ fn phrases(list: &[PhraseOptions], keep_marks: bool) -> Vec<Vec<GroupSpec>> {
     list.iter()
         .map(|p| {
             let o = WalkOptionsSpec { ignore_quotes: p.ignore_quotes, ..Default::default() };
-            slots(&p.query, keep_marks, |_| (o, &[], &[])).groups
+            slots(&p.query, keep_marks, |_| (o, None)).groups
         })
         // A phrase with a word too long to be indexed can never match
         // (Otzaria: its literal matches no term).
@@ -687,7 +725,7 @@ fn is_long(g: &GroupSpec) -> bool {
     match g {
         GroupSpec::Unindexed { .. } => true,
         GroupSpec::Any { alternatives } => !alternatives.is_empty() && alternatives.iter().all(is_long),
-        GroupSpec::Unmarked { group } => is_long(group),
+        GroupSpec::Unmarked { group } | GroupSpec::Lexical { group } | GroupSpec::Capped { group, .. } => is_long(group),
         _ => false,
     }
 }
@@ -825,7 +863,7 @@ fn inherited_proximity(p: &ProximitySpec, typed: usize) -> Option<ProximitySpec>
 /// alternatives join the sub-word's slot (and stand for the word when it
 /// cannot search itself); the unmarked alternatives too, each as a
 /// [`GroupSpec::Unmarked`] member.
-fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String], &'a [String])) -> Slots {
+fn slots<'a>(query: &str, keep_marks: bool, word: impl Fn(usize) -> (WalkOptionsSpec, Option<&'a WordOptions>)) -> Slots {
     slots_with(query, keep_marks, &[], word)
 }
 
@@ -837,7 +875,7 @@ fn slots_with<'a>(
     query: &str,
     keep_marks: bool,
     literal: &[usize],
-    word: impl Fn(usize) -> (WalkOptionsSpec, &'a [String], &'a [String]),
+    word: impl Fn(usize) -> (WalkOptionsSpec, Option<&'a WordOptions>),
 ) -> Slots {
     let mut groups = Vec::new();
     let mut typed: Vec<Option<(usize, usize)>> = Vec::new();
@@ -859,13 +897,23 @@ fn slots_with<'a>(
         if typed.len() <= index {
             typed.resize(index + 1, None);
         }
-        let (o, alternatives, unmarked) = word(index);
-        let (o, alternatives, unmarked, term) = if literal.contains(&index) {
-            (exact_options(o), &[][..], &[][..], term.map(|t| literal_term(t, keep_marks)))
+        let (o, w) = word(index);
+        let (o, w, term) = if literal.contains(&index) {
+            (exact_options(o), None, term.map(|t| literal_term(t, keep_marks)))
         } else {
-            (o, alternatives, unmarked, term)
+            (o, w, term)
         };
-        let mut members: Vec<GroupSpec> = term.into_iter().map(|t| group(t, o)).collect();
+        let none: &[String] = &[];
+        let alternatives = w.map_or(none, |w| w.alternatives.as_slice());
+        let unmarked = w.map_or(none, |w| w.unmarked_alternatives.as_slice());
+        let cap = w.and_then(|w| w.max_expanded_terms);
+        let mut members: Vec<GroupSpec> = term
+            .into_iter()
+            .map(|t| match cap {
+                Some(cap) => GroupSpec::Capped { group: Box::new(group(t, o)), cap },
+                None => group(t, o),
+            })
+            .collect();
         for alt in alternatives {
             for t in tokenize_query(alt, keep_marks) {
                 if let QueryToken::Word { term: Some(t), .. } = t {
@@ -877,6 +925,21 @@ fn slots_with<'a>(
             for t in tokenize_query(alt, keep_marks) {
                 if let QueryToken::Word { term: Some(t), .. } = t {
                     members.push(GroupSpec::Unmarked { group: Box::new(group(t, o)) });
+                }
+            }
+        }
+        // dictionary forms: exact words (Otzaria's spelling terms of each form)
+        let forms = w.map_or(none, |w| w.lexical_forms.as_slice());
+        let unmarked_forms = w.map_or(none, |w| w.unmarked_lexical_forms.as_slice());
+        for (list, marked) in [(forms, true), (unmarked_forms, false)] {
+            for form in list {
+                // one index term (Otzaria's to_index_term): a form of several
+                // words, or that is no plain word, is not a form
+                let mut tokens = tokenize_query(form, keep_marks).into_iter();
+                if let (Some(QueryToken::Word { term: Some(QueryTerm::Word(word)), .. }), None) = (tokens.next(), tokens.next()) {
+                    let g = GroupSpec::Word { word, options: exact_options(o) };
+                    let g = if marked { g } else { GroupSpec::Unmarked { group: Box::new(g) } };
+                    members.push(GroupSpec::Lexical { group: Box::new(g) });
                 }
             }
         }
@@ -1003,6 +1066,21 @@ mod tests {
         };
         let e = o.to_request(false).unwrap().exclude.unwrap();
         assert_eq!((e.max_word_distance, e.require_ordered, e.proximity), (Some(5), true, None));
+        // the base rule under a custom spacing (Otzaria's distance / any
+        // order): the negative default, also for a one-word query
+        let based = |query: String, p: Option<ProximitySpec>, any_order: bool| {
+            let o = SearchOptions {
+                query,
+                proximity: p,
+                proximity_base: Some(ProximityBase { distance: 3, any_order }),
+                exclude: Some(three()),
+                ..Default::default()
+            };
+            o.to_request(false).unwrap().exclude.unwrap().proximity
+        };
+        assert_eq!(based(format!("{a} {b} {c}"), ordered(vec![0, 3]), false), ordered(vec![3, 3]));
+        assert_eq!(based(a.to_string(), None, false), ordered(vec![3, 3]));
+        assert_eq!(based(format!("{a} {b} {c}"), ordered(vec![0, 3]), true), Some(ProximitySpec::AnyOrder { distance: 3 }));
     }
 
     fn word_of(g: &GroupSpec) -> (&str, WalkOptionsSpec) {

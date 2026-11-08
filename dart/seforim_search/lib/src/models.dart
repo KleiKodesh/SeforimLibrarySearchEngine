@@ -612,6 +612,8 @@ class SearchOptions {
     this.afterPosition,
     this.resumeStamp,
     this.maxExpandedTerms,
+    this.lexicalFuzzy = false,
+    this.proximityBase,
   })  : words = words ?? {},
         phraseAlternatives = phraseAlternatives ?? [],
         bookGenerations = bookGenerations ?? {},
@@ -649,6 +651,15 @@ class SearchOptions {
   /// segments, shortest first, the exact word typed always kept. Null: 2000
   /// (FtsLib's). 0: uncapped. Hitting it sets [SearchInfo.truncated].
   int? maxExpandedTerms;
+
+  /// Otzaria's fuzzy mode with its magic dictionary loaded: relevance scores
+  /// the fuzzy words as its lexical fuzzy query does.
+  bool lexicalFuzzy;
+
+  /// Otzaria's plain distance / any order under [proximity] (which carries
+  /// its customSpacing when set): the negative query's default rule. Null:
+  /// taken from [proximity].
+  ({int distance, bool anyOrder})? proximityBase;
 
   // Word options: every word, unless [words] overrides (see [WalkOptions]
   // for each one's meaning).
@@ -723,6 +734,9 @@ class SearchOptions {
         if (afterPosition != null) 'after_position': afterPosition,
         if (resumeStamp != null) 'resume_stamp': resumeStamp,
         if (maxExpandedTerms != null) 'max_expanded_terms': maxExpandedTerms,
+        if (lexicalFuzzy) 'lexical_fuzzy': true,
+        if (proximityBase != null)
+          'proximity_base': {'distance': proximityBase!.distance, 'any_order': proximityBase!.anyOrder},
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
             matchNikud, matchTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,
@@ -823,8 +837,13 @@ class WordOptions {
     this.grammarPrefixMaxLetters,
     List<String>? alternatives,
     List<String>? unmarkedAlternatives,
+    List<String>? lexicalForms,
+    List<String>? unmarkedLexicalForms,
+    this.maxExpandedTerms,
   })  : alternatives = alternatives ?? [],
-        unmarkedAlternatives = unmarkedAlternatives ?? [];
+        unmarkedAlternatives = unmarkedAlternatives ?? [],
+        lexicalForms = lexicalForms ?? [],
+        unmarkedLexicalForms = unmarkedLexicalForms ?? [];
 
   bool? grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes;
   bool? ktivMaleHaser, partOfWord, advancedPrefixes, advancedSuffixes;
@@ -842,9 +861,23 @@ class WordOptions {
   /// dictionary forms of a blacklisted lemma: searched, not highlighted).
   final List<String> unmarkedAlternatives;
 
+  /// The word's dictionary forms (Otzaria's MagicDictionary recall forms,
+  /// read by the host): exact words in its slot, scored in Otzaria's lexical
+  /// tier under relevance order.
+  final List<String> lexicalForms;
+
+  /// Dictionary forms of a blacklisted lemma: as [lexicalForms], not marked.
+  final List<String> unmarkedLexicalForms;
+
+  /// This word's own expansion cap, instead of the request's (0 = uncapped).
+  int? maxExpandedTerms;
+
   Map<String, Object?> toJson() => {
         if (alternatives.isNotEmpty) 'alternatives': alternatives,
         if (unmarkedAlternatives.isNotEmpty) 'unmarked_alternatives': unmarkedAlternatives,
+        if (lexicalForms.isNotEmpty) 'lexical_forms': lexicalForms,
+        if (unmarkedLexicalForms.isNotEmpty) 'unmarked_lexical_forms': unmarkedLexicalForms,
+        if (maxExpandedTerms != null) 'max_expanded_terms': maxExpandedTerms,
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
             matchNikud, matchTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,

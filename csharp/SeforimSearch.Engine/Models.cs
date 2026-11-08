@@ -687,6 +687,15 @@ namespace SeforimSearch.Engine
         /// exact word typed always kept. Null: 2000 (FtsLib's). 0: uncapped. Hitting it sets
         /// <see cref="SearchInfo.Truncated"/>.</summary>
         public int? MaxExpandedTerms { get; set; }
+        /// <summary>Otzaria's fuzzy mode with its magic dictionary loaded: relevance scores the
+        /// fuzzy words as its lexical fuzzy query does.</summary>
+        public bool LexicalFuzzy { get; set; }
+        /// <summary>Otzaria's plain distance / any order under <see cref="Proximity"/> (which
+        /// carries its customSpacing when set): the negative query's default rule. Null: taken
+        /// from <see cref="Proximity"/>.</summary>
+        public int? ProximityBaseDistance { get; set; }
+        /// <summary>With <see cref="ProximityBaseDistance"/>: Otzaria's any order.</summary>
+        public bool ProximityBaseAnyOrder { get; set; }
 
         internal string ToJson()
         {
@@ -701,6 +710,13 @@ namespace SeforimSearch.Engine
                 sb.Append(",\"max_expanded_terms\":").Append(MaxExpandedTerms.Value.ToString(inv));
             }
             if (UserRegex) sb.Append(",\"user_regex\":true");
+            if (LexicalFuzzy) sb.Append(",\"lexical_fuzzy\":true");
+            if (ProximityBaseDistance.HasValue)
+            {
+                if (ProximityBaseDistance.Value < 0) throw new ArgumentOutOfRangeException(nameof(ProximityBaseDistance));
+                sb.Append(",\"proximity_base\":{\"distance\":").Append(ProximityBaseDistance.Value.ToString(inv))
+                    .Append(",\"any_order\":").Append(ProximityBaseAnyOrder ? "true" : "false").Append('}');
+            }
             if (CrossLine) sb.Append(",\"cross_line\":true");
             if (SameSection) sb.Append(",\"same_section\":true");
             WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes, KtivMaleHaser,
@@ -856,6 +872,16 @@ namespace SeforimSearch.Engine
         /// snippet, unless a marked word of the search matched the same term (Otzaria's
         /// dictionary forms of a blacklisted lemma: searched, not highlighted).</summary>
         public List<string> UnmarkedAlternatives { get; } = new List<string>();
+        /// <summary>The word's dictionary forms (Otzaria's MagicDictionary recall forms, read
+        /// by the host): exact words in its slot, scored in Otzaria's lexical tier under
+        /// relevance order.</summary>
+        public List<string> LexicalForms { get; } = new List<string>();
+        /// <summary>Dictionary forms of a blacklisted lemma: as <see cref="LexicalForms"/>, not
+        /// marked.</summary>
+        public List<string> UnmarkedLexicalForms { get; } = new List<string>();
+        /// <summary>This word's own expansion cap, instead of
+        /// <see cref="SearchOptions.MaxExpandedTerms"/> (0 = uncapped). Null: the request's.</summary>
+        public int? MaxExpandedTerms { get; set; }
 
         internal void WriteJson(StringBuilder sb)
         {
@@ -875,6 +901,31 @@ namespace SeforimSearch.Engine
                     Json.WriteString(sb, UnmarkedAlternatives[i]);
                 }
                 sb.Append(']');
+            }
+            if (LexicalForms.Count > 0)
+            {
+                sb.Append(",\"lexical_forms\":[");
+                for (int i = 0; i < LexicalForms.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    Json.WriteString(sb, LexicalForms[i]);
+                }
+                sb.Append(']');
+            }
+            if (UnmarkedLexicalForms.Count > 0)
+            {
+                sb.Append(",\"unmarked_lexical_forms\":[");
+                for (int i = 0; i < UnmarkedLexicalForms.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    Json.WriteString(sb, UnmarkedLexicalForms[i]);
+                }
+                sb.Append(']');
+            }
+            if (MaxExpandedTerms.HasValue)
+            {
+                if (MaxExpandedTerms.Value < 0) throw new ArgumentOutOfRangeException(nameof(MaxExpandedTerms));
+                sb.Append(",\"max_expanded_terms\":").Append(MaxExpandedTerms.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
             SearchOptions.WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes,
                 KtivMaleHaser, PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes,

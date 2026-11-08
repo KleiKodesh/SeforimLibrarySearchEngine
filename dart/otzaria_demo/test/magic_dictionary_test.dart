@@ -94,26 +94,49 @@ void main() {
     expect(f.unmarked, [ken, veken]);
   });
 
-  test('fuzzy mode feeds the forms as alternatives, unmarked when blacklisted', () {
+  test('fuzzy mode feeds the forms as lexical forms, unmarked when blacklisted', () {
     OtzariaSearch s(String q, SearchMode mode) =>
-        OtzariaSearch(query: q, mode: mode, magicDictionary: dict);
-    var w = s(halachti, SearchMode.fuzzy).toOptions().words[0]!;
-    expect(w.alternatives, [hlkFinal, holechFinal]); // exact words, no ~N
-    expect(w.unmarkedAlternatives, isEmpty);
-    w = s(lachtoch, SearchMode.fuzzy).toOptions().words[0]!;
+        OtzariaSearch(query: q, mode: mode, magicDictionary: dict, distance: 2);
+    var o = s(halachti, SearchMode.fuzzy).toOptions();
+    var w = o.words[0]!;
+    expect(w.lexicalForms, [hlkFinal, holechFinal]); // exact words, no ~N
+    expect(w.unmarkedLexicalForms, isEmpty);
     expect(w.alternatives, isEmpty);
-    expect(w.unmarkedAlternatives, [ken, veken]);
+    expect(w.maxExpandedTerms, isNull);
+    expect(o.toJson()['lexical_fuzzy'], true);
+    w = s(lachtoch, SearchMode.fuzzy).toOptions().words[0]!;
+    expect(w.lexicalForms, isEmpty);
+    expect(w.unmarkedLexicalForms, [ken, veken]);
     // only the fuzzy mode, as Otzaria
     expect(s(halachti, SearchMode.advanced).toOptions().words[0], isNull);
     expect(s(halachti, SearchMode.exact).toOptions().words[0], isNull);
+    expect(s(halachti, SearchMode.advanced).toOptions().toJson()['lexical_fuzzy'], isNull);
+    // Otzaria's fuzzy query has no distance: words anywhere
+    expect(s('$halachti $shuv', SearchMode.fuzzy).toOptions().proximity, isNull);
+    // a maqaf joins two index tokens: each is looked up on its own
+    o = s('$halachti־$shuv', SearchMode.fuzzy).toOptions();
+    expect(o.query, '$halachti~1 $shuv~1');
+    expect(o.words[0]!.lexicalForms, [hlkFinal, holechFinal]);
+    expect(o.words[1]!.lexicalForms, [tashuv]);
     // the whole query quoted: Otzaria's lexical fuzzy phrase, every word
-    // fuzzy with its forms, in order within 1 word
-    final o = s('"$halachti $lachtoch"', SearchMode.fuzzy).toOptions();
+    // fuzzy with its forms, in order within 1 word, 256 terms per word
+    o = s('"$halachti $lachtoch"', SearchMode.fuzzy).toOptions();
     expect(o.query, '$halachti~1 $lachtoch~1');
-    expect(o.words[0]!.alternatives, [hlkFinal, holechFinal]);
-    expect(o.words[1]!.unmarkedAlternatives, [ken, veken]);
+    expect(o.words[0]!.lexicalForms, [hlkFinal, holechFinal]);
+    expect(o.words[0]!.maxExpandedTerms, 256 - 3);
+    expect(o.words[1]!.unmarkedLexicalForms, [ken, veken]);
+    expect(o.words[1]!.maxExpandedTerms, 256 - 3);
     expect(o.proximity!.toJson(), {'mode': 'ordered', 'gaps': [1]});
     // a quoted part of a longer query is searched as written
     expect(s('"$halachti $holech" $shuv', SearchMode.fuzzy).toOptions().words.keys, [2]);
+    // without a dictionary the fuzzy query ignores quotes, as Otzaria's
+    o = OtzariaSearch(query: '"$halachti $holech"', mode: SearchMode.fuzzy).toOptions();
+    expect(o.query, '$halachti~1 $holech~1');
+    expect(o.proximity, isNull);
+  });
+
+  test("the negative query's default is Otzaria's distance and any order", () {
+    final o = OtzariaSearch(query: '$halachti $shuv', distance: 3, anyOrder: true, customSpacing: {0: 5}).toOptions();
+    expect(o.toJson()['proximity_base'], {'distance': 3, 'any_order': true});
   });
 }

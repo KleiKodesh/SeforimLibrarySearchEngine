@@ -88,6 +88,8 @@ const TIER_BOOSTS: [Score; 4] = [1000.0, 100.0, 10.0, 1.0];
 const FUZZY_BOOST_EXACT: Score = 1000.0;
 /// Otzaria's `FUZZY_BOOST_EXACT_REL`: the BM25 add-on of the exact word.
 const FUZZY_BOOST_EXACT_REL: Score = 1.0;
+/// Otzaria's `FUZZY_BOOST_LEXICAL`: a dictionary form (its lexical fuzzy query).
+const FUZZY_BOOST_LEXICAL: Score = 30.0;
 /// Otzaria's `FUZZY_BOOST_FUZZY`: an edit-distance match.
 const FUZZY_BOOST_FUZZY: Score = 1.0;
 /// Otzaria's `FUZZY_BOOST_PHRASE`: the typed words adjacent.
@@ -176,6 +178,8 @@ pub(crate) struct ScorePlan<'a> {
     /// The index keeps marks in its terms: a word's spellings include its
     /// vocalized forms, tiers compare mark-free forms.
     pub marked_terms: bool,
+    /// Otzaria's lexical fuzzy query (`SearchRequest::lexical_fuzzy`).
+    pub lexical_fuzzy: bool,
     /// None: the main query cannot match.
     pub main: Option<MainPlan<'a>>,
     /// The main query's doc set, when phrase alternatives make a hit's main
@@ -195,9 +199,52 @@ pub(crate) fn phrases_as_count(shape: Shape, slots: usize) -> bool {
     shape == Shape::Count { partial: false } && slots > 1
 }
 
+/// A fuzzy-mode slot: its fuzzy word, and the dictionary forms the host
+/// gave it ([`GroupSpec::Lexical`] members).
+struct FuzzySlot<'a> {
+    word: &'a str,
+    distance: u8,
+    ignore_quotes: bool,
+    forms: Vec<&'a str>,
+}
+
+/// `g` as a fuzzy-mode slot: a fuzzy word (its own cap aside), alone or
+/// with dictionary forms only. None for any other slot.
+fn fuzzy_slot_of(g: &GroupSpec) -> Option<FuzzySlot<'_>> {
+    fn fuzzy(g: &GroupSpec) -> Option<(&str, u8, bool)> {
+        match g {
+            GroupSpec::Fuzzy { word, distance, ignore_quotes } => Some((word, *distance, *ignore_quotes)),
+            GroupSpec::Capped { group, .. } => fuzzy(group),
+            _ => None,
+        }
+    }
+    fn form(g: &GroupSpec) -> Option<&str> {
+        match g {
+            GroupSpec::Word { word, .. } => Some(word),
+            GroupSpec::Unmarked { group } | GroupSpec::Capped { group, .. } => form(group),
+            _ => None,
+        }
+    }
+    if let Some((word, distance, ignore_quotes)) = fuzzy(g) {
+        return Some(FuzzySlot { word, distance, ignore_quotes, forms: Vec::new() });
+    }
+    let GroupSpec::Any { alternatives } = g else { return None };
+    let mut found = None;
+    let mut forms = Vec::new();
+    for a in alternatives {
+        match a {
+            GroupSpec::Lexical { group } => forms.push(form(group)?),
+            _ if found.is_none() => found = Some(fuzzy(a)?),
+            _ => return None,
+        }
+    }
+    let (word, distance, ignore_quotes) = found?;
+    Some(FuzzySlot { word, distance, ignore_quotes, forms })
+}
+
 /// True when every slot is a fuzzy word (Otzaria's fuzzy mode).
 fn all_fuzzy(slots: &[&GroupSpec]) -> bool {
-    slots.iter().all(|g| matches!(g, GroupSpec::Fuzzy { .. }))
+    slots.iter().all(|g| fuzzy_slot_of(g).is_some())
 }
 
 /// The notice a search carries when relevance order was asked for a shape
@@ -239,7 +286,9 @@ fn roots(g: &GroupSpec, out: &mut Vec<String>) {
         // a user regex's pattern is no typed form: its terms all fall in the last tier
         GroupSpec::Wildcard { pattern, .. } | GroupSpec::Regex { pattern } => out.push(pattern.clone()),
         GroupSpec::Any { alternatives } => alternatives.iter().for_each(|a| roots(a, out)),
-        GroupSpec::Unmarked { group } => roots(group, out),
+        GroupSpec::Unmarked { group } | GroupSpec::Capped { group, .. } => roots(group, out),
+        // a dictionary form is no typed word
+        GroupSpec::Lexical { .. } => {}
     }
 }
 
@@ -806,42 +855,87 @@ fn phrase_part(
 struct MainWeights {
     /// Single advanced slot: the matched terms by tier (None: flat 1).
     tiers: Option<[Vec<String>; 4]>,
-    /// Per fuzzy slot (aligned with the slots; None for other slots):
-    /// the exact words' spellings with their BM25 weights.
-    fuzzy: Vec<Option<Vec<(Vec<String>, Bm25Weight)>>>,
+    /// Per fuzzy slot (aligned with the slots; None for other slots).
+    fuzzy: Vec<Option<FuzzyWeights>>,
     /// Phrase shape's BM25.
     phrase: Option<Bm25Weight>,
     /// Fuzzy mode's adjacency boost: the typed words' spellings.
     fuzzy_phrase: Option<Vec<Vec<String>>>,
+    /// Otzaria's lexical fuzzy phrase (the whole query quoted): the typed
+    /// words' spellings and their phrase BM25.
+    lexical_phrase: Option<(Vec<Vec<String>>, Bm25Weight)>,
+}
+
+/// One fuzzy slot's score pieces (Otzaria's fuzzy-mode token clauses).
+#[derive(Clone)]
+struct FuzzyWeights {
+    /// The exact word and its quote-free spelling: spellings + BM25.
+    exact: Vec<(Vec<String>, Bm25Weight)>,
+    /// The terms the edit-distance automaton matches (`FUZZY_BOOST_FUZZY`).
+    fuzzy_terms: Vec<String>,
+    /// The dictionary forms' spelling terms (`FUZZY_BOOST_LEXICAL`).
+    forms: Vec<String>,
 }
 
 impl MainWeights {
     fn new(searcher: &Searcher, plan: &ScorePlan<'_>, m: &MainPlan<'_>) -> Result<MainWeights> {
         let field = plan.field;
         let ranked = !plan.vocalized;
-        let mut w = MainWeights { tiers: None, fuzzy: vec![None; m.slots.len()], phrase: None, fuzzy_phrase: None };
-        let fuzzy_slot = |g: &GroupSpec| -> Result<Option<Vec<(Vec<String>, Bm25Weight)>>> {
-            let GroupSpec::Fuzzy { word, distance, .. } = g else {
+        let mut w = MainWeights {
+            tiers: None,
+            fuzzy: vec![None; m.slots.len()],
+            phrase: None,
+            fuzzy_phrase: None,
+            lexical_phrase: None,
+        };
+        let fuzzy_slot = |i: usize| -> Result<Option<FuzzyWeights>> {
+            let Some(f) = fuzzy_slot_of(m.slots[i]) else {
                 return Ok(None);
             };
-            // Otzaria ranks fuzzy words only above distance 0, and never on its vocalized field.
-            if !ranked || *distance == 0 {
+            // Otzaria ranks fuzzy words only above distance 0 (its lexical
+            // query at any distance), and never on its vocalized field.
+            if !ranked || (f.distance == 0 && !plan.lexical_fuzzy) {
                 return Ok(None);
             }
             let mut exact = Vec::new();
-            for x in std::iter::once(word.clone()).chain(quoteless(word)) {
+            for x in std::iter::once(f.word.to_string()).chain(quoteless(f.word)) {
                 let s = spellings(searcher, field, &x, plan.marked_terms)?;
                 let group: Vec<Term> = s.iter().map(|t| Term::from_field_text(field, t)).collect();
                 let stats = SharedStatistics { inner: searcher, group: &group };
                 let bm25 = Bm25Weight::for_terms(&stats, &group[..1])?;
                 exact.push((s, bm25));
             }
-            Ok(Some(exact))
+            // the slot's terms the automaton matches (a form's terms only
+            // when within the distance too, as Otzaria's two clauses)
+            let fuzzy_terms = if f.distance == 0 {
+                Vec::new()
+            } else if f.forms.is_empty() {
+                m.terms[i].clone()
+            } else {
+                let mut q = hebrew_fts::HebrewFuzzyQuery::new(field, f.word, f.distance);
+                q.set_ignore_quotes(f.ignore_quotes);
+                q.set_marked_terms(plan.marked_terms);
+                let dfa = q.automaton();
+                m.terms[i]
+                    .iter()
+                    .filter(|t| matches!(dfa.distance(t.as_bytes()), hebrew_fts::fuzzy::Distance::Exact(_)))
+                    .cloned()
+                    .collect()
+            };
+            let mut forms: Vec<String> = Vec::new();
+            for form in &f.forms {
+                for t in spellings(searcher, field, form, plan.marked_terms)? {
+                    if !forms.contains(&t) {
+                        forms.push(t);
+                    }
+                }
+            }
+            Ok(Some(FuzzyWeights { exact, fuzzy_terms, forms }))
         };
         match m.shape {
             Shape::Single => {
-                if let GroupSpec::Fuzzy { .. } = m.slots[0] {
-                    w.fuzzy[0] = fuzzy_slot(m.slots[0])?;
+                if fuzzy_slot_of(m.slots[0]).is_some() {
+                    w.fuzzy[0] = fuzzy_slot(0)?;
                 } else if ranked {
                     let mut r = Vec::new();
                     roots(m.slots[0], &mut r);
@@ -853,8 +947,8 @@ impl MainWeights {
                 }
             }
             Shape::Count { partial } => {
-                for (i, g) in m.slots.iter().enumerate() {
-                    w.fuzzy[i] = fuzzy_slot(g)?;
+                for i in 0..m.slots.len() {
+                    w.fuzzy[i] = fuzzy_slot(i)?;
                 }
                 if ranked && !partial && m.slots.len() > 1 && all_fuzzy(&m.slots) {
                     let mut words = Vec::with_capacity(m.slots.len());
@@ -862,6 +956,20 @@ impl MainWeights {
                         words.push(spellings(searcher, field, &first_root(g), plan.marked_terms)?);
                     }
                     w.fuzzy_phrase = Some(words);
+                }
+            }
+            Shape::Phrase { .. } if plan.lexical_fuzzy && all_fuzzy(&m.slots) => {
+                // Otzaria's lexical fuzzy phrase: its verified phrase over
+                // every word's terms (one const 1 per word), the typed words'
+                // exact phrase BM25 and its adjacency boost (both slop 1)
+                let terms: Vec<Term> = m.slots.iter().map(|g| Term::from_field_text(field, &first_root(g))).collect();
+                let bm25 = Bm25Weight::for_terms(searcher, &terms)?;
+                if ranked {
+                    let mut words = Vec::with_capacity(m.slots.len());
+                    for g in &m.slots {
+                        words.push(spellings(searcher, field, &first_root(g), plan.marked_terms)?);
+                    }
+                    w.lexical_phrase = Some((words, bm25));
                 }
             }
             Shape::Phrase { .. } => {
@@ -882,14 +990,20 @@ impl MainWeights {
             }
             Ok(())
         };
-        let fuzzy_parts = |exact: &[(Vec<String>, Bm25Weight)], terms: &[String], parts: &mut Vec<Part>| -> Result<()> {
+        let fuzzy_parts = |f: &FuzzyWeights, parts: &mut Vec<Part>| -> Result<()> {
             let fieldnorms = segment.get_fieldnorms_reader(field)?;
-            for (spellings, bm25) in exact {
+            for (spellings, bm25) in &f.exact {
                 if let Some(union) = TermUnion::open(inverted, field, spellings, IndexRecordOption::WithFreqs)? {
                     parts.push(Part::Exact { union, bm25: bm25.clone(), fieldnorms: fieldnorms.clone() });
                 }
             }
-            slot_const(terms, FUZZY_BOOST_FUZZY, parts)
+            if !f.fuzzy_terms.is_empty() {
+                slot_const(&f.fuzzy_terms, FUZZY_BOOST_FUZZY, parts)?;
+            }
+            if !f.forms.is_empty() {
+                slot_const(&f.forms, FUZZY_BOOST_LEXICAL, parts)?;
+            }
+            Ok(())
         };
         match m.shape {
             Shape::Single => match (&self.tiers, &self.fuzzy[0]) {
@@ -900,13 +1014,13 @@ impl MainWeights {
                         }
                     }
                 }
-                (None, Some(exact)) => fuzzy_parts(exact, &m.terms[0], &mut parts)?,
+                (None, Some(f)) => fuzzy_parts(f, &mut parts)?,
                 (None, None) => slot_const(&m.terms[0], 1.0, &mut parts)?,
             },
             Shape::Count { .. } => {
                 for (i, terms) in m.terms.iter().enumerate() {
                     match &self.fuzzy[i] {
-                        Some(exact) => fuzzy_parts(exact, terms, &mut parts)?,
+                        Some(f) => fuzzy_parts(f, &mut parts)?,
                         None => slot_const(terms, 1.0, &mut parts)?,
                     }
                 }
@@ -914,6 +1028,23 @@ impl MainWeights {
                     if let Some(p) = phrase_part(segment, inverted, field, words, None, FUZZY_PHRASE_SLOP, Some(FUZZY_BOOST_PHRASE))? {
                         parts.push(p);
                     }
+                }
+            }
+            Shape::Phrase { .. } if self.lexical_phrase.is_some() => {
+                let (words, bm25) = self.lexical_phrase.as_ref().unwrap();
+                let mut unions = Vec::with_capacity(m.terms.len());
+                for t in &m.terms {
+                    match TermUnion::open(inverted, field, t, IndexRecordOption::Basic)? {
+                        Some(u) => unions.push(u),
+                        None => return Ok(parts),
+                    }
+                }
+                parts.push(Part::AllOf { unions });
+                if let Some(p) = phrase_part(segment, inverted, field, words, Some(bm25.clone()), FUZZY_PHRASE_SLOP, None)? {
+                    parts.push(p);
+                }
+                if let Some(p) = phrase_part(segment, inverted, field, words, None, FUZZY_PHRASE_SLOP, Some(FUZZY_BOOST_PHRASE))? {
+                    parts.push(p);
                 }
             }
             Shape::Phrase { slop } => {

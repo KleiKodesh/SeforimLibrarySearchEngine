@@ -32,7 +32,7 @@ pub use hebrew_fts::word_rule::keep_second_of_paired_readings as reduce_paired_r
 pub use hebrew_fts::user_regex::classify as user_regex_kind;
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter, LINE_FLAG_NO_CROSS};
 pub use line_search::LineRegexStatus;
-pub use options::{ExcludeOptions, PhraseOptions, SearchOptions, WordMatchSpec, WordOptions};
+pub use options::{ExcludeOptions, PhraseOptions, ProximityBase, SearchOptions, WordMatchSpec, WordOptions};
 pub use relevance::{ResultsOrder, NOTICE_RELEVANCE_NEEDS_POSITIONS};
 pub use search::{
     CancelToken, ExcludeSpec, GroupSpec, HitCounts, PlacedHit, ProximitySpec, SearchInfo,
@@ -746,6 +746,55 @@ mod tests {
                 let o = SearchOptions { query: query.clone(), words: [(0, w)].into_iter().collect(), ..Default::default() };
                 assert_eq!(run(&o)[1], (2, vec![shalom.to_string()]), "positions={positions} {query}");
             }
+        }
+    }
+
+    /// Issue #10: dictionary forms (lexical_forms) join a fuzzy word's slot
+    /// and, in Otzaria's lexical fuzzy query, rank in its lexical tier:
+    /// exact word (1000 + BM25) > form (30) > edit-distance neighbour (1).
+    /// A word's own cap limits its own expansion.
+    #[test]
+    fn lexical_forms_rank_in_the_lexical_tier() {
+        let torah = "\u{05EA}\u{05D5}\u{05E8}\u{05D4}";
+        let torat = "\u{05EA}\u{05D5}\u{05E8}\u{05EA}";
+        let shalom = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
+        let other = "\u{05D0}\u{05D1}";
+        let texts = [
+            format!("{torat} {other}"),  // 1: fuzzy neighbour
+            format!("{shalom} {other}"), // 2: dictionary form
+            format!("{torah} {other}"),  // 3: the word
+            format!("{other} {other}"),  // 4: nothing
+        ];
+        let docs: Vec<LineDoc> =
+            texts.iter().enumerate().map(|(i, t)| line(i as u64 + 1, i as u64, 1, t)).collect();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &docs);
+            let ids = |o: &SearchOptions| -> Vec<u64> {
+                index.search_options(o).unwrap().hits.iter().map(|h| h.line_id).collect()
+            };
+            let forms = WordOptions { lexical_forms: vec![shalom.into()], ..Default::default() };
+            let o = SearchOptions {
+                query: format!("{torah}~1"),
+                words: [(0, forms.clone())].into_iter().collect(),
+                order: crate::ResultsOrder::Relevance,
+                lexical_fuzzy: true,
+                ..Default::default()
+            };
+            assert_eq!(ids(&o), [3, 2, 1], "positions={positions}");
+            // catalog order: the same hits
+            assert_eq!(ids(&SearchOptions { order: crate::ResultsOrder::Catalog, ..o.clone() }), [1, 2, 3]);
+            // the form is marked (an unmarked form is not: see unmarked_alternatives)
+            let mut r = index.search_options(&o).unwrap();
+            let s = r.session.locate(&texts[1]).unwrap();
+            assert_eq!(r.session.all_terms()[s.marks[2] as usize], shalom);
+            // the word's own cap: one term for the fuzzy word (the exact word
+            // keeps its slot), the form still searched
+            let capped = WordOptions { max_expanded_terms: Some(1), ..forms };
+            let o = SearchOptions { words: [(0, capped)].into_iter().collect(), ..o };
+            let r = index.search_options(&o).unwrap();
+            assert!(r.truncated(), "positions={positions}");
+            assert_eq!(r.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), [3, 2]);
         }
     }
 

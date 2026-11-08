@@ -329,7 +329,7 @@ class OtzariaSearch {
   /// Word [i]'s overrides of the global options ([own] vs [global]) and its
   /// alternatives; null when it has neither.
   WordOptions? _wordOverride(Set<String> own, Set<String> global, List<String> alternatives,
-      [({List<String> marked, List<String> unmarked})? forms]) {
+      [({List<String> marked, List<String> unmarked})? forms, int? cap]) {
     bool? d(String k) => own.contains(k) == global.contains(k) ? null : own.contains(k);
     final w = WordOptions(
       grammarPrefixes: d(OtzariaOption.grammaticalPrefixes),
@@ -344,8 +344,10 @@ class OtzariaSearch {
       ignoreQuotes: d(OtzariaOption.ignoreGershayim),
       matchNikud: d(OtzariaOption.nikud),
       matchTeamim: d(OtzariaOption.teamim),
-      alternatives: [for (final a in alternatives) _queryWord(a), ...?forms?.marked],
-      unmarkedAlternatives: forms?.unmarked,
+      alternatives: [for (final a in alternatives) _queryWord(a)],
+      lexicalForms: forms?.marked,
+      unmarkedLexicalForms: forms?.unmarked,
+      maxExpandedTerms: cap,
     );
     return w.toJson().isEmpty ? null : w;
   }
@@ -359,10 +361,20 @@ class OtzariaSearch {
     final dict = magicDictionary;
     if (dict == null || mode != SearchMode.fuzzy || quoted) return null;
     if (word.contains('*') || word.contains('?')) return null;
-    final f = dict.formsFor(word);
-    // a form is one plain word; query operators would change its meaning
-    bool plain(String x) => !x.contains(RegExp(r'[*?~%|\s]'));
-    return (marked: f.marked.where(plain).toList(), unmarked: f.unmarked.where(plain).toList());
+    return dict.formsFor(word);
+  }
+
+  /// Otzaria's `MAX_LEXICAL_PHRASE_TERMS_PER_TOKEN`.
+  static const _lexicalPhraseTerms = 256;
+
+  /// A lexical fuzzy phrase word's edit-distance budget (Otzaria's
+  /// `lexical_fuzzy_phrase_terms`): 256 terms per word, the word, its
+  /// quote-free spelling and its dictionary forms taken first.
+  int _lexicalPhraseCap(String word, ({List<String> marked, List<String> unmarked})? forms) {
+    final t = indexToken(word);
+    final taken = {t, t.replaceAll(RegExp('[\'"]'), ''), ...?forms?.marked, ...?forms?.unmarked};
+    final left = _lexicalPhraseTerms - taken.length;
+    return left > 0 ? left : 1;
   }
 
   /// Negative word [i]'s options (Otzaria keys): its own set from
@@ -489,6 +501,11 @@ class OtzariaSearch {
         magicDictionary != null &&
         words.length >= 2 &&
         phrases.every((p) => p != null && p == phrases.first);
+    // Otzaria's plain fuzzy query has no phrases (its builder ignores them):
+    // the words are searched anywhere, quoted or not.
+    final sentPhrases = lexicalPhrase || (mode == SearchMode.fuzzy && magicDictionary == null)
+        ? List<int?>.filled(words.length, null)
+        : phrases;
     final global = _globalSet();
     final perWord = <int, WordOptions>{};
     Set<String> optionsOf(int k) => {for (final i in merged[k]) ..._optionsFor(i)};
@@ -510,12 +527,13 @@ class OtzariaSearch {
       if (mode == SearchMode.advanced && o.contains(OtzariaOption.aramaicTranslation) && translations == null) {
         warnings.add('option "${OtzariaOption.aramaicTranslation}" needs --dictionary (Otzaria assets/dictionary.json)');
       }
-      final w = _wordOverride(o, global, alts, _magicForms(words[k], phrases[k] != null && !lexicalPhrase));
+      final forms = _magicForms(words[k], sentPhrases[k] != null);
+      final w = _wordOverride(o, global, alts, forms, lexicalPhrase ? _lexicalPhraseCap(words[k], forms) : null);
       if (w != null) perWord[k] = w;
     }
     final s = _withOptions(
       SearchOptions(
-        joinWithPhrases([for (final w in words) _queryWord(w)], lexicalPhrase ? List.filled(words.length, null) : phrases),
+        joinWithPhrases([for (final w in words) _queryWord(w)], sentPhrases),
         words: perWord,
         contextWords: contextWords,
         exclude: _exclude(),
@@ -527,11 +545,18 @@ class OtzariaSearch {
     // it drops (no letters or digits) out of the proximity, merging their
     // gaps. A one-letter word is a word. A partial mode sends no proximity.
     if (mode == SearchMode.advanced) s.wordMatch = wordMatch;
+    // Otzaria's fuzzy query has no distance: its words anywhere in the
+    // line (its lexical phrase: in order, at most 1 word between).
     if (lexicalPhrase) {
       s.proximity = Proximity.ordered(List.filled(words.length - 1, 1));
-    } else if (words.length > 1 && !partial) {
+    } else if (words.length > 1 && !partial && mode != SearchMode.fuzzy) {
       s.proximity = _proximity(words.length, customSpacing);
     }
+    // the fuzzy words ranked as Otzaria's lexical fuzzy query
+    s.lexicalFuzzy = mode == SearchMode.fuzzy && magicDictionary != null;
+    // the negative query's default: Otzaria's distance and any order (its
+    // negative custom spacing defaults to none)
+    if (mode == SearchMode.advanced) s.proximityBase = (distance: distance, anyOrder: anyOrder);
     return s;
   }
 }

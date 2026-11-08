@@ -80,8 +80,9 @@ void main() {
     expect(q('$acronym $a'), '$acronym $a');
     expect(q('"$acronym $a" $b'), '"$acronym $a" $b');
     expect(q('"$a $b'), '$a $b');
-    // fuzzy mode writes ~N on every word; the engine drops it inside a phrase
-    expect(q('"$a $b" $c', SearchMode.fuzzy), '"$a~1 $b~1" $c~1');
+    // fuzzy mode writes ~N on every word; Otzaria's plain fuzzy query has
+    // no phrases (build_fuzzy_query_from_terms), so the quotes go
+    expect(q('"$a $b" $c', SearchMode.fuzzy), '$a~1 $b~1 $c~1');
   });
 
   test('a paired reading keeps its second reading (engine rule)', () {

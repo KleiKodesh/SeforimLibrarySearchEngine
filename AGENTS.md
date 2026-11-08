@@ -29,6 +29,10 @@ often.
   snippet locator's own ALL-MATCHES mode (best window stays the default), not a new matcher
   API and not app regex. Every analysis must propose this built-in design as option 1;
   "leave it to the app" is only for app plumbing that is not search.
+  The limit: build in only SEARCH capabilities. Anything that USES the engine (UI,
+  readers, viewers, highlighting widgets, downloaders, seforim.db / SQLite reading, app
+  dictionaries, grouping and display of results) stays in the host and never moves into
+  the engine.
 - **Never add an AI co-author or any AI attribution line** to a commit or PR, in this repo
   or in `tantivy/`.
 - **Quick tests only** (unit tests, small fixtures, builds). Full-DB rebuilds, parity sets

@@ -46,21 +46,25 @@ abstract final class OtzariaOption {
   static const unsupported = <String>{};
 }
 
-/// Named space entities and numeric entities (decimal / hex, any case, `;`
-/// optional), the latter folded only when the code point is whitespace or a
-/// Unicode separator (Z*): the engine's scanner separates words there.
-final _spaceEntity = RegExp(r'&(?:(nbsp|ensp|emsp|thinsp)|#(?:x([0-9a-f]+)|([0-9]+)));?', caseSensitive: false);
-final _separator = RegExp(r'^[\s\p{Z}]$', unicode: true);
+/// HTML entities in a typed query. A numeric entity (decimal / hex, any case,
+/// `;` optional, valid code point, not a surrogate) decodes to its char, which
+/// then splits or joins like any typed char (a space or comma separates, a
+/// letter is a letter). A named entity is a word separator, as in the engine's
+/// scanner, which treats every entity as one: the space ones (nbsp, ensp,
+/// emsp, thinsp) also without `;`, any other name with its `;`.
+final _entity = RegExp(
+    r'&(?:#(?:x([0-9a-f]+)|([0-9]+));?|(nbsp|ensp|emsp|thinsp);?|[a-z][a-z0-9]*;)',
+    caseSensitive: false);
 
-String _spaceEntityToSpace(Match m) {
-  if (m[1] != null) return ' ';
-  final cp = m[2] != null ? int.tryParse(m[2]!, radix: 16) : int.tryParse(m[3]!);
+String _decodeEntity(Match m) {
+  if (m[1] == null && m[2] == null) return ' ';
+  final cp = m[1] != null ? int.tryParse(m[1]!, radix: 16) : int.tryParse(m[2]!);
   if (cp == null || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return m[0]!;
-  return _separator.hasMatch(String.fromCharCode(cp)) ? ' ' : m[0]!;
+  return String.fromCharCode(cp);
 }
 
-/// Otzaria's query sanitizer: `&nbsp;` and the other space entities and
-/// every char the engine's scanner does not keep in a word become spaces,
+/// Otzaria's query sanitizer: numeric entities decode first and named ones
+/// separate (see [_entity]); every char the engine's scanner does not keep in a word become spaces,
 /// presentation forms fold to letters + marks; ״/׳ → "/', maqaf, hyphen and `|` → space
 /// (Otzaria: `|` separates; the engine cuts typed words there too), collapse
 /// spaces; `"` at a word edge separates, between letters it stays (רמב"ם);
@@ -79,8 +83,7 @@ List<String> splitQueryWords(String query) => [for (final w in splitQueryWordsWi
 /// quotes are folded to `"` with gershayim.
 List<(String, int?)> splitQueryWordsWithPhrases(String query) {
   // one char for one char, so offsets hold for the phrase spans
-  final q = SeforimIndex.reducePairedReadings(foldPresentationForms(query)
-          .replaceAllMapped(_spaceEntity, _spaceEntityToSpace))
+  final q = SeforimIndex.reducePairedReadings(foldPresentationForms(query.replaceAllMapped(_entity, _decodeEntity)))
       .replaceAll(RegExp('[״“”„]'), '"')
       .replaceAll('׳', "'")
       .replaceAll(RegExp('[־|-]'), ' ')

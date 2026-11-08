@@ -176,8 +176,21 @@ void main() {
         [a, b, a, b, a, b, a, b]);
     // trailing ';' optional
     expect(splitQueryWords('$a&#xa0$b&nbsp$a&#160$b&emsp$a'), [a, b, a, b, a]);
-    // a numeric entity of a non-space char is not folded to a space
-    expect(splitQueryWords('$a&#65;$b'), [a, '65', b]);
+    // every numeric entity decodes to its char: comma separates, letters join
+    expect(splitQueryWords('$a&#44;$b&#x2C$a'), [a, b, a]);
+    expect(splitQueryWords('$a&#65;&#x42;$b'), ['${a}AB$b']);
+    expect(splitQueryWords('$a&#x05D0;'), ['$aא']);
+    // decoded before folding: a presentation form and a maqaf are handled
+    expect(splitQueryWords('&#xFB2E;'), splitQueryWords('אַ'));
+    expect(splitQueryWords('$a&#x05BE;$b'), [a, b]);
+    // invalid code points stay as text (digits remain a word)
+    expect(splitQueryWords('$a&#xD800;$b'), [a, 'xD800', b]);
+    expect(splitQueryWords('$a&#99999999;$b'), [a, '99999999', b]);
+    // a decoded control char separates; a decoded quote follows the quote rules
+    expect(splitQueryWords('$a&#0;$b&#9;$a'), [a, b, a]);
+    expect(splitQueryWords('&#34;$a&#34;'), splitQueryWords('"$a"'));
+    // any other named entity separates, as in the engine's scanner
+    expect(splitQueryWords('$a&amp;$b&quot;$a&AMP;$b'), [a, b, a, b]);
     // U+FB2E (alef + patah) -> U+05D0 U+05B7; U+FB31 (bet + dagesh) -> U+05D1 U+05BC
     expect(splitQueryWords('\uFB2E\uFB31'), ['\u05D0\u05B7\u05D1\u05BC']);
   });

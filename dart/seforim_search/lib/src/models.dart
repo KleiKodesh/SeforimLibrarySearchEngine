@@ -653,7 +653,9 @@ class SearchOptions {
   int? maxExpandedTerms;
 
   /// Otzaria's fuzzy mode with its magic dictionary loaded: relevance scores
-  /// the fuzzy words as its lexical fuzzy query does.
+  /// the fuzzy words as its lexical fuzzy query does, and a quoted phrase
+  /// keeps each word's own slot (fuzzy, forms), in order, at most one word
+  /// between neighbours. Off: a quoted phrase is literal and adjacent.
   bool lexicalFuzzy;
 
   /// Otzaria's plain distance / any order under [proximity] (which carries

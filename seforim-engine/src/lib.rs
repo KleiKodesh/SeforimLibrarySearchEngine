@@ -1896,6 +1896,83 @@ mod tests {
         assert_eq!(r.groups.len(), 3);
     }
 
+    /// Issue #10 follow-up: in Otzaria's lexical fuzzy mode a quoted part of
+    /// a longer query keeps each word's own slot (fuzzy, dictionary forms),
+    /// in order, at most one word between neighbours; the other words only
+    /// need to be in the line. Outside that mode the part stays literal.
+    #[test]
+    fn lexical_fuzzy_quoted_part_keeps_its_slots() {
+        let torah = "\u{05EA}\u{05D5}\u{05E8}\u{05D4}";
+        let torat = "\u{05EA}\u{05D5}\u{05E8}\u{05EA}";
+        let shalom = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
+        let moshe = "\u{05DE}\u{05E9}\u{05D4}";
+        let rabbenu = "\u{05E8}\u{05D1}\u{05E0}\u{05D5}";
+        let texts: Vec<String> = vec![
+            format!("{torat} {XA} {moshe} {rabbenu}"),      // 0: fuzzy word, one-word gap
+            format!("{shalom} {moshe} {XB} {rabbenu}"),     // 1: dictionary form inside the phrase
+            format!("{moshe} {torah} {rabbenu}"),           // 2: out of order
+            format!("{torah} {XA} {XB} {moshe} {rabbenu}"), // 3: two-word gap
+            format!("{torah} {moshe}"),                     // 4: no third word
+            format!("{rabbenu} {torah} {moshe}"),           // 5: exact, adjacent
+            format!("{torah} {moshe} {rabbenu}"),           // 6: every typed word in order
+        ];
+        let docs: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| line(i as u64, i as u64, 1, t)).collect();
+        let forms = WordOptions { lexical_forms: vec![shalom.into()], ..Default::default() };
+        let fuzzy = SearchOptions {
+            // the `~N` suffix ends the piece, after its closing quote
+            query: format!("\"{torah}~1 {moshe}\"~1 {rabbenu}~1"),
+            words: [(0, forms)].into_iter().collect(),
+            lexical_fuzzy: true,
+            ..Default::default()
+        };
+        let r = fuzzy.to_request(false).unwrap();
+        assert_eq!((r.required_phrases.len(), r.required_phrase_gaps.clone()), (1, vec![vec![1]]));
+        // outside fuzzy mode: the literal phrase, no gaps sent
+        let literal = SearchOptions { lexical_fuzzy: false, ..fuzzy.clone() };
+        assert!(literal.to_request(false).unwrap().required_phrase_gaps.is_empty());
+        let mut by_flavour = Vec::new();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &docs);
+            let got = passing(&index, &fuzzy, &texts);
+            assert_eq!(got, vec![(0, false), (1, false), (5, false), (6, false)], "positions={positions}");
+            // counts agree with the passing lines
+            let mut r = index.search_options(&fuzzy).unwrap();
+            let hit_texts: Vec<&str> = r.hits.iter().map(|h| texts[h.line_id as usize].as_str()).collect();
+            if r.count_needs_text() {
+                r.count_batch(&hit_texts).unwrap();
+            }
+            let c = r.counts();
+            assert!(c.exact);
+            assert_eq!(c.total, 4, "positions={positions}");
+            // the literal phrase: the words as written, adjacent
+            assert_eq!(passing(&index, &literal, &texts), vec![(5, false), (6, false)], "positions={positions}");
+            by_flavour.push(got);
+            // relevance: every typed word in order (2000) first, then the
+            // exact phrase (its BM25), then the rest
+            let ranked = SearchOptions { order: crate::ResultsOrder::Relevance, ..fuzzy.clone() };
+            let r = index.search_options(&ranked).unwrap();
+            let ids: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();
+            if positions {
+                assert_eq!(&ids[..2], &[6, 5]);
+                let mut sorted = ids.clone();
+                sorted.sort();
+                assert_eq!(sorted, [0, 1, 5, 6]);
+                // the quoted words score no clause of their own: 1000 for the
+                // unquoted exact word + 1 per phrase word (+ BM25 parts),
+                // the 2000 boost on line 6 only
+                let score = |id: u64| r.scores().unwrap()[ids.iter().position(|&i| i == id).unwrap()];
+                for id in [0, 1, 5] {
+                    assert!((1002.0..1012.0).contains(&score(id)), "line {id}: {}", score(id));
+                }
+                assert!((3002.0..3012.0).contains(&score(6)), "line 6: {}", score(6));
+            } else {
+                assert_eq!(r.notices(), [crate::NOTICE_RELEVANCE_NEEDS_POSITIONS.to_string()]);
+            }
+        }
+        assert_eq!(by_flavour[0], by_flavour[1]);
+    }
+
     #[test]
     fn cross_line_skips_line_edge_enumerators() {
         // Otzaria's content_range: the break joins content words; a trailing

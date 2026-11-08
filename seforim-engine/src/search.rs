@@ -348,6 +348,13 @@ pub struct SearchRequest {
     /// matches no term matches nothing. Cross-line matching is off when
     /// there is one (Otzaria's smart search is per line).
     pub required_phrases: Vec<Vec<GroupSpec>>,
+    /// Per required phrase (aligned with `required_phrases`), the most
+    /// words between each pair of its slots, one entry per pair (Otzaria's
+    /// lexical fuzzy phrase: 1). A missing or empty entry: adjacent. With
+    /// positions the span query takes them; without, the locator's ordered
+    /// proximity checks them on the text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_phrase_gaps: Vec<Vec<u32>>,
     /// Otzaria's word proximity (see [`ProximitySpec`]). When set it is the
     /// main query's distance rule and `max_word_distance`,
     /// `require_ordered` and `gaps` are ignored for the main query (they
@@ -445,6 +452,7 @@ impl Default for SearchRequest {
             exclude: None,
             phrase_alternatives: Vec::new(),
             required_phrases: Vec::new(),
+            required_phrase_gaps: Vec::new(),
             books: None,
             order: ResultsOrder::Catalog,
             book_generations: Vec::new(),
@@ -2483,15 +2491,30 @@ impl LineIndex {
         };
         // Required quoted phrases: a Must clause each; without positions
         // their adjacency is checked on the text.
-        let mut required_text: Vec<Vec<MatchedTermsSink>> = Vec::new();
+        let mut required_text: Vec<(Vec<MatchedTermsSink>, Vec<u32>)> = Vec::new();
         let mut required_queries: Vec<Box<dyn Query>> = Vec::new();
-        for phrase in &request.required_phrases {
+        // with relevance in lexical fuzzy mode, each phrase's slots and sinks
+        let mut required_scored: Vec<(&[GroupSpec], Vec<MatchedTermsSink>)> = Vec::new();
+        for (n, phrase) in request.required_phrases.iter().enumerate() {
             if phrase.len() < 2 {
                 continue;
             }
+            let gaps: Vec<u32> = match request.required_phrase_gaps.get(n) {
+                Some(g) if !g.is_empty() => {
+                    if g.len() + 1 != phrase.len() {
+                        return Err(Error::Tantivy(tantivy::TantivyError::InvalidArgument(format!(
+                            "required phrase gaps must have one entry per consecutive pair: {} slots, {} gaps",
+                            phrase.len(),
+                            g.len()
+                        ))));
+                    }
+                    g.clone()
+                }
+                _ => vec![0; phrase.len() - 1],
+            };
             let mut sinks = Vec::new();
             let q: Option<Box<dyn Query>> = if self.options.positions {
-                self.span_query(phrase, &vec![0; phrase.len() - 1], true, None, &searcher, walk, &mut sinks)?
+                self.span_query(phrase, &gaps, true, None, &searcher, walk, &mut sinks)?
                     .map(|q| Box::new(q) as Box<dyn Query>)
             } else {
                 let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -2516,7 +2539,9 @@ impl LineIndex {
             watched.extend(sinks.iter().cloned());
             if !self.options.positions {
                 fill_sinks(q.as_ref())?;
-                required_text.push(sinks);
+                required_text.push((sinks, gaps));
+            } else if relevance && request.lexical_fuzzy {
+                required_scored.push((phrase.as_slice(), sinks));
             }
             required_queries.push(q);
         }
@@ -2635,7 +2660,7 @@ impl LineIndex {
             }
         }
 
-        for sinks in required_text {
+        for (sinks, gaps) in required_text {
             let terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
             if terms.iter().any(|g| g.is_empty()) {
                 return Ok(SearchResult::new(Vec::new(), session).with_notices(notices).with_truncated(truncated));
@@ -2644,7 +2669,7 @@ impl LineIndex {
                 prepared: PreparedQueryGroups::from_groups(&terms),
                 max_word_distance: 0,
                 require_ordered: true,
-                proximity: Some(Proximity::Ordered { gaps: vec![0; terms.len() - 1] }),
+                proximity: Some(Proximity::Ordered { gaps }),
                 vocalized: false,
                 required: true,
             });
@@ -2860,6 +2885,10 @@ impl LineIndex {
                 },
                 phrases_as_count: relevance::phrases_as_count(shape, main_slots_len),
                 phrases: phrase_plans,
+                required: required_scored
+                    .iter()
+                    .map(|(groups, sinks)| (*groups, sinks.iter().map(|s| s.take_strings()).collect()))
+                    .collect(),
             };
             let mut scores = relevance::scores(&searcher, &plan, &keys, cancel.as_ref())?;
             // cross-line hits rank after every in-line hit (score 0)

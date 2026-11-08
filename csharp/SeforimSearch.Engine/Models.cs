@@ -688,7 +688,9 @@ namespace SeforimSearch.Engine
         /// <see cref="SearchInfo.Truncated"/>.</summary>
         public int? MaxExpandedTerms { get; set; }
         /// <summary>Otzaria's fuzzy mode with its magic dictionary loaded: relevance scores the
-        /// fuzzy words as its lexical fuzzy query does.</summary>
+        /// fuzzy words as its lexical fuzzy query does, and a quoted phrase keeps each word's own
+        /// slot (fuzzy, forms), in order, at most one word between neighbours. Off: a quoted
+        /// phrase is literal and adjacent.</summary>
         public bool LexicalFuzzy { get; set; }
         /// <summary>Otzaria's plain distance / any order under <see cref="Proximity"/> (which
         /// carries its customSpacing when set): the negative query's default rule. Null: taken

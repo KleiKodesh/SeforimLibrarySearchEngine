@@ -19,6 +19,10 @@ use crate::relevance::ResultsOrder;
 use crate::search::{ExcludeSpec, GroupSpec, KtivRulesSpec, ProximitySpec, SearchRequest, TypoModeSpec, WalkOptionsSpec};
 use crate::{Error, Result};
 
+/// Otzaria's `LEXICAL_FUZZY_PHRASE_SLOP`: the words a quoted phrase of its
+/// lexical fuzzy mode allows between neighbours.
+pub(crate) const LEXICAL_FUZZY_PHRASE_SLOP: u32 = 1;
+
 /// A search: the query string and the options of every word.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -136,7 +140,10 @@ pub struct SearchOptions {
     pub max_expanded_terms: usize,
     /// Otzaria's fuzzy mode with its magic dictionary loaded (see
     /// `SearchRequest::lexical_fuzzy`): the relevance score of its lexical
-    /// fuzzy query.
+    /// fuzzy query. A quoted phrase then keeps each word's own slot (fuzzy,
+    /// dictionary forms) instead of the literal word, in order, at most one
+    /// word between neighbours (Otzaria's lexical fuzzy phrase); off, a
+    /// quoted phrase is literal and adjacent.
     pub lexical_fuzzy: bool,
     /// Otzaria's `distance` / `any_order` under `proximity` (which carries
     /// its customSpacing when set): the negative query's default rule, as
@@ -378,9 +385,14 @@ impl SearchOptions {
                 .values()
                 .any(|w| w.match_nikud == Some(true) || w.match_teamim == Some(true));
         // Quoted phrases (Otzaria's rule, see `hebrew_fts::quoted_phrases`):
-        // their words are searched as written.
+        // their words are searched as written. In Otzaria's lexical fuzzy
+        // mode (`lexical_fuzzy`) a quoted word keeps its own slot (fuzzy,
+        // dictionary forms) and the phrase allows one word between
+        // neighbours (its `lexical_fuzzy_phrase_query`, slop 1).
         let quoted = hebrew_fts::quoted_phrases(&self.query);
-        let literal: Vec<usize> = quoted.iter().flatten().copied().collect();
+        let fuzzy_phrases = self.lexical_fuzzy;
+        let phrase_gap: u32 = if fuzzy_phrases { LEXICAL_FUZZY_PHRASE_SLOP } else { 0 };
+        let literal: Vec<usize> = if fuzzy_phrases { Vec::new() } else { quoted.iter().flatten().copied().collect() };
         let main = slots_with(&self.query, keep_marks, &literal, |i| match self.words.get(&i) {
             Some(w) => (w.apply(global), Some(w)),
             None => (global, None),
@@ -397,35 +409,51 @@ impl SearchOptions {
             && main.typed.iter().any(|t| t.is_some());
         if whole_phrase {
             let typed = main.typed.len();
-            let adjacent = ProximitySpec::Ordered { gaps: vec![0; typed.saturating_sub(1)] };
+            let adjacent = ProximitySpec::Ordered { gaps: vec![phrase_gap; typed.saturating_sub(1)] };
             let groups = main.searched_groups();
             let proximity = if groups.len() > 1 { Some(main.lower(&adjacent)?) } else { None };
             let mut request = self.lower_rest(keep_marks, global, vocalized)?;
             request.groups = groups;
             request.proximity = proximity;
-            request.cross_line = true;
+            // Otzaria's lexical fuzzy phrase is per line
+            request.cross_line = !fuzzy_phrases;
             request.same_section = false;
             return Ok(request);
         }
         // Otherwise each phrase of two or more slots is required on its own
         // (Otzaria's smart search: the query AND every literal phrase).
-        let required_phrases: Vec<Vec<GroupSpec>> = quoted
+        // Lexical fuzzy mode: each pair of slots of two typed words may have
+        // one word between them (sub-words of one typed word stay adjacent).
+        let (required_phrases, required_gaps): (Vec<Vec<GroupSpec>>, Vec<Vec<u32>>) = quoted
             .iter()
             .map(|p| {
                 let mut ids: Vec<usize> = Vec::new();
+                let mut gaps: Vec<u32> = Vec::new();
+                // a typed word the engine drops still takes its position
+                let mut dropped = 0u32;
                 for &i in p {
                     if let Some(Some((first, last))) = main.typed.get(i) {
+                        let mut new_word = true;
                         for g in *first..=*last {
                             if !ids.contains(&g) {
+                                if !ids.is_empty() {
+                                    gaps.push(if new_word { phrase_gap + dropped } else { 0 });
+                                }
                                 ids.push(g);
+                                new_word = false;
+                                dropped = 0;
                             }
                         }
+                    } else if !ids.is_empty() {
+                        dropped += 1;
                     }
                 }
-                ids.into_iter().map(|g| main.groups[g].clone()).collect::<Vec<GroupSpec>>()
+                (ids.into_iter().map(|g| main.groups[g].clone()).collect::<Vec<GroupSpec>>(), gaps)
             })
-            .filter(|p| p.len() > 1)
-            .collect();
+            .filter(|(p, _)| p.len() > 1)
+            .unzip();
+        // literal phrases keep the default (adjacent): no gaps sent
+        let required_gaps = if fuzzy_phrases { required_gaps } else { Vec::new() };
         // With a proximity rule the too long words leave the query and keep
         // their positions in the rule; without, they stay as skipped slots
         // that count toward word distance (FtsLib's originalGroupCount).
@@ -445,6 +473,7 @@ impl SearchOptions {
             request.min_groups = m.min_groups(groups.len());
             request.groups = groups;
             request.required_phrases = required_phrases;
+            request.required_phrase_gaps = required_gaps;
             return Ok(request);
         }
         let (groups, proximity) = match &self.proximity {
@@ -458,6 +487,7 @@ impl SearchOptions {
         request.min_groups = if self.word_match.is_some() { None } else { self.min_groups };
         request.proximity = proximity;
         request.required_phrases = required_phrases;
+        request.required_phrase_gaps = required_gaps;
         Ok(request)
     }
 
@@ -528,6 +558,7 @@ impl SearchOptions {
             exclude,
             phrase_alternatives,
             required_phrases: Vec::new(),
+            required_phrase_gaps: Vec::new(),
             proximity: None,
             books: self.books.clone(),
             order: self.order,

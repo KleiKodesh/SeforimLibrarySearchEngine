@@ -122,15 +122,25 @@ List<(String, int?)> splitQueryWordsWithPhrases(String query) {
 }
 
 /// [words] joined into the engine's query, each quoted phrase's run of
-/// words wrapped in `"` (the engine searches it as a literal phrase).
+/// words wrapped in `"` (the engine searches it as a literal phrase; in
+/// lexical fuzzy mode as Otzaria's lexical fuzzy phrase). A fuzzy `~N`
+/// suffix stays at the end of its piece, after the closing quote.
 String joinWithPhrases(List<String> words, List<int?> phrases) {
   final out = StringBuffer();
+  final fuzzy = RegExp(r'~[1-9]?$');
   for (var i = 0; i < words.length; i++) {
     final p = phrases[i];
     final open = p != null && (i == 0 || phrases[i - 1] != p);
     final close = p != null && (i == words.length - 1 || phrases[i + 1] != p);
     if (i > 0) out.write(' ');
-    out.write('${open ? '"' : ''}${words[i]}${close ? '"' : ''}');
+    var word = words[i];
+    var suffix = '';
+    final m = close ? fuzzy.firstMatch(word) : null;
+    if (m != null) {
+      suffix = m.group(0)!;
+      word = word.substring(0, m.start);
+    }
+    out.write('${open ? '"' : ''}$word${close ? '"' : ''}$suffix');
   }
   return out.toString();
 }
@@ -355,11 +365,11 @@ class OtzariaSearch {
   /// Word [word]'s dictionary forms (fuzzy mode with a [magicDictionary]),
   /// exact words: Otzaria's `build_lexical_fuzzy_query` recall forms
   /// minus the token and its quote-free spelling, split by its highlight
-  /// forms. None for a wildcard word or a quoted one (the engine searches
-  /// a quoted word as written).
-  ({List<String> marked, List<String> unmarked})? _magicForms(String word, bool quoted) {
+  /// forms. None for a wildcard word. A quoted word takes them too: the
+  /// engine's lexical fuzzy phrase keeps each word's slot.
+  ({List<String> marked, List<String> unmarked})? _magicForms(String word) {
     final dict = magicDictionary;
-    if (dict == null || mode != SearchMode.fuzzy || quoted) return null;
+    if (dict == null || mode != SearchMode.fuzzy) return null;
     if (word.contains('*') || word.contains('?')) return null;
     return dict.formsFor(word);
   }
@@ -491,8 +501,11 @@ class OtzariaSearch {
       }
     }
     final words = [for (final w in keep) w.$1];
-    // Quoted phrases stay quoted: the engine searches each as a literal phrase.
+    // Quoted phrases stay quoted: the engine searches each as a literal
+    // phrase, or in lexical fuzzy mode as Otzaria's lexical fuzzy phrase
+    // (each word's slot, in order, at most 1 word between neighbours).
     final phrases = [for (final w in keep) w.$2];
+    final lexicalFuzzy = mode == SearchMode.fuzzy && magicDictionary != null;
     // Otzaria's lexical fuzzy phrase (fuzzy mode with a magic dictionary,
     // the whole query one quoted phrase): every word with its edit-distance
     // matches and dictionary forms, in order, at most 1 word between
@@ -527,8 +540,11 @@ class OtzariaSearch {
       if (mode == SearchMode.advanced && o.contains(OtzariaOption.aramaicTranslation) && translations == null) {
         warnings.add('option "${OtzariaOption.aramaicTranslation}" needs --dictionary (Otzaria assets/dictionary.json)');
       }
-      final forms = _magicForms(words[k], sentPhrases[k] != null);
-      final w = _wordOverride(o, global, alts, forms, lexicalPhrase ? _lexicalPhraseCap(words[k], forms) : null);
+      final forms = _magicForms(words[k]);
+      // a lexical fuzzy phrase word (the whole query, or a quoted part the
+      // engine requires within 1 word): Otzaria's 256-term budget
+      final phraseWord = lexicalPhrase || (lexicalFuzzy && sentPhrases[k] != null);
+      final w = _wordOverride(o, global, alts, forms, phraseWord ? _lexicalPhraseCap(words[k], forms) : null);
       if (w != null) perWord[k] = w;
     }
     final s = _withOptions(
@@ -553,7 +569,7 @@ class OtzariaSearch {
       s.proximity = _proximity(words.length, customSpacing);
     }
     // the fuzzy words ranked as Otzaria's lexical fuzzy query
-    s.lexicalFuzzy = mode == SearchMode.fuzzy && magicDictionary != null;
+    s.lexicalFuzzy = lexicalFuzzy;
     // the negative query's default: Otzaria's distance and any order (its
     // negative custom spacing defaults to none)
     if (mode == SearchMode.advanced) s.proximityBase = (distance: distance, anyOrder: anyOrder);

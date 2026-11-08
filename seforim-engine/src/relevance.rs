@@ -42,6 +42,10 @@
 //! - several slots with no proximity (words anywhere in the line) and
 //!   partial matching: 1 per slot the line holds (Otzaria's per-word
 //!   `TermSetQuery`s, `scoped_words_query`); a fuzzy slot scores as above.
+//! - lexical fuzzy mode with a quoted phrase among other words: the
+//!   unquoted fuzzy words as above (a word typed inside a phrase scores
+//!   no clause of its own), each phrase 1 per word + the typed words'
+//!   phrase BM25 (slop 1), and the 2000 boost over all typed words.
 //! - each phrase alternative (Otzaria's acronym expansion, ORed): its
 //!   phrase BM25 (slop 0) when it has several words, 1 for one word, added
 //!   to the main query's score when the line matches both.
@@ -191,6 +195,12 @@ pub(crate) struct ScorePlan<'a> {
     /// paragraph scope): Otzaria builds each alternative in that scope too,
     /// so it scores 1 per word (all required), not a phrase BM25.
     pub phrases_as_count: bool,
+    /// Lexical fuzzy mode's quoted phrases inside a longer query
+    /// (`SearchRequest::required_phrases`): their slots and the terms each
+    /// matched. Otzaria's `build_lexical_fuzzy_query` scores them in place
+    /// of the quoted words' own clauses: its verified phrase (one per
+    /// word) and the typed words' phrase BM25 (slop 1).
+    pub required: Vec<(&'a [GroupSpec], Vec<Vec<String>>)>,
 }
 
 /// True when the phrase alternatives score as a word count (see
@@ -864,6 +874,13 @@ struct MainWeights {
     /// Otzaria's lexical fuzzy phrase (the whole query quoted): the typed
     /// words' spellings and their phrase BM25.
     lexical_phrase: Option<(Vec<Vec<String>>, Bm25Weight)>,
+    /// Lexical fuzzy mode's quoted phrases (`ScorePlan::required`): per
+    /// phrase, its slots' matched terms, the typed words' spellings and
+    /// their phrase BM25.
+    required: Vec<(Vec<Vec<String>>, Vec<Vec<String>>, Bm25Weight)>,
+    /// Per slot: a word typed inside one of `required`'s phrases (no clause
+    /// of its own).
+    quoted_slot: Vec<bool>,
 }
 
 /// One fuzzy slot's score pieces (Otzaria's fuzzy-mode token clauses).
@@ -887,7 +904,13 @@ impl MainWeights {
             phrase: None,
             fuzzy_phrase: None,
             lexical_phrase: None,
+            required: Vec::new(),
+            quoted_slot: vec![false; m.slots.len()],
         };
+        // a word typed inside a quoted phrase: its phrase scores it (Otzaria
+        // skips the clause of every token a phrase contains)
+        let quoted: Vec<String> = plan.required.iter().flat_map(|(g, _)| g.iter().map(|g| first_root(g))).collect();
+        let in_phrase = |i: usize| !quoted.is_empty() && quoted.contains(&first_root(m.slots[i]));
         let fuzzy_slot = |i: usize| -> Result<Option<FuzzyWeights>> {
             let Some(f) = fuzzy_slot_of(m.slots[i]) else {
                 return Ok(None);
@@ -948,7 +971,11 @@ impl MainWeights {
             }
             Shape::Count { partial } => {
                 for i in 0..m.slots.len() {
-                    w.fuzzy[i] = fuzzy_slot(i)?;
+                    if !partial && ranked && plan.lexical_fuzzy && in_phrase(i) {
+                        w.quoted_slot[i] = true;
+                    } else {
+                        w.fuzzy[i] = fuzzy_slot(i)?;
+                    }
                 }
                 if ranked && !partial && m.slots.len() > 1 && all_fuzzy(&m.slots) {
                     let mut words = Vec::with_capacity(m.slots.len());
@@ -977,6 +1004,17 @@ impl MainWeights {
                 w.phrase = Some(Bm25Weight::for_terms(searcher, &terms)?);
             }
             Shape::AnyOrder => {}
+        }
+        if plan.lexical_fuzzy && ranked && matches!(m.shape, Shape::Count { partial: false }) {
+            for (groups, terms) in &plan.required {
+                let typed: Vec<Term> = groups.iter().map(|g| Term::from_field_text(field, &first_root(g))).collect();
+                let bm25 = Bm25Weight::for_terms(searcher, &typed)?;
+                let mut words = Vec::with_capacity(groups.len());
+                for g in groups.iter() {
+                    words.push(spellings(searcher, field, &first_root(g), plan.marked_terms)?);
+                }
+                w.required.push((terms.clone(), words, bm25));
+            }
         }
         Ok(w)
     }
@@ -1021,7 +1059,27 @@ impl MainWeights {
                 for (i, terms) in m.terms.iter().enumerate() {
                     match &self.fuzzy[i] {
                         Some(f) => fuzzy_parts(f, &mut parts)?,
+                        // a quoted word: scored by its phrase below
+                        None if self.quoted_slot[i] => {}
                         None => slot_const(terms, 1.0, &mut parts)?,
+                    }
+                }
+                for (terms, words, bm25) in &self.required {
+                    let mut unions = Vec::with_capacity(terms.len());
+                    for t in terms {
+                        match TermUnion::open(inverted, field, t, IndexRecordOption::Basic)? {
+                            Some(u) => unions.push(u),
+                            None => {
+                                unions.clear();
+                                break;
+                            }
+                        }
+                    }
+                    if !unions.is_empty() {
+                        parts.push(Part::AllOf { unions });
+                    }
+                    if let Some(p) = phrase_part(segment, inverted, field, words, Some(bm25.clone()), FUZZY_PHRASE_SLOP, None)? {
+                        parts.push(p);
                     }
                 }
                 if let Some(words) = &self.fuzzy_phrase {

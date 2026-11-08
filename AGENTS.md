@@ -22,6 +22,13 @@ often.
   any feature that is needed is built in properly, at the right layer, even when that means
   changing tantivy or FtsLib. Never approximate a feature by composing existing calls,
   post-filtering, host-side workarounds or shortcuts that drop correctness.
+- **Design deep, not beside.** When a feature is missing, first ask which EXISTING engine
+  component already does most of it, and extend that component with a mode or option
+  (default behaviour unchanged) instead of adding a separate side call, a host-side copy or
+  a parallel code path. Example (user, issue #14): "find all matches in a page" is the
+  snippet locator's own ALL-MATCHES mode (best window stays the default), not a new matcher
+  API and not app regex. Every analysis must propose this built-in design as option 1;
+  "leave it to the app" is only for app plumbing that is not search.
 - **Never add an AI co-author or any AI attribution line** to a commit or PR, in this repo
   or in `tantivy/`.
 - **Quick tests only** (unit tests, small fixtures, builds). Full-DB rebuilds, parity sets

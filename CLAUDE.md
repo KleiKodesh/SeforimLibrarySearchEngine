@@ -47,6 +47,12 @@ in one or two lines. Remove entries that turn out to be wrong.
   the locator on an index without positions — NOT "search by pairs" or remapping it onto
   a different distance rule. Same for every other gap (cross-line phrases, sameSection
   scope, quote-free matching, ...).
+- **Design deep, not beside** (user, 2026-11-08, after having to say it repeatedly): a
+  missing capability extends the EXISTING engine component that already does most of it
+  (a mode/option, default unchanged), never a separate side API, host-side copy or parallel
+  path. Example: find-all-matches = the snippet locator's ALL-MATCHES mode (issue #14).
+  Analyses list this built-in design first; "leave it to the app" only for non-search
+  app plumbing.
 - **Quick tests only by default** (user's rule): unit tests, otzaria_cases, small fixtures,
   builds. Full-DB rebuilds, full parity sets, speed benchmarks and hit-count reruns run ONLY
   when the user explicitly asks; meanwhile mark the affected report sections as stale.

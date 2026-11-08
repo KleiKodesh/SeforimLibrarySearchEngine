@@ -111,6 +111,38 @@ pub(crate) fn is_transparent_sup(text: &str, lt: usize, gt: usize) -> bool {
         && after[6..].chars().next().is_some_and(is_letter_or_mark)
 }
 
+/// Whether the tag `text[lt..=gt]` (`<` at byte `lt`, its first `>` at
+/// `gt`) ends a word, decided as the scanner decides it at the `>`: the name
+/// runs to the first space or tab, `/` dropped, at most `TAG_NAME_CAP`
+/// chars; a `<sup>` breaks unless [`is_transparent_sup`], and its `</sup>`
+/// follows the open tag (`sup_transparent` carries that between the two).
+/// The line view uses it so that a line pattern sees a word boundary exactly
+/// where the index does.
+pub(crate) fn tag_breaks_word(text: &str, lt: usize, gt: usize, sup_transparent: &mut bool) -> bool {
+    let mut name = ['\0'; crate::scanner::TAG_NAME_CAP];
+    let mut len = 0usize;
+    for c in text[lt + 1..gt].chars() {
+        if c == ' ' || c == '\t' {
+            break;
+        }
+        if len < name.len() && c != '/' {
+            name[len] = c;
+            len += 1;
+        }
+    }
+    let name = &name[..len];
+    if is_sup(name) {
+        if text.as_bytes()[lt + 1] == b'/' {
+            !std::mem::take(sup_transparent)
+        } else {
+            *sup_transparent = is_transparent_sup(text, lt, gt);
+            !*sup_transparent
+        }
+    } else {
+        is_word_break_tag(name)
+    }
+}
+
 /// Advances `i` past a well-formed entity's closing `;` (entity = `&` at
 /// `chars[*i]`, then a ≤10-unit name/number, then `;`). Leaves `i` unchanged
 /// when malformed, so the caller consumes just the `&`.

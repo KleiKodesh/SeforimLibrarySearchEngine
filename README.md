@@ -30,7 +30,8 @@ the index stores only what the engine itself needs:
   engine computes them with the scanner that numbers the positions), its
   **line flags** (bit 0: no phrase continues into or out of the line, the
   host sets it for headings; bits 1 / 2: the line starts / ends with an
-  enumerator) and its **section id** (same-section scope; the host's, from
+  enumerator; bit 3: the line holds a word too long to be a term, so a line
+  regex always reads it) and its **section id** (same-section scope; the host's, from
   seforim.db)
 
 Nothing else: no text, and no data the host can read from SQLite by line id.
@@ -466,17 +467,33 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     the verify / scan loop). Kind `"line"` from `user_regex_kind`.
     - Plan: the regex with a word boundary implied on each edge that can
       be a word char, plus a prefilter without word-boundary assertions;
-      run on Otzaria's line view (markup removed, a breaking tag or a space
-      entity a space, nikud / te'amim dropped, maqaf / paseq / `|` a space,
-      spaces collapsed, quotes ASCII, presentation forms decomposed,
-      lowercase), with a map from the view back to UTF-16 offsets.
+      run on Otzaria's line view (markup removed, nikud / te'amim dropped,
+      maqaf / paseq / sof pasuq / nun hafukha / `|` a space, spaces
+      collapsed, quotes ASCII, presentation forms decomposed, lowercase),
+      with a map from the view back to UTF-16 offsets. Word breaks follow
+      the index's scanner (issue #15): a tag breaks where the scanner breaks
+      (block tags, `<sup>` / `<sub>` unless a vocalized letter mid-word),
+      other tags vanish, and every entity or bare `&` is a space (Otzaria's
+      view drops non-space entities and keeps a bare `&`; that would glue
+      words the index keeps apart, so a pattern cannot match a literal `&`).
     - Candidates from the index (bare-minimum rule: no text in the index):
       the pattern's required fixed words, ANDed rarest first, inside the
-      book filter. A whole fragment is its term; a partial one every term
-      containing it (`.*frag.*`, quote transparent, walked over the
-      dictionary). A clause over 3,000,000 postings or a partial fragment
-      over 50,000 terms is dropped (Otzaria's budgets). The candidates are
-      the search's hits, catalog order.
+      book filter, a guaranteed SUPERSET of the lines the text check
+      matches (issue #15, with Otzaria PR 66's fix). Each literal run is
+      cut into terms by the index's own scanner (quotes, `''`, transparent
+      `.`, case and marks as indexed); a term is walked over the dictionary
+      quote transparent and anchored at a term edge only where the pattern
+      names a separator right there (`frag`, `frag.*`, `.*frag`,
+      `.*frag.*`): a pattern edge or a wildcard leaves it open, since the
+      line may glue letters there (`x.ab`, `x"ab`). Lines with a word too
+      long to be a term (128 bytes or more, line flag `LINE_FLAG_LONG_WORD`,
+      bit 3 = value 8) are always candidates. Prefix-anchored clauses run first; once
+      one has 10,000 postings or fewer, clauses needing a
+      full-dictionary walk are skipped (more candidates, never fewer). A
+      clause over 3,000,000 postings or a fragment over 50,000 terms is
+      dropped (Otzaria's budgets). The candidates are the search's hits,
+      catalog order. The oracle test (`candidates_are_a_superset_of_the_text_check`)
+      checks candidates + verify == full scan on fixtures and random sets.
     - Full scan when no clause is selective (or on a keep-marks index,
       whose vocalized terms the folded fragments cannot name): no hits;
       the host streams every line in scope, catalog order, with its

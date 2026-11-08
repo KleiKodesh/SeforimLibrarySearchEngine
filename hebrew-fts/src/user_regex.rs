@@ -344,16 +344,28 @@ fn split(query: &str) -> Result<(Vec<Hir>, Vec<Hir>, bool), UserRegexError> {
     Ok((elements, parts, spans_space))
 }
 
-/// Otzaria's `contains_part`: `.*fragment.*` as a whole-term automaton over
-/// any character, quote transparent (a candidate clause of a line pattern).
-pub fn contains_automaton(fragment: &str) -> Result<QuoteFree<RegexTermAutomaton>, String> {
-    let any = Hir::repetition(Repetition {
-        min: 0,
-        max: None,
-        greedy: true,
-        sub: Box::new(Hir::class(Class::Unicode(ClassUnicode::new([ClassUnicodeRange::new('\0', char::MAX)])))),
-    });
-    let hir = Hir::concat(vec![any.clone(), Hir::literal(fragment.as_bytes().to_vec()), any]);
+/// A line pattern's candidate clause as a whole-term automaton, quote
+/// transparent (Otzaria's `contains_part` / `glued_part`): the term is
+/// `fragment`, with any text before it unless `start` and after it unless
+/// `end` (`.*fragment.*` when neither).
+pub fn fragment_automaton(fragment: &str, start: bool, end: bool) -> Result<QuoteFree<RegexTermAutomaton>, String> {
+    let any = || {
+        Hir::repetition(Repetition {
+            min: 0,
+            max: None,
+            greedy: true,
+            sub: Box::new(Hir::class(Class::Unicode(ClassUnicode::new([ClassUnicodeRange::new('\0', char::MAX)])))),
+        })
+    };
+    let mut parts = Vec::with_capacity(3);
+    if !start {
+        parts.push(any());
+    }
+    parts.push(Hir::literal(fragment.as_bytes().to_vec()));
+    if !end {
+        parts.push(any());
+    }
+    let hir = Hir::concat(parts);
     let dfa = build_dfa(&hir)?;
     Ok(QuoteFree::new(RegexTermAutomaton(Arc::new(TermPart { dfa, verify: None })), true))
 }

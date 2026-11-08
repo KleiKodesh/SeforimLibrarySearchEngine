@@ -26,6 +26,10 @@ pub struct LineEdges {
     pub first: Option<usize>,
     /// Position of the last content word.
     pub last: Option<usize>,
+    /// A word whose term is too long to be indexed
+    /// ([`is_indexable_len`](crate::chars::is_indexable_len)): no term names
+    /// it, so a line pattern's candidate terms cannot find the line.
+    pub long_word: bool,
 }
 
 /// The edges of one raw line (see the module docs).
@@ -36,6 +40,7 @@ pub fn line_edges(text: &str) -> LineEdges {
     let mut edges = LineEdges::default();
     crate::scanner::scan_with(text, false, |_, span| {
         edges.words = span.position + 1;
+        edges.long_word |= !crate::chars::is_indexable_len(span.term_bytes);
         if content.is_empty() {
             return;
         }
@@ -268,21 +273,24 @@ mod tests {
         let w = word(&[A, B, G]);
         // (a) w w {p}: words 0..4, content 1..=2
         let e = line_edges(&format!("({A}) {w} {w} {{{P}}}"));
-        assert_eq!(e, LineEdges { words: 4, first: Some(1), last: Some(2) });
+        assert_eq!(e, LineEdges { words: 4, first: Some(1), last: Some(2), long_word: false });
         // trailing number (49) and a colon
         let e = line_edges(&format!("{w} {w} (49):"));
-        assert_eq!(e, LineEdges { words: 3, first: Some(0), last: Some(1) });
+        assert_eq!(e, LineEdges { words: 3, first: Some(0), last: Some(1), long_word: false });
         // markup around the enumerator, nikud inside it
         let e = line_edges(&format!("<b>({A}\u{05B8})</b> {w} <small>[{B}]</small>"));
-        assert_eq!(e, LineEdges { words: 3, first: Some(1), last: Some(1) });
+        assert_eq!(e, LineEdges { words: 3, first: Some(1), last: Some(1), long_word: false });
         // only an enumerator: no content
         let e = line_edges(&format!("({A})"));
-        assert_eq!(e, LineEdges { words: 1, first: None, last: None });
+        assert_eq!(e, LineEdges { words: 1, first: None, last: None, long_word: false });
         // a paired reading is content (both readings share one position)
         let e = line_edges(&format!("{w} ({A}{B}) [{G}{D}]"));
-        assert_eq!(e, LineEdges { words: 2, first: Some(0), last: Some(1) });
+        assert_eq!(e, LineEdges { words: 2, first: Some(0), last: Some(1), long_word: false });
         // no enumerator
-        assert_eq!(line_edges(&w), LineEdges { words: 1, first: Some(0), last: Some(0) });
+        assert_eq!(line_edges(&w), LineEdges { words: 1, first: Some(0), last: Some(0), long_word: false });
         assert_eq!(line_edges(""), LineEdges::default());
+        // a word too long to be a term (128 bytes or more) is flagged
+        assert!(line_edges(&format!("{w} {}", A.repeat(64))).long_word);
+        assert!(!line_edges(&format!("{w} {}", A.repeat(63))).long_word);
     }
 }

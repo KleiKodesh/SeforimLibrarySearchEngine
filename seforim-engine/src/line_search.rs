@@ -4,9 +4,15 @@
 //! (the index holds no text: the HOST supplies the lines' texts):
 //!
 //! 1. The pattern's required fixed words ([`LinePlan::clauses`]) become
-//!    candidate lines from the index: a whole fragment is its term, a
-//!    partial one every term containing it (`.*frag.*`, quote transparent,
-//!    walked over the dictionary). A clause whose terms cover more than
+//!    candidate lines from the index, a guaranteed superset of the lines the
+//!    text check matches (issue #15): each fragment is cut by the index's
+//!    own scanner and walked over the dictionary, quote transparent,
+//!    anchored at a term edge only where the pattern names a separator
+//!    there (`frag`, `frag.*`, `.*frag`, `.*frag.*`); the line view breaks
+//!    words where the scanner does; lines with a word too long to be a term
+//!    (`LINE_FLAG_LONG_WORD`) are always added. Clauses anchored at the
+//!    term's start (prefix walks) run first; once one has 10,000 postings
+//!    or fewer, full-dictionary walks are skipped. A clause whose terms cover more than
 //!    3,000,000 postings, or a partial fragment matching more than 50,000
 //!    terms, narrows nothing worth reading and is dropped (Otzaria's
 //!    `CLAUSE_POSTINGS_CAP` / `CLAUSE_MAX_TERMS`). The rest are ANDed,
@@ -38,12 +44,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
-use hebrew_fts::line_regex::{LinePlan, LineView, CLAUSE_MAX_TERMS, CLAUSE_POSTINGS_CAP, MAX_LINE_HITS};
+use hebrew_fts::line_regex::{Fragment, LinePlan, LineView, CLAUSE_MAX_TERMS, CLAUSE_POSTINGS_CAP, MAX_LINE_HITS};
 use hebrew_fts::ExactTermsQuery;
 use serde::{Deserialize, Serialize};
 use tantivy::query::{BooleanQuery, Occur, Query};
-use tantivy::{Searcher, Term};
+use tantivy::Searcher;
 
+use crate::index::LINE_FLAG_LONG_WORD;
+use crate::section_scope::DocSetQuery;
 use crate::search::{CancelToken, HitCounts, PlacedCollector, PlacedHit, SearchRequest, SearchResult, Snippet, SnippetSession};
 use crate::{Error, LineIndex, Result};
 
@@ -309,8 +317,9 @@ impl LineIndex {
         Ok(result)
     }
 
-    /// Otzaria's `candidate_query`: the lines holding every selective clause;
-    /// None when no clause narrows the search.
+    /// Otzaria's `candidate_query`: the lines holding every selective clause,
+    /// plus the lines with a word too long to be a term (no clause can name
+    /// it); None when no clause narrows the search.
     fn line_candidates(
         &self,
         plan: &LinePlan,
@@ -318,51 +327,43 @@ impl LineIndex {
         cancel: Option<&CancelToken>,
     ) -> Result<Option<Box<dyn Query>>> {
         let field = self.fields.text;
+        // Clauses whose every fragment is anchored at the term's start walk
+        // only the dictionary's matching prefixes; the others walk all of it.
+        // Cheap clauses go first; once one narrows to a few lines, the costly
+        // ones are skipped (fewer clauses: more candidates, never fewer).
+        let mut order: Vec<&Vec<Fragment>> = plan.clauses.iter().collect();
+        order.sort_by_key(|clause| !clause.iter().all(|f| f.start));
         let mut clauses: Vec<(u64, Box<dyn Query>)> = Vec::new();
-        for clause in &plan.clauses {
+        for clause in order {
+            let cheap = clause.iter().all(|f| f.start);
+            if !cheap && clauses.iter().any(|(postings, _)| *postings <= FEW_CANDIDATES) {
+                break;
+            }
             let mut terms: BTreeSet<Vec<u8>> = BTreeSet::new();
             let mut postings = 0u64;
             let mut selective = true;
-            for fragment in clause {
-                if fragment.whole {
-                    let term = Term::from_field_text(field, &fragment.text);
-                    for reader in searcher.segment_readers() {
-                        postings += u64::from(reader.inverted_index(field)?.doc_freq(&term)?);
-                    }
-                    terms.insert(fragment.text.as_bytes().to_vec());
-                } else {
-                    let automaton = hebrew_fts::user_regex::contains_automaton(&fragment.text)
-                        .map_err(Error::Unsupported)?;
-                    let (mut found, mut fragment_postings) = (BTreeSet::new(), 0u64);
-                    let mut stopped = false;
-                    'segments: for reader in searcher.segment_readers() {
-                        let inverted = reader.inverted_index(field)?;
-                        let mut stream = inverted.terms().search(&automaton).into_stream()?;
-                        let mut scanned = 0u64;
-                        while stream.advance() {
-                            scanned += 1;
-                            if scanned % 4096 == 0 {
-                                CancelToken::check(cancel)?;
-                            }
-                            found.insert(stream.key().to_vec());
-                            fragment_postings += u64::from(stream.value().doc_freq);
-                            if found.len() >= CLAUSE_MAX_TERMS || fragment_postings >= CLAUSE_POSTINGS_CAP {
-                                stopped = true;
-                                break 'segments;
-                            }
+            'fragments: for fragment in clause {
+                let automaton = hebrew_fts::user_regex::fragment_automaton(&fragment.text, fragment.start, fragment.end)
+                    .map_err(Error::Unsupported)?;
+                let mut found = BTreeSet::new();
+                for reader in searcher.segment_readers() {
+                    let inverted = reader.inverted_index(field)?;
+                    let mut stream = inverted.terms().search(&automaton).into_stream()?;
+                    let mut scanned = 0u64;
+                    while stream.advance() {
+                        scanned += 1;
+                        if scanned % 4096 == 0 {
+                            CancelToken::check(cancel)?;
+                        }
+                        found.insert(stream.key().to_vec());
+                        postings += u64::from(stream.value().doc_freq);
+                        if found.len() >= CLAUSE_MAX_TERMS || postings > CLAUSE_POSTINGS_CAP {
+                            selective = false;
+                            break 'fragments;
                         }
                     }
-                    if stopped {
-                        selective = false;
-                        break;
-                    }
-                    postings += fragment_postings;
-                    terms.extend(found);
                 }
-                if postings > CLAUSE_POSTINGS_CAP {
-                    selective = false;
-                    break;
-                }
+                terms.extend(found);
             }
             if selective {
                 clauses.push((postings, Box::new(ExactTermsQuery::new(field, terms.into_iter().collect()))));
@@ -373,8 +374,53 @@ impl LineIndex {
         }
         clauses.sort_by_key(|(postings, _)| *postings);
         let must: Vec<(Occur, Box<dyn Query>)> = clauses.into_iter().map(|(_, q)| (Occur::Must, q)).collect();
-        Ok(Some(Box::new(BooleanQuery::new(must))))
+        let narrowed: Box<dyn Query> = Box::new(BooleanQuery::new(must));
+        Ok(Some(match long_word_lines(searcher)? {
+            Some(long) => Box::new(BooleanQuery::new(vec![(Occur::Should, narrowed), (Occur::Should, Box::new(long))])),
+            None => narrowed,
+        }))
     }
+}
+
+/// A clause narrowing to this many lines or fewer makes a full-dictionary
+/// walk for another clause not worth its time (the host verifies them).
+const FEW_CANDIDATES: u64 = 10_000;
+
+/// The live lines flagged [`LINE_FLAG_LONG_WORD`] (None: none, or an index
+/// without line flags). Such a word is not a term, so no candidate clause
+/// can name it, and the line pattern may still match it on the text.
+fn long_word_lines(searcher: &Searcher) -> Result<Option<DocSetQuery>> {
+    // A segment's flags never change: its flagged docs are read once and
+    // kept (a few lines per segment); deletes are applied per search.
+    type Flagged = std::collections::HashMap<tantivy::index::SegmentId, Arc<Vec<tantivy::DocId>>>;
+    static FLAGGED: std::sync::OnceLock<std::sync::Mutex<Flagged>> = std::sync::OnceLock::new();
+    let cache = FLAGGED.get_or_init(Default::default);
+    let mut docs: Vec<Vec<tantivy::DocId>> = Vec::with_capacity(searcher.segment_readers().len());
+    let mut any = false;
+    for segment in searcher.segment_readers() {
+        let known = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&segment.segment_id()).cloned();
+        let flagged = match known {
+            Some(flagged) => flagged,
+            None => {
+                let Ok(flags) = segment.fast_fields().u64("line_flags") else {
+                    return Ok(None);
+                };
+                let flagged: Arc<Vec<tantivy::DocId>> = Arc::new(
+                    (0..segment.max_doc())
+                        .filter(|&doc| flags.first(doc).is_some_and(|f| f & LINE_FLAG_LONG_WORD != 0))
+                        .collect(),
+                );
+                cache.lock().unwrap_or_else(|e| e.into_inner()).insert(segment.segment_id(), flagged.clone());
+                flagged
+            }
+        };
+        let alive = segment.alive_bitset();
+        let found: Vec<tantivy::DocId> =
+            flagged.iter().copied().filter(|&doc| alive.is_none_or(|a| a.is_alive(doc))).collect();
+        any |= !found.is_empty();
+        docs.push(found);
+    }
+    Ok(any.then(|| DocSetQuery::new(searcher, docs)))
 }
 
 /// Live lines in scope (the book filter, or every line; past the resume
@@ -518,5 +564,145 @@ mod tests {
         assert_eq!(ids(Some(0)), vec![102, 103]);
         assert_eq!(ids(Some(2)), vec![103]);
         assert_eq!(ids(Some(3)), Vec::<u64>::new());
+    }
+
+    /// Issue #15: the candidate path plus the text check returns exactly the
+    /// lines a full scan returns, for lines covering every way the line view
+    /// and the index's scanner could disagree (quotes and their typographic
+    /// forms, `''`, letters glued to digits, transparent chars, maqaf / paseq
+    /// / sof pasuq, nikud, inline / breaking / sup tags, entities, bidi
+    /// marks, paired readings, words too long to be terms) and a randomized
+    /// set of lines and patterns.
+    #[test]
+    fn candidates_are_a_superset_of_the_text_check() {
+        use hebrew_fts::user_regex::parse_line;
+        const A: &str = "\u{05d0}\u{05d1}";
+        const G: &str = "\u{05d2}\u{05d3}";
+        const D: &str = "\u{05d3}\u{05d4}";
+        const ATOMS: &[&str] = &[
+            " ", " ", " ", ".", "\"", "'", "\u{05F4}", "\u{05F3}", "\u{2019}", "\u{201D}", "''", "5", "7",
+            "\u{00B2}", "\u{05BE}", "\u{05C0}", "\u{05C3}", "\u{05C6}", "\u{05B8}", "\u{0591}", "<b>", "</b>",
+            "<sup>", "</sup>", "<sub>", "<center>", "<br>", "<p>", "&amp;", "&nbsp;", "&x", "&;", "(", ")", "[",
+            "]", "\u{200F}", "\u{200B}", ",", "-", "|", "*", "_", "<", "\u{FB2E}", "x", "Q",
+        ];
+        const LETTERS: &[&str] =
+            &["\u{05d0}", "\u{05d1}", "\u{05d2}", "\u{05d3}", "\u{05d4}", "\u{05d0}\u{05d1}", "\u{05d2}\u{05d3}", "\u{05d3}\u{05d4}"];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let long = "\u{05d0}\u{05d1}".repeat(40);
+        let mut lines: Vec<String> = vec![
+            format!("{A} {G}"),
+            format!("x.{A} {G}"),
+            format!("{A}.{G} {D}"),
+            format!("{G}\"{A} {G}"),
+            format!("{G}\u{05F4}{A} {G}"),
+            format!("{A}\u{2019} {G}"),
+            format!("{A}' {G}"),
+            format!("{A}'' {G}"),
+            format!("{A}5 {G}"),
+            format!("5{A} {G}"),
+            format!("\u{00B2}{A} {G}"),
+            format!("{A}\u{05BE}{G}"),
+            format!("{A}\u{05C0}{G}"),
+            format!("{A}\u{05C3}{G}"),
+            format!("{A}\u{05C6}{G}"),
+            format!("\u{05d0}\u{05B8}\u{05d1} {G}"),
+            format!("{A}<b></b>{G} {D}"),
+            format!("{A}<sup>1</sup> {G}"),
+            format!("{A}</sup>{G} {D}"),
+            format!("\u{05d0}<sup>\u{05d1}\u{05B8}</sup>\u{05d2} {G}"),
+            format!("{A}<sup>{G}</sup>{D} {A}"),
+            format!("{A}<center>{G}"),
+            format!("{A}&amp;{G} {D}"),
+            format!("{A}&nbsp;{G}"),
+            format!("{A}\u{200F}{G} {D}"),
+            format!("({A}) [{G}] {D}"),
+            format!("{long} {G}"),
+            format!("{A}{long} {G}"),
+            format!("{A} {G}{long}"),
+            format!("{A}-{G}, {D}"),
+            format!("{A}_{G} {D}"),
+        ];
+        for _ in 0..400 {
+            let mut line = String::new();
+            for _ in 0..3 + next(10) {
+                if next(3) == 0 {
+                    line.push_str(ATOMS[next(ATOMS.len())]);
+                } else {
+                    line.push_str(LETTERS[next(LETTERS.len())]);
+                }
+            }
+            lines.push(line);
+        }
+        let mut patterns: Vec<String> = [
+            format!("/{A} {G}/"),
+            format!("/{A}[ ,]{G}/"),
+            format!("/{A}\\.{G} /"),
+            format!("/{A}\"{G}[ ]/"),
+            format!("/{A}'[ ]{G}/"),
+            format!("/{A}''[ ]{G}/"),
+            format!("/{A} 5/"),
+            format!("/{A}5 {G}/"),
+            format!("/\\b{A}\\b {G}/"),
+            format!("/{A}\\w* {G}/"),
+            format!("/\\w+{A} {G}/"),
+            format!("/(?:{A}|{D}) {G}/"),
+            format!("/^{A} \\w+/"),
+            format!("/ {G}$/"),
+            format!("/{A}-{G}, /"),
+            format!("/{A}\\s+{G}/"),
+            format!("/{A}\\S* {G}/"),
+            format!("/{A}, {D}/"),
+            format!("/{long} {G}/"),
+            format!("/{A}.* {G}/"),
+            format!("/{A}_{G} /"),
+            format!("/[ ,]{G} {D}/"),
+            format!("/{A}{A}{A}\\w*[ ,]/"),
+            format!("/\\w{A}{A}{A}[ ,]/"),
+        ]
+        .into();
+        const PIECES: &[&str] = &[" ", "[ ,]", "\\w*", ".*", "\"", "'", "5", "\\.", ",", "\\s", "\\b", "-"];
+        for _ in 0..150 {
+            // a space piece somewhere makes most of them line patterns
+            let mut p = String::from("/");
+            let space = next(4);
+            for k in 0..2 + next(4) {
+                if k == space {
+                    p.push_str(if next(2) == 0 { " " } else { "[ ,]" });
+                }
+                if next(2) == 0 {
+                    p.push_str(PIECES[next(PIECES.len())]);
+                } else {
+                    p.push_str(LETTERS[next(LETTERS.len())]);
+                }
+            }
+            p.push('/');
+            patterns.push(p);
+        }
+        let texts: Vec<(u64, &str)> = lines.iter().map(|t| (1, t.as_str())).collect();
+        let (_d, index) = build(false, &texts);
+        let reader = index.index.reader().unwrap();
+        let searcher = reader.searcher();
+        let (mut narrowed, mut checked) = (0, 0);
+        for pattern in &patterns {
+            let Ok(plan) = parse_line(pattern) else { continue };
+            checked += 1;
+            let full: Vec<u64> =
+                (0..lines.len()).filter(|&i| super::line_passes(&plan, &lines[i])).map(|i| 100 + i as u64).collect();
+            let Some(query) = index.line_candidates(&plan, &searcher, None).unwrap() else { continue };
+            narrowed += 1;
+            let collector = crate::search::PlacedCollector { books: None, drop_sections: None, keep_docs: false, after: None };
+            let mut candidates: Vec<u64> = searcher.search(query.as_ref(), &collector).unwrap().iter().map(|h| h.line_id).collect();
+            candidates.sort_unstable();
+            let verified: Vec<u64> =
+                candidates.into_iter().filter(|&id| super::line_passes(&plan, &lines[(id - 100) as usize])).collect();
+            assert_eq!(verified, full, "pattern {}", pattern.escape_unicode());
+        }
+        assert!(checked > 60 && narrowed > 40, "checked {checked}, narrowed {narrowed}");
     }
 }

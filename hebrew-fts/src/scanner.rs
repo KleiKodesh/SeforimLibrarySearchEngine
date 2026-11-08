@@ -17,7 +17,7 @@ use crate::html_tags;
 use crate::word_rule::{is_reading_suffix, Normalized, Normalizer};
 
 /// Maximum number of chars accumulated for a tag name (as in the C# original).
-const TAG_NAME_CAP: usize = 16;
+pub(crate) const TAG_NAME_CAP: usize = 16;
 
 /// A word's location, reported to the scan callback. The normalized form is
 /// passed separately as `&str`.
@@ -578,7 +578,7 @@ fn utf16_len(bytes: &[u8]) -> usize {
 /// caller then steps past it); otherwise it stays on the `&`. Identical to the
 /// table form kept in `html_tags::skip_entity` for the reference scanner.
 #[inline]
-fn skip_entity(bytes: &[u8], b: &mut usize, u: &mut usize) {
+pub(crate) fn skip_entity(bytes: &[u8], b: &mut usize, u: &mut usize) {
     let n = bytes.len();
     let start_b = *b + 1;
     if start_b >= n {

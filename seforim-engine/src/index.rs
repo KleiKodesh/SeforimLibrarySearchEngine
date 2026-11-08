@@ -99,6 +99,11 @@ pub const LINE_FLAG_LEADING_MARKER: u64 = 2;
 /// Line flag: the line ends with an enumerator (`line_last` stops before it).
 pub const LINE_FLAG_TRAILING_MARKER: u64 = 4;
 
+/// Line flag: the line holds a word too long to be a term (128 bytes or
+/// more). A line regex's candidate path adds these lines, since no term of
+/// the dictionary names that word.
+pub const LINE_FLAG_LONG_WORD: u64 = 8;
+
 /// The `marked` field's one term.
 pub const MARKED_LINE: u64 = 1;
 
@@ -410,6 +415,9 @@ impl LineWriter {
             }
             if edges.last.is_some_and(|p| p + 1 < edges.words) {
                 bits |= LINE_FLAG_TRAILING_MARKER;
+            }
+            if edges.long_word {
+                bits |= LINE_FLAG_LONG_WORD;
             }
             document.add_u64(flags, bits);
         }

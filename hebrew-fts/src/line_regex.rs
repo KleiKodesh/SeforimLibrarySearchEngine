@@ -18,8 +18,10 @@
 use regex::{Regex, RegexBuilder};
 use regex_syntax::hir::{Class, Hir, HirKind, Look, Repetition};
 
-use crate::chars::{fold_presentation_form, is_invisible, is_transparent, is_word_mark};
-use crate::user_regex::{cost, is_separator, literal_text};
+use crate::chars::{fold_presentation_form, is_indexable_len, is_invisible, is_quote, is_transparent, is_word_mark};
+use crate::html_tags::tag_breaks_word;
+use crate::scanner::skip_entity;
+use crate::user_regex::{cost, literal_text};
 
 /// Otzaria's `LINE_REGEX_SIZE_LIMIT`.
 const LINE_REGEX_SIZE_LIMIT: usize = 8 << 20;
@@ -44,13 +46,17 @@ const BREAKING_TAG_NAMES: &[&str] = &[
     "nav", "ol", "p", "pre", "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
 ];
 
-/// A fixed word every match of a line pattern contains (Otzaria's `Fragment`).
+/// A fixed word every match of a line pattern contains, as the index's
+/// scanner makes it a term (Otzaria's `Fragment`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fragment {
-    /// Lowercase, edge quotes trimmed.
+    /// The term as indexed (lowercase, marks stripped), quotes removed.
     pub text: String,
-    /// A whole token (one term), rather than contained in terms.
-    pub whole: bool,
+    /// The line's term starts with `text` (a separator right before it);
+    /// otherwise more letters may come first.
+    pub start: bool,
+    /// The line's term ends with `text`; otherwise more letters may follow.
+    pub end: bool,
 }
 
 /// A compiled line pattern (Otzaria's `LinePlan`).
@@ -182,18 +188,41 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || is_word_mark(c)
 }
 
-fn is_term_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '"' || c == '\''
+/// A view char that continues a term in the scanner: a word char, a quote
+/// (inside a term or around it) or a transparent char (dropped inside a
+/// term, `.` in `a.b`). Every other view char comes from the same source
+/// char, or is the space of a separator, so the scanner ends a word there.
+fn continues_term(c: char) -> bool {
+    crate::chars::is_word_char(c) || is_quote(c) || is_transparent(c)
 }
 
-/// Otzaria's `required_clauses`: the fixed words of the top level, as AND-ed
-/// clauses. A run of literal characters between two non-term characters (or
-/// a pattern edge) is a whole term; one touching a wildcard is only
-/// contained in a term. A top-level group whose every branch is a fixed word
-/// contributes their OR.
+/// True when every char `hir` can match in the view ends a term in the
+/// scanner (a separator the pattern names, such as ` `, `,` or `[ ,]`), at
+/// least once: the line has a word boundary there in the index too.
+fn ends_terms(hir: &Hir) -> bool {
+    match hir.kind() {
+        HirKind::Literal(_) => literal_text(hir).is_some_and(|t| !t.is_empty() && !t.chars().any(continues_term)),
+        HirKind::Class(Class::Unicode(class)) => {
+            !class.ranges().is_empty() && class.ranges().iter().all(|r| !(r.start()..=r.end()).any(continues_term))
+        }
+        HirKind::Repetition(rep) => rep.min >= 1 && ends_terms(&rep.sub),
+        HirKind::Capture(capture) => ends_terms(&capture.sub),
+        HirKind::Alternation(subs) => subs.iter().all(ends_terms),
+        _ => false,
+    }
+}
+
+/// The fixed words of the top level (Otzaria's `required_clauses`, with the
+/// superset fix of Otzaria PR 66): AND-ed clauses whose candidate terms are
+/// guaranteed to name every line the pattern matches. A run of literal
+/// chars that continue a term is cut into terms by the index's own scanner;
+/// a term is anchored at an edge only where the pattern puts a separator
+/// ([`ends_terms`]) right there. A pattern edge or a wildcard leaves the edge
+/// open: the line may glue more letters there (`x.ab`, `x"ab`, `\u{00B2}ab`).
+/// A top-level group whose every branch is a fixed word contributes their OR.
 fn required_clauses(elements: &[Hir]) -> Vec<Vec<Fragment>> {
     fn flush(run: &mut String, left: bool, right: bool, clauses: &mut Vec<Vec<Fragment>>) {
-        if let Some(fragment) = fragment(run, left, right) {
+        for fragment in fragments(run, left, right) {
             if !clauses.iter().any(|c| c.len() == 1 && c[0] == fragment) {
                 clauses.push(vec![fragment]);
             }
@@ -202,67 +231,76 @@ fn required_clauses(elements: &[Hir]) -> Vec<Vec<Fragment>> {
     }
     let mut clauses: Vec<Vec<Fragment>> = Vec::new();
     let mut run = String::new();
-    let mut left_bounded = true;
+    let mut left_bounded = false;
     for element in elements {
         if let Some(text) = literal_text(element) {
-            let c = text.chars().next().unwrap_or(' ');
-            if is_term_char(c) {
-                run.extend(c.to_lowercase());
-            } else if is_transparent(c) {
-                // The tokenizer drops it inside a term, so no edge here.
-                flush(&mut run, left_bounded, false, &mut clauses);
-                left_bounded = false;
-            } else {
-                flush(&mut run, left_bounded, true, &mut clauses);
-                left_bounded = true;
+            for c in text.chars() {
+                if continues_term(c) {
+                    run.push(c);
+                } else {
+                    flush(&mut run, left_bounded, true, &mut clauses);
+                    left_bounded = true;
+                }
             }
             continue;
         }
-        if is_separator(element) {
-            flush(&mut run, left_bounded, true, &mut clauses);
-            left_bounded = true;
-            continue;
-        }
-        flush(&mut run, left_bounded, false, &mut clauses);
-        left_bounded = false;
-        if let Some(any) = alternatives(element) {
-            clauses.push(any);
+        let bounding = ends_terms(element);
+        flush(&mut run, left_bounded, bounding, &mut clauses);
+        left_bounded = bounding;
+        if !bounding {
+            if let Some(any) = alternatives(element) {
+                clauses.push(any);
+            }
         }
     }
-    flush(&mut run, left_bounded, true, &mut clauses);
+    flush(&mut run, left_bounded, false, &mut clauses);
     clauses
 }
 
 /// Otzaria's `alternatives`: the literal branches of a group required at
-/// least once, each only contained in a term.
+/// least once, each its longest term, open on both edges.
 fn alternatives(hir: &Hir) -> Option<Vec<Fragment>> {
     match hir.kind() {
         HirKind::Repetition(rep) if rep.min >= 1 => alternatives(&rep.sub),
         HirKind::Capture(capture) => alternatives(&capture.sub),
-        HirKind::Alternation(subs) => {
-            let mut out = Vec::new();
-            for sub in subs {
-                let text = literal_text(sub)?;
-                let longest = text.split(|c: char| !is_term_char(c)).max_by_key(|piece| piece.chars().count())?;
-                out.push(fragment(&longest.to_lowercase(), false, false)?);
-            }
-            Some(out)
-        }
+        HirKind::Alternation(subs) => subs
+            .iter()
+            .map(|sub| {
+                let text: String = literal_text(sub)?.chars().map(|c| if continues_term(c) { c } else { ' ' }).collect();
+                fragments(&text, false, false).into_iter().max_by_key(|f| f.text.chars().count())
+            })
+            .collect(),
         _ => None,
     }
 }
 
-fn fragment(run: &str, left: bool, right: bool) -> Option<Fragment> {
-    let trimmed_left = run.trim_start_matches(['"', '\'']);
-    let trimmed = trimmed_left.trim_end_matches(['"', '\'']);
-    let whole = left && right && trimmed.len() == run.len();
-    (trimmed.chars().count() >= 2).then(|| Fragment { text: trimmed.to_string(), whole })
+/// The terms the index makes of `run` (the scanner itself: quotes, `''`,
+/// transparent chars, case and marks as in the index), quotes removed (the
+/// walk reads quotes zero-width). `left` / `right`: the run is bounded there
+/// by a separator; inside the run the scanner's own cuts bound the terms. A
+/// term of fewer than two letters narrows nothing; one too long to be
+/// indexed is no term at all (its lines come from the long-word flag).
+fn fragments(run: &str, left: bool, right: bool) -> Vec<Fragment> {
+    let mut words: Vec<(String, bool)> = Vec::new();
+    crate::scanner::scan_with(run, false, |word, span| {
+        words.push((word.chars().filter(|c| !is_quote(*c)).collect(), is_indexable_len(span.term_bytes)));
+    });
+    let last = words.len().saturating_sub(1);
+    words
+        .into_iter()
+        .enumerate()
+        .filter(|(_, (text, indexed))| *indexed && text.chars().count() >= 2)
+        .map(|(i, (text, _))| Fragment { text, start: left || i > 0, end: right || i < last })
+        .collect()
 }
 
-/// What `cleanLineForSearch` deletes: the nikud / cantillation block (sof
-/// pasuq too), except maqaf and paseq, which it turns into a space.
+/// What the view deletes: the marks the scanner keeps inside a word and
+/// strips from its term (nikud, cantillation, combining accents). Maqaf,
+/// paseq, sof pasuq and nun hafukha end a word in the scanner, so the view
+/// turns them into a space (`cleanLineForSearch` deletes sof pasuq, which
+/// would glue two words the index keeps apart).
 fn is_dropped_mark(c: char) -> bool {
-    (matches!(c, '\u{0591}'..='\u{05C7}') && !matches!(c, '\u{05BE}' | '\u{05C0}')) || is_word_mark(c)
+    is_word_mark(c)
 }
 
 /// Otzaria's `is_breaking_tag_name` on the text between `<` and `>`.
@@ -272,9 +310,11 @@ pub(crate) fn is_breaking_tag_name(body: &str) -> bool {
     (1..=10).contains(&len) && BREAKING_TAG_NAMES.iter().any(|name| name.eq_ignore_ascii_case(&body[..len]))
 }
 
-/// A line as a line pattern sees it (Otzaria's `LineView`, ported verbatim):
-/// markup removed (a breaking tag and a whitespace entity become a space),
-/// nikud and cantillation removed, maqaf, paseq and `|` as a space,
+/// A line as a line pattern sees it (Otzaria's `LineView`, with the word
+/// breaks of the index's scanner, so the candidate terms always name every
+/// matching line): markup removed (a tag that ends a word in the scanner and
+/// every entity become a space, other tags vanish), nikud and cantillation
+/// removed, maqaf, paseq, sof pasuq, nun hafukha and `|` as a space,
 /// whitespace collapsed and trimmed, quotes as ASCII, presentation forms
 /// decomposed, invisible characters dropped, lowercase. With a map, every
 /// byte of `text` knows the UTF-16 range of the source it came from.
@@ -299,7 +339,7 @@ impl LineView {
         let bytes = source.as_bytes();
         let mut pending: Option<(u32, u32)> = None;
         let mut has_tag_end = true;
-        let mut has_entity_end = true;
+        let mut sup_transparent = false;
         let mut byte = 0usize;
         let mut utf16 = 0u32;
         let units = |text: &str| if map { text.encode_utf16().count() as u32 } else { 0 };
@@ -309,7 +349,7 @@ impl LineView {
                 let rest = &source[byte..];
                 if let Some(close) = rest.find('>') {
                     let end16 = utf16 + units(&rest[..=close]);
-                    if is_breaking_tag_name(&rest[1..close]) {
+                    if tag_breaks_word(source, byte, byte + close, &mut sup_transparent) {
                         pending = Some(pending.map_or((utf16, end16), |(s, _)| (s, end16)));
                     }
                     byte += close + 1;
@@ -317,21 +357,16 @@ impl LineView {
                     continue;
                 }
                 has_tag_end = false;
-            } else if b == b'&' && has_entity_end {
-                let rest = &source[byte..];
-                match rest[1..].find(';') {
-                    Some(semi) if semi >= 1 => {
-                        let end16 = utf16 + units(&rest[..semi + 2]);
-                        if matches!(&rest[1..1 + semi], "nbsp" | "thinsp" | "ensp" | "emsp") {
-                            pending = Some(pending.map_or((utf16, end16), |(s, _)| (s, end16)));
-                        }
-                        byte += semi + 2;
-                        utf16 = end16;
-                        continue;
-                    }
-                    Some(_) => {}
-                    None => has_entity_end = false,
-                }
+            } else if b == b'&' {
+                // As the scanner: an entity (a name of at most 10 units, then
+                // `;`) or a bare `&` is a separator, here a space.
+                let (mut end, mut unused) = (byte, 0usize);
+                skip_entity(bytes, &mut end, &mut unused);
+                let end16 = utf16 + units(&source[byte..=end]);
+                pending = Some(pending.map_or((utf16, end16), |(s, _)| (s, end16)));
+                byte = end + 1;
+                utf16 = end16;
+                continue;
             }
             if b < 0x80 {
                 byte += 1;
@@ -358,7 +393,7 @@ impl LineView {
                         self.ends[n - last.len_utf8()..].fill(next16);
                     }
                 }
-            } else if c.is_whitespace() || matches!(c, '\u{05BE}' | '\u{05C0}') {
+            } else if c.is_whitespace() || matches!(c, '\u{05BE}' | '\u{05C0}' | '\u{05C3}' | '\u{05C6}') {
                 pending = Some(pending.map_or((utf16, next16), |(s, _)| (s, next16)));
             } else if !is_invisible(c) {
                 self.flush_space(&mut pending, map);
@@ -419,13 +454,14 @@ mod tests {
         // case-insensitive parse (as in Otzaria), so they are no fragments.
         const AB: &str = "\u{05d0}\u{05d1}";
         const CD: &str = "\u{05d2}\u{05d3}";
-        // "ab .* cd": two whole fixed words, matched across the space
+        // "ab .* cd": two fixed words, each bounded by its space; the
+        // pattern edges stay open (the line may glue `x.ab` into one term)
         let plan = parse_line(&format!("/{AB} .* {CD}/")).unwrap();
         assert_eq!(
             plan.clauses,
             vec![
-                vec![Fragment { text: AB.into(), whole: true }],
-                vec![Fragment { text: CD.into(), whole: true }]
+                vec![Fragment { text: AB.into(), start: false, end: true }],
+                vec![Fragment { text: CD.into(), start: true, end: false }]
             ]
         );
         let mut view = LineView::default();
@@ -433,7 +469,14 @@ mod tests {
         assert!(plan.match_ranges(&format!("x{AB} y {CD}"), &mut view).is_empty()); // implied word boundary
         // a fragment touching a wildcard is only contained in a term
         let plan = parse_line(&format!("/{AB}\\w+[ ,]{CD}/")).unwrap();
-        assert_eq!(plan.clauses[0], vec![Fragment { text: AB.into(), whole: false }]);
+        assert_eq!(plan.clauses[0], vec![Fragment { text: AB.into(), start: false, end: false }]);
+        // a quote inside a run is the scanner's: the term without its quotes;
+        // `[ ,]ab"cd[ ,]` is bounded on both sides
+        let plan = parse_line(&format!("/[ ,]{AB}\"{CD}[ ,]/")).unwrap();
+        assert_eq!(plan.clauses, vec![vec![Fragment { text: format!("{AB}{CD}"), start: true, end: true }]]);
+        // a transparent `.` continues the term (`ab.cd` is one term)
+        let plan = parse_line(&format!("/[ ,]{AB}\\.{CD}[ ,]/")).unwrap();
+        assert_eq!(plan.clauses, vec![vec![Fragment { text: format!("{AB}{CD}"), start: true, end: true }]]);
         assert_eq!(classify(&format!("/{AB} .* {CD}/")), "line");
     }
 

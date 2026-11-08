@@ -33,9 +33,14 @@ class DbLine {
 ///
 /// Kept OPEN for the life of the object: one connection, its schema probe,
 /// zstd dictionary and prepared statements (by SQL text) serve every search
-/// and batch, the snippet-text reads included. When the file changes (size
-/// or write time of the main file) the next query closes everything and
-/// reopens. Single-isolate use: sqlite3 handles do not cross isolates.
+/// and batch, the snippet-text reads included. When the database changes
+/// (size or write time of the main file, or `PRAGMA data_version`: a commit
+/// through the WAL, e.g. a new zstd dictionary) the next query opens a fresh
+/// connection, probe and codec FIRST and only then closes the old ones (a
+/// failed reopen leaves the old ones working). No cursor stays open between
+/// calls ([bookLines] reads in chunks), so a reopen never closes the DB under
+/// a live cursor. [close] is idempotent. Single-isolate use: sqlite3 handles
+/// do not cross isolates.
 /// A snippet's TEXT (KitveiHakodesh Core's FtsSnippetText): the matched line
 /// and, for a short window only, the plain context before and after it.
 class SnippetText {
@@ -50,7 +55,8 @@ class SeforimDb {
         splitContent = o.split,
         compressed = o.compressed,
         _zstd = o.zstd,
-        _stamp = o.stamp;
+        _stamp = o.stamp,
+        _dataVersion = o.dataVersion;
 
   final String path;
   final String? _zstdLib;
@@ -63,6 +69,8 @@ class SeforimDb {
   bool compressed;
   ZstdDictDecoder? _zstd;
   String _stamp;
+  int _dataVersion;
+  bool _closed = false;
 
   /// Prepared statements kept with the connection, by SQL text.
   final _statements = <String, PreparedStatement>{};
@@ -78,37 +86,52 @@ class SeforimDb {
     return one(path); // not the -wal: a reader alone can create or touch it
   }
 
-  static _Open _open(String path, String? zstdLib) {
-    final stamp = _fileStamp(path);
-    final db = sqlite3.open(path, mode: OpenMode.readOnly);
-    db.execute('PRAGMA cache_size=-65536; PRAGMA mmap_size=268435456; PRAGMA temp_store=MEMORY;');
-    bool table(String t) =>
-        db.select("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [t]).isNotEmpty;
-    final lineHasContent = db.select('PRAGMA table_info(line)').any((r) => r['name'] == 'content');
-    final split = table('line_content') && !lineHasContent;
-    final compressed = table('zstd_dict');
-    ZstdDictDecoder? dec;
-    if (compressed) {
-      final dicts = [
+  static int _readDataVersion(Database db) => db.select('PRAGMA data_version').first.columnAt(0) as int;
+
+  static List<Uint8List> _readDictionaries(Database db) => [
         for (final r in db.select('SELECT dict FROM zstd_dict'))
           if (r['dict'] != null) r['dict'] as Uint8List,
       ];
-      if (dicts.isEmpty) throw StateError('zstd_dict table is empty: compressed content cannot be decoded');
-      dec = ZstdDictDecoder(Zstd.load(zstdLib), dicts);
+
+  static _Open _open(String path, String? zstdLib) {
+    final stamp = _fileStamp(path);
+    final db = sqlite3.open(path, mode: OpenMode.readOnly);
+    try {
+      db.execute('PRAGMA cache_size=-65536; PRAGMA mmap_size=268435456; PRAGMA temp_store=MEMORY;');
+      bool table(String t) =>
+          db.select("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [t]).isNotEmpty;
+      final lineHasContent = db.select('PRAGMA table_info(line)').any((r) => r['name'] == 'content');
+      final split = table('line_content') && !lineHasContent;
+      final compressed = table('zstd_dict');
+      final dataVersion = _readDataVersion(db);
+      ZstdDictDecoder? dec;
+      if (compressed) {
+        final dicts = _readDictionaries(db);
+        if (dicts.isEmpty) throw StateError('zstd_dict table is empty: compressed content cannot be decoded');
+        dec = ZstdDictDecoder(Zstd.load(zstdLib), dicts, reload: () => _readDictionaries(db));
+      }
+      return _Open(db, split, compressed, dec, stamp, dataVersion);
+    } catch (_) {
+      db.close();
+      rethrow;
     }
-    return _Open(db, split, compressed, dec, stamp);
   }
 
-  /// Reopens when the database file changed since it was opened.
+  /// Reopens when the database changed since it was opened: the main file's
+  /// stamp, or `PRAGMA data_version` (another connection committed, a WAL
+  /// write included). The new connection, probe and codec are opened FIRST;
+  /// the old ones are closed only once that succeeded.
   void _ensureCurrent() {
-    if (_fileStamp(path) == _stamp) return;
-    _closeAll();
-    final o = _open(path, _zstdLib);
+    if (_closed) throw StateError('SeforimDb is closed');
+    if (_fileStamp(path) == _stamp && _readDataVersion(_db) == _dataVersion) return;
+    final o = _open(path, _zstdLib); // throws: the old handles stay open and usable
+    _closeHandles();
     _db = o.db;
     splitContent = o.split;
     compressed = o.compressed;
     _zstd = o.zstd;
     _stamp = o.stamp;
+    _dataVersion = o.dataVersion;
   }
 
   /// Runs [sql] through its kept prepared statement.
@@ -129,21 +152,43 @@ class SeforimDb {
   String get _contentJoin => splitContent ? ' LEFT JOIN line_content lc ON lc.id = l.id' : '';
 
   /// Decide by runtime value type, never via SQL (SQLite coerces blobs).
-  String decode(Object? v) {
+  ///
+  /// A string starting "KLUv" is decoded only when it is valid base64 AND
+  /// carries a valid zstd frame header; otherwise it is the text it claims to
+  /// be. A frame that fails (missing dictionary, bad data) and malformed UTF-8
+  /// raise a [FormatException] naming [lineId] (issue #8).
+  String decode(Object? v, [int? lineId]) {
     if (v == null) return '';
     if (v is String) {
-      if (_zstd != null && v.length >= 8 && v.startsWith('KLUv')) {
-        try {
-          return utf8.decode(_zstd!.decode(base64.decode(v)), allowMalformed: true);
-        } catch (_) {/* genuinely text */}
+      if (_zstd == null || v.length < 8 || !v.startsWith('KLUv')) return v;
+      final Uint8List frame;
+      try {
+        frame = base64.decode(v);
+        ZstdDictDecoder.readFrameDictionaryId(frame);
+      } on FormatException {
+        return v; // not base64, or no frame header: genuinely text
       }
-      return v;
+      return _decodeFrame(frame, lineId);
     }
     if (v is Uint8List) {
-      final z = _zstd ?? (throw StateError('blob content but no zstd_dict'));
-      return utf8.decode(z.decode(v), allowMalformed: true);
+      if (_zstd == null) throw StateError('line ${lineId ?? '?'}: blob content but no zstd_dict');
+      return _decodeFrame(v, lineId);
     }
     return v.toString();
+  }
+
+  String _decodeFrame(Uint8List frame, int? lineId) {
+    final Uint8List bytes;
+    try {
+      bytes = _zstd!.decode(frame);
+    } on FormatException catch (e) {
+      throw FormatException('line ${lineId ?? '?'}: compressed content cannot be decoded: ${e.message}');
+    }
+    try {
+      return utf8.decode(bytes);
+    } on FormatException catch (e) {
+      throw FormatException('line ${lineId ?? '?'}: content is not valid UTF-8: ${e.message}');
+    }
   }
 
   /// The ids of the books flagged `book.isBaseBook` (the relevance order
@@ -205,24 +250,37 @@ class SeforimDb {
     return _db;
   }
 
+  /// Lines per [bookLines] chunk.
+  static const bookLinesChunk = 2000;
+
   /// One book's lines in reading order.
+  ///
+  /// Read in chunks (keyset on `lineIndex, id`), each one fully read before
+  /// it is yielded: no statement or cursor stays open between items, so an
+  /// early stop (`take`, `break`, an exception in the consumer) leaks nothing
+  /// and a reopen between chunks never closes the DB under a live cursor.
   Iterable<DbLine> bookLines(int bookId) sync* {
-    _ensureCurrent();
-    // the section: `line_toc` (the authoritative map) when the DB has it
-    final hasLineToc =
-        _db.select("SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_toc'").isNotEmpty;
-    final toc = hasLineToc ? 'COALESCE(lt.tocEntryId, 0)' : 'COALESCE(l.tocEntryId, 0)';
-    final tocJoin = hasLineToc ? ' LEFT JOIN line_toc lt ON lt.lineId = l.id' : '';
-    final stmt = _db.prepare('SELECT l.id, l.lineIndex, $toc, $_contentCol FROM line l'
-        '$_contentJoin$tocJoin WHERE l.bookId = ? ORDER BY l.lineIndex, l.id');
-    try {
-      final cur = stmt.selectCursor([bookId]);
-      while (cur.moveNext()) {
-        final r = cur.current;
-        yield DbLine(r.columnAt(0) as int, bookId, r.columnAt(1) as int, r.columnAt(2) as int, decode(r.columnAt(3)));
-      }
-    } finally {
-      stmt.close();
+    var lastIndex = -(1 << 62), lastId = -(1 << 62);
+    while (true) {
+      // the section: `line_toc` (the authoritative map) when the DB has it
+      final hasLineToc =
+          _select("SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_toc'").isNotEmpty;
+      final toc = hasLineToc ? 'COALESCE(lt.tocEntryId, 0)' : 'COALESCE(l.tocEntryId, 0)';
+      final tocJoin = hasLineToc ? ' LEFT JOIN line_toc lt ON lt.lineId = l.id' : '';
+      final rows = _select(
+          'SELECT l.id, l.lineIndex, $toc, $_contentCol FROM line l$_contentJoin$tocJoin'
+          ' WHERE l.bookId = ? AND (l.lineIndex > ? OR (l.lineIndex = ? AND l.id > ?))'
+          ' ORDER BY l.lineIndex, l.id LIMIT $bookLinesChunk',
+          [bookId, lastIndex, lastIndex, lastId]);
+      final chunk = [
+        for (final r in rows)
+          DbLine(r.columnAt(0) as int, bookId, r.columnAt(1) as int, r.columnAt(2) as int,
+              decode(r.columnAt(3), r.columnAt(0) as int)),
+      ];
+      yield* chunk;
+      if (chunk.length < bookLinesChunk) return;
+      lastIndex = chunk.last.lineIndex;
+      lastId = chunk.last.id;
     }
   }
 
@@ -239,7 +297,7 @@ class SeforimDb {
           'SELECT id, content FROM $table WHERE id IN (${List.filled(chunk.length, '?').join(',')})',
           chunk);
       for (final r in rs) {
-        out[r.columnAt(0) as int] = decode(r.columnAt(1));
+        out[r.columnAt(0) as int] = decode(r.columnAt(1), r.columnAt(0) as int);
       }
     }
     return out;
@@ -293,7 +351,7 @@ class SeforimDb {
       for (final r in _select(parts.join(' UNION ALL '), params)) {
         final id = r.columnAt(0) as int;
         final delta = r.columnAt(1) as int;
-        final text = decode(r.columnAt(2));
+        final text = decode(r.columnAt(2), id);
         if (delta == 0) {
           texts[id] = text;
           continue;
@@ -366,23 +424,30 @@ class SeforimDb {
     return '${s.size}|${s.modified.toUtc().toIso8601String()}';
   }
 
-  void close() => _closeAll();
+  /// Closes the connection, statements and codec; idempotent.
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    _closeHandles();
+  }
 
-  void _closeAll() {
+  void _closeHandles() {
     for (final stmt in _statements.values) {
       stmt.close();
     }
     _statements.clear();
     _zstd?.close();
+    _zstd = null;
     _db.close();
   }
 }
 
 /// One opening of the database: connection, schema probe, decoder, file stamp.
 class _Open {
-  _Open(this.db, this.split, this.compressed, this.zstd, this.stamp);
+  _Open(this.db, this.split, this.compressed, this.zstd, this.stamp, this.dataVersion);
   final Database db;
   final bool split, compressed;
   final ZstdDictDecoder? zstd;
   final String stamp;
+  final int dataVersion;
 }

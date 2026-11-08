@@ -1348,7 +1348,15 @@ every differing query.
   concurrent rent, reopen on file change, and an end-to-end tantivy11 build
   + search on a small seforim.db-shaped fixture; net10 and net48); the Dart demo's `SeforimDb` keeps its one connection and prepared
   statements. Both reopen when the database file changes size
-  or write time.
+  or write time, or when `PRAGMA data_version` moved (a commit through the
+  WAL, e.g. a new zstd dictionary; issue #8). The Dart demo opens the new
+  connection before closing the old one, closes idempotently, and reads a
+  book in chunks so no cursor outlives a call. Content decoding (C#, Core,
+  Dart): a frame naming a dictionary the codec lacks re-reads `zstd_dict`
+  once and retries; a `KLUv` string is decoded only when it is valid base64
+  with a zstd frame header, and a frame that cannot be decoded (or, in Dart,
+  malformed UTF-8) raises an error naming the line id instead of returning
+  raw text.
 
 ## Open
 - Quoted phrases: a whole-query phrase may cross a line in our engine but

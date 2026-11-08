@@ -169,6 +169,28 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 "PRAGMA cache_size=-65536;" +   // up to 64 MB page cache
                 "PRAGMA temp_store=MEMORY;";
             command.ExecuteNonQuery();
+            _dataVersion = ReadDataVersion();
+        }
+
+        /// <summary>`PRAGMA data_version` when this connection was opened: it changes when
+        /// another connection commits, including a WAL write that leaves the main file's stamp
+        /// alone (a new zstd dictionary, a schema change). The pool checks it on every rent and
+        /// reopens, so the schema probe and the codec are rebuilt (issue #8).</summary>
+        private readonly long _dataVersion;
+
+        private long ReadDataVersion()
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText = "PRAGMA data_version";
+            return Convert.ToInt64(command.ExecuteScalar());
+        }
+
+        /// <summary>True when another connection committed since this one was opened (or the
+        /// check itself fails): the pool then closes it instead of handing it out.</summary>
+        internal bool DatabaseChanged()
+        {
+            try { return ReadDataVersion() != _dataVersion; }
+            catch (SqliteException) { return true; }
         }
 
         public long CountDocuments()
@@ -191,7 +213,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             using var command = _connection.CreateCommand();
             command.CommandText = SeforimDbSqlStrings.FtsGetLineContent(_schema);
             command.Parameters.AddWithValue("@id", id);
-            return _codec.Decode(command.ExecuteScalar());
+            return _codec.Decode(command.ExecuteScalar(), id);
         }
 
         public IEnumerable<(int Id, string Text)> ReadDocuments(int limit, CancellationToken ct = default)
@@ -204,7 +226,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             while (reader.Read())
             {
                 ct.ThrowIfCancellationRequested();
-                yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1));
+                yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1, reader.GetInt32(0)));
             }
         }
 
@@ -256,7 +278,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 while (reader.Read())
                 {
                     ct.ThrowIfCancellationRequested();
-                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1), bookId,
+                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1, reader.GetInt32(0)), bookId,
                                   reader.IsDBNull(2) ? null : (long?)reader.GetInt64(2));
                 }
             }
@@ -273,7 +295,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             while (reader.Read())
             {
                 ct.ThrowIfCancellationRequested();
-                yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1));
+                yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1, reader.GetInt32(0)));
             }
         }
 
@@ -311,7 +333,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 
                 using var reader = command.ExecuteReader();
                 while (reader.Read())
-                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1), "");
+                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1, reader.GetInt32(0)), "");
             }
             finally
             {
@@ -468,7 +490,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                     var placement = new FtsDocumentPlacement(
                         bookId: reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
                         lineIndex: reader.IsDBNull(3) ? 0 : reader.GetInt32(3));
-                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1), placement);
+                    yield return (reader.GetInt32(0), _codec.DecodeColumnOrEmpty(reader, 1, reader.GetInt32(0)), placement);
                 }
             }
             finally
@@ -539,7 +561,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 {
                     int id = reader.GetInt32(0);
                     int delta = reader.GetInt32(1);
-                    string text = _codec.DecodeColumnOrEmpty(reader, 2);
+                    string text = _codec.DecodeColumnOrEmpty(reader, 2, id);
                     if (delta == 0) { texts[id] = text; continue; }
                     if (text.Length == 0) continue;   // empty neighbours are skipped, not joined
                     var side = delta < 0 ? before : after;
@@ -607,7 +629,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                     {
                         int matchedId = reader.GetInt32(0);
                         int delta = reader.GetInt32(1);
-                        string text = _codec.DecodeColumnOrEmpty(reader, 2);
+                        string text = _codec.DecodeColumnOrEmpty(reader, 2, reader.GetInt32(3));
                         if (text.Length == 0) continue;
                         int neighbourId = reader.GetInt32(3);
 
@@ -701,6 +723,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// is opened when none is idle; up to <see cref="MaxIdle"/> stay open). When the database
     /// file changes (size or write time of the main file), idle corpora are closed and
     /// the next rent opens a fresh one; one rented before the change closes when returned.
+    /// An idle connection whose `PRAGMA data_version` moved (a WAL commit, e.g. a new zstd
+    /// dictionary) is reopened on rent too (issue #8).
     /// </summary>
     public sealed class SeforimDbFtsCorpusPool : IDisposable
     {
@@ -731,7 +755,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 while (_idle.Count > 0)
                 {
                     var c = _idle.Pop();
-                    if (c.Stamp.Equals(stamp)) { connection = c; break; }
+                    if (c.Stamp.Equals(stamp) && !c.DatabaseChanged()) { connection = c; break; }
                     (stale ??= new List<SeforimDbCorpusConnection>()).Add(c);
                 }
             }

@@ -58,26 +58,50 @@ final class Zstd {
 }
 
 /// Decodes zstd frames with the dictionaries of one database. One per
-/// isolate/connection (a DCtx is not thread-safe). Call [close] when done.
+/// isolate/connection (a DCtx is not thread-safe). Call [close] when done;
+/// [close] is idempotent.
+///
+/// [reload] re-reads the database's dictionaries: a frame naming an id this
+/// decoder lacks (a writer appended a dictionary through the WAL) reloads
+/// them once and retries, as Otzaria does (issue #8).
 final class ZstdDictDecoder {
-  ZstdDictDecoder(this._z, List<Uint8List> dictionaries) : _dctx = _z._createDCtx() {
+  ZstdDictDecoder(this._z, List<Uint8List> dictionaries, {List<Uint8List> Function()? reload})
+      : _dctx = _z._createDCtx(),
+        _reload = reload {
+    try {
+      if (_dctx == nullptr) throw StateError('ZSTD_createDCtx failed');
+      _addDictionaries(dictionaries);
+    } catch (_) {
+      close(); // frees the dictionaries loaded so far and the DCtx
+      rethrow;
+    }
+  }
+
+  static const int maxLineBytes = 16 * 1024 * 1024;
+  final Zstd _z;
+  Pointer<Void> _dctx;
+  final List<Uint8List> Function()? _reload;
+  final Map<int, Pointer<Void>> _ddicts = {};
+  Pointer<Uint8> _src = nullptr, _dst = nullptr;
+  int _srcCap = 0, _dstCap = 0;
+  bool _closed = false;
+
+  /// Loads the dictionaries whose id is not loaded yet; true when one was added.
+  bool _addDictionaries(List<Uint8List> dictionaries) {
+    var added = false;
     for (final d in dictionaries) {
       final id = readDictionaryId(d);
+      if (_ddicts.containsKey(id)) continue;
       final p = malloc<Uint8>(d.length);
       p.asTypedList(d.length).setAll(0, d);
       final dd = _z._createDDict(p, d.length); // copies the dictionary
       malloc.free(p);
       if (dd == nullptr) throw FormatException('zstd dictionary $id could not be loaded');
       _ddicts[id] = dd;
+      added = true;
     }
+    return added;
   }
-
-  static const int maxLineBytes = 16 * 1024 * 1024;
-  final Zstd _z;
-  final Pointer<Void> _dctx;
-  final Map<int, Pointer<Void>> _ddicts = {};
-  Pointer<Uint8> _src = nullptr, _dst = nullptr;
-  int _srcCap = 0, _dstCap = 0;
 
   /// The id zstd stamped into the dictionary (NOT the table's id column).
   static int readDictionaryId(Uint8List d) {
@@ -106,8 +130,12 @@ final class ZstdDictDecoder {
   }
 
   Uint8List decode(Uint8List frame) {
+    if (_closed) throw StateError('ZstdDictDecoder is closed');
     final id = readFrameDictionaryId(frame);
-    final dd = _ddicts[id] ?? (throw FormatException('dictionary $id not in zstd_dict'));
+    var dd = _ddicts[id];
+    // a dictionary appended since this decoder was built: re-read once, retry
+    if (dd == null && _reload != null && _addDictionaries(_reload())) dd = _ddicts[id];
+    if (dd == null) throw FormatException('dictionary $id not in zstd_dict');
     if (frame.length > _srcCap) {
       if (_src != nullptr) malloc.free(_src);
       _srcCap = frame.length * 2;
@@ -129,13 +157,17 @@ final class ZstdDictDecoder {
   }
 
   void close() {
+    if (_closed) return;
+    _closed = true;
     for (final d in _ddicts.values) {
       _z._freeDDict(d);
     }
     _ddicts.clear();
-    _z._freeDCtx(_dctx);
+    if (_dctx != nullptr) _z._freeDCtx(_dctx);
+    _dctx = nullptr;
     if (_src != nullptr) malloc.free(_src);
     if (_dst != nullptr) malloc.free(_dst);
     _src = _dst = nullptr;
+    _srcCap = _dstCap = 0;
   }
 }

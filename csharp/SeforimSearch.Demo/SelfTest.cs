@@ -33,6 +33,9 @@ namespace SeforimSearch.Demo
                 ("abandoned enumerator does not keep a pooled connection", AbandonedEnumerator),
                 ("concurrent rents get distinct connections", ConcurrentRent),
                 ("file change reopens", FileChangeReopens),
+                ("WAL commit (data_version) reopens on rent", DataVersionReopens),
+                ("codec: dictionary appended via WAL is picked up", CodecReloadsNewDictionary),
+                ("codec: base64 text vs base64 frame, errors name the line", CodecBase64AndErrors),
                 ("end to end: build tantivy13 + search in catalog order", EndToEnd),
                 ("stream: chunks, resume, Restarted, cancellation (Core's StreamSearch)", Stream),
             };
@@ -192,6 +195,118 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             using var b = pool.Rent();
             Check(!ReferenceEquals(b.Connection, before), "not reopened after the file changed");
             Check(b.CountDocuments() == 2 * LinesPerBook + 1, "the reopened connection sees the change");
+        }
+
+        /// <summary>Issue #8: a commit through the WAL leaves the main file's stamp alone; the
+        /// pool must still see it (PRAGMA data_version) and reopen the idle connection.</summary>
+        private static void DataVersionReopens(string db, string dir)
+        {
+            string copy = Path.Combine(dir, "wal.db");
+            File.Copy(db, copy, true);
+            using var w = new SqliteConnection($"Data Source={copy};Pooling=False");
+            w.Open();
+            using (var cmd = w.CreateCommand())
+            {
+                cmd.CommandText = "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;";
+                cmd.ExecuteNonQuery();
+            }
+            using var pool = new SeforimDbFtsCorpusPool(copy);
+            SeforimDbCorpusConnection before;
+            using (var a = pool.Rent())
+            {
+                before = a.Connection;
+                Check(a.CountDocuments() == 2 * LinesPerBook, "count before");
+            }
+            var length = new FileInfo(copy).Length;
+            var time = File.GetLastWriteTimeUtc(copy);
+            using (var cmd = w.CreateCommand())
+            {
+                cmd.CommandText = "INSERT INTO line (id, bookId, lineIndex, content) VALUES (99999, 1, 99999, 'alpha new')";
+                cmd.ExecuteNonQuery();
+            }
+            File.SetLastWriteTimeUtc(copy, time);
+            Check(new FileInfo(copy).Length == length, "the WAL commit must not grow the main file");
+            using var b = pool.Rent();
+            Check(!ReferenceEquals(b.Connection, before), "not reopened after a WAL commit");
+            Check(b.CountDocuments() == 2 * LinesPerBook + 1, "the reopened connection sees the commit");
+        }
+
+        private static byte[] TrainDictionary(int seed)
+        {
+            var random = new Random(seed);
+            var samples = new List<byte[]>();
+            for (int i = 0; i < 2000; i++)
+                samples.Add(System.Text.Encoding.UTF8.GetBytes(
+                    $"line {seed} {i} alpha beta gamma delta {random.Next(1000)} epsilon zeta {random.Next(100)} eta theta"));
+            return ZstdSharp.DictBuilder.TrainFromBuffer(samples, 4096).ToArray();
+        }
+
+        private static byte[] Compress(byte[] dictionary, string text)
+        {
+            using var compressor = new ZstdSharp.Compressor(3);
+            compressor.LoadDictionary(dictionary);
+            return compressor.Wrap(System.Text.Encoding.UTF8.GetBytes(text)).ToArray();
+        }
+
+        private static uint DictionaryIdOf(byte[] dictionary) => BitConverter.ToUInt32(dictionary, 4);
+
+        /// <summary>Issue #8 D1 (A): a frame naming a dictionary the codec lacks re-reads
+        /// zstd_dict once (a writer appended it through the WAL) and decodes.</summary>
+        private static void CodecReloadsNewDictionary(string db, string dir)
+        {
+            string path = Path.Combine(dir, "dict-wal.db");
+            byte[] first = TrainDictionary(1), second = TrainDictionary(2);
+            Check(DictionaryIdOf(first) != DictionaryIdOf(second), "two dictionaries with one id");
+            using var w = new SqliteConnection($"Data Source={path};Pooling=False");
+            w.Open();
+            using (var cmd = w.CreateCommand())
+            {
+                cmd.CommandText = "PRAGMA journal_mode=WAL; CREATE TABLE zstd_dict (id INTEGER PRIMARY KEY, dict BLOB); " +
+                                  "INSERT INTO zstd_dict (dict) VALUES ($d);";
+                cmd.Parameters.AddWithValue("$d", first);
+                cmd.ExecuteNonQuery();
+            }
+            using var r = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+            r.Open();
+            using var codec = SeforimSearch.Demo.SeforimDb.SeforimDbLineContentCodec.Create(r);
+            Check(codec.Decode(Compress(first, "alpha one"), 1) == "alpha one", "first dictionary");
+            using (var cmd = w.CreateCommand())
+            {
+                cmd.CommandText = "INSERT INTO zstd_dict (dict) VALUES ($d)";
+                cmd.Parameters.AddWithValue("$d", second);
+                cmd.ExecuteNonQuery();
+            }
+            Check(codec.Decode(Compress(second, "beta two"), 2) == "beta two", "the appended dictionary was not picked up");
+        }
+
+        /// <summary>Issue #8 D2: base64 is decoded only when it carries a zstd frame header; a
+        /// frame that cannot be decoded raises an error naming the line.</summary>
+        private static void CodecBase64AndErrors(string db, string dir)
+        {
+            string path = Path.Combine(dir, "dict-b64.db");
+            byte[] known = TrainDictionary(3), unknown = TrainDictionary(4);
+            using (var w = new SqliteConnection($"Data Source={path};Pooling=False"))
+            {
+                w.Open();
+                using var cmd = w.CreateCommand();
+                cmd.CommandText = "CREATE TABLE zstd_dict (id INTEGER PRIMARY KEY, dict BLOB); INSERT INTO zstd_dict (dict) VALUES ($d);";
+                cmd.Parameters.AddWithValue("$d", known);
+                cmd.ExecuteNonQuery();
+            }
+            using var r = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+            r.Open();
+            using var codec = SeforimSearch.Demo.SeforimDb.SeforimDbLineContentCodec.Create(r);
+            // KLUv-looking text: not base64 at all, and base64 without a frame header
+            Check(codec.Decode("KLUv is how it starts", 5) == "KLUv is how it starts", "not base64: stays text");
+            Check(codec.Decode("KLUvAAAAAAAA", 5) == "KLUvAAAAAAAA", "base64 without a frame header: stays text");
+            Check(codec.Decode(Convert.ToBase64String(Compress(known, "gamma three")), 6) == "gamma three", "a base64 frame decodes");
+            foreach (object value in new object[] { Convert.ToBase64String(Compress(unknown, "x")), Compress(unknown, "x") })
+            {
+                string? message = null;
+                try { codec.Decode(value, 4242); }
+                catch (SeforimSearch.Demo.SeforimDb.SeforimDbContentCodecException e) { message = e.Message; }
+                Check(message != null && message.Contains("4242"), "a frame with a missing dictionary must raise naming the line: " + message);
+            }
         }
 
         private static void EndToEnd(string db, string dir)

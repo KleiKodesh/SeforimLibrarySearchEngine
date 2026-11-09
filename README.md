@@ -365,6 +365,29 @@ is clean, and CHANGELOG.md has the entry.
    - The ordered check is a linear forward sweep per slot (every position
      where a valid chain can end), no backtracking.
 
+6. **Indexing in the OS background mode, live memory budget** (issue #19;
+   `indexer/thread_priority.rs`, `indexer/index_writer.rs`,
+   `indexer/segment_updater.rs`). `IndexWriterOptions::low_priority_threads`
+   puts the indexing workers and the policy's merges in the OS background
+   mode, set on each thread itself: Windows `THREAD_MODE_BACKGROUND_BEGIN`
+   (CPU + I/O + memory priority, fallback `THREAD_PRIORITY_LOWEST`;
+   [doc](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadpriority)),
+   Linux `SCHED_IDLE` (`SCHED_BATCH` without `RLIMIT_NICE` headroom) + `IOPRIO_CLASS_IDLE`
+   ([sched](https://man7.org/linux/man-pages/man7/sched.7.html),
+   [ioprio_set](https://man7.org/linux/man-pages/man2/ioprio_set.2.html)),
+   Android nice 10 = `THREAD_PRIORITY_BACKGROUND`
+   ([doc](https://developer.android.com/reference/android/os/Process#THREAD_PRIORITY_BACKGROUND))
+   + idle I/O, Apple `QOS_CLASS_BACKGROUND`
+   ([doc](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/EnergyGuide-iOS/PrioritizeWorkWithQoS.html)).
+   Nesting-safe per thread (depth counter, as FtsLib's
+   `BackgroundPriorityScope`), with `NormalPrioritySection` to leave it
+   around sections foreground work waits for: a worker's commit-driven
+   flush and an explicit `IndexWriter::merge` run at normal priority by
+   themselves. `IndexWriter::memory_budget()` is a live handle each worker
+   reads once per batch: lowering it flushes the segments above it (the
+   buffer is released, as Elasticsearch's IndexingMemoryController forcing a
+   flush). Public, for any thread of the application.
+
 Also small: `get_match_term_infos` honours the cap and the sink, and
 `RegexPhraseWeight` is reachable crate-internally so SpanQuery can reuse its
 positioned union. `PhraseScorer` is public (its constructor already was), so
@@ -628,11 +651,16 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   bare-minimum rule above) with a host payload (resume watermark,
   provenance stamp) committed atomically with the documents. C ABI:
   `se_index_create` / `_open` / `_exists` / `_info` / `_close`,
-  `se_writer_open` / `se_writer_open_ex` (flag `SE_WRITER_LOW_PRIORITY`:
-  tantivy's indexing and merge threads below normal OS priority, best effort
-  per OS; Dart `openWriter(lowPriority:)`, C# `OpenWriter(lowPriority:)`;
-  the SDKs' default heap is 50 MB per thread, so the default threads, cores
-  up to 4, are always granted), `se_writer_add` / `se_writer_add_line` (per-line flags,
+  `se_writer_open` / `se_writer_open_ex` (flags: `SE_WRITER_AUTO`, the
+  SDKs' default, see "Writer resources" below; `SE_WRITER_LOW_PRIORITY`: fixed
+  resources with the indexing threads and background merges in the OS
+  background mode; Dart `openWriter()` / `openWriter(heapBytes:, threads:,
+  lowPriority:)`, C# `OpenWriter()` / `OpenWriter(heapBytes, threads,
+  lowPriority)`; a fixed writer's default heap is 50 MB per thread, so the
+  default threads, cores up to 4, are always granted), `se_writer_memory_budget`
+  (current budget per thread), `se_thread_background_begin` / `_end` (the
+  calling host thread in the OS background mode; C# `BackgroundPriority.Enter()`,
+  Dart `runInBackgroundPriority`), `se_writer_add` / `se_writer_add_line` (per-line flags,
   see cross-line below), `se_writer_add_lines` (a batch in one call:
   48-byte `SeLineRecord`s of `se_writer_add_line`'s fields + text length,
   the UTF-8 texts concatenated in one buffer; Dart `IndexWriter.addAll`),
@@ -1319,6 +1347,54 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   target (compile-time assert, 32-bit included). Located marks carry a
   term id into the search's term table; `se_search_take_new_terms` (C#
   `TakeNewTerms`) returns the terms added since the previous call.
+
+#### Writer resources (issue #19)
+
+Goal: use as much of the machine as possible while it is idle, without the
+user ever noticing the build. The writer's **auto mode** (`LineIndex::writer_auto`,
+`SE_WRITER_AUTO`, the SDKs' and both demos' default; fixed heap / threads
+stay available):
+
+- **Threads:** one per core (capped so each thread's 15 MB minimum fits in a
+  quarter of the free RAM), all in the OS background mode (tantivy item 6),
+  so the OS throttles CPU, disk and memory for us. The host's feeding thread
+  opts in with `se_thread_background_begin` / `_end` (C#
+  `using (BackgroundPriority.Enter())`, Dart `runInBackgroundPriority`; set
+  natively, never .NET `Thread.Priority`). Commits, the final merge
+  (`merge_all`, an explicit merge) and the FM sidecar build run at normal
+  priority: a reader waits for them, and a throttled single-threaded tail
+  drags.
+- **Memory, event based** (`seforim-engine/src/resources.rs`): one small
+  watcher thread per auto writer blocks on the OS signal (about one wakeup
+  per second) and moves the writer's live budget: under memory pressure or
+  while the user is active, the minimum (15 MB per thread), so every worker
+  flushes its segment at its next batch and frees its buffer; idle again, a
+  quarter of the free RAM shared by the threads (at most 512 MB per thread).
+  The writer reads one atomic per batch, never per line.
+  - Windows: `CreateMemoryResourceNotification(LowMemoryResourceNotification)` +
+    `WaitForSingleObject` (1 s), `GetLastInputInfo` (input in the last 10 s =
+    active; per session), free RAM `GlobalMemoryStatusEx`
+    ([1](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-creatememoryresourcenotification),
+    [2](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject),
+    [3](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getlastinputinfo),
+    [4](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-globalmemorystatusex)).
+  - Linux / Android: PSI trigger `some 150000 2000000` on `/proc/pressure/memory`
+    polled for `POLLPRI` ([doc](https://docs.kernel.org/accounting/psi.html)),
+    free RAM `MemAvailable` ([doc](https://man7.org/linux/man-pages/man5/proc_meminfo.5.html));
+    no user-activity signal (none is generic).
+  - Apple platforms: no watcher yet (the GCD memory-pressure source needs
+    blocks from Rust); the budget stays as opened (64 MB per thread).
+- Linux: leaving `SCHED_IDLE` needs `RLIMIT_NICE` headroom (often 0), so
+  without it the CPU side is `SCHED_BATCH` (reversible, weaker); the idle I/O
+  class applies either way.
+- Pools (`seforim-engine/src/pools.rs`): `indexing_pool()`, a lazily built rayon pool,
+  one thread per core, each worker in the OS background mode for its life (start /
+  exit handlers), for the engine's own parallel indexing-side work; a normal-priority
+  search pool joins it with issue #24. No indexing-side code is parallel yet (the FM
+  sidecar build is single-threaded and runs at normal priority, above).
+- Micro benchmark: `cargo run --release -p seforim-engine --example
+  writer_resources_bench -- [lines] [rounds]` (auto vs fixed, watcher
+  overhead, simulated pressure).
 
 ### C# demo (`csharp/SeforimSearch.Demo`)
 - **DB code**, copied from KitveiHakodesh Core with namespace renames only:

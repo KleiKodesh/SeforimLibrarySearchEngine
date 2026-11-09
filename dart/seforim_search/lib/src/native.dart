@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 1;
+const int seforimAbiVersion = 2;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -106,6 +106,11 @@ final class SeforimNative {
         writerOpenEx = lib.lookupFunction<
             Pointer<Void> Function(Pointer<Void>, Size, Size, Uint32),
             Pointer<Void> Function(Pointer<Void>, int, int, int)>('se_writer_open_ex'),
+        writerMemoryBudget = lib.lookupFunction<Uint64 Function(Pointer<Void>), int Function(Pointer<Void>)>(
+            'se_writer_memory_budget'),
+        threadBackgroundBegin =
+            lib.lookupFunction<Void Function(), void Function()>('se_thread_background_begin'),
+        threadBackgroundEnd = lib.lookupFunction<Void Function(), void Function()>('se_thread_background_end'),
         writerAdd = lib.lookupFunction<
             Int32 Function(Pointer<Void>, Uint64, Uint64, Uint64, Pointer<Uint8>, Size),
             int Function(Pointer<Void>, int, int, int, Pointer<Uint8>, int)>('se_writer_add'),
@@ -208,6 +213,9 @@ final class SeforimNative {
   final int Function(Pointer<Void>) indexHasFmSidecar;
   final Pointer<Void> Function(Pointer<Void>, int, int) writerOpen;
   final Pointer<Void> Function(Pointer<Void>, int, int, int) writerOpenEx;
+  final int Function(Pointer<Void>) writerMemoryBudget;
+  final void Function() threadBackgroundBegin;
+  final void Function() threadBackgroundEnd;
   final int Function(Pointer<Void>, int, int, int, Pointer<Uint8>, int) writerAdd;
   final int Function(Pointer<Void>, int) writerDelete;
   final int Function(Pointer<Void>, int, int, int, int, int, Pointer<Uint8>, int) writerAddLine;

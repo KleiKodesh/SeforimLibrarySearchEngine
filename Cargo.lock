@@ -746,11 +746,14 @@ name = "seforim-engine"
 version = "0.1.0"
 dependencies = [
  "hebrew-fts",
+ "libc",
  "memmap2",
+ "rayon",
  "serde",
  "serde_json",
  "tantivy",
  "tempfile",
+ "winapi",
 ]
 
 [[package]]

@@ -113,42 +113,46 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
   stdout.writeln('DB: ${db.path} (split=${db.splitContent}, zstd=${db.compressed})');
   final index = SeforimIndex.create(
       dir, IndexOptions(positions: !o.containsKey('no-positions'), keepMarks: o.containsKey('keep-marks')));
-  final w = index.openWriter(heapBytes: 200000000);
+  final w = index.openWriter(); // auto mode (issue #19)
   var position = 0;
   // lines go to the engine in batches (one FFI call per 1000 lines)
   final batch = <LineDocument>[];
-  try {
-    outer:
-    for (final bookId in db.catalogBookOrder()) {
-      for (final line in db.bookLines(bookId)) {
-        if (maxLines > 0 && position >= maxLines) break outer;
-        batch.add(LineDocument(
-            lineId: line.id,
-            position: position++,
-            bookId: line.bookId,
-            text: line.text,
-            // the section (TOC entry; 0 = none: a section of its own) and
-            // Otzaria's rule: a heading interrupts the text (no cross-line phrase)
-            sectionId: line.tocEntryId == 0 ? null : line.tocEntryId,
-            noCross: line.text.startsWith('<h') || isVirtualId(line.id))); // a footnote stands alone (issue #13)
-        if (batch.length == 1000) {
-          w.addAll(batch);
-          batch.clear();
+  // this feeding thread (DB reads) in the OS background mode too; commits,
+  // the final merge and the FM sidecar leave it by themselves
+  runInBackgroundPriority(() {
+    try {
+      outer:
+      for (final bookId in db.catalogBookOrder()) {
+        for (final line in db.bookLines(bookId)) {
+          if (maxLines > 0 && position >= maxLines) break outer;
+          batch.add(LineDocument(
+              lineId: line.id,
+              position: position++,
+              bookId: line.bookId,
+              text: line.text,
+              // the section (TOC entry; 0 = none: a section of its own) and
+              // Otzaria's rule: a heading interrupts the text (no cross-line phrase)
+              sectionId: line.tocEntryId == 0 ? null : line.tocEntryId,
+              noCross: line.text.startsWith('<h') || isVirtualId(line.id))); // a footnote stands alone (issue #13)
+          if (batch.length == 1000) {
+            w.addAll(batch);
+            batch.clear();
+          }
+          if (position % 100000 == 0) stdout.writeln('  $position lines, ${sw.elapsed.inSeconds}s');
         }
-        if (position % 100000 == 0) stdout.writeln('  $position lines, ${sw.elapsed.inSeconds}s');
       }
+      w.addAll(batch);
+      w.commit('{"lines":$position,"db":"${db.fingerprint()}","notes":${db.hasNotes ? 1 : 0}}');
+    } catch (_) {
+      w.rollback();
+      rethrow;
+    } finally {
+      w.close();
     }
-    w.addAll(batch);
-    w.commit('{"lines":$position,"db":"${db.fingerprint()}","notes":${db.hasNotes ? 1 : 0}}');
-  } catch (_) {
-    w.rollback();
-    rethrow;
-  } finally {
-    w.close();
-  }
+  });
   // One segment (the walks and their caps run per segment), then the
   // FM-index sidecar for leading-* wildcards and fuzzy words.
-  index.openWriter(heapBytes: 200000000).mergeAndClose();
+  index.openWriter().mergeAndClose();
   index.buildFmSidecar();
   stdout.writeln('Indexed $position lines into $dir in ${sw.elapsed.inMilliseconds} ms; '
       'payload ${index.info().payload}');

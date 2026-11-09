@@ -257,6 +257,9 @@ impl LineIndex {
     /// several segments or no terms (nothing built; searches still work
     /// through the FST walk).
     pub fn build_fm_sidecar(&self) -> Result<bool> {
+        // the single-threaded tail of a build: normal priority even when the
+        // calling thread opted into background mode (throttled, it drags)
+        let _normal = tantivy::indexer::NormalPrioritySection::enter();
         crate::fm_sidecar::build(&self.index, self.fields.text, &self.dir)
     }
 
@@ -378,6 +381,31 @@ impl LineIndex {
         Ok(LineWriter {
             writer: self.index.writer_with_options(options)?,
             fields: self.fields,
+            threads,
+            watcher: None,
+        })
+    }
+
+    /// Starts a writer in the auto mode (issue #19, see [`crate::resources`]):
+    /// one thread per core in the OS background mode, and a memory budget
+    /// that follows the machine (large while idle, the minimum under memory
+    /// pressure or while the user is active; lowering it flushes the
+    /// workers' segments at their next batch).
+    pub fn writer_auto(&self) -> Result<LineWriter> {
+        use crate::resources;
+        let threads = resources::auto_threads();
+        let options = IndexWriterOptions::builder()
+            .num_worker_threads(threads)
+            .memory_budget_per_thread(resources::idle_budget_per_thread(threads))
+            .low_priority_threads(true)
+            .build();
+        let writer = self.index.writer_with_options(options)?;
+        let watcher = resources::Watcher::start(writer.memory_budget(), threads);
+        Ok(LineWriter {
+            writer,
+            fields: self.fields,
+            threads,
+            watcher: Some(watcher),
         })
     }
 }
@@ -386,6 +414,9 @@ impl LineIndex {
 pub struct LineWriter {
     writer: IndexWriter,
     fields: LineFields,
+    threads: usize,
+    /// The auto mode's resource watcher (stops when the writer drops).
+    watcher: Option<crate::resources::Watcher>,
 }
 
 impl LineWriter {
@@ -438,12 +469,34 @@ impl LineWriter {
     /// Commits everything queued, with an optional host payload stored
     /// atomically with it (see [`LineIndex::committed_payload`]).
     pub fn commit(&mut self, payload: Option<&str>) -> Result<()> {
+        // a commit is waited for (readers reload after it): normal priority
+        // even when the calling thread opted into background mode
+        let _normal = tantivy::indexer::NormalPrioritySection::enter();
         let mut prepared = self.writer.prepare_commit()?;
         if let Some(p) = payload {
             prepared.set_payload(p);
         }
         prepared.commit()?;
         Ok(())
+    }
+
+    /// The current memory budget per indexing thread, in bytes (it moves in
+    /// the auto mode).
+    pub fn memory_budget_per_thread(&self) -> usize {
+        self.writer.memory_budget().per_thread()
+    }
+
+    /// The number of indexing threads.
+    pub fn num_threads(&self) -> usize {
+        self.threads
+    }
+
+    /// Forces the auto mode's load (for tests and benchmarks; `None` returns
+    /// to the OS signals). No effect on a fixed writer.
+    pub fn simulate_load(&self, load: Option<crate::resources::Load>) {
+        if let Some(w) = &self.watcher {
+            w.simulate(load);
+        }
     }
 
     /// Drops everything queued since the last commit.
@@ -564,5 +617,26 @@ mod tests {
         let index = LineIndex::open(dir.path()).unwrap();
         assert_eq!(index.num_lines().unwrap(), 2);
         assert_eq!(index.committed_payload().unwrap().as_deref(), Some("p1"));
+    }
+
+    /// Issue #19: the auto writer indexes, and a pressure signal drops its
+    /// budget to the minimum (the flush itself is tantivy's
+    /// `test_lowering_the_memory_budget_flushes_the_segment`).
+    #[test]
+    fn auto_writer_follows_the_load() {
+        use crate::resources::{Load, MIN_BUDGET_PER_THREAD};
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let mut w = index.writer_auto().unwrap();
+        assert!(w.num_threads() >= 1);
+        w.simulate_load(Some(Load::Idle));
+        assert!(w.memory_budget_per_thread() >= MIN_BUDGET_PER_THREAD);
+        w.add(&doc(1, "alpha beta")).unwrap();
+        w.simulate_load(Some(Load::Pressure));
+        assert_eq!(w.memory_budget_per_thread(), MIN_BUDGET_PER_THREAD);
+        w.add(&doc(2, "gamma")).unwrap();
+        w.commit(None).unwrap();
+        w.merge_all().unwrap();
+        assert_eq!(index.num_lines().unwrap(), 2);
     }
 }

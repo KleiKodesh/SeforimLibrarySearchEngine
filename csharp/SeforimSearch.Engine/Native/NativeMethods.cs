@@ -75,6 +75,16 @@ namespace SeforimSearch.Engine.Native
         public static extern WriterHandle se_writer_open(IndexHandle index, UIntPtr heapBytes, UIntPtr numThreads);
 
         public const uint SE_WRITER_LOW_PRIORITY = 1;
+        public const uint SE_WRITER_AUTO = 2;
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ulong se_writer_memory_budget(WriterHandle writer);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void se_thread_background_begin();
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void se_thread_background_end();
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern WriterHandle se_writer_open_ex(IndexHandle index, UIntPtr heapBytes, UIntPtr numThreads, uint flags);

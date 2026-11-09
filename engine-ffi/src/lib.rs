@@ -72,7 +72,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 1;
+pub const SE_ABI_VERSION: u32 = 2;
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -398,12 +398,19 @@ pub unsafe extern "C" fn se_writer_open(
     })
 }
 
-/// Flag of [`se_writer_open_ex`]: indexing and merge threads run below
-/// normal OS priority (background build; best effort per OS).
+/// Flag of [`se_writer_open_ex`]: the indexing threads and the background
+/// merges run in the OS background mode (best effort per OS).
 pub const SE_WRITER_LOW_PRIORITY: u32 = 1;
 
-/// [`se_writer_open`] with `flags` (`SE_WRITER_LOW_PRIORITY`; other bits
-/// must be 0).
+/// Flag of [`se_writer_open_ex`]: the auto mode (issue #19). One thread per
+/// core in the OS background mode, and a memory budget that follows the
+/// machine: large while idle, the minimum under memory pressure or while the
+/// user is active (the workers flush their segments to free the buffer).
+/// `heap_bytes` and `num_threads` must be 0.
+pub const SE_WRITER_AUTO: u32 = 2;
+
+/// [`se_writer_open`] with `flags` (`SE_WRITER_LOW_PRIORITY`,
+/// `SE_WRITER_AUTO`; other bits must be 0).
 ///
 /// # Safety
 /// `index` must be a live index; it must outlive the writer.
@@ -416,12 +423,54 @@ pub unsafe extern "C" fn se_writer_open_ex(
 ) -> *mut LineWriter {
     guard(ptr::null_mut(), || {
         let index = index.as_ref().ok_or("null index")?;
-        if flags & !SE_WRITER_LOW_PRIORITY != 0 {
+        if flags & !(SE_WRITER_LOW_PRIORITY | SE_WRITER_AUTO) != 0 {
             return Err(format!("unknown writer flags {flags:#x}"));
         }
-        let low = flags & SE_WRITER_LOW_PRIORITY != 0;
-        let writer = index.writer_with(heap_bytes, num_threads, low).map_err(err)?;
+        let writer = if flags & SE_WRITER_AUTO != 0 {
+            if heap_bytes != 0 || num_threads != 0 {
+                return Err("SE_WRITER_AUTO needs heap_bytes = 0 and num_threads = 0".into());
+            }
+            index.writer_auto().map_err(err)?
+        } else {
+            let low = flags & SE_WRITER_LOW_PRIORITY != 0;
+            index.writer_with(heap_bytes, num_threads, low).map_err(err)?
+        };
         Ok(Box::into_raw(Box::new(writer)))
+    })
+}
+
+/// The writer's current memory budget per indexing thread, in bytes (it
+/// moves in the auto mode); 0 on error.
+///
+/// # Safety
+/// `writer` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_writer_memory_budget(writer: *const LineWriter) -> u64 {
+    guard(0, || {
+        let writer = writer.as_ref().ok_or("null writer")?;
+        Ok(writer.memory_budget_per_thread() as u64)
+    })
+}
+
+/// Puts the CALLING thread into the OS background mode (low CPU, and where
+/// the OS supports it disk and memory priority), e.g. the host thread that
+/// reads the corpus and feeds the writer. Nesting-safe; pair every call with
+/// [`se_thread_background_end`] on the SAME thread. Commits and the FM
+/// sidecar build leave the mode for their duration by themselves.
+#[no_mangle]
+pub extern "C" fn se_thread_background_begin() {
+    guard((), || {
+        seforim_engine::resources::begin_background();
+        Ok(())
+    })
+}
+
+/// Ends what the matching [`se_thread_background_begin`] began on this thread.
+#[no_mangle]
+pub extern "C" fn se_thread_background_end() {
+    guard((), || {
+        seforim_engine::resources::end_background();
+        Ok(())
     })
 }
 

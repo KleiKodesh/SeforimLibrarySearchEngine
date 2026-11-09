@@ -8,6 +8,22 @@ import 'models.dart';
 import 'native.dart';
 import 'session.dart';
 
+/// Runs [body] with the CALLING OS thread in the OS background mode (low CPU,
+/// and where the OS supports it disk and memory priority), set natively by
+/// the engine: for the code that reads the corpus and feeds an [IndexWriter].
+/// [body] must be synchronous (an `await` may resume on another thread).
+/// Nesting-safe; commits and the FM sidecar build leave the mode for their
+/// duration by themselves.
+T runInBackgroundPriority<T>(T Function() body) {
+  final n = SeforimNative.instance;
+  n.threadBackgroundBegin();
+  try {
+    return body();
+  } finally {
+    n.threadBackgroundEnd();
+  }
+}
+
 /// Cancels a search (Otzaria's cancellation token). One token per search;
 /// it cannot be reset. [cancel] returns at once; the search notices at its
 /// next check. From another isolate, pass [address] and call
@@ -118,12 +134,20 @@ final class SeforimIndex implements Finalizable {
   /// True when a sidecar matching the current single segment exists.
   bool get hasFmSidecar => _n.indexHasFmSidecar(handle) == 1;
 
-  /// Starts a writer. [heapBytes] is the total indexing memory (≥15 MB per
-  /// thread); 0 (the default) gives 50 MB per thread, so [threads] (0 = cores,
-  /// at most 4) are always granted.
-  /// With [lowPriority], tantivy's indexing and merge threads run below
-  /// normal OS priority (a background build that keeps the machine usable).
+  /// Starts a writer. With no arguments (the default): the AUTO mode
+  /// (issue #19), one thread per core in the OS background mode and a memory
+  /// budget that follows the machine (large while idle; the minimum under
+  /// memory pressure or while the user is active, the workers flushing their
+  /// segments to free the buffer).
+  ///
+  /// FIXED resources: [heapBytes] is the total indexing memory (≥15 MB per
+  /// thread); 0 gives 50 MB per thread, so [threads] (0 = cores, at most 4)
+  /// are always granted. With [lowPriority], the indexing threads and the
+  /// background merges run in the OS background mode.
   IndexWriter openWriter({int heapBytes = 0, int threads = 0, bool lowPriority = false}) {
+    if (heapBytes <= 0 && threads <= 0 && !lowPriority) {
+      return IndexWriter._(this, _n.checkPtr(_n.writerOpenEx(handle, 0, 0, 2 /* SE_WRITER_AUTO */)));
+    }
     if (threads <= 0) threads = Platform.numberOfProcessors.clamp(1, 4);
     if (heapBytes <= 0) heapBytes = threads * 50000000;
     return IndexWriter._(
@@ -180,6 +204,10 @@ final class IndexWriter implements Finalizable {
     if (_handle == nullptr) throw StateError('IndexWriter is closed');
     return _handle;
   }
+
+  /// The current memory budget per indexing thread, in bytes (it moves in
+  /// the auto mode).
+  int get memoryBudgetPerThread => _n.writerMemoryBudget(_h);
 
   /// Queues a line. Not visible to searches until [commit].
   void add(LineDocument line) {

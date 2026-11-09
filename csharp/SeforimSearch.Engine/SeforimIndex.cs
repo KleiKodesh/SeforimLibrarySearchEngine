@@ -108,13 +108,22 @@ namespace SeforimSearch.Engine
         /// <summary>True when a sidecar matching the current single segment exists.</summary>
         public bool HasFmSidecar => NativeMethods.se_index_has_fm_sidecar(_handle) == 1;
 
-        /// <summary>Starts a writer. <paramref name="heapBytes"/> is the total
-        /// indexing memory (at least 15 MB per thread; threads are capped by it);
-        /// 0 (the default) gives 50 MB per thread, so <paramref name="threads"/>
-        /// (0 = cores, at most 4) are always granted.
-        /// With <paramref name="lowPriority"/>, the indexing and merge threads run below
-        /// normal OS priority (a background build that keeps the machine usable).</summary>
-        public SeforimIndexWriter OpenWriter(long heapBytes = 0, int threads = 0, bool lowPriority = false)
+        /// <summary>Starts a writer in the AUTO mode (the default, issue #19): one thread per
+        /// core in the OS background mode, and a memory budget that follows the machine
+        /// (large while idle; the minimum under memory pressure or while the user is active,
+        /// the workers flushing their segments to free the buffer).</summary>
+        public SeforimIndexWriter OpenWriter()
+        {
+            return new SeforimIndexWriter(Interop.Check(NativeMethods.se_writer_open_ex(
+                _handle, UIntPtr.Zero, UIntPtr.Zero, NativeMethods.SE_WRITER_AUTO)));
+        }
+
+        /// <summary>Starts a writer with FIXED resources. <paramref name="heapBytes"/> is the
+        /// total indexing memory (at least 15 MB per thread; threads are capped by it);
+        /// 0 gives 50 MB per thread, so <paramref name="threads"/> (0 = cores, at most 4)
+        /// are always granted. With <paramref name="lowPriority"/>, the indexing threads and
+        /// the background merges run in the OS background mode.</summary>
+        public SeforimIndexWriter OpenWriter(long heapBytes, int threads = 0, bool lowPriority = false)
         {
             if (threads <= 0) threads = Math.Min(Environment.ProcessorCount, 4);
             if (heapBytes <= 0) heapBytes = threads * 50_000_000L;
@@ -183,6 +192,10 @@ namespace SeforimSearch.Engine
         private readonly WriterHandle _handle;
 
         internal SeforimIndexWriter(WriterHandle handle) { _handle = handle; }
+
+        /// <summary>The current memory budget per indexing thread, in bytes (it moves in
+        /// the auto mode).</summary>
+        public long MemoryBudgetPerThread => (long)NativeMethods.se_writer_memory_budget(_handle);
 
         /// <summary>Queues a line. Not visible to searches until <see cref="Commit"/>.</summary>
         public void Add(in LineDocument line)

@@ -495,7 +495,7 @@ namespace FtsLib.Fts5
         /// <param name="indexOptions">Applies to a from-scratch build only.</param>
         public void BuildLines(Action<long, long>? onProgress = null, CancellationToken ct = default,
                                IndexOptions? indexOptions = null, int linesPerCommit = 20000,
-                               long heapBytes = 200_000_000, long maxLines = 0, Action<string, TimeSpan>? onStage = null)
+                               long heapBytes = 0, long maxLines = 0, Action<string, TimeSpan>? onStage = null)
         {
             _onStage = onStage;
             string fingerprint = SeforimSearch.Demo.SeforimDb.SeforimDbContentFingerprint.Compute(_seforimDbPath, IndexFormatVersion);
@@ -545,7 +545,12 @@ namespace FtsLib.Fts5
         private void RunBuild(BuildState state, bool resume, Action<long, long>? onProgress, CancellationToken ct,
                               int linesPerCommit, long heapBytes, long maxLines, System.Diagnostics.Stopwatch stage)
         {
-            using var writer = Engine().OpenWriter(heapBytes);
+            // heapBytes 0 = the engine's auto mode (issue #19): threads per core in the OS
+            // background mode, memory budget following the machine's load
+            using var writer = heapBytes > 0 ? Engine().OpenWriter(heapBytes) : Engine().OpenWriter();
+            // this feeding thread (corpus reads) runs in the OS background mode too; the
+            // engine leaves it for commits, the final merge and the FM sidecar by itself
+            using var background = BackgroundPriority.Enter();
             using var corpus = _openCorpus();
 
             // Resume re-reads the feed from LinesDone-1: its first line must be the last
@@ -607,9 +612,9 @@ namespace FtsLib.Fts5
         /// otherwise) and builds the FM-index sidecar over it (FtsLib's
         /// <c>BuildFmSidecar</c>; skipped when it already matches). Call after
         /// updates when the index is mostly read.</summary>
-        public void MergeSegments(long heapBytes = 200_000_000)
+        public void MergeSegments(long heapBytes = 0)
         {
-            using (var writer = Engine().OpenWriter(heapBytes))
+            using (var writer = heapBytes > 0 ? Engine().OpenWriter(heapBytes) : Engine().OpenWriter())
                 writer.MergeAndClose();
             if (!Engine().HasFmSidecar) Engine().BuildFmSidecar();
         }

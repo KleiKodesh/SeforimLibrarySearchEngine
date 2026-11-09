@@ -39,6 +39,7 @@ namespace SeforimSearch.Demo
                 ("end to end: build tantivy16 + search in catalog order", EndToEnd),
                 ("stream: chunks, resume, Restarted, cancellation (Core's StreamSearch)", Stream),
                 ("async engine API (issue #16): batches = sync hits, cancel, abandon, errors", AsyncEngine),
+                ("async open (issue #34): OpenAsync opens and searches, cancelled before open", AsyncOpen),
                 ("FM sidecar auto-repair (issue #28): background build, switchable", FmAutoRepair),
                 ("second writer (issue #31): lock error on the same and on another handle", SecondWriter),
                 ("load mode (issue #31): concurrent searches while a writer commits", LoadMode),
@@ -66,6 +67,30 @@ namespace SeforimSearch.Demo
             if (!args.Contains("--keep"))
                 try { Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
             return failed == 0 ? 0 : 1;
+        }
+
+        private static void AsyncOpen(string db, string dir)
+        {
+            string d = Path.Combine(dir, "async-open");
+            using (var created = SeforimIndex.CreateAsync(d).GetAwaiter().GetResult())
+            {
+                var w = created.OpenWriter(30_000_000, 1);
+                w.Add(new LineDocument { LineId = 1, Position = 0, BookId = 1, Text = "alpha beta" });
+                w.Add(new LineDocument { LineId = 2, Position = 1, BookId = 1, Text = "gamma beta" });
+                w.MergeAndClose();
+            }
+            using (var index = SeforimIndex.OpenAsync(d).GetAwaiter().GetResult())
+            using (var s = index.Search(new SearchOptions("beta")))
+                Check(s.HitCount == 2, "OpenAsync then search: " + s.HitCount);
+            using (var cts = new CancellationTokenSource())
+            {
+                cts.Cancel();
+                var task = SeforimIndex.OpenAsync(d, cts.Token);
+                Check(task.IsCanceled, "a token cancelled before open gives a cancelled task");
+                bool threw = false;
+                try { task.GetAwaiter().GetResult(); } catch (OperationCanceledException) { threw = true; }
+                Check(threw, "awaiting it throws OperationCanceledException");
+            }
         }
 
         private static void FmAutoRepair(string db, string dir)

@@ -884,6 +884,13 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   `PairsAsync`, `CountBatchAsync` / `PairsAsync`, `GetCountsAsync`; the
   `CancellationToken` drives the native cancel. Sync APIs unchanged; the Dart
   demo's result page runs through `SearchWorker`.
+  Opening off the UI thread (issue #34): C# `SeforimIndex.OpenAsync` /
+  `CreateAsync` (thread pool, a token cancelled before the open gives a cancelled
+  task); in Dart `SearchWorker` already opens its index inside the worker isolate.
+  No FM preload: the FM sidecar is memory-mapped (`fm_sidecar.rs`, as FtsLib's
+  `FmIndex` uses a `MemoryMappedFile`), so opening keeps only the mapping and the
+  OS pages it in on use; a preload would gain almost nothing. Cold start / first
+  frame are not timed yet (needs a full-DB run, on request).
 - **Cancellation and streaming** (Otzaria's cancel token / streamed pages):
   a `CancelToken` (Rust `LineIndex::search_cancellable` /
   `search_options_cancellable`; C ABI `se_cancel_token_new` / `_cancel` /

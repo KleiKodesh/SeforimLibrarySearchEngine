@@ -72,6 +72,25 @@ namespace SeforimSearch.Engine
                 return new SeforimIndex(Interop.Check(NativeMethods.se_index_open(d, (UIntPtr)dir.Length)));
         }
 
+        /// <summary><see cref="Open(string)"/> on the thread pool (issue #34): opening reads the
+        /// segment metadata and maps the FM sidecar, so a UI thread should not wait on it. A token
+        /// cancelled before the open starts returns a cancelled task; a running open is not interrupted.</summary>
+        public static System.Threading.Tasks.Task<SeforimIndex> OpenAsync(string directory, CancellationToken ct = default)
+        {
+            if (directory == null) throw new ArgumentNullException(nameof(directory));
+            if (ct.IsCancellationRequested) return System.Threading.Tasks.Task.FromCanceled<SeforimIndex>(ct);
+            return System.Threading.Tasks.Task.Run(() => Open(directory), ct);
+        }
+
+        /// <summary><see cref="Create(string, IndexOptions)"/> on the thread pool (issue #34).</summary>
+        public static System.Threading.Tasks.Task<SeforimIndex> CreateAsync(string directory, IndexOptions? options = null,
+                                                                            CancellationToken ct = default)
+        {
+            if (directory == null) throw new ArgumentNullException(nameof(directory));
+            if (ct.IsCancellationRequested) return System.Threading.Tasks.Task.FromCanceled<SeforimIndex>(ct);
+            return System.Threading.Tasks.Task.Run(() => Create(directory, options), ct);
+        }
+
         /// <summary>True when <paramref name="directory"/> holds an index.</summary>
         public static bool Exists(string directory)
         {

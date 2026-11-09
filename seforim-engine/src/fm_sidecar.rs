@@ -48,16 +48,76 @@ pub fn build(searcher: &tantivy::Searcher, text: Field, dir: &Path) -> Result<bo
 }
 
 /// Removes the temp files of sidecar builds that never finished (a process
-/// stopped mid-build): `<segment>.fmi.tmp`. Best effort.
+/// stopped mid-build): `<segment>.fmi.<pid>-<n>.tmp` (and the older
+/// `<segment>.fmi.tmp`). A build holds an OS lock on its temp file while it
+/// writes it, so a file that is locked belongs to a live build (in this or
+/// another process) and is left alone. Best effort.
 pub(crate) fn remove_leftover_temps(dir: &Path) {
+    use fs4::fs_std::FileExt;
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
-        let leftover = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".fmi.tmp"));
-        if leftover && path.is_file() {
-            let _ = std::fs::remove_file(path);
+        let temp = path.file_name().and_then(|n| n.to_str()).is_some_and(is_temp_name);
+        if !temp || !path.is_file() {
+            continue;
         }
+        // a file just created may not be locked yet (create, then lock):
+        // a temp younger than a few seconds is never a leftover
+        let young = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().map_or(true, |age| age < LEFTOVER_MIN_AGE));
+        if young {
+            continue;
+        }
+        let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&path) else { continue };
+        // a live build holds the lock: skip its file
+        if !matches!(FileExt::try_lock_exclusive(&file), Ok(true)) {
+            continue;
+        }
+        let _ = FileExt::unlock(&file);
+        drop(file);
+        let _ = std::fs::remove_file(path);
     }
+}
+
+/// A temp file younger than this is never removed as a leftover. Locks are
+/// per open file on Windows and Unix `flock`; on NFS (emulated with
+/// per-process `fcntl` locks) a same-process live temp is protected by this
+/// age only.
+const LEFTOVER_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// True for the name of a sidecar build's temp file.
+fn is_temp_name(name: &str) -> bool {
+    name.contains(".fmi.") && name.ends_with(".tmp")
+}
+
+/// A temp name no other build uses: the process id and a per-process counter.
+fn temp_path(path: &Path) -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    path.with_extension(format!("fmi.{}-{n}.tmp", std::process::id()))
+}
+
+/// Writes `bytes` to a fresh temp file next to `path` under an exclusive OS
+/// lock (so no cleanup removes it meanwhile) and moves it over `path`.
+fn publish(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use fs4::fs_std::FileExt;
+    use std::io::Write;
+    let tmp = temp_path(path);
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        FileExt::lock_exclusive(&file)?;
+        file.write_all(bytes)?;
+        file.sync_data()?;
+        // still locked while it takes the sidecar's name
+        replace_file(&tmp, path)?;
+        let _ = FileExt::unlock(&file);
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// [`build`] that stops once `cancel` is set (Err, nothing written).
@@ -99,11 +159,7 @@ pub(crate) fn build_cancellable(
     remove_leftover_temps(dir);
     // publish atomically: the new file is complete before it takes the
     // sidecar's name, so a search sees the old file (or none), never half
-    let tmp = path.with_extension("fmi.tmp");
-    if let Err(e) = std::fs::write(&tmp, bytes).and_then(|_| replace_file(&tmp, &path)) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
+    publish(&path, &bytes)?;
     // then the sidecars of older segments go
     for entry in std::fs::read_dir(dir)? {
         let other = entry?.path();

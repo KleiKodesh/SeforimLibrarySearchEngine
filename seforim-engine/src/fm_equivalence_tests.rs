@@ -463,16 +463,17 @@ fn a_failed_rebuild_is_recorded_and_not_retried() {
     let lines = corpus();
     let (dir, index, path) = broken_index(&lines);
     std::fs::remove_file(&path).unwrap();
-    // the temp file's name taken by a directory: the build cannot write
+    // the sidecar's name taken by a directory: the build cannot publish
     // (as a read-only index directory)
-    let blocker = path.with_extension("fmi.tmp");
+    let blocker = path.clone();
     std::fs::create_dir(&blocker).unwrap();
     let o = SearchOptions { query: format!("*{}*", s(&[SHIN, LAMED])), ..Default::default() };
     let expected = run(&index, &lines, &o, true);
     assert_eq!(run(&index, &lines, &o, false), expected);
     wait_repair(&index);
     let problem = index.fm_sidecar_problem().expect("the failure");
-    assert!(problem.starts_with("FM sidecar rebuild failed: "), "{problem}");
+    assert!(problem.contains("FM sidecar rebuild failed: "), "{problem}");
+    assert!(temps(dir.path()).is_empty(), "a failed build left its temp file");
     // more searches: same results, no new attempt
     for _ in 0..5 {
         assert_eq!(run(&index, &lines, &o, false), expected);
@@ -552,14 +553,21 @@ fn a_leftover_temp_file_is_removed_on_open_and_before_a_build() {
     let (dir, index) = index_over(&lines, false);
     let seg = index.reader.searcher().segment_readers()[0].segment_id();
     let tmp = crate::fm_sidecar::sidecar_path(dir.path(), seg).with_extension("fmi.tmp");
-    let other = dir.path().join("0123.fmi.tmp");
+    let other = dir.path().join("0123.fmi.99999-3.tmp");
     // an interrupted build left these behind
     std::fs::write(&tmp, b"half").unwrap();
     std::fs::write(&other, b"half").unwrap();
+    let young = dir.path().join("0123.fmi.99999-4.tmp");
+    std::fs::write(&young, b"just created").unwrap();
+    age(&tmp);
+    age(&other);
     assert!(index.build_fm_sidecar().unwrap());
     assert!(!tmp.exists() && !other.exists());
+    // a temp just created (maybe not locked yet) is never a leftover
+    assert!(young.exists());
     drop(index);
     std::fs::write(&other, b"half").unwrap();
+    age(&other);
     let _index = LineIndex::open(dir.path()).unwrap();
     assert!(!other.exists(), "open must remove a leftover temp file");
 }
@@ -583,7 +591,44 @@ fn dropping_the_index_stops_a_background_rebuild_promptly() {
     assert!(!repair.running());
     // nothing written: the broken file is untouched, no temp left
     assert_eq!(std::fs::read(&path).unwrap(), vec![7u8; 100]);
-    assert!(!path.with_extension("fmi.tmp").exists());
+    assert!(temps(path.parent().unwrap()).is_empty());
+}
+
+/// Makes `path` a minute old (older than any live build's fresh temp).
+fn age(path: &std::path::Path) {
+    let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60)).unwrap();
+}
+
+/// The sidecar temp files in `dir`.
+fn temps(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().unwrap().to_str().unwrap().ends_with(".tmp"))
+        .collect()
+}
+
+#[test]
+fn a_temp_file_of_a_live_build_is_never_removed() {
+    use fs4::fs_std::FileExt;
+    let lines = corpus();
+    let (dir, index) = index_over(&lines, false);
+    // another process's build in progress: its temp file is locked
+    let live = dir.path().join("0123.fmi.424242-0.tmp");
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&live).unwrap();
+    FileExt::lock_exclusive(&file).unwrap();
+    age(&live);
+    assert!(index.build_fm_sidecar().unwrap());
+    drop(index);
+    let index = LineIndex::open(dir.path()).unwrap();
+    assert!(live.exists(), "a locked temp file was removed");
+    // the build ended without finishing (lock released): it goes
+    FileExt::unlock(&file).unwrap();
+    drop(file);
+    drop(index);
+    let _index = LineIndex::open(dir.path()).unwrap();
+    assert!(!live.exists());
 }
 
 #[test]

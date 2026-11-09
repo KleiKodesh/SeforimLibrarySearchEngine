@@ -1098,9 +1098,12 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     `fmAutoRepair` / `fmSidecarRebuilding`; ABI 7). The rebuild thread is
     never joined: dropping the index sets a cancel flag the build checks
     between stages, so it stops promptly and never delays a drop or the
-    process exit. A temp file left by a build that never finished
-    (`*.fmi.tmp`, the app closed mid-build) is removed when the index is
-    opened and before every build. A search
+    process exit. Each build writes a temp file of its own
+    (`<segment>.fmi.<pid>-<n>.tmp`) under an exclusive OS lock until it is
+    published; a temp file left by a build that never finished (the app
+    closed mid-build) is removed when the index is opened and before every
+    build, while a locked one (a live build, in any process) or one younger than
+    10 s (created, not locked yet) is left alone. A search
     cancelled during an FM expansion stops with `Cancelled`. The sidecar
     is used whenever it is present (no per-search switch).
   - Measured on the full index (1,755,598 terms): built in 2.4 s, 41 MB;

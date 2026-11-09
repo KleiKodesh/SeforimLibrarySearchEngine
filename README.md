@@ -1385,10 +1385,17 @@ stay available):
   drags.
 - **Memory, event based** (`seforim-engine/src/resources.rs`): one small
   watcher thread per auto writer blocks on the OS signal (about one wakeup
-  per second) and moves the writer's live budget: under memory pressure or
-  while the user is active, the minimum (15 MB per thread), so every worker
-  flushes its segment at its next batch and frees its buffer; idle again, a
-  quarter of the free RAM shared by the threads (at most 512 MB per thread).
+  per second) and moves the writer's live budget in three tiers: under memory
+  pressure the minimum (15 MB per thread); while the user is active (no
+  pressure) a moderate 64 MB per thread, capped so all threads take at most an
+  eighth of the free RAM (never below 15 MB); idle, a quarter of the free RAM
+  shared by the threads (at most 512 MB per thread). A worker above a lowered
+  budget flushes its segment at its next batch and frees its buffer. The
+  moderate value is the knee measured with `writer_resources_bench` (300k
+  synthetic lines, 8 threads): 15 MB/thread 0.7-2.2 min and 67-85 segments,
+  32 MB 0.4-0.6 min, 64 MB 0.1-0.5 min and 8 segments, 128 MB 0.1-0.2 min;
+  peak process memory 160 MB at 15 MB/thread, 320-380 MB at 64 MB (busy machine,
+  wide spread).
   The writer reads one atomic per batch, never per line.
   - Windows: `CreateMemoryResourceNotification(LowMemoryResourceNotification)` +
     `WaitForSingleObject` (1 s), `GetLastInputInfo` (input in the last 10 s =

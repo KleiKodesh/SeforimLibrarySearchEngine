@@ -7,11 +7,13 @@
 //!   so that every thread's minimum buffer fits in a quarter of the free RAM.
 //! - Memory: one small watcher thread per auto writer waits on OS signals and
 //!   sets the writer's live memory budget (`tantivy::indexer::MemoryBudget`).
-//!   Under memory pressure, or while the user is active, the budget drops to
-//!   the minimum (15 MB per thread): every worker above it flushes its segment
-//!   at its next batch, which frees its buffer. When the machine is idle again
-//!   the budget grows back to a large value derived from the free RAM. The
-//!   writer itself only reads one atomic per batch.
+//!   Three tiers: under memory pressure the budget drops to the minimum
+//!   (15 MB per thread); while the user is active (and no pressure) to a
+//!   moderate budget (see [`active_budget_per_thread`]); a worker above the
+//!   new budget flushes its segment at its next batch, which frees its
+//!   buffer. When the machine is idle again the budget grows back to a large
+//!   value derived from the free RAM. The writer itself only reads one atomic
+//!   per batch.
 //!
 //! OS signals (each checked against its official documentation):
 //! - Windows: `CreateMemoryResourceNotification(LowMemoryResourceNotification)`, waited on
@@ -44,6 +46,10 @@ pub use tantivy::indexer::thread_priority::{begin_background, end_background};
 pub const MIN_BUDGET_PER_THREAD: usize = 15_000_000;
 /// The largest buffer per thread the auto mode grants.
 pub const MAX_BUDGET_PER_THREAD: usize = 512_000_000;
+/// The moderate budget per thread while the user is active (issue #19
+/// follow-up): measured with `writer_resources_bench`, see
+/// [`active_budget_per_thread`].
+pub const ACTIVE_BUDGET_PER_THREAD: usize = 64_000_000;
 /// Budget per thread when the free RAM is unknown.
 const UNKNOWN_RAM_BUDGET_PER_THREAD: usize = 64_000_000;
 /// The user counts as active for this long after the last input.
@@ -59,7 +65,7 @@ const PRESSURE_FOR: Duration = Duration::from_secs(10);
 pub enum Load {
     /// Nobody needs the machine: large budget.
     Idle = 0,
-    /// The user is working: minimum budget.
+    /// The user is working: moderate budget.
     Active = 1,
     /// The system is low on memory: minimum budget.
     Pressure = 2,
@@ -99,6 +105,17 @@ pub fn idle_budget_per_thread(threads: usize) -> usize {
             .clamp(MIN_BUDGET_PER_THREAD, MAX_BUDGET_PER_THREAD),
         None => UNKNOWN_RAM_BUDGET_PER_THREAD,
     }
+}
+
+/// The moderate budget per thread while the user is active: 64 MB, capped so
+/// the threads together take at most an eighth of the free RAM, within
+/// [15 MB, 64 MB].
+pub fn active_budget_per_thread(threads: usize) -> usize {
+    let cap = match available_memory() {
+        Some(free) => (free / 8) as usize / threads.max(1),
+        None => ACTIVE_BUDGET_PER_THREAD,
+    };
+    cap.clamp(MIN_BUDGET_PER_THREAD, ACTIVE_BUDGET_PER_THREAD)
 }
 
 /// True when this OS has a watcher (else the auto budget stays as opened).
@@ -158,7 +175,8 @@ impl Drop for Watcher {
 fn apply(budget: &MemoryBudget, load: Load, threads: usize) {
     match load {
         Load::Idle => budget.set_per_thread(idle_budget_per_thread(threads)),
-        Load::Active | Load::Pressure => budget.set_per_thread(MIN_BUDGET_PER_THREAD),
+        Load::Active => budget.set_per_thread(active_budget_per_thread(threads)),
+        Load::Pressure => budget.set_per_thread(MIN_BUDGET_PER_THREAD),
     };
 }
 
@@ -378,5 +396,7 @@ mod tests {
         assert!(threads >= 1);
         let idle = idle_budget_per_thread(threads);
         assert!((MIN_BUDGET_PER_THREAD..=MAX_BUDGET_PER_THREAD).contains(&idle));
+        let active = active_budget_per_thread(threads);
+        assert!((MIN_BUDGET_PER_THREAD..=ACTIVE_BUDGET_PER_THREAD).contains(&active));
     }
 }

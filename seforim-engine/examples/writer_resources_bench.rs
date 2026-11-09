@@ -9,6 +9,12 @@
 //! - auto-idle: `writer_auto` with the load held at Idle (watcher thread running)
 //! - auto: `writer_auto` (watcher thread running, OS signals live)
 //! - auto-pressure: `writer_auto`, a simulated memory-pressure signal after half the lines
+//! - auto-active: `writer_auto`, the user active (simulated) from the start: moderate tier
+//! - active-<N>MB: the auto mode's threads and background priority at a fixed N MB per
+//!   thread (15 = the old active tier, the minimum); used to choose the moderate budget
+//!
+//! A third argument runs only the modes whose names contain it (one mode per process
+//! lets a caller read the process's peak memory).
 //!
 //! The watcher's overhead = auto-idle vs fixed-auto-config.
 
@@ -73,10 +79,17 @@ fn run(mode: &str, texts: &[String]) -> Run {
         "fixed-auto-config" => index
             .writer_with(resources::idle_budget_per_thread(threads) * threads, threads, true)
             .unwrap(),
+        m if m.starts_with("active-") => {
+            let mb: usize = m["active-".len()..m.len() - 2].parse().unwrap();
+            index.writer_with(mb * 1_000_000 * threads, threads, true).unwrap()
+        }
         _ => index.writer_auto().unwrap(),
     };
     if mode == "auto-idle" {
         w.simulate_load(Some(Load::Idle));
+    }
+    if mode == "auto-active" {
+        w.simulate_load(Some(Load::Active));
     }
     let half = texts.len() / 2;
     feed(&mut w, texts, 0, half);
@@ -105,7 +118,22 @@ fn main() {
         resources::available_memory().map_or(0, |b| b / 1_000_000),
         resources::HAS_WATCHER
     );
-    let modes = ["fixed-200MB", "fixed-auto-config", "auto-idle", "auto", "auto-pressure"];
+    let filter = args.get(3).cloned().unwrap_or_default();
+    let modes: Vec<&str> = [
+        "fixed-200MB",
+        "fixed-auto-config",
+        "auto-idle",
+        "auto",
+        "auto-pressure",
+        "auto-active",
+        "active-15MB",
+        "active-32MB",
+        "active-64MB",
+        "active-128MB",
+    ]
+    .into_iter()
+    .filter(|m| m.contains(filter.as_str()))
+    .collect();
     let mut all: Vec<Vec<Run>> = modes.iter().map(|_| Vec::new()).collect();
     for round in 0..rounds {
         for (m, mode) in modes.iter().enumerate() {

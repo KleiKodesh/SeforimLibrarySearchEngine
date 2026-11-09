@@ -329,3 +329,160 @@ fn cancel_stops_an_fm_expansion() {
     assert!(matches!(index.search_options_cancellable(&o, Some(token)), Err(Error::Cancelled)));
 }
 
+
+/// Waits for the index's background sidecar rebuild to finish.
+fn wait_repair(index: &LineIndex) {
+    let start = std::time::Instant::now();
+    while index.fm_sidecar_rebuilding() {
+        assert!(start.elapsed() < std::time::Duration::from_secs(60), "the rebuild did not finish");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn starts(index: &LineIndex) -> usize {
+    index.fm_repair.test_only_starts.load(Ordering::Relaxed)
+}
+
+/// A sidecar file for `dir`'s index broken on disk, the index re-opened
+/// with the automatic rebuild on.
+fn broken_index(lines: &[LineDoc]) -> (tempfile::TempDir, LineIndex, std::path::PathBuf) {
+    let (dir, index) = index_over(lines, false);
+    assert!(index.build_fm_sidecar().unwrap());
+    let path = fmi_path(dir.path());
+    drop(index);
+    std::fs::write(&path, vec![7u8; 100]).unwrap();
+    let index = LineIndex::open(dir.path()).unwrap();
+    index.set_fm_auto_repair(true);
+    (dir, index, path)
+}
+
+#[test]
+fn the_engine_mends_a_broken_sidecar_in_the_background() {
+    let lines = corpus();
+    let (_dir, index, _path) = broken_index(&lines);
+    let o = SearchOptions { query: format!("*{}*", s(&[SHIN, LAMED])), ..Default::default() };
+    let expected = run(&index, &lines, &o, true);
+    index.fm_repair.test_only_delay_ms.store(3000, Ordering::Relaxed);
+    // the search that meets the broken file walks (same results, notice)
+    // and starts the rebuild without waiting for it
+    let begun = std::time::Instant::now();
+    assert_eq!(run(&index, &lines, &o, false), expected);
+    assert!(begun.elapsed() < std::time::Duration::from_millis(3000), "the search waited for the rebuild");
+    assert!(index.fm_sidecar_rebuilding());
+    let problem = index.fm_sidecar_problem().expect("rebuilding");
+    assert!(problem.starts_with("rebuilding: ") && problem.contains("bad magic"), "{problem}");
+    // searches during the rebuild: still the walk, no second build
+    let r = index.search_options(&o).unwrap();
+    assert_eq!(r.notices(), [NOTICE_FM_SIDECAR_UNUSABLE.to_string()]);
+    wait_repair(&index);
+    assert_eq!(starts(&index), 1);
+    // the next search uses the new file
+    assert!(index.has_fm_sidecar());
+    assert_eq!(index.fm_sidecar_problem(), None);
+    assert!(index.search_options(&o).unwrap().notices().is_empty());
+    assert_eq!(run(&index, &lines, &o, false), expected);
+    assert_eq!(starts(&index), 1);
+}
+
+#[test]
+fn a_missing_sidecar_is_built_in_the_background() {
+    let lines = corpus();
+    let (dir, index) = index_over(&lines, false);
+    index.set_fm_auto_repair(true);
+    let o = SearchOptions { query: format!("*{}*", s(&[SHIN, LAMED])), ..Default::default() };
+    let expected = run(&index, &lines, &o, true);
+    assert_eq!(run(&index, &lines, &o, false), expected);
+    wait_repair(&index);
+    assert_eq!(starts(&index), 1);
+    assert!(index.has_fm_sidecar());
+    assert!(fmi_path(dir.path()).exists());
+    assert_eq!(run(&index, &lines, &o, false), expected);
+}
+
+#[test]
+fn a_failed_rebuild_is_recorded_and_not_retried() {
+    let lines = corpus();
+    let (dir, index, path) = broken_index(&lines);
+    std::fs::remove_file(&path).unwrap();
+    // the temp file's name taken by a directory: the build cannot write
+    // (as a read-only index directory)
+    let blocker = path.with_extension("fmi.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    let o = SearchOptions { query: format!("*{}*", s(&[SHIN, LAMED])), ..Default::default() };
+    let expected = run(&index, &lines, &o, true);
+    assert_eq!(run(&index, &lines, &o, false), expected);
+    wait_repair(&index);
+    let problem = index.fm_sidecar_problem().expect("the failure");
+    assert!(problem.starts_with("FM sidecar rebuild failed: "), "{problem}");
+    // more searches: same results, no new attempt
+    for _ in 0..5 {
+        assert_eq!(run(&index, &lines, &o, false), expected);
+        assert!(!index.fm_sidecar_rebuilding());
+    }
+    assert_eq!(starts(&index), 1);
+    assert_eq!(index.fm_sidecar_problem().as_deref(), Some(problem.as_str()));
+    // an explicit build is the retry: it reports the same failure...
+    assert!(index.build_fm_sidecar().is_err());
+    // ...and once the cause is gone it builds
+    std::fs::remove_dir(&blocker).unwrap();
+    assert!(index.build_fm_sidecar().unwrap());
+    assert!(index.has_fm_sidecar());
+    assert_eq!(index.fm_sidecar_problem(), None);
+    assert_eq!(run(&index, &lines, &o, false), expected);
+    assert_eq!(starts(&index), 1);
+    drop(dir);
+}
+
+#[test]
+fn no_rebuild_on_several_segments_or_while_a_writer_is_open() {
+    let lines = corpus();
+    let (_dir, index, _path) = broken_index(&lines);
+    let o = SearchOptions { query: format!("*{}*", s(&[SHIN, LAMED])), ..Default::default() };
+    // an open writer holds it off
+    let mut w = index.writer(60_000_000, 1).unwrap();
+    index.search_options(&o).unwrap();
+    assert!(!index.fm_sidecar_rebuilding());
+    assert_eq!(starts(&index), 0);
+    // a second segment: the index does not qualify
+    w.add(&line(1_000_000, &s(&[ALEF, BET, SHIN, LAMED]))).unwrap();
+    w.commit(None).unwrap();
+    drop(w);
+    assert_eq!(index.reader.searcher().segment_readers().len(), 2);
+    index.search_options(&o).unwrap();
+    assert!(!index.fm_sidecar_rebuilding());
+    assert_eq!(starts(&index), 0);
+    // merged to one segment: the next search starts it
+    index.writer(60_000_000, 1).unwrap().merge_all().unwrap();
+    index.search_options(&o).unwrap();
+    wait_repair(&index);
+    assert_eq!(starts(&index), 1);
+    assert!(index.has_fm_sidecar());
+}
+
+#[test]
+fn concurrent_searches_during_a_rebuild_stay_correct() {
+    let lines = corpus();
+    let (_dir, index, _path) = broken_index(&lines);
+    let queries = [format!("*{}*", s(&[SHIN, LAMED])), format!("{}~1", s(&[ALEF, BET, SHIN, LAMED, ALEF]))];
+    let opts: Vec<SearchOptions> =
+        queries.iter().map(|q| SearchOptions { query: q.clone(), ..Default::default() }).collect();
+    let expected: Vec<Outcome> = opts.iter().map(|o| run(&index, &lines, o, true)).collect();
+    index.fm_repair.test_only_delay_ms.store(200, Ordering::Relaxed);
+    std::thread::scope(|scope| {
+        for t in 0..4 {
+            let (index, lines, opts, expected) = (&index, &lines, &opts, &expected);
+            scope.spawn(move || {
+                for i in 0..20 {
+                    let k = (t + i) % opts.len();
+                    assert_eq!(&run(index, lines, &opts[k], false), &expected[k]);
+                }
+            });
+        }
+    });
+    wait_repair(&index);
+    assert_eq!(starts(&index), 1);
+    assert!(index.has_fm_sidecar());
+    for (o, want) in opts.iter().zip(&expected) {
+        assert_eq!(&run(&index, &lines, o, false), want);
+    }
+}

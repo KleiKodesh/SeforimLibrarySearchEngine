@@ -109,8 +109,9 @@ namespace SeforimSearch.Engine
         public bool HasFmSidecar => NativeMethods.se_index_has_fm_sidecar(_handle) == 1;
 
         /// <summary>Why the FM sidecar file cannot be used (the reason behind the search
-        /// notice <see cref="SearchInfo.FmSidecarUnusable"/>), or null when it is usable
-        /// or absent. Rebuild it with <see cref="BuildFmSidecar"/>.</summary>
+        /// notice <see cref="SearchInfo.FmSidecarUnusable"/>), "rebuilding: ..." while the engine's
+        /// background rebuild runs, "FM sidecar rebuild failed: ..." after it failed, or null
+        /// when it is usable or absent with nothing tried. Rebuild it with <see cref="BuildFmSidecar"/>.</summary>
         public string? FmSidecarProblem
         {
             get

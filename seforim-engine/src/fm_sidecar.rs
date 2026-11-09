@@ -5,6 +5,7 @@
 //! loaded lazily and memory-mapped on the first leading-`*` or fuzzy search.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tantivy::schema::Field;
@@ -67,16 +68,233 @@ pub fn build(searcher: &tantivy::Searcher, text: Field, dir: &Path) -> Result<bo
     let bytes = fm_index::build(forms.iter().map(|s| s.as_str()))
         .map_err(|e| Error::Unsupported(format!("FM sidecar not built: {e}")))?;
 
+    // publish atomically: the new file is complete before it takes the
+    // sidecar's name, so a search sees the old file (or none), never half
+    let tmp = path.with_extension("fmi.tmp");
+    if let Err(e) = std::fs::write(&tmp, bytes).and_then(|_| replace_file(&tmp, &path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    // then the sidecars of older segments go
     for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|e| e == "fmi") {
-            let _ = std::fs::remove_file(path);
+        let other = entry?.path();
+        if other != path && other.extension().is_some_and(|e| e == "fmi") {
+            let _ = std::fs::remove_file(other);
         }
     }
-    let tmp = path.with_extension("fmi.tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(tmp, path)?;
     Ok(true)
+}
+
+/// Moves `from` over `to` (the rule of tantivy's `MmapDirectory` atomic
+/// write, issue #7): `fs::rename` replaces the target; on Windows an
+/// access-denied or sharing-violation error (a reader or a virus scan holding
+/// the file for a moment) is retried with growing delays for about 500 ms.
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        const DELAYS_MS: [u64; 7] = [5, 10, 20, 40, 75, 150, 200];
+        let mut attempt = 0;
+        loop {
+            match std::fs::rename(from, to) {
+                Ok(()) => return Ok(()),
+                Err(err) if matches!(err.raw_os_error(), Some(5) | Some(32)) && attempt < DELAYS_MS.len() => {
+                    std::thread::sleep(std::time::Duration::from_millis(DELAYS_MS[attempt]));
+                    attempt += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
+}
+
+/// The engine's own mending of the sidecar: when a search finds the sidecar
+/// of a qualifying index (one segment, a non-empty dictionary) missing or
+/// unusable, ONE background build starts (a thread in the OS background
+/// mode); searches keep running as walks (same results) until the new file
+/// is published, then the next search picks it up.
+///
+/// - At most one build per index at a time; `build_lock` also serializes
+///   it with an explicit `build_fm_sidecar`.
+/// - Once per problem: an attempt that leaves no sidecar (a failure, or
+///   nothing to build) is recorded against the segment and never retried
+///   automatically for it; a new segment (commit, merge) or an explicit
+///   `build_fm_sidecar` clears the record. The reason shows in
+///   `fm_sidecar_problem`.
+/// - Never while a `LineWriter` of this index is open (after a merge to one
+///   segment the writer is gone and the next search starts it). Writers in
+///   another process are not seen; the build is still safe (it publishes by
+///   rename and touches only `.fmi` files).
+/// - Read-only index directories: the build fails, the reason is recorded,
+///   searches stay on the walk.
+pub(crate) struct Repair {
+    /// Off: no automatic build (`LineIndex::set_fm_auto_repair`).
+    auto: AtomicBool,
+    /// Open writers of this index.
+    writers: AtomicUsize,
+    state: Mutex<RepairState>,
+    /// Held by every sidecar build (background or explicit).
+    pub(crate) build_lock: Mutex<()>,
+    /// TEST ONLY: how many background builds were started.
+    #[cfg(test)]
+    pub(crate) test_only_starts: AtomicUsize,
+    /// TEST ONLY: a background build waits this long before building.
+    #[cfg(test)]
+    pub(crate) test_only_delay_ms: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Default)]
+struct RepairState {
+    running: bool,
+    /// The last automatic attempt that left no sidecar: its segment and,
+    /// when it failed, the reason.
+    attempted: Option<(SegmentId, Option<String>)>,
+}
+
+impl Repair {
+    pub(crate) fn new(auto: bool) -> Repair {
+        Repair {
+            auto: AtomicBool::new(auto),
+            writers: AtomicUsize::new(0),
+            state: Mutex::new(RepairState::default()),
+            build_lock: Mutex::new(()),
+            #[cfg(test)]
+            test_only_starts: AtomicUsize::new(0),
+            #[cfg(test)]
+            test_only_delay_ms: Default::default(),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, RepairState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn set_auto(&self, on: bool) {
+        self.auto.store(on, Ordering::Release);
+    }
+
+    /// True while a background build runs.
+    pub(crate) fn running(&self) -> bool {
+        self.state().running
+    }
+
+    /// Why the last automatic build for `segment` left no sidecar.
+    pub(crate) fn failure(&self, segment: SegmentId) -> Option<String> {
+        match &self.state().attempted {
+            Some((id, reason)) if *id == segment => reason.clone(),
+            _ => None,
+        }
+    }
+
+    /// Forgets the attempt record (an explicit build).
+    pub(crate) fn reset(&self) {
+        self.state().attempted = None;
+    }
+
+    /// Registers an open writer until the guard drops.
+    pub(crate) fn writer_guard(self: &Arc<Self>) -> WriterGuard {
+        self.writers.fetch_add(1, Ordering::AcqRel);
+        WriterGuard(self.clone())
+    }
+
+    /// Starts the background build when `searcher`'s index qualifies and
+    /// nothing forbids it (see [`Repair`]). Never blocks the caller.
+    pub(crate) fn maybe_start(
+        self: &Arc<Self>,
+        cache: &Arc<FmCache>,
+        searcher: &tantivy::Searcher,
+        text: Field,
+        dir: &Path,
+    ) {
+        if !self.auto.load(Ordering::Acquire) || self.writers.load(Ordering::Acquire) > 0 {
+            return;
+        }
+        let segments = searcher.segment_readers();
+        if segments.len() != 1 {
+            return;
+        }
+        let segment = segments[0].segment_id();
+        if !segments[0].inverted_index(text).is_ok_and(|i| i.terms().num_terms() > 0) {
+            return;
+        }
+        {
+            let mut state = self.state();
+            if state.running || state.attempted.as_ref().is_some_and(|(id, _)| *id == segment) {
+                return;
+            }
+            state.running = true;
+        }
+        #[cfg(test)]
+        self.test_only_starts.fetch_add(1, Ordering::Relaxed);
+        let repair = self.clone();
+        let cache = cache.clone();
+        let searcher = searcher.clone();
+        let dir = dir.to_path_buf();
+        let spawned = std::thread::Builder::new()
+            .name("seforim-fm-repair".into())
+            .spawn(move || {
+                crate::resources::begin_background();
+                let outcome = repair.build_in_background(&cache, &searcher, text, &dir);
+                crate::resources::end_background();
+                let mut state = repair.state();
+                state.running = false;
+                if let Some(reason) = outcome {
+                    state.attempted = Some((segment, reason));
+                }
+            });
+        if let Err(e) = spawned {
+            let mut state = self.state();
+            state.running = false;
+            state.attempted = Some((segment, Some(format!("FM sidecar rebuild could not start: {e}"))));
+        }
+    }
+
+    /// The build itself. None: a sidecar is in place, or a writer opened
+    /// meanwhile (nothing recorded, the next search decides again).
+    /// Some(reason): the attempt left no sidecar.
+    fn build_in_background(
+        &self,
+        cache: &FmCache,
+        searcher: &tantivy::Searcher,
+        text: Field,
+        dir: &Path,
+    ) -> Option<Option<String>> {
+        let _build = self.build_lock.lock().unwrap_or_else(|e| e.into_inner());
+        // a writer opened after this check is harmless: the file is named by
+        // this snapshot's segment and published atomically
+        if self.writers.load(Ordering::Acquire) > 0 {
+            return None;
+        }
+        // an explicit build that ran first may have mended it already
+        // (and a search may map the fresh file: do not rename over it)
+        if matches!(cache.lookup(dir, searcher, text), FmLookup::Ready(_)) {
+            return None;
+        }
+        // drop any cached mapping of the file being replaced
+        cache.clear();
+        #[cfg(test)]
+        std::thread::sleep(std::time::Duration::from_millis(self.test_only_delay_ms.load(Ordering::Relaxed)));
+        let result = build(searcher, text, dir);
+        // the next search re-reads the published file
+        cache.clear();
+        match result {
+            Ok(true) => None,
+            Ok(false) => Some(None),
+            Err(e) => Some(Some(format!("FM sidecar rebuild failed: {e}"))),
+        }
+    }
+}
+
+/// An open writer of the index (see [`Repair`]).
+pub(crate) struct WriterGuard(Arc<Repair>);
+
+impl Drop for WriterGuard {
+    fn drop(&mut self) {
+        self.0.writers.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// The sidecar state of an index, as a search sees it.

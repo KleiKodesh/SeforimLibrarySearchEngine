@@ -381,7 +381,9 @@ pub unsafe extern "C" fn se_index_has_fm_sidecar(index: *const LineIndex) -> i32
 }
 
 /// Why the index's FM sidecar file cannot be used (the reason behind the
-/// search notice `fm_sidecar_unusable`), or "" when it is usable or absent.
+/// search notice `fm_sidecar_unusable`), `rebuilding: <reason>` while the
+/// engine's background rebuild runs, `FM sidecar rebuild failed: ...` after it
+/// failed, or "" when it is usable or absent with nothing tried.
 /// Free with `se_string_free`; null on error.
 ///
 /// # Safety

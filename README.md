@@ -1079,7 +1079,21 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     `se_index_fm_sidecar_problem`, C# `SeforimIndex.FmSidecarProblem`, Dart
     `fmSidecarProblem`; ABI 6). A broken file is remembered by its size and
     modification time and re-checked only when it changes, the index moves to
-    another segment, or the sidecar is rebuilt (not re-opened per search). A search
+    another segment, or the sidecar is rebuilt (not re-opened per search).
+    The engine mends the sidecar itself: a search that finds it missing or
+    unusable on a one-segment index starts ONE background rebuild (a thread
+    in the OS background mode; never while a `LineWriter` of the index is
+    open, never two at a time, serialized with `build_fm_sidecar`). Searches
+    keep the walk until the new file is published (temp file + rename,
+    Windows sharing errors retried as in tantivy's atomic write), then the
+    next search uses it. Once per problem: a failed rebuild (e.g. a
+    read-only index directory) is recorded and not retried until the index
+    moves to another segment or the host calls `build_fm_sidecar`.
+    `fm_sidecar_problem` reports `rebuilding: <reason>` while it runs and
+    `FM sidecar rebuild failed: ...` after a failure; Rust
+    `LineIndex::set_fm_auto_repair(false)` turns it off and
+    `fm_sidecar_rebuilding()` tells whether it runs (Rust only, no C ABI
+    change). A search
     cancelled during an FM expansion stops with `Cancelled`. The sidecar
     is used whenever it is present (no per-search switch).
   - Measured on the full index (1,755,598 terms): built in 2.4 s, 41 MB;

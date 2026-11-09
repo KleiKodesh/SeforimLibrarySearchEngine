@@ -186,7 +186,9 @@ pub struct LineIndex {
     /// call [`LineIndex::reload`] (or reopen).
     pub(crate) reader: SharedReader,
     /// The FM-index sidecar, opened on first use (see `fm_sidecar`).
-    pub(crate) fm: crate::fm_sidecar::FmCache,
+    pub(crate) fm: std::sync::Arc<crate::fm_sidecar::FmCache>,
+    /// The sidecar's automatic background rebuild (see `fm_sidecar::Repair`).
+    pub(crate) fm_repair: std::sync::Arc<crate::fm_sidecar::Repair>,
     /// TEST ONLY (compiled out of every non-test build): forces leading-`*`
     /// and fuzzy to run as FST walks although a sidecar exists, so a test
     /// can assert the sidecar and the walk give identical terms.
@@ -250,6 +252,9 @@ impl LineIndex {
             options,
             dir: dir.to_path_buf(),
             fm: Default::default(),
+            // unit tests opt in (`set_fm_auto_repair`), so a test that
+            // checks a missing sidecar is not raced by a background build
+            fm_repair: std::sync::Arc::new(crate::fm_sidecar::Repair::new(!cfg!(test))),
             #[cfg(test)]
             test_only_disable_fm: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -290,10 +295,14 @@ impl LineIndex {
         let _normal = tantivy::indexer::NormalPrioritySection::enter();
         // another LineIndex over this dir may have merged: see the last commit
         self.reader.reload()?;
+        // one build at a time (a background rebuild may be running)
+        let _build = self.fm_repair.build_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.fm.clear();
         let built = crate::fm_sidecar::build(&self.reader.searcher(), self.fields.text, &self.dir);
         // a search during the build may have cached the file being replaced
         self.fm.clear();
+        // an explicit build is a new chance for the automatic one too
+        self.fm_repair.reset();
         built
     }
 
@@ -302,15 +311,49 @@ impl LineIndex {
         self.fm.get(&self.dir, &self.reader.searcher(), self.fields.text).is_some()
     }
 
-    /// Why the sidecar file of the current single segment cannot be used
-    /// (corrupt, truncated, an unknown format, built over another
-    /// dictionary), or None when it is usable or absent. A search that met
-    /// this carries [`NOTICE_FM_SIDECAR_UNUSABLE`](crate::NOTICE_FM_SIDECAR_UNUSABLE).
+    /// Why the index has no usable sidecar although it could, or None when
+    /// it is usable, or absent with nothing tried. One of:
+    /// - `"rebuilding: <reason>"`: the engine's background rebuild is running
+    ///   (searches use the walk until it is published);
+    /// - the file's problem (corrupt, truncated, an unknown format, built
+    ///   over another dictionary), followed by `"; FM sidecar rebuild
+    ///   failed: ..."` when the automatic rebuild failed;
+    /// - `"FM sidecar rebuild failed: ..."` alone when no file exists and the
+    ///   rebuild failed (e.g. a read-only index directory).
+    ///
+    /// A search that met an unusable file carries
+    /// [`NOTICE_FM_SIDECAR_UNUSABLE`](crate::NOTICE_FM_SIDECAR_UNUSABLE).
     pub fn fm_sidecar_problem(&self) -> Option<String> {
-        match self.fm.lookup(&self.dir, &self.reader.searcher(), self.fields.text) {
+        let searcher = self.reader.searcher();
+        let file = match self.fm.lookup(&self.dir, &searcher, self.fields.text) {
+            crate::fm_sidecar::FmLookup::Ready(_) => return None,
             crate::fm_sidecar::FmLookup::Unusable(reason) => Some(reason),
-            _ => None,
+            crate::fm_sidecar::FmLookup::Missing => None,
+        };
+        if self.fm_repair.running() {
+            return Some(format!("rebuilding: {}", file.as_deref().unwrap_or("no sidecar")));
         }
+        let failed = match searcher.segment_readers() {
+            [segment] => self.fm_repair.failure(segment.segment_id()),
+            _ => None,
+        };
+        match (file, failed) {
+            (Some(file), Some(failed)) => Some(format!("{file}; {failed}")),
+            (file, failed) => file.or(failed),
+        }
+    }
+
+    /// Turns the engine's automatic FM sidecar rebuild on or off (default
+    /// on): when on, a search that finds the sidecar of a one-segment index
+    /// missing or unusable starts one background rebuild (see
+    /// [`fm_sidecar_problem`](Self::fm_sidecar_problem) for its state).
+    pub fn set_fm_auto_repair(&self, on: bool) {
+        self.fm_repair.set_auto(on);
+    }
+
+    /// True while the engine's background sidecar rebuild runs.
+    pub fn fm_sidecar_rebuilding(&self) -> bool {
+        self.fm_repair.running()
     }
 
     /// True when the docs of `searcher` are in ascending catalog `position`
@@ -444,6 +487,7 @@ impl LineIndex {
             threads,
             watcher: None,
             reader: self.reader.clone(),
+            _repair: self.fm_repair.writer_guard(),
         })
     }
 
@@ -468,6 +512,7 @@ impl LineIndex {
             threads,
             watcher: Some(watcher),
             reader: self.reader.clone(),
+            _repair: self.fm_repair.writer_guard(),
         })
     }
 }
@@ -482,6 +527,8 @@ pub struct LineWriter {
     /// The index's shared reader, reloaded after every commit, rollback
     /// and merge (issue #22).
     reader: SharedReader,
+    /// Holds off the automatic FM sidecar rebuild while the writer is open.
+    _repair: crate::fm_sidecar::WriterGuard,
 }
 
 /// The index's one reader (issue #22), shared by the index and its writers.

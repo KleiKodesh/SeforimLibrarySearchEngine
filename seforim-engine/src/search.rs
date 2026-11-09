@@ -2096,11 +2096,15 @@ impl LineIndex {
         if self.test_only_disable_fm.load(std::sync::atomic::Ordering::Relaxed) {
             return (None, false);
         }
-        match self.fm.lookup(&self.dir, searcher, self.fields.text) {
-            crate::fm_sidecar::FmLookup::Ready(fm) => (Some(fm), false),
+        let found = match self.fm.lookup(&self.dir, searcher, self.fields.text) {
+            crate::fm_sidecar::FmLookup::Ready(fm) => return (Some(fm), false),
             crate::fm_sidecar::FmLookup::Missing => (None, false),
             crate::fm_sidecar::FmLookup::Unusable(_) => (None, true),
-        }
+        };
+        // no usable sidecar: the engine mends it in the background (once per
+        // problem, never while a writer is open); this search walks
+        self.fm_repair.maybe_start(&self.fm, searcher, self.fields.text, &self.dir);
+        found
     }
 
     /// The exact terms for a group the sidecar can expand (a leading-`*`

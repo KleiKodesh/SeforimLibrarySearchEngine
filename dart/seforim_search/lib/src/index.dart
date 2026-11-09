@@ -135,8 +135,10 @@ final class SeforimIndex implements Finalizable {
   bool get hasFmSidecar => _n.indexHasFmSidecar(handle) == 1;
 
   /// Why the FM sidecar file cannot be used (the reason behind the search
-  /// notice [SearchInfo.fmSidecarUnusable]), or null when it is usable or
-  /// absent. Rebuild it with [buildFmSidecar].
+  /// notice [SearchInfo.fmSidecarUnusable]), `rebuilding: ...` while the
+  /// engine's background rebuild runs, `FM sidecar rebuild failed: ...` after
+  /// it failed, or null when it is usable or absent with nothing tried.
+  /// Rebuild it with [buildFmSidecar].
   String? get fmSidecarProblem {
     final s = _n.takeString(_n.indexFmSidecarProblem(handle));
     return s.isEmpty ? null : s;

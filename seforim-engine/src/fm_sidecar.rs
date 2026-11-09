@@ -116,6 +116,9 @@ fn file_identity(path: &Path) -> std::io::Result<(u64, Option<std::time::SystemT
 #[derive(Default)]
 pub struct FmCache {
     inner: Mutex<Option<(SegmentId, Cached)>>,
+    /// TEST ONLY: how many times a sidecar file was opened and checked.
+    #[cfg(test)]
+    pub(crate) test_only_opens: std::sync::atomic::AtomicUsize,
 }
 
 impl FmCache {
@@ -171,6 +174,8 @@ impl FmCache {
 
     /// Opens and checks the sidecar file of `segment`.
     fn open(&self, path: &Path, segment: &tantivy::SegmentReader, text: Field) -> FmLookup {
+        #[cfg(test)]
+        self.test_only_opens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FmLookup::Missing,

@@ -272,8 +272,17 @@ fn a_broken_sidecar_is_remembered_until_the_file_changes() {
     drop(index);
     let index = LineIndex::open(dir.path()).unwrap();
     std::fs::write(&path, vec![7u8; 100]).unwrap();
+    let opens = || index.fm.test_only_opens.load(Ordering::Relaxed);
     let first = index.fm_sidecar_problem().expect("unusable");
     assert!(first.contains("bad magic"), "{first}");
+    let after_first = opens();
+    // unchanged broken file: searches and status calls never re-open it
+    for _ in 0..3 {
+        let r = index.search_options(&SearchOptions { query: format!("*{}*", s(&[SHIN, LAMED])), ..Default::default() });
+        assert_eq!(r.unwrap().notices(), [NOTICE_FM_SIDECAR_UNUSABLE.to_string()]);
+        assert_eq!(index.fm_sidecar_problem().as_deref(), Some(first.as_str()));
+    }
+    assert_eq!(opens(), after_first, "an unchanged broken sidecar was re-opened");
     // the cache answers while the file keeps its identity
     let searcher = index.reader.searcher();
     assert!(matches!(
@@ -286,6 +295,9 @@ fn a_broken_sidecar_is_remembered_until_the_file_changes() {
     std::fs::write(&path, &bytes).unwrap();
     let second = index.fm_sidecar_problem().expect("unusable");
     assert_ne!(second, first);
+    assert_eq!(opens(), after_first + 1, "a changed file must be re-checked once");
+    assert_eq!(index.fm_sidecar_problem().as_deref(), Some(second.as_str()));
+    assert_eq!(opens(), after_first + 1);
     // the file removed: missing, no problem
     std::fs::remove_file(&path).unwrap();
     assert_eq!(index.fm_sidecar_problem(), None);

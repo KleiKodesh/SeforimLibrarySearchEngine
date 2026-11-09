@@ -723,6 +723,8 @@ impl LineWriter {
             keep.extend(ids);
         }
         crate::fm_sidecar::remove_dead_sidecars(&self.dir, &keep);
+        // temps of interrupted sidecar builds (same locked / young rule as open)
+        crate::fm_sidecar::remove_leftover_temps(&self.dir);
     }
 
     /// Merges all segments into one (for a shipped, read-mostly index) and

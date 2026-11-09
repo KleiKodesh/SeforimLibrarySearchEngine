@@ -572,6 +572,27 @@ fn a_leftover_temp_file_is_removed_on_open_and_before_a_build() {
     assert!(!other.exists(), "open must remove a leftover temp file");
 }
 
+/// Issue #29: a writer open and a commit clean leftover temps too (same
+/// rule: an old, unlocked temp goes; a young one stays).
+#[test]
+fn a_leftover_temp_file_is_removed_by_a_writer() {
+    let lines = corpus();
+    let (dir, index) = index_over(&lines, false);
+    let old = dir.path().join("0123.fmi.99999-5.tmp");
+    let young = dir.path().join("0123.fmi.99999-6.tmp");
+    std::fs::write(&old, b"half").unwrap();
+    std::fs::write(&young, b"just created").unwrap();
+    age(&old);
+    let mut w = index.writer(50_000_000, 1).unwrap();
+    assert!(!old.exists(), "a writer open must remove a leftover temp file");
+    assert!(young.exists());
+    std::fs::write(&old, b"half").unwrap();
+    age(&old);
+    w.commit(None).unwrap();
+    assert!(!old.exists(), "a commit must remove a leftover temp file");
+    assert!(young.exists());
+}
+
 #[test]
 fn dropping_the_index_stops_a_background_rebuild_promptly() {
     let lines = corpus();

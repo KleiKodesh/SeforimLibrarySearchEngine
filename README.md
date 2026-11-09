@@ -647,6 +647,13 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   distances, on both index flavours. The `word_model` option of the
   previous version (ftslib 2..29 letters / otzaria) is gone: nothing
   differs any more once FtsLib counts every word.
+- **Book updates are atomic by host policy** (issue #32): one book update = delete
+  its lines + add its new lines + ONE commit. Never commit, `merge_all` or
+  `se_writer_merge_and_close` (C# `MergeAndClose` / Dart `mergeAndClose`) in between. A crash before
+  that commit leaves the old book whole (a tantivy commit is atomic). Use the commit
+  payload as the host's pending/done record (e.g. the last finished book) to resume.
+  The engine has no book-level API for it. Tested in
+  `seforim-engine/tests/book_update_atomicity.rs`.
 - **Index:** create or open; positions optional; add/delete/commit lines
   (`line_id`, `position`, `book_id`, text indexed but not stored; see the
   bare-minimum rule above) with a host payload (resume watermark,

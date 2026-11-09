@@ -720,6 +720,11 @@ pub unsafe extern "C" fn se_writer_delete(writer: *mut LineWriter, line_id: u64)
 }
 
 /// Commits, storing `payload` (may be null) atomically with the documents.
+///
+/// Book updates (issue #32, host policy): delete the book's lines, add its
+/// new lines, then ONE commit; never commit or `se_writer_merge_and_close` in
+/// between. A crash before that commit leaves the old book whole; the payload
+/// is the host's pending/done record to resume from.
 /// 0 means the commit is durable. The index's shared reader reloads right
 /// after; if that reload fails the commit still returns 0, searches keep the
 /// previous snapshot and the next search or count retries the reload

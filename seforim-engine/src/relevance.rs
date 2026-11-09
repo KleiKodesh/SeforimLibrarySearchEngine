@@ -238,12 +238,21 @@ fn fuzzy_slot_of(g: &GroupSpec) -> Option<FuzzySlot<'_>> {
     if let Some((word, distance, ignore_quotes)) = fuzzy(g) {
         return Some(FuzzySlot { word, distance, ignore_quotes, forms: Vec::new() });
     }
+    if let GroupSpec::Capped { group, .. } = g {
+        return fuzzy_slot_of(group);
+    }
     let GroupSpec::Any { alternatives } = g else { return None };
     let mut found = None;
     let mut forms = Vec::new();
+    // a vocalized fuzzy word: its exact form's walk (typed marks required)
+    // sits beside the fuzzy typo variants; the fuzzy word scores it (d = 0)
+    let vocalized_exact = |w: &str| {
+        alternatives.iter().any(|b| matches!(b, GroupSpec::Fuzzy { word, .. } if word == w))
+    };
     for a in alternatives {
         match a {
             GroupSpec::Lexical { group } => forms.push(form(group)?),
+            GroupSpec::Word { word, .. } if vocalized_exact(word) => {}
             _ if found.is_none() => found = Some(fuzzy(a)?),
             _ => return None,
         }

@@ -72,6 +72,8 @@ pub enum GroupSpec {
     },
     /// A wildcard pattern (`*`, `?`). A rejected pattern (anchor too short,
     /// too many `?`) skips the slot but still counts toward word distance.
+    /// Marks left in the pattern (vocalized matching, needs `keep_marks`)
+    /// are required on their typed letters; every other mark is free.
     Wildcard {
         pattern: String,
         /// The quote is transparent (FtsLib's quote-free terms).
@@ -89,7 +91,10 @@ pub enum GroupSpec {
     },
     /// Levenshtein neighbours of a word (FtsLib `word~N`), closest first,
     /// capped at 2000 terms. Distance is clamped to 2 (tantivy's DFA limit;
-    /// FtsLib allowed 3).
+    /// FtsLib allowed 3). A word with marks left (vocalized matching, needs
+    /// `keep_marks`) matches its typo variants only, mark-free (Otzaria):
+    /// [`SearchOptions`](crate::SearchOptions) ORs it with the exact form's
+    /// word walk, typed marks required.
     Fuzzy {
         word: String,
         distance: u8,
@@ -2063,6 +2068,10 @@ impl LineIndex {
     fn check_vocalized(&self, request: &SearchRequest) -> Result<()> {
         fn wants(g: &GroupSpec) -> bool {
             match g {
+                // a wildcard / fuzzy word with typed marks left is vocalized
+                GroupSpec::Wildcard { pattern: w, .. } | GroupSpec::Fuzzy { word: w, .. } => {
+                    w.chars().any(hebrew_fts::chars::is_term_mark)
+                }
                 GroupSpec::Word { options, .. } => options.match_nikud || options.match_teamim,
                 GroupSpec::Any { alternatives } => alternatives.iter().any(wants),
                 GroupSpec::Unmarked { group } | GroupSpec::Lexical { group } | GroupSpec::Capped { group, .. } => {

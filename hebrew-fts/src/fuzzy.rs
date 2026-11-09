@@ -34,6 +34,10 @@ pub struct LevenshteinDfa {
     /// [`Self::distance`] skips the term's marks (an index that keeps marks;
     /// the walk itself runs the DFA inside [`MarkFree`]).
     transparent_marks: bool,
+    /// The fewest edits a match takes: 1 for a vocalized fuzzy word (its
+    /// exact form is matched with its typed marks by a word walk, see
+    /// [`HebrewFuzzyQuery`]), else 0.
+    min_distance: u8,
 }
 
 impl LevenshteinDfa {
@@ -55,6 +59,11 @@ impl LevenshteinDfa {
             self.dfa.eval(term)
         }
     }
+
+    /// The fewest edits a match takes (1: typo variants only).
+    pub fn min_distance(&self) -> u8 {
+        self.min_distance
+    }
 }
 
 impl Automaton for LevenshteinDfa {
@@ -66,7 +75,7 @@ impl Automaton for LevenshteinDfa {
 
     fn is_match(&self, state: &Self::State) -> bool {
         match self.dfa.distance(*state) {
-            Distance::Exact(_) => true,
+            Distance::Exact(d) => d >= self.min_distance,
             Distance::AtLeast(_) => false,
         }
     }
@@ -109,6 +118,15 @@ impl Automaton for SharedDfa {
 /// Fuzzy query for one word: every indexed term within `distance` edits
 /// (insert, delete, substitute, and a swap of two adjacent letters as ONE
 /// edit: Otzaria's `FuzzyTermQuery(.., true)`, FtsLib's `Levenshtein.Distance`).
+///
+/// A word that carries marks is a VOCALIZED fuzzy word (`match_nikud` /
+/// `match_teamim` on an index that keeps marks; the marks left are the
+/// required ones, see [`crate::walk::required_marks_form`]): Otzaria's rule,
+/// the typo variants match mark-free (marks never count as edits), and the
+/// exact typed form needs its typed marks. This query then matches the typo
+/// variants only (one edit or more, measured on the mark-free forms); the
+/// exact form is the word walk with the typed marks required, ORed with it
+/// in the same slot by the engine.
 #[derive(Debug, Clone)]
 pub struct HebrewFuzzyQuery {
     field: Field,
@@ -190,16 +208,29 @@ impl HebrewFuzzyQuery {
             [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
         let builder = BUILDERS[self.distance as usize]
             .get_or_init(|| LevenshteinAutomatonBuilder::new(self.distance, true));
-        let word: String = if self.ignore_quotes {
-            self.word.chars().filter(|&c| !crate::chars::is_term_quote(c)).collect()
-        } else {
-            self.word.clone()
-        };
+        let vocalized = self.is_vocalized();
+        let word: String = self
+            .word
+            .chars()
+            .filter(|&c| !(self.ignore_quotes && crate::chars::is_term_quote(c)) && !crate::chars::is_term_mark(c))
+            .collect();
         LevenshteinDfa {
             dfa: builder.build_dfa(&word),
             transparent_quotes: self.ignore_quotes,
             transparent_marks: self.marked_terms,
+            min_distance: u8::from(vocalized),
         }
+    }
+
+    /// True for a vocalized fuzzy word (it carries required marks): only
+    /// its typo variants match here (see [`HebrewFuzzyQuery`]).
+    pub fn is_vocalized(&self) -> bool {
+        self.word.chars().any(crate::chars::is_term_mark)
+    }
+
+    /// The word without marks: the form the distances are measured from.
+    pub fn mark_free_word(&self) -> String {
+        self.word.chars().filter(|&c| !crate::chars::is_term_mark(c)).collect()
     }
 
     fn configure<A>(&self, mut weight: AutomatonWeight<A>, dfa: Arc<LevenshteinDfa>, segments: Option<&[tantivy::SegmentReader]>) -> AutomatonWeight<A>
@@ -212,7 +243,7 @@ impl HebrewFuzzyQuery {
         }
         if self.max_expansions > 0 {
             weight.set_max_expansions(self.max_expansions);
-            weight.set_pinned_terms(crate::marks::exact_forms(&self.word));
+            weight.set_pinned_terms(crate::marks::exact_forms(&self.mark_free_word()));
             if let Some(segments) = segments {
                 weight.set_cap_across_segments(segments);
             }

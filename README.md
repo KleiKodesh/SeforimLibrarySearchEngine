@@ -1127,6 +1127,21 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     is never an edit.
   - Vocalized mode (Otzaria's `voc_mode`): when the flags are on globally
     or for any word, the search sees only lines that carry an attached
+  - Wildcard and fuzzy words take the options too (per word, like plain
+    words; on a keep_marks index the query parser keeps their typed
+    marks, the engine keeps the required ones). Wildcard (our design,
+    Otzaria has none): the typed letters must carry the typed marks of an
+    enabled class, every other mark is free, letters a `*` matches (and
+    their marks) are free and marks never count against a `*` budget; a
+    `?` drops its letter with that letter's marks; spelling variants of
+    the core match mark-free. A mode of the wildcard automaton
+    (`WildcardPattern::requires_marks`), so the FM sidecar verifies with
+    the same automaton (FM == walk). Fuzzy (Otzaria's rule): the exact
+    typed form requires its typed marks, the typo variants match mark-free
+    (marks are never edits): the slot ORs the exact form's word walk
+    (typed marks required) with the fuzzy DFA restricted to one edit or
+    more (`LevenshteinDfa::min_distance`), on the walk and the FM path
+    alike. With the options off the typed marks are dropped (as before).
     mark, as Otzaria then runs the whole query on `textVocalized`, which
     holds only such lines (`hebrew_query.rs` `normalize_line_for_indexing`,
     `contains_attached_marks`; `search_engine.rs` `search_text_field`).

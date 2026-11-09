@@ -168,6 +168,65 @@ fn fm_equals_walk_on_marks_and_quotes() {
     assert!(capped > 0, "the cap was never hit");
 }
 
+/// Vocalized wildcard and fuzzy words (match_nikud / match_teamim on a
+/// keep_marks index): a wildcard requires the typed marks on its typed
+/// letters, every other mark free; a fuzzy word requires them on its exact
+/// form and matches its typo variants mark-free. The FM path gives the walk's
+/// result for every case; with the options off the marks are dropped.
+/// A vocalized search keeps its lines to marked lines (lines 2, 6, 9 have
+/// no mark).
+#[test]
+fn vocalized_wildcard_and_fuzzy_fm_equals_walk() {
+    const GIMEL: char = '\u{05D2}';
+    const DALET: char = '\u{05D3}';
+    const HE: char = '\u{05D4}';
+    let (a, b, sh, l) = (ALEF, BET, SHIN, LAMED);
+    let lines: Vec<LineDoc> = [
+        s(&[a, NIK, b, sh, l, GIMEL]),
+        s(&[a, b, sh, l, GIMEL]),
+        s(&[a, NIK2, b, sh, l, GIMEL]),
+        s(&[a, NIK, TAAM, b, sh, l, GIMEL]),
+        s(&[a, NIK, b, sh, l, GIMEL, NIK, DALET]),
+        s(&[a, b, sh, l, DALET]),
+        s(&[a, NIK2, b, sh, l, DALET]),
+        s(&[HE, a, NIK, b, sh, l, GIMEL]),
+        s(&[HE, a, b, sh, l, GIMEL]),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, t)| line(i as u64 + 1, t))
+    .collect();
+    let (_dir, index) = index_over(&lines, true);
+    assert!(index.build_fm_sidecar().unwrap());
+    let all: Vec<u64> = (1..=9).collect();
+    let cases: Vec<(String, bool, bool, Vec<u64>)> = vec![
+        // trailing star: typed letters keep the typed nikud, star chars free
+        (format!("{}*", s(&[a, NIK, b, sh, l])), true, false, vec![1, 4, 5]),
+        (format!("{}*", s(&[a, NIK, b, sh, l])), false, false, (1..=7).collect()),
+        // leading star (the FM shape): the core's marks are required
+        (format!("*{}", s(&[a, NIK, b, sh, l, GIMEL])), true, false, vec![1, 4, 8]),
+        (format!("*{}", s(&[a, NIK, b, sh, l, GIMEL])), false, false, vec![1, 2, 3, 4, 8, 9]),
+        // te'amim: only the te'amim option requires a typed taam
+        (format!("*{}", s(&[a, TAAM, b, sh, l, GIMEL])), false, true, vec![4]),
+        (format!("*{}", s(&[a, TAAM, b, sh, l, GIMEL])), true, false, vec![1, 3, 4, 8]),
+        // `?`: the optional letter goes with its typed mark
+        (format!("{}?{}", s(&[HE]), s(&[a, NIK, b, sh, l, GIMEL])), true, false, vec![1, 4, 8]),
+        // fuzzy: the exact form needs its nikud, a typo variant is mark-free
+        (format!("{}~1", s(&[a, NIK, b, sh, l, GIMEL])), true, false, vec![1, 4, 5, 7, 8]),
+        (format!("{}~1", s(&[a, NIK, b, sh, l, GIMEL])), false, false, all.clone()),
+        (format!("{}~1", s(&[a, TAAM, b, sh, l, GIMEL])), false, true, vec![4, 5, 7, 8]),
+    ];
+    for (qi, (query, nikud, teamim, want)) in cases.into_iter().enumerate() {
+        for ignore_quotes in [false, true] {
+            let o = SearchOptions { query: query.clone(), match_nikud: nikud, match_teamim: teamim, ignore_quotes, ..Default::default() };
+            let walk = run(&index, &lines, &o, true);
+            let fm = run(&index, &lines, &o, false);
+            assert_eq!(walk.0, want, "case #{qi} ignore_quotes={ignore_quotes}: {:?}", walk.1);
+            assert_eq!(fm, walk, "FM != walk: case #{qi} ignore_quotes={ignore_quotes}");
+        }
+    }
+}
+
 #[test]
 fn astral_chars_are_fm_indexed() {
     let mut lines = Vec::new();

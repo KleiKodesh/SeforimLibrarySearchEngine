@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 
+use hebrew_fts::walk::required_marks_form;
 use hebrew_fts::{tokenize_query, QueryTerm, QueryToken, DEFAULT_CONTEXT_WORDS};
 use serde::{Deserialize, Serialize};
 
@@ -650,7 +651,13 @@ fn phrases(list: &[PhraseOptions], keep_marks: bool) -> Vec<Vec<GroupSpec>> {
 }
 
 /// One slot for a parsed term with its word's options. Wildcard, fuzzy and
-/// `%` words take only the quote option (as FtsLib's parser), plus ktiv:
+/// `%` words take only the quote option (as FtsLib's parser), plus nikud /
+/// te'amim matching for wildcard and fuzzy words (on an index that keeps
+/// marks; the term keeps its typed marks, see [`required_marks_form`]): a
+/// wildcard requires the typed marks on its typed letters, every other mark
+/// free; a fuzzy word (Otzaria's rule) requires them on its exact form, its
+/// typo variants match mark-free (the exact form's word walk ORed with the
+/// fuzzy typo variants). Plus ktiv:
 /// with `ktiv_male_haser` on, a wildcard's literal core (only leading /
 /// trailing `*`, no `?`) and a `%` word also search their spelling
 /// variants, ORed in the slot (FtsLib, KitveiHakodesh `71162c83`: else
@@ -662,7 +669,11 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
         QueryTerm::Word(word) => GroupSpec::Word { word, options: o },
         QueryTerm::Unindexed(word) => GroupSpec::Unindexed { word },
         QueryTerm::Wildcard(pattern) => {
-            let variants: Vec<GroupSpec> = match (o.ktiv_male_haser, star_core(&pattern)) {
+            let pattern = required_marks_form(&pattern, o.match_nikud, o.match_teamim);
+            // spelling variants are other letters: the typed marks have no
+            // place on them (Otzaria), so they match mark-free
+            let plain = mark_free(&pattern);
+            let variants: Vec<GroupSpec> = match (o.ktiv_male_haser, star_core(&plain)) {
                 (true, Some((lead, core, trail))) => ktiv_variants(core, o.ktiv_rules)
                     .into_iter()
                     .map(|v| GroupSpec::Wildcard { pattern: format!("{lead}{v}{trail}"), ignore_quotes })
@@ -671,7 +682,16 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
             };
             with_variants(GroupSpec::Wildcard { pattern, ignore_quotes }, variants)
         }
-        QueryTerm::Fuzzy { word, distance } => GroupSpec::Fuzzy { word, distance, ignore_quotes },
+        QueryTerm::Fuzzy { word, distance } => {
+            let word = required_marks_form(&word, o.match_nikud, o.match_teamim);
+            if word.chars().any(hebrew_fts::chars::is_term_mark) {
+                // the exact form with its typed marks, or a typo variant mark-free
+                let exact = GroupSpec::Word { word: word.clone(), options: exact_options(o) };
+                GroupSpec::Any { alternatives: vec![exact, GroupSpec::Fuzzy { word, distance, ignore_quotes }] }
+            } else {
+                GroupSpec::Fuzzy { word, distance, ignore_quotes }
+            }
+        }
         QueryTerm::Grammar { word, prefixes, suffixes } => {
             let variants: Vec<GroupSpec> = if o.ktiv_male_haser {
                 ktiv_variants(&word, o.ktiv_rules)
@@ -684,6 +704,11 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
             with_variants(GroupSpec::Grammar { word, prefixes, suffixes, ignore_quotes }, variants)
         }
     }
+}
+
+/// `s` without its marks.
+fn mark_free(s: &str) -> String {
+    s.chars().filter(|&c| !hebrew_fts::chars::is_term_mark(c)).collect()
 }
 
 /// A quoted phrase's word options: none of the expansions, only the base

@@ -62,10 +62,18 @@ pub struct WildcardPattern {
     /// The canonical quote `"` is transparent everywhere (התעלם מגרשיים):
     /// `*לום` then matches the indexed `שלו"ם`, as FtsLib's quote-free terms did.
     ignore_quotes: bool,
+    /// Vocalized matching (`match_nikud` / `match_teamim` on an index that
+    /// keeps marks): the pattern carries the typed marks, required on their
+    /// letters; every other mark of a term is free (zero width), and a char
+    /// a `*` matches may carry any marks or none. False: the pattern has no
+    /// mark (on a marks-keeping index the walk reads it through
+    /// [`MarkFree`](crate::marks::MarkFree)).
+    free_marks: bool,
 }
 
 fn anchor_length(pattern: &str) -> usize {
-    pattern.chars().filter(|&c| c != '*' && c != '?').count()
+    // a typed (required) mark is no character of its own
+    pattern.chars().filter(|&c| c != '*' && c != '?' && !crate::chars::is_term_mark(c)).count()
 }
 
 /// `?`s with a real preceding letter: the ones that branch.
@@ -98,10 +106,16 @@ fn expand_optionals(chars: &[char], pos: usize, current: &mut Vec<char>, out: &m
     }
     // include the optional char
     expand_optionals(chars, pos + 1, current, out);
-    // exclude it
-    let saved = current.pop().unwrap();
+    // exclude it, with the marks typed on it (vocalized patterns)
+    let mut saved = Vec::new();
+    while let Some(c) = current.pop() {
+        saved.push(c);
+        if !crate::chars::is_term_mark(c) {
+            break;
+        }
+    }
     expand_optionals(chars, pos + 1, current, out);
-    current.push(saved);
+    current.extend(saved.into_iter().rev());
 }
 
 fn tokenize(pattern: &str) -> Vec<Token> {
@@ -163,7 +177,15 @@ impl WildcardPattern {
             variants,
             budget,
             ignore_quotes: false,
+            free_marks: pattern.chars().any(crate::chars::is_term_mark),
         })
+    }
+
+    /// True when the pattern carries typed marks it requires (vocalized
+    /// matching, see [`crate::walk::required_marks_form`]): its automaton
+    /// then reads a term's marks itself, so it runs on the marked term.
+    pub fn requires_marks(&self) -> bool {
+        self.free_marks
     }
 
     /// True when the quote is transparent.
@@ -183,8 +205,15 @@ impl WildcardPattern {
 
 // ── The automaton ───────────────────────────────────────────────────────
 //
-// NFA config packed in a u64: variant(8) | token(16) | literal offset(16) |
-// star chars used(8) | pending continuation bytes(8).
+// NFA config packed in a u64: held lead byte(8) | variant(8) | token(16) |
+// literal offset(16) | star chars used(8) | pending continuation bytes(8).
+// The held byte (vocalized patterns only) is the lead byte of a two-byte
+// char read but not resolved yet: with `pending` = [`HOLD_MARK`] a possible
+// free mark, otherwise the char a star is consuming (a mark is not one).
+
+/// `pending` value of a config holding the lead byte of a possible free mark.
+const HOLD_MARK: u32 = 0xFE;
+const HELD_SHIFT: u32 = 56;
 
 #[inline]
 fn pack(variant: usize, token: usize, offset: usize, used: u32, pending: u32) -> u64 {
@@ -197,12 +226,20 @@ fn pack(variant: usize, token: usize, offset: usize, used: u32, pending: u32) ->
 #[inline]
 fn unpack(c: u64) -> (usize, usize, usize, u32, u32) {
     (
-        (c >> 48) as usize,
+        ((c >> 48) & 0xFF) as usize,
         ((c >> 32) & 0xFFFF) as usize,
         ((c >> 16) & 0xFFFF) as usize,
         ((c >> 8) & 0xFF) as u32,
         (c & 0xFF) as u32,
     )
+}
+#[inline]
+fn held(c: u64) -> u8 {
+    (c >> HELD_SHIFT) as u8
+}
+#[inline]
+fn with_held(c: u64, lead: u8) -> u64 {
+    (c & !(0xFF << HELD_SHIFT)) | (u64::from(lead) << HELD_SHIFT)
 }
 
 /// UTF-8 sequence length from a lead byte (1 for ASCII).
@@ -226,6 +263,12 @@ impl WildcardAutomaton {
     /// Wraps a parsed pattern.
     pub fn new(pattern: WildcardPattern) -> WildcardAutomaton {
         WildcardAutomaton { pattern }
+    }
+
+    /// True when the pattern requires typed marks
+    /// ([`WildcardPattern::requires_marks`]): it reads a term's marks itself.
+    pub fn requires_marks(&self) -> bool {
+        self.pattern.free_marks
     }
 
     /// True when the whole `term` matches the pattern (budgets included).
@@ -256,12 +299,28 @@ impl WildcardAutomaton {
     fn step(&self, config: u64, byte: u8, out: &mut Vec<u64>) {
         let (v, t, off, used, pending) = unpack(config);
         let tokens = &self.pattern.variants[v];
+        if pending == HOLD_MARK {
+            // a free mark: skipped, back where it began
+            if crate::marks::is_mark_char(held(config), byte) {
+                self.close_into(pack(v, t, off, used, 0), out);
+            }
+            return;
+        }
         if pending > 0 {
-            // continuation byte of a char a star is consuming
-            if byte & 0xC0 == 0x80 {
+            // continuation byte of a char a star is consuming (a mark is
+            // zero width, never a star's char: the free-mark path reads it)
+            if byte & 0xC0 == 0x80 && !crate::marks::is_mark_char(held(config), byte) {
                 self.close_into(pack(v, t, 0, used, pending - 1), out);
             }
             return;
+        }
+        // Vocalized: any mark of the term may be free (a typed one is also
+        // read by its literal below, as required).
+        if self.pattern.free_marks && crate::marks::is_mark_lead(byte) {
+            let hold = with_held(pack(v, t, off, used, HOLD_MARK), byte);
+            if !out.contains(&hold) {
+                out.push(hold);
+            }
         }
         let Some(token) = tokens.get(t) else {
             // A quote after the whole pattern (a trailing geresh is part of
@@ -294,7 +353,9 @@ impl WildcardAutomaton {
                 }
                 if used < self.pattern.budget {
                     let len = utf8_len(byte);
-                    self.close_into(pack(v, t, 0, used + 1, len - 1), out);
+                    let next = pack(v, t, 0, used + 1, len - 1);
+                    let next = if self.pattern.free_marks && len == 2 { with_held(next, byte) } else { next };
+                    self.close_into(next, out);
                 }
             }
         }
@@ -397,7 +458,8 @@ impl HebrewWildcardQuery {
 
     /// The index keeps marks in its terms (`keep_marks`): the pattern then
     /// reads them as zero width ([`crate::marks::MarkFree`]), so it matches
-    /// what it matches on the mark-stripped index.
+    /// what it matches on the mark-stripped index. A pattern with typed
+    /// (required) marks reads them itself ([`WildcardPattern::requires_marks`]).
     pub fn set_marked_terms(&mut self, marked_terms: bool) {
         self.marked_terms = marked_terms;
     }
@@ -410,7 +472,8 @@ impl HebrewWildcardQuery {
             segments,
             pinned: Vec::new(),
             marked_terms: self.marked_terms,
-            mark_free: self.marked_terms,
+            // a vocalized pattern reads the marks itself
+            mark_free: self.marked_terms && !self.pattern.free_marks,
         }
     }
 
@@ -519,6 +582,48 @@ mod tests {
         assert!(matches_ignoring_quotes("\u{05E9}\u{05DC}\u{05D5}?\u{05DD}", "\u{05E9}\u{05DC}\u{05DD}'"));
         assert!(matches_ignoring_quotes("*\u{05DC}\u{05D5}\u{05DD}", "\u{05E9}\u{05DC}\u{05D5}\u{05DD}'"));
         assert!(!matches_ignoring_quotes("\u{05E9}\u{05DC}\u{05D5}?\u{05DD}", "\u{05E9}\u{05DC}\u{05DD}'\u{05D0}"));
+    }
+
+    /// A vocalized pattern (typed marks left, see
+    /// [`crate::walk::required_marks_form`]) over marked terms.
+    fn matches_marked(pattern: &str, term: &str) -> bool {
+        let p = WildcardPattern::parse(&crate::chars::canonical_marks(pattern)).unwrap();
+        assert!(p.requires_marks());
+        WildcardAutomaton::new(p).accepts(crate::chars::canonical_marks(term).as_bytes())
+    }
+
+    #[test]
+    fn typed_marks_are_required_on_typed_letters_only() {
+        let (a, b, g, d, he) = ('\u{05D0}', '\u{05D1}', '\u{05D2}', '\u{05D3}', '\u{05D4}');
+        let (qamatz, patah, dagesh, etnahta) = ('\u{05B8}', '\u{05B7}', '\u{05BC}', '\u{0591}');
+        let w = |cs: &[char]| cs.iter().collect::<String>();
+        let pat = format!("{}*", w(&[a, b, qamatz, g]));
+        assert!(matches_marked(&pat, &w(&[a, b, qamatz, g])));
+        // other marks are free, on typed letters and on star letters
+        assert!(matches_marked(&pat, &w(&[a, patah, b, dagesh, qamatz, etnahta, g, qamatz, d, patah])));
+        assert!(!matches_marked(&pat, &w(&[a, b, g])));
+        assert!(!matches_marked(&pat, &w(&[a, b, patah, g])));
+        // a star letter's marks do not count against the budget (4 letters)
+        assert!(matches_marked(&pat, &w(&[a, b, qamatz, g, d, qamatz, he, patah, d, qamatz, he, etnahta])));
+        assert!(!matches_marked(&pat, &w(&[a, b, qamatz, g, d, qamatz, he, d, he, d])));
+        // leading star
+        let pat = format!("*{}", w(&[b, qamatz, g, d]));
+        assert!(matches_marked(&pat, &w(&[he, patah, b, qamatz, g, d])));
+        assert!(!matches_marked(&pat, &w(&[he, b, g, d])));
+        // `?` drops its letter together with the letter's typed marks
+        let pat = w(&[he, qamatz, '?', b, g]);
+        assert!(matches_marked(&pat, &w(&[b, g])));
+        assert!(matches_marked(&pat, &w(&[he, qamatz, b, patah, g])));
+        assert!(!matches_marked(&pat, &w(&[he, b, g])));
+        // te'amim alike: a typed taam is required, nikud free
+        let pat = format!("{}*", w(&[a, etnahta, b]));
+        assert!(matches_marked(&pat, &w(&[a, qamatz, etnahta, b, d])));
+        assert!(!matches_marked(&pat, &w(&[a, qamatz, b, d])));
+        // the anchor counts letters, not marks
+        assert_eq!(
+            WildcardPattern::parse(&format!("*{}", w(&[a, qamatz]))).unwrap_err(),
+            WildcardRejected::AnchorTooShort
+        );
     }
 
     #[test]

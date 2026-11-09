@@ -37,7 +37,10 @@ pub fn fm_wildcard_shape(pattern: &str, ignore_quotes: bool) -> Option<(String, 
     if pattern.contains('?') || !pattern.starts_with('*') {
         return None;
     }
-    let core = pattern.trim_matches('*');
+    // A vocalized pattern's typed marks: the sidecar's text is mark-free, so
+    // the core is searched without them (the walk's automaton verifies them).
+    let core: String = pattern.trim_matches('*').chars().filter(|&c| !hebrew_fts::chars::is_term_mark(c)).collect();
+    let core = core.as_str();
     if core.chars().count() < hebrew_fts::wildcard::MIN_ANCHOR_LENGTH
         || core.contains('*')
         || core.contains(['"', '\''])
@@ -127,7 +130,8 @@ fn check_cancel(i: usize, cancel: Option<&CancelToken>) -> Result<()> {
 /// would match, capped like the walk. `core`/`suffix_only` from
 /// [`fm_wildcard_shape`]; `automaton` the walk's (built on mark-free text:
 /// with `marked_terms` a candidate is verified on its mark-free bytes, as
-/// the walk reads it through `MarkFree`).
+/// the walk reads it through `MarkFree`; a vocalized pattern's automaton
+/// reads the marks itself, so it verifies the marked term).
 pub fn expand_wildcard(
     fm: &FmIndex,
     dict: &TermDictionary,
@@ -145,7 +149,11 @@ pub fn expand_wildcard(
         if !term_of(dict, rowid, &mut buf)? {
             continue;
         }
-        let ok = if marked_terms { automaton.accepts(&strip_mark_bytes(&buf)) } else { automaton.accepts(&buf) };
+        let ok = if marked_terms && !automaton.requires_marks() {
+            automaton.accepts(&strip_mark_bytes(&buf))
+        } else {
+            automaton.accepts(&buf)
+        };
         if ok {
             kept.push((0u32, buf.clone()));
         }
@@ -178,12 +186,13 @@ pub fn expand_fuzzy(
             continue;
         }
         if let Distance::Exact(d) = dfa.distance(&buf) {
-            if d <= max_distance {
+            // a vocalized word: typo variants only (as the walk's DFA)
+            if d <= max_distance && d >= dfa.min_distance() {
                 kept.push((d as u32, buf.clone()));
             }
         }
     }
-    cap_like_the_walk(dict, kept, cap, marked_terms, &hebrew_fts::marks::exact_forms(word))
+    cap_like_the_walk(dict, kept, cap, marked_terms, &hebrew_fts::marks::exact_forms(&strip_marks(word)))
 }
 
 /// Edit distance over chars (insert, delete, substitute, and a swap of two
@@ -232,6 +241,8 @@ pub fn expand_fuzzy_quote_free(
     cancel: Option<&CancelToken>,
 ) -> Result<(Vec<Vec<u8>>, bool)> {
     let query: Vec<char> = text_form(word).chars().collect();
+    // a vocalized word (it carries required marks): typo variants only
+    let min_distance = usize::from(word.chars().any(hebrew_fts::chars::is_term_mark));
     let mut buf = Vec::new();
     let mut kept = Vec::new();
     for (i, (rowid, _)) in fm.find_fuzzy(&text_form(word), max_distance as usize).into_iter().enumerate() {
@@ -241,11 +252,16 @@ pub fn expand_fuzzy_quote_free(
         }
         let Ok(term) = std::str::from_utf8(&buf) else { continue };
         let form: Vec<char> = text_form(term).chars().collect();
-        if let Some(d) = levenshtein_within(&form, &query, max_distance as usize) {
+        if let Some(d) = levenshtein_within(&form, &query, max_distance as usize).filter(|&d| d >= min_distance) {
             kept.push((d as u32, buf.clone()));
         }
     }
-    cap_like_the_walk(dict, kept, cap, marked_terms, &hebrew_fts::marks::exact_forms(word))
+    cap_like_the_walk(dict, kept, cap, marked_terms, &hebrew_fts::marks::exact_forms(&strip_marks(word)))
+}
+
+/// `word` without its marks (a vocalized fuzzy word's pinned forms).
+fn strip_marks(word: &str) -> String {
+    word.chars().filter(|&c| !hebrew_fts::chars::is_term_mark(c)).collect()
 }
 
 #[cfg(test)]

@@ -27,7 +27,7 @@
 //!   word too).
 //!
 //! One addition, for vocalized search: with `keep_marks` (an index that keeps
-//! nikud / te'amim) a plain word keeps its marks, so the walk can require or
+//! nikud / te'amim) a plain, wildcard or fuzzy word keeps its marks, so the walk can require or
 //! ignore them. FtsLib's index has no marks, so its path never sets it.
 //!
 //! The parser only tokenizes: grouping (`|`) and the per-word options are the
@@ -225,10 +225,14 @@ fn parse_piece(raw: &str, keep_marks: bool) -> Vec<Option<QueryTerm>> {
         pos = e;
         let word = &text[s..e];
         let normalised = plain.normalize(word).text;
+        // A wildcard or fuzzy word keeps its typed marks on an index that
+        // keeps them (the engine keeps the required ones, or drops them all
+        // when nikud / te'amim matching is off).
+        let with_marks = || if keep_marks { marked.normalize(word).text } else { normalised.clone() };
         if normalised.contains(['*', '?']) {
-            out.push(Some(QueryTerm::Wildcard(normalised)));
+            out.push(Some(QueryTerm::Wildcard(with_marks())));
         } else if let Some(distance) = fuzzy {
-            out.push(Some(QueryTerm::Fuzzy { word: normalised, distance }));
+            out.push(Some(QueryTerm::Fuzzy { word: with_marks(), distance }));
         } else if prefixes || suffixes {
             out.push(Some(QueryTerm::Grammar { word: normalised, prefixes, suffixes }));
         } else {

@@ -22,7 +22,7 @@ An AI agent follows [AGENT-RUNBOOK.md](AGENT-RUNBOOK.md).
 | ours, positions | this repo: modified tantivy (`tantivy/` submodule) + hebrew-fts walks; index with positions (span queries for distance) | `TantivySeforimIndex.IndexFormatVersion` (tantivy12 at the time of writing) |
 | ours, no positions | same engine; distance/order checked on the line text by the locator | same |
 | ours, keep marks | positions index that keeps nikud/te'amim (vocalized walks); build only | same |
-| FtsLib | KitveiHakodesh's FtsLib (SQLite FTS5, `detail=none`) through Core's own searcher (`tools/parity/FtsLibDump`) | submodule `external/KleiKodeshProject` pinned at 1c647ea7, `SeforimDbFtsIndexer.IndexFormatVersion` (fts10) |
+| FtsLib | KitveiHakodesh's FtsLib (SQLite FTS5, `detail=none`) through Core's own searcher (`tools/parity/FtsLibDump`) | sibling checkout `../KleiKodeshProject` (current code), `SeforimDbFtsIndexer.IndexFormatVersion` (fts10) |
 | Otzaria | `otzaria_search_engine` v5.0.0, unmodified, through `tools/bench/otzaria-driver` (cargo git dependency, tag v5.0.0) | Otzaria's own tantivy index |
 
 Feature specs and the latest numbers: [FTS-SPECS-AND-COMPARISONS.md](../../FTS-SPECS-AND-COMPARISONS.md).
@@ -65,8 +65,8 @@ phrases have no Otzaria equivalent and are `n/a`.
 - Prerequisites: git, Rust stable, .NET 10 SDK, Python 3 (3.14 unpacks zstd natively; older
   needs `pip install zstandard` or the zstd CLI). Windows only: the .NET Framework 4.8
   targeting pack (the demo also builds net48) and the MSVC C++ build tools for Rust.
-- Submodules: `tantivy` (our modified copy) and `external/KleiKodeshProject` (KitveiHakodesh:
-  FtsLib + Core, ~0.8 GB history; `git clone --recursive --shallow-submodules` saves space).
+- Submodule `tantivy` (our modified copy). KitveiHakodesh (FtsLib + Core): clone
+  KleiKodesh/KleiKodeshProject NEXT TO this repo (`../KleiKodeshProject`), or set `KITVEI_DIR`.
 - seforim.db: found at `--db` / `DB_PATH`, else Otzaria's location
   (Windows `%APPDATA%\otzaria\books`, macOS `~/Library/Application Support/otzaria/books`,
   Linux `~/.local/share/otzaria/books`), else Zayit's, else `<out>/data`; otherwise

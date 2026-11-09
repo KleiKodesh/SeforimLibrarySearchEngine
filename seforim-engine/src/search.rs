@@ -1231,7 +1231,6 @@ impl SnippetSession {
             // their results are reassembled by chunk index, so the output
             // order — and with it the term-id numbering below — is exactly
             // the sequential one.
-            let total: usize = texts.iter().map(&size).sum();
             let target = (total / (threads * 8)).max(1);
             let mut bounds = vec![0usize];
             let mut acc = 0usize;
@@ -2068,11 +2067,11 @@ impl LineIndex {
     fn check_vocalized(&self, request: &SearchRequest) -> Result<()> {
         fn wants(g: &GroupSpec) -> bool {
             match g {
+                GroupSpec::Word { options, .. } => options.match_nikud || options.match_teamim,
                 // a wildcard / fuzzy word with typed marks left is vocalized
                 GroupSpec::Wildcard { pattern: w, .. } | GroupSpec::Fuzzy { word: w, .. } => {
                     w.chars().any(hebrew_fts::chars::is_term_mark)
                 }
-                GroupSpec::Word { options, .. } => options.match_nikud || options.match_teamim,
                 GroupSpec::Any { alternatives } => alternatives.iter().any(wants),
                 GroupSpec::Unmarked { group } | GroupSpec::Lexical { group } | GroupSpec::Capped { group, .. } => {
                     wants(group)

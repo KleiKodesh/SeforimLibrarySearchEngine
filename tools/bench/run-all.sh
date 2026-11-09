@@ -64,7 +64,7 @@ IDX_NOPOS="${IDX_NOPOS:-$OUT_DIR/indexes/ours-nopos}"
 IDX_MARKS="${IDX_MARKS:-$OUT_DIR/indexes/ours-marks}"
 IDX_FTSLIB="${IDX_FTSLIB:-$OUT_DIR/indexes/ftslib}"
 IDX_OTZARIA="${IDX_OTZARIA:-$OUT_DIR/indexes/otzaria}"
-KITVEI_DIR="${KITVEI_DIR:-$ROOT/external/KleiKodeshProject/KitveiHakodesh}"
+KITVEI_DIR="${KITVEI_DIR:-$ROOT/../KleiKodeshProject/KitveiHakodesh}"
 
 NATIVE="$ROOT/target/release/$LIB"
 DEMO="$ROOT/csharp/SeforimSearch.Demo/bin/Release/net10.0/SeforimSearch.Demo$EXE_SUF"

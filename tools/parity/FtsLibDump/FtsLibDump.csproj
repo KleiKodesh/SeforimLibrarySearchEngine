@@ -5,7 +5,7 @@
     existing FtsLib index and dumps every hit as one JSON line, in the same format
     as SeforimSearch.Demo's `dump` command, for a side-by-side diff.
 
-    KitveiHakodesh comes from the submodule external/KleiKodeshProject (pinned commit);
+    KitveiHakodesh comes from the sibling checkout ..\KleiKodeshProject (current code);
     override with -p:KitveiHakodeshDir=<...\KitveiHakodesh>.
     Windows: references KitveiHakodesh.Core (net10.0-windows) as is.
     Other OSes (or -p:FtsLibDumpPortable=true): KitveiHakodesh.Core.Portable, the plain
@@ -13,7 +13,7 @@
     guarded), so the same code runs on macOS and Linux.
   -->
   <PropertyGroup>
-    <KitveiHakodeshDir Condition="'$(KitveiHakodeshDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\external\KleiKodeshProject\KitveiHakodesh</KitveiHakodeshDir>
+    <KitveiHakodeshDir Condition="'$(KitveiHakodeshDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\..\KleiKodeshProject\KitveiHakodesh</KitveiHakodeshDir>
     <CoreDir>$(KitveiHakodeshDir)\CSharpBackend\KitveiHakodesh.Core</CoreDir>
     <FtsLibDumpPortable Condition="'$(FtsLibDumpPortable)' == '' And '$(OS)' != 'Windows_NT'">true</FtsLibDumpPortable>
     <OutputType>Exe</OutputType>

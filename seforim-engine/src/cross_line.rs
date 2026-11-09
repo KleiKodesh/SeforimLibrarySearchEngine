@@ -30,11 +30,13 @@
 //!    cross-line hit (when the in-line hits are exact; otherwise the host's
 //!    text check tries the line alone first).
 //! 5. Exact check: words anywhere (and partial matching) are exact from the
-//!    bitmaps; Otzaria's proximity (and per-pair gaps, phrases, regex
-//!    sequences) is checked on the postings' positions of both lines on an
-//!    index with positions, with the locator's own window rules; without
-//!    positions, and for FtsLib's distance / order, the host's texts are
-//!    checked by the locator over the joined text (like the in-line rule).
+//!    bitmaps when no edge enumerator sits at the break. On an index with
+//!    positions every other pair (Otzaria's proximity, per-pair gaps,
+//!    phrases, FtsLib's distance / order, a cover across an enumerator) is
+//!    decided on the postings' positions of both lines by the way of
+//!    matching's own matcher (issue #21); without positions the host's
+//!    texts are checked by the locator over the joined text (like the
+//!    in-line rule).
 
 use std::collections::{HashMap, HashSet};
 
@@ -69,6 +71,10 @@ pub(crate) struct CrossMatcher<'a> {
     pub terms: &'a [Vec<String>],
     pub prepared: &'a PreparedQueryGroups,
     pub rule: CrossRule,
+    /// The session's matcher for this way of matching: on an index with
+    /// positions it decides each pair on the joined positions, with the
+    /// same rules the locator applies to the joined texts.
+    pub matcher: &'a crate::search::Matcher,
 }
 
 /// What the cross-line pass needs from the search.
@@ -202,6 +208,16 @@ pub(crate) fn find(index: &LineIndex, searcher: &Searcher, input: &CrossInput<'_
     let nbits = max_position as usize + 2;
     let inline: HashSet<u64> = input.inline.iter().map(|h| h.position).collect();
     let mut locator = SnippetWindowLocator::new(0);
+    locator.set_word_span(true);
+    // An index with positions decides every pair on the joined positions
+    // (issue #21): FtsLib's distance / order and a cover across an edge
+    // enumerator too, not only Otzaria's proximity.
+    #[allow(unused_mut)]
+    let mut decide = index.options.positions;
+    #[cfg(test)]
+    if index.test_only_text_decision.load(std::sync::atomic::Ordering::Relaxed) {
+        decide = false;
+    }
 
     // Per line L: (exact, left, right) over every way of matching.
     let mut found: HashMap<u64, (bool, Pair)> = HashMap::new();
@@ -225,9 +241,19 @@ pub(crate) fn find(index: &LineIndex, searcher: &Searcher, input: &CrossInput<'_
         match &m.rule {
             // exact from the bitmaps unless an edge enumerator sits at the
             // break: its word may be the slot's only occurrence there
+            CrossRule::Cover { .. } if decide => {
+                let (plain, edged): (Vec<Pair>, Vec<Pair>) = pairs.into_iter().partition(|p| plain_break(&columns, p));
+                mark(&mut found, plain.into_iter().map(|p| (p, true)));
+                let passed = verify_positions(index, searcher, &columns, m, &edged, &mut locator, input.cancel)?;
+                mark(&mut found, passed.into_iter().map(|p| (p, true)));
+            }
             CrossRule::Cover { .. } => mark(&mut found, pairs.into_iter().map(|p| (p, plain_break(&columns, &p)))),
-            CrossRule::Proximity(proximity) if index.options.positions => {
-                let passed = verify_positions(index, searcher, &columns, m, proximity, &pairs, &mut locator, input.cancel)?;
+            CrossRule::Proximity(_) if index.options.positions => {
+                let passed = verify_positions(index, searcher, &columns, m, &pairs, &mut locator, input.cancel)?;
+                mark(&mut found, passed.into_iter().map(|p| (p, true)));
+            }
+            CrossRule::Text { .. } if decide => {
+                let passed = verify_positions(index, searcher, &columns, m, &pairs, &mut locator, input.cancel)?;
                 mark(&mut found, passed.into_iter().map(|p| (p, true)));
             }
             _ => mark(&mut found, pairs.into_iter().map(|p| (p, false))),
@@ -471,14 +497,14 @@ fn drop_negative(pairs: Vec<Pair>, searcher: &Searcher, input: &CrossInput<'_>) 
     Ok(pairs.into_iter().filter(|p| !excluded.contains(&p.left)).collect())
 }
 
-/// The pairs whose joined positions satisfy `proximity` with a matched
-/// word on each line (an index with positions).
+/// The pairs whose joined positions pass the way of matching's own matcher
+/// across the break, with a matched word on each line (an index with
+/// positions): the rule the locator applies to the two texts joined.
 fn verify_positions(
     index: &LineIndex,
     searcher: &Searcher,
     columns: &[LineColumns],
     m: &CrossMatcher<'_>,
-    proximity: &Proximity,
     pairs: &[Pair],
     locator: &mut SnippetWindowLocator,
     cancel: Option<&CancelToken>,
@@ -534,7 +560,10 @@ fn verify_positions(
         check(cancel)?;
     }
     let mut passed = Vec::new();
-    let mut joined = Vec::new();
+    let mut joined: Vec<(usize, u32)> = Vec::new();
+    let mut tokens: Vec<(u32, u32)> = Vec::new();
+    // the term ids ARE the prepared ordinals
+    let identity: Vec<u32> = (0..m.prepared.term_count() as u32).collect();
     for pair in pairs {
         // content words only, joined at the break (Otzaria's content_range):
         // L up to its last content word, L + 1 from its first, right after it
@@ -547,7 +576,12 @@ fn verify_positions(
         if let Some(right) = occurrences.get(&pair.right) {
             joined.extend(right.iter().filter(|&&(p, _)| p >= skip).map(|&(p, o)| (p - skip + words, o)));
         }
-        if locator.proximity_across_positions(m.prepared, proximity, &mut joined, words) {
+        joined.sort_unstable();
+        joined.dedup();
+        tokens.clear();
+        tokens.extend(joined.iter().map(|&(p, o)| (p as u32, o)));
+        locator.tokenize_occurrences_across(&tokens, words);
+        if m.matcher.locate(locator, true, &identity).is_some() {
             passed.push(*pair);
         }
     }

@@ -625,6 +625,18 @@ impl SnippetWindowLocator {
         self.positioned = true;
     }
 
+    /// [`tokenize_occurrences`](Self::tokenize_occurrences) for two lines
+    /// joined at a line break: `occurrences` are the joined lines' sorted
+    /// `(position, term id)` pairs (the next line's positions shifted past
+    /// the first line's words), `break_position` the next line's first
+    /// position. Until the next tokenize call every window the locate calls
+    /// find must cross the break, as after [`tokenize_pair`](Self::tokenize_pair)
+    /// (cross-line matching decided from the index positions, issue #21).
+    pub fn tokenize_occurrences_across(&mut self, occurrences: &[(u32, u32)], break_position: usize) {
+        self.tokenize_occurrences(occurrences);
+        self.break_token = Some(occurrences.partition_point(|o| (o.0 as usize) < break_position));
+    }
+
     /// Tokenizes two consecutive lines joined as `left + "\n" + right`
     /// (see [`TextTokens::tokenize_pair`]) for a cross-line locate: until
     /// the next [`tokenize`](Self::tokenize), every window the locate calls
@@ -1207,6 +1219,65 @@ fn any_order_window(
     word: bool,
 ) -> Option<(usize, usize, usize)> {
     let k = prepared.group_count();
+    let groups_of = |t: usize| -> &[usize] {
+        if ordinals[t] == NO_TERM {
+            &[]
+        } else {
+            prepared.groups_at(ordinals[t] as usize)
+        }
+    };
+    // positions never decrease along the tokens: compare each matched
+    // token with the previous MATCHED one (an unmatched token may sit between)
+    let shared = word && {
+        let mut prev: Option<usize> = None;
+        (0..tokens.len()).filter(|&t| ordinals[t] != NO_TERM).any(|t| {
+            let same = prev == Some(tokens[t].position);
+            prev = Some(tokens[t].position);
+            same
+        })
+    };
+    if !shared {
+        return any_order_window_on(tokens, &groups_of, k, max_span, brk, scratch, word);
+    }
+    // The word rule with a paired reading among the matched words (two
+    // readings at one position): one position fills one group, as on the
+    // index positions, so each position becomes one token holding the union
+    // of its readings' groups (issue #21).
+    let mut merged: Vec<TextToken> = Vec::new();
+    let mut first: Vec<usize> = Vec::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (t, tok) in tokens.iter().enumerate() {
+        let gs = groups_of(t);
+        if gs.is_empty() {
+            continue;
+        }
+        if merged.last().is_some_and(|m: &TextToken| m.position == tok.position) {
+            let g = groups.last_mut().unwrap();
+            g.extend_from_slice(gs);
+            g.sort_unstable();
+            g.dedup();
+        } else {
+            merged.push(*tok);
+            first.push(t);
+            groups.push(gs.to_vec());
+        }
+    }
+    let mbrk = brk.map(|b| first.partition_point(|&t| t < b));
+    let (l, r, span) = any_order_window_on(&merged, &|t: usize| groups[t].as_slice(), k, max_span, mbrk, scratch, word)?;
+    Some((first[l], first[r], span))
+}
+
+/// [`any_order_window`] over tokens whose groups `groups_of` gives (empty:
+/// not a matched word).
+fn any_order_window_on<'g>(
+    tokens: &[TextToken],
+    groups_of: &dyn Fn(usize) -> &'g [usize],
+    k: usize,
+    max_span: usize,
+    brk: Option<usize>,
+    scratch: &mut ProximityScratch,
+    word: bool,
+) -> Option<(usize, usize, usize)> {
     // Cross-line (`brk`): a feasible window crosses the break when it holds
     // a term token on each line (k >= 2: a group can then move its token to
     // the other side of a matching without breaking it).
@@ -1215,18 +1286,11 @@ fn any_order_window(
             if k < 2 {
                 return None;
             }
-            Some((0..b.min(tokens.len())).rev().find(|&t| ordinals[t] != NO_TERM)?)
+            Some((0..b.min(tokens.len())).rev().find(|&t| !groups_of(t).is_empty())?)
         }
         None => None,
     };
     scratch.reset_any_order(tokens.len(), k);
-    let groups_of = |t: usize| -> &[usize] {
-        if ordinals[t] == NO_TERM {
-            &[]
-        } else {
-            prepared.groups_at(ordinals[t] as usize)
-        }
-    };
     let mut w = WindowCounts::default();
     let mut best: Option<(usize, usize, usize)> = None;
     let mut l = 0usize;

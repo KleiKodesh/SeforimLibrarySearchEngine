@@ -132,7 +132,7 @@ pub(crate) struct HitFilter {
 
 impl HitFilter {
     /// Whether each of `docs` passes, from its positions alone.
-    fn passes(&mut self, docs: &[(u64, u32, DocId)]) -> Result<Vec<bool>> {
+    fn passes(&mut self, docs: &[(u64, u32, DocId)], crossing: &[bool]) -> Result<Vec<bool>> {
         let keys: Vec<Option<DocKey>> = docs.iter().map(|&(_, s, d)| Some((s, d))).collect();
         let occurrences = self.source.occurrences(&keys)?;
         let marked = match self.marked {
@@ -142,6 +142,12 @@ impl HitFilter {
         let maps = TermMaps { matchers: &self.source.matcher_maps, negatives: &self.source.negative_maps };
         let mut out = Vec::with_capacity(docs.len());
         for (i, o) in occurrences.iter().enumerate() {
+            if crossing[i] {
+                // a cross-line pair the cross-line pass already decided on
+                // the joined positions (`next_line_id`): it passes across
+                out.push(true);
+                continue;
+            }
             self.locator.tokenize_occurrences(o);
             let line_marked = marked.as_ref().is_none_or(|m| m[i]);
             out.push(passes_tokenized(&self.matchers, &self.negative, &mut self.locator, line_marked, maps));
@@ -170,7 +176,8 @@ pub(crate) fn produce(
             let (mut batch, done) = source.next(chunk, cancel.as_ref())?;
             candidates += batch.hits.len();
             if let Some(f) = filter.as_mut().filter(|_| !batch.hits.is_empty()) {
-                let pass = f.passes(&batch.docs)?;
+                let crossing: Vec<bool> = batch.hits.iter().map(|h| h.next_line_id.is_some()).collect();
+                let pass = f.passes(&batch.docs, &crossing)?;
                 let mut keep = pass.iter();
                 batch.hits.retain(|_| *keep.next().unwrap());
                 let mut keep = pass.iter();

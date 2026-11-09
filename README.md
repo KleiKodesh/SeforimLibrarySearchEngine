@@ -709,8 +709,9 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     during the search (issue #21, see "Hits decided from positions"): the
     hit list holds only passing lines, `count_needs_text` is false and the
     counts are exact once the search is complete, with no text read.
-    Cross-line searches keep the text path below.
-  - Otherwise (an index without positions, or cross-line matching) the host
+    Cross-line pairs too: the cross-line pass decides them on the two
+    lines' joined positions.
+  - Otherwise (an index without positions) the host
     feeds the hits' texts in hit order (any batch size); the engine
     validates each batch across all cores with exactly the snippet
     locator's test (no snippet, no term table) and adds the passing lines.
@@ -916,8 +917,9 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     counts) works on the hits taken in so far; the counts are exact once
     complete; the cancel token stops the producer at its next chunk (the
     next pull fails as cancelled). The blocking `search` drains the stream,
-    so its results are complete as before. Cross-line searches and an index
-    without positions are complete at once (not streamed).
+    so its results are complete as before. A cross-line search streams after
+    its cross-line pass (it needs every in-line hit first). An index without
+    positions is complete at once (not streamed).
 - **Search:** every matching line in catalog order (or by relevance /
   generation, see the result order item), plus a snippet session.
   - The session locates snippets for a whole batch across all cores.
@@ -1662,6 +1664,15 @@ word, a plain AND, spans already on positions) no position is read: the
 hits pass as they come. The hits are streamed (see "Cancellation and
 streaming"). Code: `seforim-engine/src/stream.rs`.
 
+Cross-line matching on an index with positions decides every candidate pair
+on the joined positions (`cross_line.rs`: `L` up to its last content word,
+`L + 1` from its first content word, from the `line_last` / `line_first`
+fields; `SnippetWindowLocator::tokenize_occurrences_across`), running the
+way of matching's own matcher across the break: FtsLib's distance and
+order, a cover across an edge enumerator and Otzaria's proximity alike. So
+the cross-line hits are exact too, and a hit with `next_line_id` passes the
+in-line decision (its pair already passed).
+
 The window is the word-tightest one (`SnippetWindowLocator::set_word_span`,
 the user's decision): a session on an index with positions picks, on the
 displayed rows' texts too, the window spanning the fewest word positions,
@@ -1690,10 +1701,15 @@ of 5 runs after a warm-up, one process per query; before = `eefabda`):
 | two words, proximity any order (span query) | 7,417 | 29 -> 12 ms | 29 -> 24 ms | - | 15 -> 16 MB |
 | two words, proximity in order (span query) | 78,061 | 101 -> 13 ms | 101 -> 86 ms | - | 22 -> 22 MB |
 | three words, proximity | 2,008 | 59 -> 28 ms | 59 -> 39 ms | - | 18 -> 18 MB |
-| quoted phrase (cross-line: not streamed) | 67,664 | 390 -> 317 ms | 390 -> 317 ms | - | 56 -> 56 MB |
+| quoted phrase (cross-line) | 67,664 | 390 -> 422 ms | 390 -> 430 ms | - | 56 -> 56 MB |
+| two words, distance 5, cross-line | text -> 7,583 | text -> 71 ms | text (locate + fetch of every candidate pair) -> 92 ms | - | -> 24 MB |
 
 Before, "first batch" = "complete" = the whole search (every hit
-collected). "text": the exact total needed every candidate's text located
+collected). A cross-line search's first batch waits for the in-line
+collection and the cross-line pass: the quoted phrase measured slower
+(390 -> 422 ms; this run was noisier, the plain distance query also read
+42 ms instead of 28), so it may cost up to a third more before its first
+batch, and its hits are exact as before. "text": the exact total needed every candidate's text located
 (locate time measured on a 2000-text sample and extrapolated, issue #21
 probe) plus fetching all those texts from seforim.db. The in-order query's
 78,061 hits now equal the in-order proximity's, as they should. Memory: no
@@ -1784,7 +1800,9 @@ every differing query.
   occurrence instead of the shortest), and in rare lines a distance filter
   passes under the word rule only. In order, the slots also follow in
   strictly increasing positions (a paired reading's two readings share one
-  position and never chain). An index without positions is FtsLib's rule
+  position and never chain), and in any-order proximity one position fills
+  one group (both readings of a paired reading never fill two groups, as the
+  span query on positions). An index without positions is FtsLib's rule
   exactly.
 - **A quoted phrase across lines:** one phrase holding the whole query may
   cross into the next line here (Otzaria's literal phrase search); FtsLib
@@ -1882,10 +1900,6 @@ every differing query.
   open, and hits arrive sorted (see "Doc order = catalog order"). Built
   (issue #21): the search streams on an index with positions, the first
   batch in 7-28 ms engine time on the full library (every hit still kept).
-- Cross-line searches (a quoted phrase, `cross_line`) are not streamed and
-  their FtsLib distance / order still needs the texts (the cross-line pairs
-  are decided on the joined texts); their in-line part could be decided
-  from positions like every other search (issue #21 follow-up).
 - Vocalized matching (nikud / te'amim) needs an index built with
   `keep_marks`; matching marks on a plain index is not built.
 - Choosing span query vs post-filter for very broad expansions (needs a

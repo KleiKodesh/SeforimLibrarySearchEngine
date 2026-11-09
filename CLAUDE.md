@@ -213,8 +213,9 @@ seforim.db knowledge). Hits carry no TOC entry; the host reads it by line id.
   (`search_streaming` / `pull`, `se_search_stream`), totals exact with no text. The
   window spans the fewest WORD positions (`set_word_span`), a NAMED DEVIATION from
   FtsLib's fewest-UTF-16 rule (0.1-3% of hits show another occurrence). An index
-  WITHOUT positions stays FtsLib's path step for step. Cross-line searches: text path,
-  not streamed (open). No per-hit window arena: the window is re-found for displayed rows.
+  WITHOUT positions stays FtsLib's path step for step. Cross-line pairs are decided on the
+  joined positions by the matcher itself (`verify_positions`, `tokenize_occurrences_across`),
+  then streamed. No per-hit window arena: the window is re-found for displayed rows.
 - Offsets are UTF-16 (.NET/JS indices) everywhere the page reads them.
 - Word model (user: "fix fts lib, make it match otzaria", 2026-10-21): FtsLib's words =
   Otzaria's: runs of letters AND ASCII digits, any length, one letter included (`ב5`

@@ -478,10 +478,20 @@ mod tests {
             };
             let (_d1, index) = build(true);
             let mut decided = 0;
-            for json in requests() {
+            let mut crossed = 0;
+            // every request, and each also matching across lines
+            let crossing: Vec<String> =
+                requests().iter().map(|r| format!("{},\"cross_line\":true}}", &r[..r.len() - 1])).collect();
+            for json in requests().into_iter().chain(crossing) {
                 let request: SearchRequest = serde_json::from_str(&json).unwrap();
-                let mut r = index.search(&request).unwrap();
-                assert!(r.is_complete() && !r.count_needs_text());
+                let mut r = match index.search(&request) {
+                    Ok(r) => r,
+                    // a shape cross-line refuses (gaps without order)
+                    Err(_) if request.cross_line => continue,
+                    Err(e) => panic!("{e}"),
+                };
+                assert!(r.is_complete() && !r.count_needs_text(), "{}", json.escape_unicode());
+                crossed += r.hits.iter().filter(|h| h.next_line_id.is_some()).count();
                 // the candidates: the same index, the text deciding
                 index.test_only_text_decision.store(true, std::sync::atomic::Ordering::Relaxed);
                 let candidates = index.search(&request).unwrap();
@@ -489,8 +499,8 @@ mod tests {
                 let want: Vec<u64> = candidates
                     .hits
                     .iter()
+                    .filter(|h| r.session.locate_pair(text_of(h.line_id), h.next_line_id.map(text_of)).is_some())
                     .map(|h| h.line_id)
-                    .filter(|&id| r.session.locate(text_of(id)).is_some())
                     .collect();
                 let got: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();
                 if got != want {
@@ -508,6 +518,45 @@ mod tests {
                 assert_eq!(s.hits, r.hits);
             }
             assert!(decided > 20, "too few hits dropped by their positions: {decided}");
+            assert!(crossed > 20, "too few cross-line hits: {crossed}");
+        }
+    }
+
+    /// Issue #21: a paired reading's two readings share one position, so on
+    /// an index with positions they never fill two groups of an any-order
+    /// proximity: the span query and the locator (word rule) agree. An
+    /// index without positions keeps its text rule.
+    #[test]
+    fn paired_reading_fills_one_proximity_group() {
+        let text = format!("{} ({}) [{}] {}", W[5], W[0], W[1], W[5]);
+        let lines = vec![LineDoc {
+            line_id: 1,
+            position: 0,
+            book_id: 1,
+            text: text.clone(),
+            section_id: None,
+            no_cross: false,
+        }];
+        let json = format!(
+            "{{\"groups\":[{{\"kind\":\"word\",\"word\":\"{}\"}},{{\"kind\":\"word\",\"word\":\"{}\"}}],\"proximity\":{{\"mode\":\"any_order\",\"distance\":2}}}}",
+            W[0], W[1]
+        );
+        let request: SearchRequest = serde_json::from_str(&json).unwrap();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = LineIndex::create(dir.path(), IndexOptions { positions, keep_marks: false }).unwrap();
+            let mut w = index.writer(50_000_000, 1).unwrap();
+            w.add(&lines[0]).unwrap();
+            w.commit(None).unwrap();
+            let mut r = index.search(&request).unwrap();
+            if positions {
+                assert!(r.hits.is_empty());
+                assert!(r.session.locate(&text).is_none());
+            } else {
+                // the text rule without positions: unchanged
+                assert_eq!(r.hits.len(), 1);
+                assert!(r.session.locate(&text).is_some());
+            }
         }
     }
 

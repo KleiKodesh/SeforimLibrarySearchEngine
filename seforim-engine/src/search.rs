@@ -682,7 +682,7 @@ impl Matcher {
     /// over the text the locator last tokenized (`crossing`: two lines
     /// joined by `tokenize_pair`; the window must cross the break).
     /// `map`: the positioned locate's term map (see [`TermMaps`]).
-    fn locate(&self, locator: &mut SnippetWindowLocator, crossing: bool, map: &[u32]) -> Option<Snippet> {
+    pub(crate) fn locate(&self, locator: &mut SnippetWindowLocator, crossing: bool, map: &[u32]) -> Option<Snippet> {
         if let Some(proximity) = self.cross_proximity.as_ref().filter(|_| crossing) {
             let d = locator.locate_proximity_tokenized_mapped(&self.prepared, map, proximity);
             return SnippetSession::raw(d, usize::MAX);
@@ -2787,13 +2787,14 @@ impl LineIndex {
         // of the position-sorted index streams straight from the scorer.
         // Cross-line matching keeps the text path (its pairs need texts).
         #[allow(unused_mut)]
-        let mut stream = self.options.positions && !cross;
+        let mut stream = self.options.positions;
         #[cfg(test)]
         if self.test_only_text_decision.load(std::sync::atomic::Ordering::Relaxed) {
             stream = false;
         }
         let mut scan: Option<crate::stream::Source> = None;
-        if stream && !relevance && request.order != ResultsOrder::Generation && self.catalog_ordered(&searcher) {
+        // (cross-line needs every in-line hit first: collected, then streamed)
+        if stream && !cross && !relevance && request.order != ResultsOrder::Generation && self.catalog_ordered(&searcher) {
             let segment = &searcher.segment_readers()[0];
             let start = match request.after_position {
                 Some(after) => self.first_doc_after(segment, after)?,
@@ -3008,6 +3009,7 @@ impl LineIndex {
                     terms: &group_terms,
                     prepared: &session.matchers[0].prepared,
                     rule: main_rule,
+                    matcher: &session.matchers[0],
                 });
                 m_index = 1;
             }
@@ -3015,6 +3017,7 @@ impl LineIndex {
                 matchers.push(CrossMatcher {
                     terms,
                     prepared: &session.matchers[m_index + i].prepared,
+                    matcher: &session.matchers[m_index + i],
                     rule: CrossRule::Proximity(Proximity::Ordered { gaps: vec![0; terms.len().saturating_sub(1)] }),
                 });
             }

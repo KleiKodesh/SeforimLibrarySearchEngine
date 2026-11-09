@@ -134,6 +134,22 @@ final class SeforimIndex implements Finalizable {
   /// True when a sidecar matching the current single segment exists.
   bool get hasFmSidecar => _n.indexHasFmSidecar(handle) == 1;
 
+  /// Number of lines in the index (a cheap count: no JSON, no payload), as of
+  /// the last commit through this index's writers or the last [reload].
+  int get numLines {
+    final n = _n.indexNumLines(handle);
+    if (n < 0) throw _n.error();
+    return n;
+  }
+
+  /// Reloads the index's shared reader to the last commit on disk. Needed
+  /// only when ANOTHER process (or another [SeforimIndex] on the same
+  /// directory) wrote the index; this index's own writers reload it
+  /// themselves. Running searches keep their snapshot.
+  void reload() {
+    if (_n.indexReload(handle) != 0) throw _n.error();
+  }
+
   /// Starts a writer. With no arguments (the default): the AUTO mode
   /// (issue #19), one thread per core in the OS background mode and a memory
   /// budget that follows the machine (large while idle; the minimum under

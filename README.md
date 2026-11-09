@@ -666,7 +666,14 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   the UTF-8 texts concatenated in one buffer; Dart `IndexWriter.addAll`),
   `se_writer_delete`, `se_writer_commit` /
   `_rollback` / `_merge_and_close`, `se_index_build_fm_sidecar` /
-  `se_index_has_fm_sidecar`. Options are strict both ways: create's
+  `se_index_has_fm_sidecar`, `se_index_num_lines` (a cheap count, no JSON; C#
+  `SeforimIndex.NumLines`, Dart `numLines`), `se_index_reload`. One shared
+  reader per open index (issue #22): every search, count and sidecar check
+  takes its searcher from it; the index's own writers reload it after every
+  commit, rollback and merge (no file watcher), and a running search keeps
+  the snapshot it started with. When another process or another handle on
+  the same directory writes the index, the host calls `se_index_reload`
+  (C# `Reload()`, Dart `reload()`) or reopens. Options are strict both ways: create's
   options JSON may omit a key (its default) but malformed JSON, a
   non-object, an unknown key or a wrong type is an error; open reads the
   recorded `engine_options.json` (both keys required, no unknown key) and

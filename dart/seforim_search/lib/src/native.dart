@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 2;
+const int seforimAbiVersion = 3;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -101,6 +101,10 @@ final class SeforimNative {
             'se_index_build_fm_sidecar'),
         indexHasFmSidecar = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
             'se_index_has_fm_sidecar'),
+        indexNumLines = lib.lookupFunction<Int64 Function(Pointer<Void>), int Function(Pointer<Void>)>(
+            'se_index_num_lines'),
+        indexReload = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
+            'se_index_reload'),
         writerOpen = lib.lookupFunction<Pointer<Void> Function(Pointer<Void>, Size, Size),
             Pointer<Void> Function(Pointer<Void>, int, int)>('se_writer_open'),
         writerOpenEx = lib.lookupFunction<
@@ -211,6 +215,8 @@ final class SeforimNative {
   final Pointer<Utf8> Function(Pointer<Uint8>, int) userRegexKind;
   final int Function(Pointer<Void>) indexBuildFmSidecar;
   final int Function(Pointer<Void>) indexHasFmSidecar;
+  final int Function(Pointer<Void>) indexNumLines;
+  final int Function(Pointer<Void>) indexReload;
   final Pointer<Void> Function(Pointer<Void>, int, int) writerOpen;
   final Pointer<Void> Function(Pointer<Void>, int, int, int) writerOpenEx;
   final int Function(Pointer<Void>) writerMemoryBudget;

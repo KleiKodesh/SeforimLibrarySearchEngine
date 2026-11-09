@@ -70,6 +70,12 @@ namespace SeforimSearch.Engine.Native
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern int se_index_has_fm_sidecar(IndexHandle index);
 
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern long se_index_num_lines(IndexHandle index);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_index_reload(IndexHandle index);
+
         // ── Writer ──
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern WriterHandle se_writer_open(IndexHandle index, UIntPtr heapBytes, UIntPtr numThreads);

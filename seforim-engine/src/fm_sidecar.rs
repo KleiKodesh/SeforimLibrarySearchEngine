@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 
 use tantivy::schema::Field;
 use tantivy::index::SegmentId;
-use tantivy::Index;
 
 use crate::fm_index::{self, FmIndex};
 use crate::Result;
@@ -43,9 +42,7 @@ fn sidecar_matches(path: &Path, num_terms: usize) -> bool {
 /// use the walk) when the index has several segments, has no terms, or its
 /// dictionary cannot be FM-indexed (a char outside the BMP). Err only on
 /// I/O failure.
-pub fn build(index: &Index, text: Field, dir: &Path) -> Result<bool> {
-    let reader = index.reader()?;
-    let searcher = reader.searcher();
+pub fn build(searcher: &tantivy::Searcher, text: Field, dir: &Path) -> Result<bool> {
     let segments = searcher.segment_readers();
     if segments.len() != 1 {
         return Ok(false);

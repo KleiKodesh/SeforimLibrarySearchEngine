@@ -284,8 +284,7 @@ impl LineIndex {
         cancel: Option<CancelToken>,
     ) -> Result<SearchResult> {
         let plan = Arc::new(hebrew_fts::user_regex::parse_line(pattern).map_err(|e| Error::Unsupported(e.to_string()))?);
-        let reader = self.index.reader()?;
-        let searcher = reader.searcher();
+        let searcher = self.reader.searcher();
         let books: Option<HashSet<u64>> = request.books.as_ref().map(|b| b.iter().copied().collect());
         let candidates = if self.options.keep_marks {
             None

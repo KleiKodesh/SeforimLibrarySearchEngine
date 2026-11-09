@@ -72,7 +72,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 2;
+pub const SE_ABI_VERSION: u32 = 3;
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -376,6 +376,36 @@ pub unsafe extern "C" fn se_index_has_fm_sidecar(index: *const LineIndex) -> i32
     guard(0, || {
         let index = index.as_ref().ok_or("null index")?;
         Ok(index.has_fm_sidecar() as i32)
+    })
+}
+
+/// Number of lines in the index, from the index's shared reader (as of the
+/// last commit this engine made or the last `se_index_reload`). No JSON, no
+/// payload: a cheap count. -1 on error.
+///
+/// # Safety
+/// `index` must be a live index.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_num_lines(index: *const LineIndex) -> i64 {
+    guard(-1, || {
+        let index = index.as_ref().ok_or("null index")?;
+        Ok(index.num_lines().map_err(err)? as i64)
+    })
+}
+
+/// Reloads the index's shared reader to the last commit on disk. Needed
+/// only when ANOTHER process (or another index handle on the same dir)
+/// wrote the index; writes through this handle's writers reload it
+/// themselves. Running searches keep their snapshot. 0 = ok, -1 on error.
+///
+/// # Safety
+/// `index` must be a live index.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_reload(index: *const LineIndex) -> i32 {
+    guard(-1, || {
+        let index = index.as_ref().ok_or("null index")?;
+        index.reload().map_err(err)?;
+        Ok(0)
     })
 }
 

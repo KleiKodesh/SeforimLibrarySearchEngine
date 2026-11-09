@@ -108,6 +108,28 @@ namespace SeforimSearch.Engine
         /// <summary>True when a sidecar matching the current single segment exists.</summary>
         public bool HasFmSidecar => NativeMethods.se_index_has_fm_sidecar(_handle) == 1;
 
+        /// <summary>Number of lines in the index (a cheap count: no JSON, no payload), as of
+        /// the last commit through this index's writers or the last <see cref="Reload"/>.</summary>
+        public long NumLines
+        {
+            get
+            {
+                long n = NativeMethods.se_index_num_lines(_handle);
+                if (n < 0) throw new SeforimEngineException(Interop.LastError());
+                return n;
+            }
+        }
+
+        /// <summary>Reloads the index's shared reader to the last commit on disk. Needed only
+        /// when ANOTHER process (or another <see cref="SeforimIndex"/> on the same directory)
+        /// wrote the index; this index's own writers reload it themselves. Running searches
+        /// keep their snapshot.</summary>
+        public void Reload()
+        {
+            if (NativeMethods.se_index_reload(_handle) != 0)
+                throw new SeforimEngineException(Interop.LastError());
+        }
+
         /// <summary>Starts a writer in the AUTO mode (the default, issue #19): one thread per
         /// core in the OS background mode, and a memory budget that follows the machine
         /// (large while idle; the minimum under memory pressure or while the user is active,

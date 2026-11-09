@@ -2166,8 +2166,7 @@ impl LineIndex {
             session.max_word_distance = usize::MAX;
         }
 
-        let reader = self.index.reader()?;
-        let searcher = reader.searcher();
+        let searcher = self.reader.searcher();
         let fm = self.fm_sidecar_for(&searcher);
         let walk = Walk { fm: fm.as_deref(), cap: request.max_expanded_terms };
         let mut sinks = Vec::new();

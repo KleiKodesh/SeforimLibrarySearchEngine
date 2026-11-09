@@ -29,7 +29,7 @@ use tantivy::indexer::IndexWriterOptions;
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED,
 };
-use tantivy::{doc, Index, IndexSettings, IndexSortByField, IndexWriter, Order, Searcher, Term};
+use tantivy::{doc, Index, IndexReader, IndexSettings, IndexSortByField, IndexWriter, Order, ReloadPolicy, Searcher, Term};
 
 use crate::Result;
 
@@ -178,6 +178,13 @@ pub struct LineIndex {
     pub(crate) fields: LineFields,
     pub(crate) options: IndexOptions,
     pub(crate) dir: PathBuf,
+    /// The ONE reader every search, count and sidecar check takes its
+    /// searcher from (issue #22). Manual reload policy, no file watcher:
+    /// the engine reloads it after every commit, rollback and merge its own
+    /// [`LineWriter`] performs. A running search keeps the searcher (the
+    /// snapshot) it started with. When ANOTHER process writes the index,
+    /// call [`LineIndex::reload`] (or reopen).
+    pub(crate) reader: IndexReader,
     /// The FM-index sidecar, opened on first use (see `fm_sidecar`).
     pub(crate) fm: crate::fm_sidecar::FmCache,
     /// TEST ONLY (compiled out of every non-test build): forces leading-`*`
@@ -217,19 +224,21 @@ impl LineIndex {
             dir.join(OPTIONS_FILE),
             serde_json::to_string(&options).map_err(|e| crate::Error::Unsupported(e.to_string()))?,
         )?;
-        Ok(Self::wrap(index, fields, options, dir))
+        Self::wrap(index, fields, options, dir)
     }
 
-    fn wrap(index: Index, fields: LineFields, options: IndexOptions, dir: &Path) -> LineIndex {
-        LineIndex {
+    fn wrap(index: Index, fields: LineFields, options: IndexOptions, dir: &Path) -> Result<LineIndex> {
+        let reader = index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()?;
+        Ok(LineIndex {
             index,
+            reader,
             fields,
             options,
             dir: dir.to_path_buf(),
             fm: Default::default(),
             #[cfg(test)]
             test_only_disable_fm: std::sync::atomic::AtomicBool::new(false),
-        }
+        })
     }
 
     /// Opens an existing index.
@@ -247,7 +256,7 @@ impl LineIndex {
         fields.line_last = schema.get_field("line_last").ok();
         fields.line_flags = schema.get_field("line_flags").ok();
         fields.section_id = schema.get_field("section_id").ok();
-        Ok(Self::wrap(index, fields, options, dir))
+        Self::wrap(index, fields, options, dir)
     }
 
     /// Builds the FM-index sidecar over the term dictionary (FtsLib's
@@ -260,13 +269,14 @@ impl LineIndex {
         // the single-threaded tail of a build: normal priority even when the
         // calling thread opted into background mode (throttled, it drags)
         let _normal = tantivy::indexer::NormalPrioritySection::enter();
-        crate::fm_sidecar::build(&self.index, self.fields.text, &self.dir)
+        // another LineIndex over this dir may have merged: see the last commit
+        self.reader.reload()?;
+        crate::fm_sidecar::build(&self.reader.searcher(), self.fields.text, &self.dir)
     }
 
     /// True when a sidecar matching the current single segment exists.
     pub fn has_fm_sidecar(&self) -> bool {
-        let Ok(reader) = self.index.reader() else { return false };
-        self.fm.get(&self.dir, &reader.searcher(), self.fields.text).is_some()
+        self.fm.get(&self.dir, &self.reader.searcher(), self.fields.text).is_some()
     }
 
     /// True when the docs of `searcher` are in ascending catalog `position`
@@ -330,9 +340,18 @@ impl LineIndex {
         Ok(self.index.load_metas()?.payload)
     }
 
-    /// A reader over the index (for tools and statistics).
+    /// The index's shared reader (for tools and statistics; see the
+    /// `reader` field: reloaded after this engine's own writes).
     pub fn reader(&self) -> Result<tantivy::IndexReader> {
-        Ok(self.index.reader()?)
+        Ok(self.reader.clone())
+    }
+
+    /// Reloads the shared reader to the last commit on disk. Needed only
+    /// when another process (or another `LineIndex` over the same dir) wrote
+    /// the index; this engine's own writer reloads it itself. Searches
+    /// already running keep their snapshot.
+    pub fn reload(&self) -> Result<()> {
+        Ok(self.reader.reload()?)
     }
 
     /// The text field.
@@ -351,8 +370,7 @@ impl LineIndex {
 
     /// Number of lines in the index (as of the last commit).
     pub fn num_lines(&self) -> Result<u64> {
-        let reader = self.index.reader()?;
-        Ok(reader.searcher().num_docs())
+        Ok(self.reader.searcher().num_docs())
     }
 
     /// Starts a writer. `heap_bytes` is the total budget; tantivy needs at
@@ -383,6 +401,7 @@ impl LineIndex {
             fields: self.fields,
             threads,
             watcher: None,
+            reader: self.reader.clone(),
         })
     }
 
@@ -406,6 +425,7 @@ impl LineIndex {
             fields: self.fields,
             threads,
             watcher: Some(watcher),
+            reader: self.reader.clone(),
         })
     }
 }
@@ -417,6 +437,9 @@ pub struct LineWriter {
     threads: usize,
     /// The auto mode's resource watcher (stops when the writer drops).
     watcher: Option<crate::resources::Watcher>,
+    /// The index's shared reader, reloaded after every commit, rollback
+    /// and merge (issue #22).
+    reader: IndexReader,
 }
 
 impl LineWriter {
@@ -477,6 +500,7 @@ impl LineWriter {
             prepared.set_payload(p);
         }
         prepared.commit()?;
+        self.reader.reload()?;
         Ok(())
     }
 
@@ -502,6 +526,7 @@ impl LineWriter {
     /// Drops everything queued since the last commit.
     pub fn rollback(&mut self) -> Result<()> {
         self.writer.rollback()?;
+        self.reader.reload()?;
         Ok(())
     }
 
@@ -540,7 +565,9 @@ impl LineWriter {
                 Err(e) => return Err(e.into()),
             }
         }
+        let reader = self.reader.clone();
         self.writer.wait_merging_threads()?;
+        reader.reload()?;
         Ok(())
     }
 }
@@ -598,6 +625,65 @@ mod tests {
             section_id: None,
             no_cross: false,
         }
+    }
+
+    fn hits(index: &LineIndex, q: &str) -> usize {
+        let o = crate::SearchOptions { query: q.into(), ..Default::default() };
+        index.search_options(&o).unwrap().hits.len()
+    }
+
+    /// Issue #22: one reader for the index's life, reloaded by our writer.
+    #[test]
+    fn shared_reader_reloads_after_our_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        w.add(&doc(1, "alpha beta")).unwrap();
+        w.commit(None).unwrap();
+        // reused: no commit, same generation across searches and counts
+        let g = index.reader.searcher().generation().generation_id();
+        assert_eq!(hits(&index, "alpha"), 1);
+        assert_eq!(index.num_lines().unwrap(), 1);
+        assert_eq!(index.reader.searcher().generation().generation_id(), g);
+        // a search started before a commit keeps its snapshot
+        let before = index.search_options(&crate::SearchOptions { query: "alpha".into(), ..Default::default() }).unwrap();
+        let snapshot = index.reader.searcher();
+        w.add(&doc(2, "alpha gamma")).unwrap();
+        w.commit(None).unwrap();
+        assert_eq!(before.hits.len(), 1);
+        assert_eq!(snapshot.num_docs(), 1);
+        // the next search and the count see the commit
+        assert_eq!(hits(&index, "alpha"), 2);
+        assert_eq!(index.num_lines().unwrap(), 2);
+        // a delete, a rollback and the merge reload too
+        w.delete(1);
+        w.commit(None).unwrap();
+        assert_eq!(index.num_lines().unwrap(), 1);
+        w.add(&doc(3, "alpha")).unwrap();
+        w.rollback().unwrap();
+        assert_eq!(hits(&index, "alpha"), 1);
+        w.add(&doc(4, "alpha delta")).unwrap();
+        w.merge_all().unwrap();
+        assert_eq!(hits(&index, "alpha"), 2);
+        assert_eq!(index.reader.searcher().segment_readers().len(), 1);
+        assert!(index.build_fm_sidecar().unwrap());
+        assert!(index.has_fm_sidecar());
+    }
+
+    /// Issue #22: a write through ANOTHER handle is seen after `reload`.
+    #[test]
+    fn reload_sees_another_handles_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let other = LineIndex::open(dir.path()).unwrap();
+        let mut w = other.writer(50_000_000, 1).unwrap();
+        w.add(&doc(1, "alpha")).unwrap();
+        w.commit(None).unwrap();
+        assert_eq!(other.num_lines().unwrap(), 1);
+        assert_eq!(index.num_lines().unwrap(), 0); // no watcher
+        index.reload().unwrap();
+        assert_eq!(index.num_lines().unwrap(), 1);
+        assert_eq!(hits(&index, "alpha"), 1);
     }
 
     /// Issue #7 A11: merge_all commits pending adds and deletes first and

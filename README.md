@@ -188,6 +188,12 @@ SeforimSearch.Demo build  [--db path] [--index dir] [--max-lines N] [--no-positi
 SeforimSearch.Demo search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] <query>
 ```
 
+Release profile (workspace `Cargo.toml`): fat LTO, `codegen-units = 1`, `strip = "symbols"`.
+Measured win-x64: `seforim_search_native.dll` 8.92 MB -> 8.35 MB, locate_bench / find_all_bench
+same or faster (find_all one word best 24.1 -> 21.3 ms); release build ~7.4 -> ~13.5 min from clean.
+Rejected: opt-level "s" (7.22 MB, find_all ~23% slower); panic = "abort" (engine-ffi catches panics
+at the C boundary).
+
 Tests: `cargo test` at the root (hebrew-fts, seforim-engine, engine-ffi), and
 `cargo test --lib query::` in `tantivy/`.
 

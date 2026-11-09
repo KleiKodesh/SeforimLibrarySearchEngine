@@ -8,3 +8,12 @@ exclude = ["tantivy"]
 # built once and cached, only our crates recompile per edit.
 [profile.dev]
 debug = 0
+
+# Native library size (measured 2026-11, win-x64): fat LTO + one codegen unit
+# 8.92 MB -> 8.35 MB, same or faster in locate_bench / find_all_bench. opt-level
+# "s" (7.22 MB) was rejected: find_all ~23% slower. panic stays "unwind": engine-ffi
+# catches panics at the C boundary. strip only matters off Windows (PDB is separate).
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

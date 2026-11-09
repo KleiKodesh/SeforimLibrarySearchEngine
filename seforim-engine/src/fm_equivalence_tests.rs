@@ -637,3 +637,98 @@ fn a_cancelled_fm_build_stops() {
     let r = crate::fm_index::build_cancellable(["ab", "cd"], Some(&flag));
     assert!(r.is_err_and(|e| e.0 == crate::fm_index::BUILD_CANCELLED));
 }
+
+#[test]
+fn concurrent_lookups_open_the_sidecar_once() {
+    // issue #30: single flight, several threads arriving together
+    let lines = corpus();
+    let (dir, index) = index_over(&lines, false);
+    assert!(index.build_fm_sidecar().unwrap());
+    drop(index);
+    let index = LineIndex::open(dir.path()).unwrap();
+    let barrier = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                let searcher = index.reader.searcher();
+                barrier.wait();
+                assert!(matches!(
+                    index.fm.lookup(&index.dir, &searcher, index.fields.text),
+                    crate::fm_sidecar::FmLookup::Ready(_)
+                ));
+            });
+        }
+    });
+    assert_eq!(index.fm.test_only_opens.load(Ordering::Relaxed), 1);
+    // a broken file is shared too: one open, every caller gets its reason
+    let path = fmi_path(dir.path());
+    drop(index);
+    let index = LineIndex::open(dir.path()).unwrap();
+    std::fs::write(&path, vec![7u8; 100]).unwrap();
+    let barrier = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                let searcher = index.reader.searcher();
+                barrier.wait();
+                assert!(matches!(
+                    index.fm.lookup(&index.dir, &searcher, index.fields.text),
+                    crate::fm_sidecar::FmLookup::Unusable(_)
+                ));
+            });
+        }
+    });
+    assert_eq!(index.fm.test_only_opens.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_wait_for_another_open_is_cancellable_and_plain_searches_never_wait() {
+    let lines = corpus();
+    let (dir, index) = index_over(&lines, false);
+    assert!(index.build_fm_sidecar().unwrap());
+    drop(index);
+    let index = LineIndex::open(dir.path()).unwrap();
+    let id = index.reader.searcher().segment_readers()[0].segment_id();
+    // another caller is "opening" the sidecar and never finishes
+    index.fm.test_only_set_loading(id, true);
+    // a search with no leading-* or fuzzy word does not touch the sidecar
+    let plain = SearchOptions { query: s(&[SHIN, LAMED]), ..Default::default() };
+    index.search_options(&plain).unwrap();
+    // an FM search waits; cancelling it stops the wait
+    let token = CancelToken::new();
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            let o = SearchOptions { query: format!("*{}*", s(&[SHIN, LAMED])), ..Default::default() };
+            index.search_options_cancellable(&o, Some(token.clone()))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!waiter.is_finished(), "the FM search did not wait");
+        token.cancel();
+        assert!(matches!(waiter.join().unwrap(), Err(Error::Cancelled)));
+    });
+    assert_eq!(index.fm.test_only_opens.load(Ordering::Relaxed), 0);
+    // the flight ends: the next caller opens it once
+    index.fm.test_only_set_loading(id, false);
+    assert!(index.has_fm_sidecar());
+    assert_eq!(index.fm.test_only_opens.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn an_unusable_sidecar_met_by_an_exclude_word_still_gives_the_notice() {
+    // issue #30: the sidecar is looked up on first use, here by the
+    // negative query only (built after the positive groups)
+    let lines = corpus();
+    let (dir, index) = index_over(&lines, false);
+    assert!(index.build_fm_sidecar().unwrap());
+    let path = fmi_path(dir.path());
+    drop(index);
+    let index = LineIndex::open(dir.path()).unwrap();
+    std::fs::write(&path, vec![7u8; 100]).unwrap();
+    let o = SearchOptions {
+        query: s(&[SHIN, LAMED]),
+        exclude: Some(crate::options::ExcludeOptions { query: format!("*{}", s(&[ALEF, BET])), ..Default::default() }),
+        ..Default::default()
+    };
+    let r = index.search_options(&o).unwrap();
+    assert_eq!(r.notices(), [NOTICE_FM_SIDECAR_UNUSABLE.to_string()]);
+}

@@ -1753,10 +1753,36 @@ impl SpanTermSource for AnySource {
 /// uncapped).
 #[derive(Clone, Copy)]
 struct Walk<'a> {
-    fm: Option<&'a FmIndex>,
+    fm: &'a FmSlot<'a>,
     cap: usize,
     /// Checked while an FM expansion verifies its candidates.
     cancel: Option<&'a CancelToken>,
+}
+
+/// The search's FM sidecar, looked up on first use (issue #30): a search
+/// with no leading-`*` or fuzzy word never touches the sidecar, so it never
+/// waits for another search's open of it.
+struct FmSlot<'a> {
+    index: &'a LineIndex,
+    searcher: &'a tantivy::Searcher,
+    cancel: Option<&'a CancelToken>,
+    /// The sidecar, and whether a sidecar file exists but is unusable.
+    found: std::sync::OnceLock<(Option<Arc<FmIndex>>, bool)>,
+}
+
+impl<'a> FmSlot<'a> {
+    /// The sidecar (looked up once per search). [`Error::Cancelled`] when
+    /// the token was cancelled, e.g. while waiting for another open.
+    fn get(&self) -> Result<Option<&FmIndex>> {
+        let found = self.found.get_or_init(|| self.index.fm_sidecar_for(self.searcher, self.cancel));
+        CancelToken::check(self.cancel)?;
+        Ok(found.0.as_deref())
+    }
+
+    /// Whether the lookup (if one ran) met an unusable sidecar file.
+    fn unusable(&self) -> bool {
+        self.found.get().is_some_and(|f| f.1)
+    }
 }
 
 impl LineIndex {
@@ -2099,12 +2125,14 @@ impl LineIndex {
     /// current single segment, and whether a sidecar file exists but is
     /// unusable (the search then runs walks and carries
     /// [`NOTICE_FM_SIDECAR_UNUSABLE`](crate::fm_sidecar::NOTICE_FM_SIDECAR_UNUSABLE)).
-    fn fm_sidecar_for(&self, searcher: &tantivy::Searcher) -> (Option<Arc<FmIndex>>, bool) {
+    fn fm_sidecar_for(&self, searcher: &tantivy::Searcher, cancel: Option<&CancelToken>) -> (Option<Arc<FmIndex>>, bool) {
         #[cfg(test)]
         if self.test_only_disable_fm.load(std::sync::atomic::Ordering::Relaxed) {
             return (None, false);
         }
-        let found = match self.fm.lookup(&self.dir, searcher, self.fields.text) {
+        let found = match self.fm.lookup_cancellable(&self.dir, searcher, self.fields.text, cancel) {
+            // a cancelled wait for another open says nothing about the file
+            _ if cancel.is_some_and(|t| t.is_cancelled()) => return (None, false),
             crate::fm_sidecar::FmLookup::Ready(fm) => return (Some(fm), false),
             crate::fm_sidecar::FmLookup::Missing => (None, false),
             crate::fm_sidecar::FmLookup::Unusable(_) => (None, true),
@@ -2125,7 +2153,6 @@ impl LineIndex {
         searcher: &tantivy::Searcher,
         group: &GroupSpec,
     ) -> Result<Option<(Vec<Vec<u8>>, bool)>> {
-        let Some(fm) = walk.fm else { return Ok(None) };
         // 0 = uncapped (the FM expansion takes a count).
         let cap = if walk.cap == 0 { usize::MAX } else { walk.cap };
         let field = self.fields.text;
@@ -2142,6 +2169,7 @@ impl LineIndex {
                 };
                 // A rejected pattern is rejected on both paths (the slot is skipped).
                 let Ok(q) = parsed else { return Ok(None) };
+                let Some(fm) = walk.fm.get()? else { return Ok(None) };
                 let inverted = dict()?;
                 let terms = fm_expand::expand_wildcard(
                     fm,
@@ -2162,6 +2190,7 @@ impl LineIndex {
                 let mut q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
                 q.set_ignore_quotes(*ignore_quotes);
                 q.set_marked_terms(self.options.keep_marks);
+                let Some(fm) = walk.fm.get()? else { return Ok(None) };
                 let inverted = dict()?;
                 let terms = if *ignore_quotes {
                     fm_expand::expand_fuzzy_quote_free(
@@ -2365,8 +2394,8 @@ impl LineIndex {
         }
 
         let searcher = self.reader.searcher();
-        let (fm, fm_unusable) = self.fm_sidecar_for(&searcher);
-        let walk = Walk { fm: fm.as_deref(), cap: request.max_expanded_terms, cancel: cancel.as_ref() };
+        let fm = FmSlot { index: self, searcher: &searcher, cancel: cancel.as_ref(), found: Default::default() };
+        let walk = Walk { fm: &fm, cap: request.max_expanded_terms, cancel: cancel.as_ref() };
         let mut sinks = Vec::new();
         let mut relevance = request.order == ResultsOrder::Relevance;
         // The request groups the main sinks belong to, when not all of them
@@ -2523,9 +2552,14 @@ impl LineIndex {
         // A relevance score that needs positions the index lacks: the hits
         // come back in catalog order, with a notice (not an error).
         let mut notices: Vec<String> = Vec::new();
-        if fm_unusable {
-            notices.push(crate::fm_sidecar::NOTICE_FM_SIDECAR_UNUSABLE.to_string());
-        }
+        // The sidecar is looked up on first use, possibly by an exclude or
+        // cross-line query built further down: its notice is added on return.
+        let with_fm_notice = |mut notices: Vec<String>| {
+            if fm.unusable() {
+                notices.insert(0, crate::fm_sidecar::NOTICE_FM_SIDECAR_UNUSABLE.to_string());
+            }
+            notices
+        };
         if relevance
             && relevance::lacks_positions(
                 self.options.positions,
@@ -2543,7 +2577,7 @@ impl LineIndex {
             None
         };
         let query: Box<dyn Query> = match (main_query, alternatives.is_empty()) {
-            (None, true) => return Ok(SearchResult::new(Vec::new(), session).with_notices(notices)),
+            (None, true) => return Ok(SearchResult::new(Vec::new(), session).with_notices(with_fm_notice(notices))),
             (Some(q), true) => q,
             (main, false) => {
                 let mut should: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -2761,7 +2795,7 @@ impl LineIndex {
             // a phrase that cannot match: no hit can carry it
             let Some(q) = q else {
                 let truncated = watched.iter().chain(&sinks).any(|s| s.is_truncated());
-                return Ok(SearchResult::new(Vec::new(), session).with_notices(notices).with_truncated(truncated));
+                return Ok(SearchResult::new(Vec::new(), session).with_notices(with_fm_notice(notices)).with_truncated(truncated));
             };
             watched.extend(sinks.iter().cloned());
             if !self.options.positions {
@@ -2917,7 +2951,7 @@ impl LineIndex {
         for (sinks, gaps) in required_text {
             let terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
             if terms.iter().any(|g| g.is_empty()) {
-                return Ok(SearchResult::new(Vec::new(), session).with_notices(notices).with_truncated(truncated));
+                return Ok(SearchResult::new(Vec::new(), session).with_notices(with_fm_notice(notices)).with_truncated(truncated));
             }
             session.negative.push(NegativeFilter {
                 prepared: PreparedQueryGroups::from_groups(&terms),
@@ -3018,7 +3052,7 @@ impl LineIndex {
             ));
         }
         if session.matchers.is_empty() {
-            return Ok(SearchResult::new(Vec::new(), session).with_notices(notices).with_truncated(truncated));
+            return Ok(SearchResult::new(Vec::new(), session).with_notices(with_fm_notice(notices)).with_truncated(truncated));
         }
 
         // Cross-line matching (see `cross_line`): after the in-line hits.
@@ -3209,9 +3243,9 @@ impl LineIndex {
             }
             if stream {
                 let source = self.sorted_source(&mut session, hits, Some(scores));
-                return Ok(self.stream_result(session, source, true)?.with_notices(notices).with_truncated(truncated));
+                return Ok(self.stream_result(session, source, true)?.with_notices(with_fm_notice(notices)).with_truncated(truncated));
             }
-            let mut result = SearchResult::new(hits, session).with_notices(notices).with_truncated(truncated);
+            let mut result = SearchResult::new(hits, session).with_notices(with_fm_notice(notices)).with_truncated(truncated);
             result.scores = Some(scores);
             return Ok(result);
         }
@@ -3220,9 +3254,9 @@ impl LineIndex {
                 Some(source) => source,
                 None => self.sorted_source(&mut session, hits, None),
             };
-            return Ok(self.stream_result(session, source, false)?.with_notices(notices).with_truncated(truncated));
+            return Ok(self.stream_result(session, source, false)?.with_notices(with_fm_notice(notices)).with_truncated(truncated));
         }
-        Ok(SearchResult::new(hits, session).with_notices(notices).with_truncated(truncated))
+        Ok(SearchResult::new(hits, session).with_notices(with_fm_notice(notices)).with_truncated(truncated))
     }
 
     /// Sorted hits (and their docs, set on the session) as a stream source.

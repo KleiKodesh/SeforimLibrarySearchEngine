@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use tantivy::schema::Field;
 use tantivy::index::SegmentId;
@@ -429,11 +429,28 @@ fn file_identity(path: &Path) -> std::io::Result<(u64, Option<std::time::SystemT
     Ok((meta.len(), meta.modified().ok()))
 }
 
+/// What [`FmCache`] holds under its lock.
+#[derive(Default)]
+struct CacheState {
+    /// The last answer, for the segment it belongs to.
+    entry: Option<(SegmentId, Cached)>,
+    /// The segment whose sidecar one caller is opening now (single flight:
+    /// concurrent callers wait for its answer instead of opening it again).
+    loading: Option<SegmentId>,
+    /// Bumped by [`FmCache::clear`]: an open that started before a clear
+    /// does not store its (possibly stale) answer.
+    generation: u64,
+}
+
 /// Lazily opened sidecar, keyed by the segment it belongs to (a reload to
-/// another segment re-checks).
+/// another segment re-checks). Single flight (issue #30): one caller opens
+/// the file, callers arriving meanwhile wait for its answer (ready or
+/// unusable alike); the lock is never held while the file is opened.
 #[derive(Default)]
 pub struct FmCache {
-    inner: Mutex<Option<(SegmentId, Cached)>>,
+    inner: Mutex<CacheState>,
+    /// Signalled when a `loading` open finishes.
+    loaded: Condvar,
     /// TEST ONLY: how many times a sidecar file was opened and checked.
     #[cfg(test)]
     pub(crate) test_only_opens: std::sync::atomic::AtomicUsize,
@@ -451,7 +468,29 @@ impl FmCache {
 
     /// Forgets what is cached (after a sidecar build).
     pub fn clear(&self) {
-        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let mut state = self.state();
+        state.entry = None;
+        state.generation += 1;
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, CacheState> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The cached answer for `id`, if it still holds.
+    fn cached(state: &CacheState, id: SegmentId, path: &Path) -> Option<FmLookup> {
+        let (cached_id, cached) = state.entry.as_ref()?;
+        if *cached_id != id {
+            return None;
+        }
+        match cached {
+            Cached::Ready(fm) => Some(FmLookup::Ready(fm.clone())),
+            Cached::Unusable { identity, reason } => match file_identity(path) {
+                Ok(now) if now == *identity => Some(FmLookup::Unusable(reason.clone())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(FmLookup::Missing),
+                _ => None,
+            },
+        }
     }
 
     /// [`get`](Self::get), telling a missing sidecar from an unusable one.
@@ -459,6 +498,19 @@ impl FmCache {
     /// checked again only when the file changes, the index moves to another
     /// segment, or a sidecar build clears the cache.
     pub fn lookup(&self, dir: &Path, searcher: &tantivy::Searcher, text: Field) -> FmLookup {
+        self.lookup_cancellable(dir, searcher, text, None)
+    }
+
+    /// [`lookup`](Self::lookup) whose wait for another caller's open of the
+    /// same sidecar stops when `cancel` is cancelled (the answer is then
+    /// `Missing`; the caller sees its own cancellation next).
+    pub(crate) fn lookup_cancellable(
+        &self,
+        dir: &Path,
+        searcher: &tantivy::Searcher,
+        text: Field,
+        cancel: Option<&crate::CancelToken>,
+    ) -> FmLookup {
         let segments = searcher.segment_readers();
         if segments.len() != 1 {
             return FmLookup::Missing;
@@ -466,18 +518,28 @@ impl FmCache {
         let segment = &segments[0];
         let id = segment.segment_id();
         let path = sidecar_path(dir, id);
-        if let Some((cached_id, cached)) = &*self.inner.lock().unwrap_or_else(|e| e.into_inner()) {
-            if *cached_id == id {
-                match cached {
-                    Cached::Ready(fm) => return FmLookup::Ready(fm.clone()),
-                    Cached::Unusable { identity, reason } => match file_identity(&path) {
-                        Ok(now) if now == *identity => return FmLookup::Unusable(reason.clone()),
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FmLookup::Missing,
-                        _ => {}
-                    },
-                }
+        let mut state = self.state();
+        let generation = loop {
+            if let Some(found) = Self::cached(&state, id, &path) {
+                return found;
             }
-        }
+            if state.loading != Some(id) {
+                break state.generation;
+            }
+            if cancel.is_some_and(|t| t.is_cancelled()) {
+                return FmLookup::Missing;
+            }
+            // the token has no waker: wake now and then to check it
+            state = self
+                .loaded
+                .wait_timeout(state, std::time::Duration::from_millis(20))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        };
+        // this caller opens; the others wait for its answer
+        state.loading = Some(id);
+        drop(state);
+        let flight = Flight { cache: self, id };
         let result = self.open(&path, segment, text);
         let cached = match &result {
             FmLookup::Ready(fm) => Some(Cached::Ready(fm.clone())),
@@ -486,8 +548,21 @@ impl FmCache {
                 .map(|identity| Cached::Unusable { identity, reason: reason.clone() }),
             FmLookup::Missing => None,
         };
-        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = cached.map(|c| (id, c));
+        let mut state = self.state();
+        if state.generation == generation {
+            state.entry = cached.map(|c| (id, c));
+        }
+        drop(state);
+        drop(flight);
         result
+    }
+
+    /// TEST ONLY: marks `id` as being opened by another caller (as if an
+    /// open were in flight); `false` ends it and wakes the waiters.
+    #[cfg(test)]
+    pub(crate) fn test_only_set_loading(&self, id: SegmentId, on: bool) {
+        self.state().loading = if on { Some(id) } else { None };
+        self.loaded.notify_all();
     }
 
     /// Opens and checks the sidecar file of `segment`.
@@ -521,5 +596,23 @@ impl FmCache {
             ));
         }
         FmLookup::Ready(Arc::new(fm))
+    }
+}
+
+/// Ends a single-flight open (also on a panic): clears the loading mark and
+/// wakes the waiters.
+struct Flight<'a> {
+    cache: &'a FmCache,
+    id: SegmentId,
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        let mut state = self.cache.state();
+        if state.loading == Some(self.id) {
+            state.loading = None;
+        }
+        drop(state);
+        self.cache.loaded.notify_all();
     }
 }

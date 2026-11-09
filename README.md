@@ -1080,6 +1080,10 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     `fmSidecarProblem`; ABI 6). A broken file is remembered by its size and
     modification time and re-checked only when it changes, the index moves to
     another segment, or the sidecar is rebuilt (not re-opened per search).
+    The sidecar is opened on a search's first leading-`*` or fuzzy word, single
+    flight (issue #30): searches arriving together wait for ONE open and share its
+    answer (ready or unusable); the wait stops on the search's cancel token, and a
+    search with no such word never touches the sidecar.
     The engine mends the sidecar itself: a search that finds it missing or
     unusable on a one-segment index starts ONE background rebuild (a thread
     in the OS background mode; never while a `LineWriter` of the index is

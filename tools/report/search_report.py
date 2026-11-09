@@ -17,6 +17,17 @@ if it fails it is kept as the failing sample and no timed runs follow), then N
 runs per query; each stage is the median of the N (mean of the two middle values
 for even N). Every run is appended to search-<n>.log.
 
+Load mode (issue #31):
+  python -I tools/report/search_report.py <demo exe> <index dir> <queries.txt> <out dir> --load N
+      [--db <seforim.db>] [--rounds R] [--commit-every MS] [--update-lines K]
+  N concurrent searchers (SeforimSearch.Demo load) each run every query R times (default 3)
+  while one writer re-indexes K lines (default 100; delete + add of the same documents) and
+  commits every MS ms (default 1000). The updates change the index, so the index is COPIED
+  to <out dir>/load-index first and the copy is deleted afterwards. Per query: first-batch
+  and total latency p50 / p95 / max over all its searches, and whether its hit count stayed
+  the same (it must: the updates rewrite identical lines); per commit: latency p50 / p95 /
+  max. Writes load-report.md / load-report.json and the full log load.log in <out dir>.
+
 Stages per query (all in ms):
   weight     engine: build the query weight (SEFORIM_ENGINE_TIMING "weight");
              cheap: the dictionary walks do NOT run here
@@ -142,6 +153,125 @@ def main(exe, index, queries, out, ftslib_db=None, runs=1, db=None):
     return 1 if failed else 0
 
 
+def pct(values, p):
+    """Nearest-rank percentile (p in 0..100) of `values` (None when empty)."""
+    v = sorted(values)
+    if not v:
+        return None
+    k = -(-p * len(v) // 100) - 1
+    return v[max(0, min(len(v) - 1, int(k)))]
+
+
+def load_main(exe, index, queries, out, searchers, db=None, rounds=3, commit_every=1000, update_lines=100):
+    import json
+    import shutil
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    copy = out / "load-index"
+    if copy.exists():
+        shutil.rmtree(copy)
+    print(f"load: copying the index to {copy}", flush=True)
+    shutil.copytree(index, copy)
+    args = [exe, "load", "--index", str(copy), "--queries", queries, "--searchers", str(searchers),
+            "--rounds", str(rounds), "--commit-every", str(commit_every), "--update-lines", str(update_lines)]
+    if db:
+        args += ["--db", db]
+    qlines = [l for l in Path(queries).read_text(encoding="utf-8").splitlines()
+              if l.strip() and not l.startswith("#")]
+    expected = searchers * rounds * len(qlines)
+    log = out / "load.log"
+    events = []
+    t0 = time.perf_counter()
+    with log.open("w", encoding="utf-8") as lf:
+        lf.write(f"$ {' '.join(args)}\n\n")
+        p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        done = 0
+        for raw in p.stdout:
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            lf.write(line + "\n")
+            lf.flush()
+            events.append(line)
+            if line.startswith("load-search "):
+                done += 1
+                if done % max(1, expected // 20) == 0 or done == expected:
+                    print(f"load: {done}/{expected} searches ({(time.perf_counter() - t0) * 1000:,.0f} ms)", flush=True)
+            elif "error=" in line or line.startswith("load:"):
+                print(line.encode("ascii", "replace").decode(), flush=True)
+        code = p.wait()
+        lf.write(f"\nexit {code}\n")
+    wall = (time.perf_counter() - t0) * 1000
+    shutil.rmtree(copy, ignore_errors=True)
+
+    def kv(line):
+        head, _, err = line.partition(" error=")
+        d = dict(part.split("=", 1) for part in head.split()[1:] if "=" in part)
+        if err:
+            d["error"] = err
+        return d
+
+    per_q = {}
+    commits = []
+    errors = []
+    for line in events:
+        if line.startswith("load-search "):
+            e = kv(line)
+            q = per_q.setdefault(int(e["q"]), {"first": [], "total": [], "hits": set(), "n": 0})
+            q["n"] += 1
+            q["hits"].add(int(e["hits"]))
+            if e.get("first", "-") != "-":
+                q["first"].append(float(e["first"]))
+            q["total"].append(float(e["total"]))
+            if "error" in e:
+                errors.append(line)
+        elif line.startswith("load-commit "):
+            e = kv(line)
+            if "ms" in e:
+                commits.append(float(e["ms"]))
+            if "error" in e:
+                errors.append(line)
+
+    def stats(v):
+        return {"p50": pct(v, 50), "p95": pct(v, 95), "max": max(v) if v else None}
+
+    def f(v):
+        """ms below one second, minutes otherwise (the report rule)."""
+        if v is None:
+            return "-"
+        return f"{v:,.0f} ms" if v < 1000 else f"{v / 60000:.2f} min"
+
+    rows = []
+    for n, line in enumerate(qlines):
+        q = per_q.get(n, {"first": [], "total": [], "hits": set(), "n": 0})
+        rows.append(dict(n=n, query=line.partition("\t")[0], searches=q["n"],
+                         hits=sorted(q["hits"]), hits_stable=len(q["hits"]) <= 1,
+                         first_ms=stats(q["first"]), total_ms=stats(q["total"])))
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    md = [f"# Search load report ({stamp})", "",
+          f"{searchers} concurrent searchers x {rounds} rounds x {len(qlines)} queries; one writer re-indexes "
+          f"{update_lines} lines and commits every {commit_every} ms. Index: copy of `{index}`. Runner: `{exe}`. "
+          f"Exit {code}; wall {f(wall)}.", "",
+          "| # | query | searches | hits | hits stable | first p50 | first p95 | first max | total p50 | total p95 | total max |",
+          "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        md.append(f"| {r['n']} | {r['query']} | {r['searches']} | {', '.join(map(str, r['hits'])) or '-'} | "
+                  f"{'yes' if r['hits_stable'] else 'NO'} | {f(r['first_ms']['p50'])} | {f(r['first_ms']['p95'])} | "
+                  f"{f(r['first_ms']['max'])} | {f(r['total_ms']['p50'])} | {f(r['total_ms']['p95'])} | {f(r['total_ms']['max'])} |")
+    cs = stats(commits)
+    md += ["", f"Commits: {len(commits)}, latency p50 {f(cs['p50'])}, p95 {f(cs['p95'])}, max {f(cs['max'])}.",
+           f"Errors: {len(errors)}." + (" See load.log." if errors else ""), "",
+           "first = search call to the first results frame; total = the whole search call (every hit read). "
+           "Full log: load.log next to this report."]
+    (out / "load-report.json").write_text(json.dumps({
+        "searchers": searchers, "rounds": rounds, "commit_every_ms": commit_every, "update_lines": update_lines,
+        "index": index, "exit": code, "wall_ms": wall, "errors": len(errors),
+        "commits": {"n": len(commits), **cs}, "rows": rows,
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+    (out / "load-report.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+    print(f"report: {out / 'load-report.md'}", flush=True)
+    unstable = [r for r in rows if not r["hits_stable"]]
+    return 1 if code != 0 or errors or unstable else 0
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     ftslib_db = None
@@ -164,4 +294,23 @@ if __name__ == "__main__":
         if runs < 1:
             sys.exit("--runs needs a whole number >= 1")
         del a[i:i + 2]
+    def int_opt(name, default):
+        if name not in a:
+            return default
+        i = a.index(name)
+        try:
+            v = int(a[i + 1])
+        except (IndexError, ValueError):
+            sys.exit(f"{name} needs a whole number >= 1")
+        if v < 1:
+            sys.exit(f"{name} needs a whole number >= 1")
+        del a[i:i + 2]
+        return v
+    load_n = int_opt("--load", 0)
+    if load_n:
+        if ftslib_db:
+            sys.exit("--load runs our engine only (no --ftslib)")
+        sys.exit(load_main(*a[:4], searchers=load_n, db=demo_db, rounds=int_opt("--rounds", 3),
+                           commit_every=int_opt("--commit-every", 1000),
+                           update_lines=int_opt("--update-lines", 100)))
     sys.exit(main(*a[:4], ftslib_db=ftslib_db, runs=runs, db=demo_db))

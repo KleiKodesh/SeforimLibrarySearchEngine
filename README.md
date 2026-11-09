@@ -1466,6 +1466,38 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   term id into the search's term table; `se_search_take_new_terms` (C#
   `TakeNewTerms`) returns the terms added since the previous call.
 
+#### Threading and writers (issue #31)
+
+- **An index object is shared by threads.** Searches, counts, `se_index_reload`,
+  info and sidecar checks on one `LineIndex` (C ABI index pointer, C#
+  `SeforimIndex`) may run concurrently from any number of threads (Rust:
+  `LineIndex: Send + Sync`, asserted in a test). Dart: an isolate opens its own
+  `SeforimIndex` (handles do not cross isolates); the async API does so itself.
+- **Every other object is one thread at a time:** a writer, a search session
+  (`se_search*` result), a cancel token's owner. Use one per thread, or a host
+  lock around its calls. Different sessions are independent: each keeps the
+  snapshot it started with, whatever other sessions or the writer do.
+- **One writer per index directory.** A second writer, on the same handle, on
+  another handle opened on the same directory, or in another process, fails at
+  open with tantivy's lockfile error: Rust `Error::Tantivy(LockFailure(LockBusy, ..))`,
+  the C ABI returns null from `se_writer_open` / `_open_ex` and `se_last_error()`
+  holds `Failed to acquire Lockfile: LockBusy. ...` (the message contains
+  `LockBusy`), C# `OpenWriter` throws `SeforimEngineException`, Dart `openWriter`
+  throws `SeforimEngineException`, both with that message. The first writer is not
+  affected; once it is closed (or its process exits) a new writer opens. Tested in
+  all four layers.
+- **Reader freshness:** a commit, rollback or merge through this handle's writer
+  reloads the shared reader before it returns, so the next search on this handle
+  sees it (a running search keeps its snapshot). A write through ANOTHER handle or
+  process is seen after `se_index_reload` (C# `Reload()`, Dart `reload()`) or a reopen.
+- **Rollback** drops everything queued since the last commit; searches never saw
+  it. A crash or kill before a commit loses only the uncommitted queue; the last
+  commit stays intact.
+- An index with no segment yet (created, nothing committed) answers every search
+  with no hits.
+- Load behaviour (concurrent searches while a writer commits) is measured by the
+  benchmark's load mode (`search_report.py --load`, below).
+
 #### Writer resources (issue #19)
 
 Goal: use as much of the machine as possible while it is idle, without the
@@ -1585,6 +1617,15 @@ Full comparison on any machine (index builds, parity, speed, Otzaria hit counts,
   snippet locate + seeded short-row context), time to the first batch, total, and exit code. Every run's full
   log is kept next to the report. `--runs N` adds one warm-up run, then
   reports each stage as the median of N runs (every run in `search-<n>.log`).
+- Load mode (issue #31): `python -I tools/report/search_report.py <demo exe> <index> <queries> <out>
+  --load N [--db <seforim.db>] [--rounds R] [--commit-every MS] [--update-lines K]` copies the
+  index to `<out>/load-index`, runs `SeforimSearch.Demo load` (N concurrent searcher threads, each
+  running every query R times through the streaming path, while one writer re-indexes K lines,
+  delete + add of the same documents, and commits every MS ms; defaults 3 / 1000 / 100), and writes
+  `load-report.md` / `.json` (per query first-batch and total p50 / p95 / max, hit counts stable;
+  commit latency p50 / p95 / max) plus the full `load.log`. In the full benchmark it is the `load`
+  step (`LOAD_*` in `tools/bench/bench.env`); its section in FTS-SPECS-AND-COMPARISONS.md says
+  "not run yet" until it is run on the full DB.
 
 ## Match mode: all matches, and find in an open text (issues #14 / #23)
 

@@ -19,8 +19,24 @@
 //!   but their domain is 0..=i64::MAX (SQLite rowids; C# `long`, Dart
 //!   `int`): a larger value is rejected with an error at ingest. u64::MAX
 //!   is reserved as "none" in outputs (`se_search_copy_next_lines`).
-//! - Calls on one object are not thread-safe; use one object per thread or
-//!   lock. Different objects are independent.
+//! - Threading (issue #31; README "Threading and writers"):
+//!   - An INDEX (`LineIndex`) is shared by threads: searches, counts,
+//!     `se_index_reload`, info and sidecar calls on one index may run
+//!     concurrently from any number of threads.
+//!   - Every other object (writer, search session) is used by one thread at
+//!     a time: one per thread, or a host lock. Different sessions are
+//!     independent; each keeps the snapshot it started with.
+//!   - One writer per index directory: a second `se_writer_open` /
+//!     `se_writer_open_ex` (same index pointer, another pointer opened on the
+//!     same directory, or another process) returns null and
+//!     `se_last_error()` holds tantivy's lockfile error ("Failed to acquire
+//!     Lockfile: LockBusy. ..."); the first writer is not affected.
+//!   - Freshness: a commit, rollback or merge through a writer of this index
+//!     pointer reloads its reader before returning (the next search sees
+//!     it); a write through another pointer or process needs
+//!     `se_index_reload` (or a reopen).
+//!   - Rollback drops everything queued since the last commit (never seen by
+//!     searches); a crash before a commit loses only that queue.
 
 use std::cell::RefCell;
 use std::ffi::{c_char, CString};
@@ -1880,6 +1896,39 @@ mod tests {
             se_buffer_free(buf);
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Issue #31: a second writer on the same index (same handle, or another
+    /// handle on the same directory) returns null with tantivy's lockfile
+    /// error in `se_last_error()`; the first writer is untouched.
+    #[test]
+    fn second_writer_returns_lock_error() {
+        let dir = std::env::temp_dir().join(format!("se_ffi_lock_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let d = dir.to_string_lossy().into_owned();
+        unsafe {
+            let index = se_index_create(d.as_ptr(), d.len(), ptr::null(), 0);
+            assert!(!index.is_null(), "{}", se_last_error_message());
+            let other = se_index_open(d.as_ptr(), d.len());
+            assert!(!other.is_null(), "{}", se_last_error_message());
+            let first = se_writer_open(index, 30_000_000, 1);
+            assert!(!first.is_null(), "{}", se_last_error_message());
+            for handle in [index as *const LineIndex, other as *const LineIndex] {
+                assert!(se_writer_open(handle, 30_000_000, 1).is_null());
+                let message = se_last_error_message();
+                assert!(message.contains("LockBusy"), "{message}");
+            }
+            let text = "alpha";
+            assert_eq!(se_writer_add(first, 1, 0, 1, text.as_ptr(), text.len()), 0);
+            assert_eq!(se_writer_commit(first, ptr::null(), 0), 0);
+            se_writer_close(first);
+            let again = se_writer_open(other, 30_000_000, 1);
+            assert!(!again.is_null(), "{}", se_last_error_message());
+            se_writer_close(again);
+            se_index_close(other);
+            se_index_close(index);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn se_last_error_message() -> String {

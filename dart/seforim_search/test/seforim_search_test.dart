@@ -212,6 +212,26 @@ void main() {
     plain.close();
   });
 
+  test('second writer: lock error on the same and on another handle (issue #31)', () {
+    final dir = Directory.systemTemp.createTempSync('se_dart_lock_');
+    final one = SeforimIndex.create(dir.path);
+    final other = SeforimIndex.open(dir.path);
+    final first = one.openWriter(heapBytes: 30000000, threads: 1);
+    for (final handle in [one, other]) {
+      expect(
+          () => handle.openWriter(heapBytes: 30000000, threads: 1),
+          throwsA(isA<SeforimEngineException>()
+              .having((e) => e.toString(), 'message', contains('LockBusy'))));
+    }
+    first.add(const LineDocument(lineId: 1, position: 0, bookId: 1, text: 'alpha'));
+    first.commit();
+    first.close();
+    other.openWriter(heapBytes: 30000000, threads: 1).close();
+    other.close();
+    one.close();
+    dir.deleteSync(recursive: true);
+  });
+
   test('cancel token stops the session and later searches', () {
     const bereshit = '\u05D1\u05E8\u05D0\u05E9\u05D9\u05EA';
     final token = SearchCancelToken();

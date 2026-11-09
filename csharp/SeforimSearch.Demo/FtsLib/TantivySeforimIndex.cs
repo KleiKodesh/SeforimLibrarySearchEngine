@@ -571,13 +571,7 @@ namespace FtsLib.Fts5
                 }
                 if (maxLines > 0 && state.LinesDone >= maxLines) { capped = true; break; }
 
-                // Otzaria's rule: a heading interrupts the text, no phrase continues into or out of it.
-                // A footnote (virtual notes-book line, issue #13) is a text of its own: never joined.
-                writer.Add(new LineDocument
-                {
-                    LineId = id, Position = state.LinesDone, BookId = bookId, Text = text,
-                    SectionId = sectionId, NoCross = text.StartsWith("<h", StringComparison.Ordinal) || global::SeforimSearch.Demo.SeforimDb.SeforimDbNoteIds.IsVirtual(id),
-                });
+                writer.Add(ToLineDocument(id, state.LinesDone, bookId, text, sectionId));
                 state.LinesDone++;
                 state.LastLineId = id;
                 if (++sinceCommit >= linesPerCommit)
@@ -606,6 +600,46 @@ namespace FtsLib.Fts5
                 BuildFmSidecarReported(stage);
             }
         }
+
+        /// <summary>The document the build writes for one corpus line at catalog
+        /// <paramref name="position"/>.</summary>
+        private static LineDocument ToLineDocument(long id, long position, long bookId, string text, long? sectionId) =>
+            new LineDocument
+            {
+                // Otzaria's rule: a heading interrupts the text, no phrase continues into or out of it.
+                // A footnote (virtual notes-book line, issue #13) is a text of its own: never joined.
+                LineId = id, Position = position, BookId = bookId, Text = text,
+                SectionId = sectionId, NoCross = text.StartsWith("<h", StringComparison.Ordinal) || global::SeforimSearch.Demo.SeforimDb.SeforimDbNoteIds.IsVirtual(id),
+            };
+
+        /// <summary>Reads the documents of the lines at catalog positions
+        /// [<paramref name="first"/>, first + <paramref name="count"/>) from seforim.db: the same
+        /// documents the build writes. A host updating changed lines deletes each line id and adds
+        /// its document again (<see cref="SeforimIndexWriter.Delete"/> + Add); the demo's
+        /// <c>load</c> benchmark (issue #31) does so while searches run.</summary>
+        public List<LineDocument> ReadLineDocuments(long first, int count, CancellationToken ct = default)
+        {
+            var docs = new List<LineDocument>(count);
+            if (count <= 0) return docs;
+            using var corpus = _openCorpus();
+            long position = first;
+            foreach (var (id, text, bookId, sectionId) in corpus.ReadDocumentsWithSectionInResultOrder(first, ct))
+            {
+                docs.Add(ToLineDocument(id, position++, bookId, text, sectionId));
+                if (docs.Count >= count) break;
+            }
+            return docs;
+        }
+
+        /// <summary>Opens a writer on this index (fixed resources, see
+        /// <see cref="SeforimIndex.OpenWriter(long, int, bool)"/>). One writer per index directory:
+        /// a second one throws the engine's lock error. Commit it with
+        /// <see cref="CommitKeepingBuildState"/> so the index stays built.</summary>
+        public SeforimIndexWriter OpenWriter(long heapBytes, int threads) => Engine().OpenWriter(heapBytes, threads);
+
+        /// <summary>Commits <paramref name="writer"/> with the index's current build state as
+        /// the payload (a commit without it would leave the index "not built").</summary>
+        public void CommitKeepingBuildState(SeforimIndexWriter writer) => writer.Commit(ReadBuildState()?.Serialize());
 
         /// <summary>Builds the FM sidecar and reports the outcome as a build stage line:
         /// built (with its time), not built (several segments or no terms), or FAILED

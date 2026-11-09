@@ -12,8 +12,10 @@ namespace SeforimSearch.Demo
     /// Demo console:
     ///   build  [--db path] [--index dir] [--max-lines N] [--no-positions] [--keep-marks]
     ///   search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] query...
-    ///   selftest [--dir path]   (C# corpus-pool and end-to-end tests on a small fixture)
+    ///   selftest [--dir path] [--keep]   (C# corpus-pool and end-to-end tests on a small fixture)
     ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] [--regex] [--order catalog|relevance|generation] [--cancel-after MS] query...
+    ///   load   [--db path] [--index dir] --queries file [--searchers N] [--rounds R] [--commit-every MS] [--update-lines K] [--update-from P]
+    ///          (issue #31: N concurrent searches while a writer commits K re-indexed lines every MS ms; see LoadCommand)
     /// The seforim.db path defaults to KitveiHakodesh's resolution order
     /// (registry choice, then Otzaria, then Zayit).
     /// </summary>
@@ -44,6 +46,7 @@ namespace SeforimSearch.Demo
             if (command == "search") return Search(engine, args);
             if (command == "dump") return Dump(engine, args);
             if (command == "count") return Count(engine, args);
+            if (command == "load") return LoadCommand.Run(engine, args);
             Console.Error.WriteLine("unknown command " + command);
             return 2;
         }

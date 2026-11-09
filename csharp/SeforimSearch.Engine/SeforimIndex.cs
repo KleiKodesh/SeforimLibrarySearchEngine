@@ -8,7 +8,10 @@ namespace SeforimSearch.Engine
     /// <summary>
     /// A line index on disk. Thread safety: searches may run concurrently from
     /// several threads (each <see cref="Search(SearchOptions)"/> returns its own session);
-    /// one writer at a time.
+    /// one writer per index directory (a second <see cref="OpenWriter()"/>, here, on another
+    /// SeforimIndex of the same directory or in another process, throws
+    /// <see cref="SeforimEngineException"/> with the engine's LockBusy error). See README
+    /// "Threading and writers".
     /// </summary>
     public sealed unsafe class SeforimIndex : IDisposable
     {

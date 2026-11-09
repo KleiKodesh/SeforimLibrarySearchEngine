@@ -370,12 +370,13 @@ impl LineIndex {
     /// order: the index is sorted by position (meta.json settings) and has a
     /// single segment. An update (delete + add) adds a segment, which turns
     /// this off until the next [`LineWriter::merge_all`]; deletes alone keep
-    /// it. Older indexes (no sort setting) are never catalog-ordered.
+    /// it. An empty index (no segment) is not. Older indexes (no sort
+    /// setting) are never catalog-ordered.
     pub fn catalog_ordered(&self, searcher: &Searcher) -> bool {
         let sorted = self.index.settings().sort_by_field.as_ref().is_some_and(|s| {
             s.field == "position" && s.order == Order::Asc
         });
-        sorted && searcher.segment_readers().len() <= 1
+        sorted && searcher.segment_readers().len() == 1
     }
 
     /// The first doc of `segment` whose position is after `after`, when the
@@ -790,6 +791,57 @@ mod tests {
     fn hits(index: &LineIndex, q: &str) -> usize {
         let o = crate::SearchOptions { query: q.into(), ..Default::default() };
         index.search_options(&o).unwrap().hits.len()
+    }
+
+    /// Issue #31: one writer per index directory. A second writer, on the
+    /// same handle or on another handle opened on the same directory, fails
+    /// with tantivy's lockfile error (`LockFailure(LockBusy, ..)`); once the
+    /// first writer is dropped a new one opens.
+    #[test]
+    fn second_writer_fails_with_lock_error() {
+        // the threading contract (README "Threading"): an index is shared by
+        // threads (concurrent searches and counts), a writer moves between them
+        fn shared<T: Send + Sync>() {}
+        fn movable<T: Send>() {}
+        shared::<LineIndex>();
+        movable::<LineWriter>();
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let other = LineIndex::open(dir.path()).unwrap();
+        let first = index.writer(50_000_000, 1).unwrap();
+        for second in [index.writer(50_000_000, 1), other.writer(50_000_000, 1)] {
+            let error = second.err().expect("second writer must fail");
+            assert!(
+                matches!(&error, crate::Error::Tantivy(tantivy::TantivyError::LockFailure(_, _))),
+                "{error}"
+            );
+            assert!(error.to_string().contains("LockBusy"), "{error}");
+        }
+        drop(first);
+        let mut w = other.writer(50_000_000, 1).unwrap();
+        w.add(&doc(1, "alpha")).unwrap();
+        w.commit(None).unwrap();
+        // the other handle sees it after an explicit reload
+        assert_eq!(hits(&index, "alpha"), 0);
+        index.reload().unwrap();
+        assert_eq!(hits(&index, "alpha"), 1);
+    }
+
+    /// An index with no segment (created, nothing committed yet) returns no
+    /// hits instead of panicking (the catalog-order scan read segment 0),
+    /// both flavours, blocking and streaming.
+    #[test]
+    fn search_on_an_empty_index_returns_no_hits() {
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let options = IndexOptions { positions, ..IndexOptions::default() };
+            let index = LineIndex::create(dir.path(), options).unwrap();
+            assert_eq!(hits(&index, "alpha"), 0, "positions={positions}");
+            let o = crate::SearchOptions { query: "alpha".into(), ..Default::default() };
+            let mut streamed = index.search_options_streaming(&o, None).unwrap();
+            assert!(streamed.pull(usize::MAX, None).unwrap());
+            assert!(streamed.hits.is_empty(), "positions={positions}");
+        }
     }
 
     /// Issue #22: one reader for the index's life, reloaded by our writer.

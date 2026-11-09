@@ -40,6 +40,8 @@ namespace SeforimSearch.Demo
                 ("stream: chunks, resume, Restarted, cancellation (Core's StreamSearch)", Stream),
                 ("async engine API (issue #16): batches = sync hits, cancel, abandon, errors", AsyncEngine),
                 ("FM sidecar auto-repair (issue #28): background build, switchable", FmAutoRepair),
+                ("second writer (issue #31): lock error on the same and on another handle", SecondWriter),
+                ("load mode (issue #31): concurrent searches while a writer commits", LoadMode),
                 ("native ABI check (issue #17): loaded = expected, mismatch names both and the path", AbiCheck),
                 ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
             };
@@ -60,7 +62,9 @@ namespace SeforimSearch.Demo
             }
             Console.WriteLine(failed == 0 ? $"selftest: all {tests.Length} passed" : $"selftest: {failed} of {tests.Length} FAILED");
             SqliteConnection.ClearAllPools();
-            try { Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            // --keep: leave the fixture (seforim.db + indexes) for manual smoke runs
+            if (!args.Contains("--keep"))
+                try { Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
             return failed == 0 ? 0 : 1;
         }
 
@@ -86,6 +90,51 @@ namespace SeforimSearch.Demo
                 Check(index.HasFmSidecar, "the rebuilt sidecar is used");
                 Check(index.FmSidecarProblem == null, "no problem left");
             }
+        }
+
+        /// <summary>Issue #31: one writer per index directory. A second OpenWriter, on the same
+        /// SeforimIndex or on another one opened on the same directory, throws
+        /// SeforimEngineException with tantivy's lockfile message (LockBusy).</summary>
+        private static void SecondWriter(string db, string dir)
+        {
+            string d = Path.Combine(dir, "second-writer");
+            using (var index = SeforimIndex.Create(d))
+            using (var other = SeforimIndex.Open(d))
+            {
+                using (var first = index.OpenWriter(30_000_000, 1))
+                {
+                    foreach (var handle in new[] { index, other })
+                    {
+                        string? message = null;
+                        try { handle.OpenWriter(30_000_000, 1).Dispose(); }
+                        catch (SeforimEngineException e) { message = e.Message; }
+                        Check(message != null && message.Contains("LockBusy"), "second writer: " + (message ?? "no error"));
+                    }
+                    first.Add(new LineDocument { LineId = 1, Position = 0, BookId = 1, Text = "alpha" });
+                    first.Commit();
+                }
+                using (var again = other.OpenWriter(30_000_000, 1)) { }
+                using (var s = index.Search(new SearchOptions("alpha")))
+                    Check(s.HitCount == 1, "the first writer's commit: " + s.HitCount);
+            }
+        }
+
+        /// <summary>Issue #31: the demo's load command on the fixture: 3 searchers x 4 rounds
+        /// while the writer re-indexes 5 lines every 5 ms; at least one commit lands, no error, the index stays built
+        /// and the hits are unchanged afterwards.</summary>
+        private static void LoadMode(string db, string dir)
+        {
+            string index = Path.Combine(dir, "load-index");
+            string queries = Path.Combine(dir, "load-queries.txt");
+            File.WriteAllText(queries, "beta\nalpha beta\t3\n");
+            using var engine = new SeforimDbFtsEngine(index, db);
+            engine.Index.BuildLines(linesPerCommit: 500, heapBytes: 60_000_000);
+            int before = engine.Index.Search("beta").Count();
+            int code = LoadCommand.Run(engine, new[] { "load", "--queries", queries, "--searchers", "3", "--rounds", "4",
+                                                       "--commit-every", "5", "--update-lines", "5", "--update-from", "2" });
+            Check(code == 0, "load exit " + code);
+            Check(engine.Index.IsBuilt, "still built after the updates");
+            Check(engine.Index.Search("beta").Count() == before, "hits unchanged by identical updates");
         }
 
         private static void AbiCheck(string db, string dir)

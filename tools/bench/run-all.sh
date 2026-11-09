@@ -13,6 +13,8 @@
 #   build-indexes  ours pos, nopos, keep_marks; FtsLib; Otzaria (sequential, one at a time)
 #   parity         FtsLib parity sets (FtsLibDump dump vs demo dump, compare.py)
 #   speed          every engine on every speed set, median of RUNS after a warm-up, sequential
+#   load           load mode (issue #31): LOAD_SEARCHERS concurrent searches on a COPY of the
+#                  positions index while a writer commits small updates (search_report.py --load)
 #   hitcount       Otzaria hit-count comparison (needs the Otzaria speed runs)
 #   report         FTS-SPECS-AND-COMPARISONS.md + README/CLAUDE.md Specs blocks
 # Resume-safe: a finished unit leaves $OUT_DIR/.done/<unit>; it is skipped next time
@@ -222,6 +224,12 @@ step_speed() {
   done
 }
 
+step_load() {
+  resolve_db
+  local Q; Q="$(qfile "$LOAD_SET")"
+  done_ok load || { run load sb-load-pos "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_POS")" "$Q" "$(wp "$OUT_DIR/sb-load-pos")" --db "$DB" --load "$LOAD_SEARCHERS" --rounds "$LOAD_ROUNDS" --commit-every "$LOAD_COMMIT_MS" --update-lines "$LOAD_UPDATE_LINES" && [ $DRY = 0 ] && mark load; }
+}
+
 step_hitcount() {
   done_ok hitcount && { echo "hitcount: done (skipped)"; return; }
   run hitcount hitcount "$PY" -I -X utf8 "$(wp "$HERE/hitcount.py")" "$(wp "$NATIVE")" "$(wp "$IDX_POS")" "$(wp "$OUT_DIR")" && [ $DRY = 0 ] && mark hitcount
@@ -246,6 +254,11 @@ publish_results() {
     b="$(basename "$(dirname "$f")")"; mkdir -p "$RESULTS_DIR/$b"
     cp "$f" "$RESULTS_DIR/$b/"; [ -f "$OUT_DIR/$b/search-report.md" ] && cp "$OUT_DIR/$b/search-report.md" "$RESULTS_DIR/$b/"
   done
+  for f in "$OUT_DIR"/sb-*/load-report.json; do
+    [ -f "$f" ] || continue
+    b="$(basename "$(dirname "$f")")"; mkdir -p "$RESULTS_DIR/$b"
+    cp "$f" "$RESULTS_DIR/$b/"; [ -f "$OUT_DIR/$b/load-report.md" ] && cp "$OUT_DIR/$b/load-report.md" "$RESULTS_DIR/$b/"
+  done
   for f in otz-hitcount.json machine.txt; do [ -f "$OUT_DIR/$f" ] && cp "$OUT_DIR/$f" "$RESULTS_DIR/"; done
   echo "results published to $RESULTS_DIR"
 }
@@ -265,6 +278,7 @@ has build-tools && step_build_tools
 has build-indexes && step_build_indexes
 has parity && step_parity
 has speed && step_speed
+has load && step_load
 has hitcount && step_hitcount
 has report && step_report
 if [ ${#FAILED[@]} -gt 0 ]; then

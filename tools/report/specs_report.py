@@ -327,6 +327,31 @@ for name, before, after in SNIPPETS:
         md.append(f"| {name} | {t(before)} | {t(after)} | {100 * (before - after) / before:.0f}% |")
 md.append("")
 
+md.append("## Search under load (concurrent searches while a writer commits)\n")
+md.append("Load mode of the speed benchmark (issue #31, `tools/bench/run-all.sh --steps load` = "
+          "`search_report.py --load N`): N searcher threads in one process each run the query set several times "
+          "through the host's streaming path, while one writer on the same index re-indexes a few lines (delete + add "
+          "of the same documents) and commits periodically; on a copy of the positions index. A hit count that changes "
+          "under the updates is a failure.\n")
+_load = os.path.join(SP, "sb-load-pos", "load-report.json")
+if not os.path.exists(_load):
+    md.append("Not run yet: the user runs it on the full DB (`--steps load`, then `--steps report`).\n")
+else:
+    with open(_load, encoding="utf-8") as _f:
+        L = json.load(_f)
+    md.append(f"{L['searchers']} concurrent searchers x {L['rounds']} rounds; writer: {L['update_lines']} lines per commit, "
+              f"a commit every {t(L['commit_every_ms'])}. Exit {L['exit']}, {L['errors']} errors. "
+              f"Commits: {L['commits']['n']}, latency p50 {t(L['commits']['p50'])}, p95 {t(L['commits']['p95'])}, "
+              f"max {t(L['commits']['max'])}.\n")
+    md.append("| # | query | searches | hits | stable | first p50 | first p95 | first max | total p50 | total p95 | total max |")
+    md.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    for r in L["rows"]:
+        fm, tm = r["first_ms"], r["total_ms"]
+        md.append(f"| q{r['n'] + 1} | `{r['query']}` | {r['searches']} | {', '.join(f'{h:,}' for h in r['hits']) or '-'} | "
+                  f"{'yes' if r['hits_stable'] else 'NO'} | {t(fm['p50'])} | {t(fm['p95'])} | {t(fm['max'])} | "
+                  f"{t(tm['p50'])} | {t(tm['p95'])} | {t(tm['max'])} |")
+    md.append("")
+
 md.append("""## First-page latency (profiled 2026-10-22)
 
 One single common word (802,677 hits), first page of 256 in both engines, fresh process per run, positions

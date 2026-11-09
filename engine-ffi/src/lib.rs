@@ -72,7 +72,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 4;
+pub const SE_ABI_VERSION: u32 = 5;
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -354,8 +354,9 @@ pub unsafe extern "C" fn se_index_info(index: *const LineIndex) -> *mut c_char {
 /// `BuildFmSidecar`), which serves leading-`*` wildcards and fuzzy words
 /// without walking the whole dictionary. Needs a single segment: call after
 /// `se_writer_merge_and_close`. Idempotent. Returns 1 when a sidecar is in
-/// place, 0 when the index has several segments, no terms or more than 64
-/// distinct characters (searches then use the walk), -1 on error.
+/// place, 0 when the index has several segments or no terms (searches then
+/// use the walk), -1 on error, a sidecar that cannot be built included
+/// (`se_last_error` holds the reason).
 ///
 /// # Safety
 /// `index` must be a live index.
@@ -1408,7 +1409,9 @@ pub unsafe extern "C" fn se_search_counts(search: *const SearchResult) -> *mut c
 /// How the search was served, as JSON: `{"notices":["..."],"truncated":false}`.
 /// `notices` are not errors: `"relevance_needs_positions"` = relevance order
 /// was asked for a phrase / proximity / multi-word fuzzy query on an index
-/// without positions, so the hits are in catalog order. `truncated`: a walk
+/// without positions, so the hits are in catalog order; `"fm_sidecar_unusable"` =
+/// the FM sidecar file is corrupt or stale, so leading-`*` and fuzzy words ran
+/// as walks (same hits, slower; rebuild it). `truncated`: a walk
 /// hit its expansion cap (`max_expanded_terms`, default 2000, one cap
 /// across all segments), so terms beyond it were not
 /// searched. Free with `se_string_free`.

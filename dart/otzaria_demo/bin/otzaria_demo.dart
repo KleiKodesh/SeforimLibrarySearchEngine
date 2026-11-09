@@ -153,7 +153,18 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
   // One segment (the walks and their caps run per segment), then the
   // FM-index sidecar for leading-* wildcards and fuzzy words.
   index.openWriter().mergeAndClose();
-  index.buildFmSidecar();
+  final fmWatch = Stopwatch()..start();
+  try {
+    final built = index.buildFmSidecar();
+    final fmi = Directory(dir).listSync().whereType<File>().where((f) => f.path.endsWith('.fmi'))
+        .fold<int>(0, (n, f) => n + f.lengthSync());
+    stdout.writeln(built
+        ? 'FM sidecar: ${fmWatch.elapsedMilliseconds} ms, ${(fmi / 1e6).toStringAsFixed(1)} MB'
+        : 'FM sidecar not built (several segments or no terms): leading-* and fuzzy use the walk');
+  } catch (e) {
+    stderr.writeln('FM sidecar FAILED: $e (the index is complete; leading-* and fuzzy use the walk)');
+    rethrow;
+  }
   stdout.writeln('Indexed $position lines into $dir in ${sw.elapsed.inMilliseconds} ms; '
       'payload ${index.info().payload}');
   index.close();

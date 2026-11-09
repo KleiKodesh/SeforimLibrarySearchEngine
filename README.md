@@ -1060,6 +1060,21 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     the candidates are verified on their mark-free bytes. Symbol codes are 16-bit and sort keys
     take the width the alphabet needs (every script being a word char, the
     dictionary holds about 280 distinct chars), as in FtsLib's `FmIndex`.
+    The alphabet is the distinct chars present, chars outside the BMP
+    included (issue #28): a BMP-only dictionary writes FtsLib's exact
+    `FMI3` bytes; one with an astral char sets flag bit 1 and stores the
+    chars table as u32 code points.
+  - A sidecar that cannot be built is an error (C ABI -1 with the reason,
+    C# / Dart exception; the C# and Dart demo builds print the failure as a
+    build line, and the C# `build` report has the sidecar's time and
+    size), never a silent skip. A sidecar file that exists but is corrupt,
+    truncated or built over another dictionary is not used: leading-`*`
+    and fuzzy words run as walks (same hits) and the search carries the
+    notice `fm_sidecar_unusable` (delivered like `relevance_needs_positions`,
+    C# `SearchInfo.FmSidecarUnusable`, Dart `SearchInfo.fmSidecarUnusable`)
+    until the sidecar is rebuilt; this and the build error change bumped the C ABI to 5. A search
+    cancelled during an FM expansion stops with `Cancelled`. The sidecar
+    is used whenever it is present (no per-search switch).
   - Measured on the full index (1,755,598 terms): built in 2.4 s, 41 MB;
     `*יצח*` 41 ms against 1.1 s as a walk (FtsLib: 0.26 s).
 - **Vocalized matching (nikud / te'amim)** (Otzaria's `match_nikud` /

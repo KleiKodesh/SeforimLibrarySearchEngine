@@ -18,7 +18,7 @@ use tantivy::termdict::TermDictionary;
 
 use crate::fm_index::FmIndex;
 use crate::fm_sidecar::text_form;
-use crate::Result;
+use crate::{CancelToken, Result};
 
 /// FtsLib `IsFmWildcard`: the leading-star shape the sidecar answers
 /// exactly. No `?`, one literal core with `*` only at the start (suffix) or
@@ -58,13 +58,17 @@ fn term_of(dict: &TermDictionary, rowid: u32, buf: &mut Vec<u8>) -> Result<bool>
 /// them), then highest doc count, then the stripped bytes. As in the walk's
 /// cap, a term and its quoted or vocalized variants are ONE slot (FtsLib's
 /// index stored only the quote-free term), ranked by their summed doc count;
-/// a kept slot keeps all of them. Also returns whether the cap left out a
-/// matching term (the walk's truncation flag).
+/// a kept slot keeps all of them. `pinned` (the walk's pinned terms: a fuzzy
+/// word's exact typed form and its quote-free twin) always keep a slot when
+/// they match, taken from the worst kept slot, as the walk's
+/// `capped_terms`. Also returns whether the cap left out a matching term
+/// (the walk's truncation flag).
 fn cap_like_the_walk(
     dict: &TermDictionary,
     mut ranked: Vec<(u32, Vec<u8>)>,
     cap: usize,
     marked_terms: bool,
+    pinned: &[Vec<u8>],
 ) -> Result<(Vec<Vec<u8>>, bool)> {
     let zero_width = zero_width_chars(marked_terms);
     let mut forms: std::collections::HashMap<Vec<u8>, (u32, usize, u64, Vec<Vec<u8>>)> =
@@ -91,9 +95,32 @@ fn cap_like_the_walk(
     }
     slots.sort_unstable_by(|a, b| (a.0, a.1, a.2, &a.3).cmp(&(b.0, b.1, b.2, &b.3)));
     slots.truncate(cap);
+    // Pinned terms: a pin matches when it is a verified candidate (= the
+    // walk's automaton accepts it and the dictionary has it).
+    for pin in pinned {
+        let form = zero_width.strip(pin);
+        if slots.iter().any(|s| s.3.as_slice() == &*form) || !ranked.iter().any(|(_, t)| t == pin) {
+            continue;
+        }
+        if cap == 0 {
+            break;
+        }
+        if slots.len() >= cap {
+            slots.truncate(cap - 1);
+        }
+        slots.insert(0, (0, 0, Reverse(0), form.into_owned(), vec![pin.clone()]));
+    }
     let mut terms: Vec<Vec<u8>> = slots.into_iter().flat_map(|s| s.4).collect();
     terms.sort_unstable();
     Ok((terms, true))
+}
+
+/// Every 1024 candidates (the first included), stops a cancelled search.
+fn check_cancel(i: usize, cancel: Option<&CancelToken>) -> Result<()> {
+    if i % 1024 == 0 {
+        CancelToken::check(cancel)?;
+    }
+    Ok(())
 }
 
 /// FtsLib `ExpandWildcardWithFm`, verified: the terms the wildcard walk
@@ -109,10 +136,12 @@ pub fn expand_wildcard(
     suffix_only: bool,
     cap: usize,
     marked_terms: bool,
+    cancel: Option<&CancelToken>,
 ) -> Result<(Vec<Vec<u8>>, bool)> {
     let mut buf = Vec::new();
     let mut kept = Vec::new();
-    for rowid in fm.find_row_ids(core, suffix_only) {
+    for (i, rowid) in fm.find_row_ids(core, suffix_only).into_iter().enumerate() {
+        check_cancel(i, cancel)?;
         if !term_of(dict, rowid, &mut buf)? {
             continue;
         }
@@ -121,7 +150,7 @@ pub fn expand_wildcard(
             kept.push((0u32, buf.clone()));
         }
     }
-    cap_like_the_walk(dict, kept, cap, marked_terms)
+    cap_like_the_walk(dict, kept, cap, marked_terms, &[])
 }
 
 /// FtsLib `ExpandFuzzy`, verified: the terms within `max_distance` edits of
@@ -139,10 +168,12 @@ pub fn expand_fuzzy(
     max_distance: u8,
     cap: usize,
     marked_terms: bool,
+    cancel: Option<&CancelToken>,
 ) -> Result<(Vec<Vec<u8>>, bool)> {
     let mut buf = Vec::new();
     let mut kept = Vec::new();
-    for (rowid, _) in fm.find_fuzzy(&text_form(word), max_distance as usize) {
+    for (i, (rowid, _)) in fm.find_fuzzy(&text_form(word), max_distance as usize).into_iter().enumerate() {
+        check_cancel(i, cancel)?;
         if !term_of(dict, rowid, &mut buf)? {
             continue;
         }
@@ -152,7 +183,7 @@ pub fn expand_fuzzy(
             }
         }
     }
-    cap_like_the_walk(dict, kept, cap, marked_terms)
+    cap_like_the_walk(dict, kept, cap, marked_terms, &hebrew_fts::marks::exact_forms(word))
 }
 
 /// Edit distance over chars (insert, delete, substitute, and a swap of two
@@ -198,11 +229,13 @@ pub fn expand_fuzzy_quote_free(
     max_distance: u8,
     cap: usize,
     marked_terms: bool,
+    cancel: Option<&CancelToken>,
 ) -> Result<(Vec<Vec<u8>>, bool)> {
     let query: Vec<char> = text_form(word).chars().collect();
     let mut buf = Vec::new();
     let mut kept = Vec::new();
-    for (rowid, _) in fm.find_fuzzy(&text_form(word), max_distance as usize) {
+    for (i, (rowid, _)) in fm.find_fuzzy(&text_form(word), max_distance as usize).into_iter().enumerate() {
+        check_cancel(i, cancel)?;
         if !term_of(dict, rowid, &mut buf)? {
             continue;
         }
@@ -212,7 +245,7 @@ pub fn expand_fuzzy_quote_free(
             kept.push((d as u32, buf.clone()));
         }
     }
-    cap_like_the_walk(dict, kept, cap, marked_terms)
+    cap_like_the_walk(dict, kept, cap, marked_terms, &hebrew_fts::marks::exact_forms(word))
 }
 
 #[cfg(test)]

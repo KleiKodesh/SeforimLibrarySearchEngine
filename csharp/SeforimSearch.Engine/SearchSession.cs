@@ -479,6 +479,11 @@ namespace SeforimSearch.Engine
         /// catalog order.</summary>
         public const string RelevanceNeedsPositions = "relevance_needs_positions";
 
+        /// <summary>Notice: the index's FM sidecar file is corrupt, truncated or built over
+        /// another dictionary; leading-<c>*</c> and fuzzy words ran as walks (same hits,
+        /// slower). Rebuild it with <see cref="SeforimIndex.BuildFmSidecar"/>.</summary>
+        public const string FmSidecarUnusable = "fm_sidecar_unusable";
+
         public SearchInfo(IReadOnlyList<string> notices, bool truncated, string orderStamp = "")
         {
             Notices = notices;

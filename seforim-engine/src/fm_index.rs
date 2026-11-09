@@ -3,7 +3,9 @@
 //! EXACT matching term rowids. Read through a memory map.
 //!
 //! Text: `SEP t0 SEP t1 ... SEP t(k-1) SEP END`, one code per char
-//! (END=0, SEP=1, real chars 2.. in code-point order).
+//! (END=0, SEP=1, real chars 2.. in code-point order). The alphabet is the
+//! distinct chars present (any Unicode scalar, astral included), so the
+//! codes stay dense whatever the code points are.
 //!
 //! Suffix order: compare codes up to and including the first SEP/END
 //! ("stop"); if equal, by text position. The position tie-break keeps
@@ -35,7 +37,9 @@
 //!   header  : magic u32, textLength u32, sigma u32, termCount u32,
 //!             internalNodes u32, rowIdBits u32, bitvectorBytes u64,
 //!             flags u32 (bit 0: rowid == rank + 1), reserved u32      [40 B]
-//!   chars   : sigma x u16 (code -> char; 0 for END/SEP)
+//!   chars   : sigma x u16 (code -> char; 0 for END/SEP); sigma x u32 when
+//!             flags bit 1 is set (a char outside the BMP is present; our
+//!             extension: a BMP-only dictionary is written exactly as FtsLib's)
 //!   C       : (sigma + 1) x u32
 //!   nodes   : internalNodes x { left i32, right i32, bitLength u32, pad u32, offset u64 }
 //!             child >= 0 = internal node index, child < 0 = leaf symbol -(code+1)
@@ -64,6 +68,8 @@ fn sort_key_bits(sigma: usize) -> usize {
     (usize::BITS - (sigma.max(2) - 1).leading_zeros()) as usize
 }
 const FLAG_ROWID_IS_RANK_PLUS_ONE: u32 = 1;
+/// The chars table holds u32 code points (a char outside the BMP is present).
+const FLAG_WIDE_CHARS: u32 = 2;
 
 /// Why an FM-index could not be built for a dictionary.
 #[derive(Debug, Clone)]
@@ -78,32 +84,44 @@ impl std::fmt::Display for FmBuildError {
 // ── Build ─────────────────────────────────────────────────────────────
 
 /// Builds the index bytes over `terms` (the text forms, in dictionary order;
-/// term i has rowid i + 1). Every term must be non-empty BMP text.
+/// term i has rowid i + 1). Every term must be non-empty; any Unicode
+/// scalar is allowed, astral included (at most 65534 distinct chars).
 pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, FmBuildError> {
     let terms: Vec<&str> = terms.into_iter().collect();
 
-    // Alphabet in code-point order (code order == ordinal for BMP text).
+    // Alphabet = the distinct chars present, in code-point order (code
+    // order == ordinal for BMP text, as FtsLib's).
     let mut present = vec![false; 65536];
+    let mut astral: Vec<u32> = Vec::new();
     for t in &terms {
         if t.is_empty() {
             return Err(FmBuildError("empty term".into()));
         }
         for ch in t.chars() {
             let u = ch as u32;
-            if u >= 65536 {
-                return Err(FmBuildError("non-BMP char".into()));
+            if u < 65536 {
+                present[u as usize] = true;
+            } else {
+                astral.push(u);
             }
-            present[u as usize] = true;
         }
     }
+    astral.sort_unstable();
+    astral.dedup();
     let mut code_of = vec![0 as Code; 65536];
-    let mut char_of: Vec<u16> = vec![0, 0];
+    let mut char_of: Vec<u32> = vec![0, 0];
     for ch in 0..65536usize {
         if present[ch] {
             code_of[ch] = char_of.len() as Code;
-            char_of.push(ch as u16);
+            char_of.push(ch as u32);
         }
     }
+    let first_astral_code = char_of.len();
+    char_of.extend_from_slice(&astral);
+    if char_of.len() > Code::MAX as usize + 1 {
+        return Err(FmBuildError(format!("{} distinct chars (at most 65534)", char_of.len() - 2)));
+    }
+    let wide = !astral.is_empty();
     let sigma = char_of.len();
 
     // Text, plus the rowid of the term each position belongs to. A SEP
@@ -129,7 +147,13 @@ pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, Fm
         w += 1;
         for ch in t.chars() {
             rowid_at[w] = rowid;
-            text[w] = code_of[ch as usize];
+            let u = ch as u32;
+            text[w] = if u < 65536 {
+                code_of[u as usize]
+            } else {
+                // present: every astral char of the terms was collected above
+                (first_astral_code + astral.binary_search(&u).unwrap_or(0)) as Code
+            };
             w += 1;
         }
     }
@@ -174,7 +198,8 @@ pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, Fm
         bitvector_bytes += (bits.count / RANK_BLOCK_DATA_BITS as u64 + 1) * RANK_BLOCK_BYTES as u64;
     }
 
-    let mut out = Vec::with_capacity(HEADER_BYTES + sigma * 2 + (sigma + 1) * 4 + node_bits.len() * NODE_BYTES
+    let char_bytes = if wide { 4 } else { 2 };
+    let mut out = Vec::with_capacity(HEADER_BYTES + sigma * char_bytes + (sigma + 1) * 4 + node_bits.len() * NODE_BYTES
         + bitvector_bytes as usize + (n * rowid_bits + 7) / 8 + 8);
     out.extend_from_slice(&MAGIC.to_le_bytes());
     out.extend_from_slice(&(n as u32).to_le_bytes());
@@ -183,10 +208,15 @@ pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, Fm
     out.extend_from_slice(&(node_bits.len() as u32).to_le_bytes());
     out.extend_from_slice(&(rowid_bits as u32).to_le_bytes());
     out.extend_from_slice(&bitvector_bytes.to_le_bytes());
-    out.extend_from_slice(&FLAG_ROWID_IS_RANK_PLUS_ONE.to_le_bytes());
+    let flags = FLAG_ROWID_IS_RANK_PLUS_ONE | if wide { FLAG_WIDE_CHARS } else { 0 };
+    out.extend_from_slice(&flags.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes());
-    for ch in &char_of {
-        out.extend_from_slice(&ch.to_le_bytes());
+    for &ch in &char_of {
+        if wide {
+            out.extend_from_slice(&ch.to_le_bytes());
+        } else {
+            out.extend_from_slice(&(ch as u16).to_le_bytes());
+        }
     }
     for v in &c {
         out.extend_from_slice(&v.to_le_bytes());
@@ -452,6 +482,7 @@ pub struct FmIndex {
     rowid_bits: usize,
     c: Vec<u32>,
     code_of: Vec<Code>, // 65536 entries; 0 = char not in alphabet
+    astral: Vec<(u32, Code)>, // the alphabet's chars outside the BMP, sorted
     left: Vec<i32>,
     right: Vec<i32>,
     root: usize,
@@ -479,10 +510,14 @@ impl FmIndex {
         let internal_nodes = u32_at(16) as usize;
         let rowid_bits = u32_at(20) as usize;
         let bitvector_bytes = u64_at(24);
-        let _flags = u32_at(32);
+        let flags = u32_at(32);
+        if flags & !(FLAG_ROWID_IS_RANK_PLUS_ONE | FLAG_WIDE_CHARS) != 0 {
+            return Err(FmBuildError("unknown format flags".into()));
+        }
+        let char_bytes: usize = if flags & FLAG_WIDE_CHARS != 0 { 4 } else { 2 };
         // A corrupt or truncated file must be an Err, never a panic.
         let tables = HEADER_BYTES as u64
-            + 2 * sigma as u64
+            + char_bytes as u64 * sigma as u64
             + 4 * (sigma as u64 + 1)
             + NODE_BYTES as u64 * internal_nodes as u64;
         if !(2..=65536).contains(&sigma)
@@ -495,13 +530,25 @@ impl FmIndex {
 
         let mut pos = HEADER_BYTES;
         let mut code_of = vec![0 as Code; 65536];
+        let mut astral: Vec<(u32, Code)> = Vec::new();
         for code in 0..sigma {
-            let ch = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap());
+            let ch = if char_bytes == 4 {
+                u32_at(pos)
+            } else {
+                u32::from(u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap()))
+            };
             if code as Code > SEPARATOR_CODE {
-                code_of[ch as usize] = code as Code;
+                if ch < 65536 {
+                    code_of[ch as usize] = code as Code;
+                } else if char::from_u32(ch).is_some() {
+                    astral.push((ch, code as Code));
+                } else {
+                    return Err(FmBuildError("corrupt chars table".into()));
+                }
             }
-            pos += 2;
+            pos += char_bytes;
         }
+        astral.sort_unstable();
         let mut c = vec![0u32; sigma + 1];
         for v in c.iter_mut() {
             *v = u32_at(pos);
@@ -540,6 +587,7 @@ impl FmIndex {
             rowid_bits,
             c,
             code_of,
+            astral,
             root: tree.root,
             left: tree.left,
             right: tree.right,
@@ -549,6 +597,17 @@ impl FmIndex {
             rowids_offset,
             data,
         })
+    }
+
+    /// The code of `ch`; 0 when it is not in the alphabet.
+    #[inline]
+    fn code(&self, ch: char) -> Code {
+        let u = ch as u32;
+        if u < 65536 {
+            self.code_of[u as usize]
+        } else {
+            self.astral.binary_search_by_key(&u, |&(c, _)| c).map_or(0, |i| self.astral[i].1)
+        }
     }
 
     /// Number of terms the index was built over.
@@ -627,8 +686,7 @@ impl FmIndex {
             let code = if k as usize == pattern.len() {
                 SEPARATOR_CODE // only when must_end_term
             } else {
-                let ch = pattern[k as usize] as u32;
-                let code = if ch < 65536 { self.code_of[ch as usize] } else { 0 };
+                let code = self.code(pattern[k as usize]);
                 if code == 0 {
                     return None;
                 }
@@ -676,15 +734,12 @@ impl FmIndex {
     pub fn find_fuzzy(&self, query: &str, max_distance: usize) -> Vec<(u32, u32)> {
         let qchars: Vec<char> = query.chars().collect();
         let m = qchars.len();
-        let reversed: Vec<Code> = (0..m)
-            .map(|j| {
-                let ch = qchars[m - 1 - j] as u32;
-                let code = if ch < 65536 { self.code_of[ch as usize] } else { 0 };
-                if code == 0 {
-                    255 // never equals a BWT symbol
-                } else {
-                    code
-                }
+        // u32: a char outside the alphabet is u32::MAX, which no symbol
+        // equals (any u16 code can be a real symbol once sigma passes 255).
+        let reversed: Vec<u32> = (0..m)
+            .map(|j| match self.code(qchars[m - 1 - j]) {
+                0 => u32::MAX,
+                code => u32::from(code),
             })
             .collect();
         let mut search = FuzzySearch {
@@ -707,7 +762,7 @@ impl FmIndex {
 
 struct FuzzySearch<'a> {
     fm: &'a FmIndex,
-    query: Vec<Code>,
+    query: Vec<u32>,
     max_distance: usize,
     m: usize,
     results: Vec<(u32, u32)>,
@@ -757,7 +812,7 @@ impl FuzzySearch<'_> {
             next[0] = row[0] + 1;
             let mut min = next[0];
             for j in 1..=self.m {
-                let mut v = row[j - 1] + usize::from(self.query[j - 1] != code);
+                let mut v = row[j - 1] + usize::from(self.query[j - 1] != u32::from(code));
                 let delete = row[j] + 1;
                 let insert = next[j - 1] + 1;
                 if delete < v {
@@ -768,7 +823,7 @@ impl FuzzySearch<'_> {
                 }
                 // adjacent swap (the reversed strings: still an adjacent swap)
                 if let Some(parent) = parent {
-                    if j > 1 && self.query[j - 1] == last && self.query[j - 2] == code && parent[j - 2] + 1 < v {
+                    if j > 1 && self.query[j - 1] == u32::from(last) && self.query[j - 2] == u32::from(code) && parent[j - 2] + 1 < v {
                         v = parent[j - 2] + 1;
                     }
                 }
@@ -922,5 +977,61 @@ mod tests {
             assert_eq!(got, want, "infix of {i}");
         }
     }
-}
 
+    #[test]
+    fn astral_chars_get_dense_codes() {
+        let a = '\u{1D400}';
+        let b = '\u{1F600}';
+        let terms: Vec<String> = vec![
+            format!("x{a}y"),
+            format!("{b}{a}"),
+            "xyz".into(),
+            format!("z{b}"),
+            format!("{a}{a}x"),
+        ];
+        let refs: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
+        let bytes = build(refs.iter().copied()).unwrap();
+        // the wide chars table is flagged; sigma = END, SEP, x y z, two astral
+        assert_eq!(u32::from_le_bytes(bytes[32..36].try_into().unwrap()), FLAG_ROWID_IS_RANK_PLUS_ONE | FLAG_WIDE_CHARS);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 7);
+        let fm = FmIndex::open(Box::new(bytes)).unwrap();
+        for (i, t) in refs.iter().enumerate() {
+            assert_eq!(fm.find_row_ids(t, true), vec![i as u32 + 1], "term {i}");
+        }
+        assert_eq!(fm.find_row_ids(&a.to_string(), false), vec![1, 2, 5]);
+        assert_eq!(fm.find_row_ids(&format!("{a}y"), false), vec![1]);
+        assert_eq!(fm.find_row_ids(&b.to_string(), true), vec![4]);
+        assert_eq!(fm.find_fuzzy(&format!("{b}{b}"), 1), vec![(2, 1), (4, 1)]);
+        assert_eq!(fm.find_fuzzy(&format!("x{b}y"), 1), vec![(1, 1)]);
+        assert_eq!(fm.find_fuzzy(&format!("x{b}y"), 2), vec![(1, 1), (2, 2), (3, 2), (4, 2)]);
+        assert_eq!(fm.find_fuzzy(&format!("{a}x{a}"), 1), vec![(5, 1)]); // a swap
+        // an astral char not in the alphabet matches nothing
+        assert!(fm.find_row_ids("\u{1F601}", false).is_empty());
+    }
+
+    #[test]
+    fn bmp_only_bytes_stay_ftslibs() {
+        let bytes = build(["ab", "ba", "c"]).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[32..36].try_into().unwrap()), FLAG_ROWID_IS_RANK_PLUS_ONE);
+        // u16 chars table: END, SEP, a, b, c
+        let chars: Vec<u16> = (0..5).map(|i| u16::from_le_bytes(bytes[40 + 2 * i..42 + 2 * i].try_into().unwrap())).collect();
+        assert_eq!(chars, [0, 0, 'a' as u16, 'b' as u16, 'c' as u16]);
+        // an unknown flag is rejected
+        let mut bad = bytes.clone();
+        bad[32] |= 4;
+        assert!(FmIndex::open(Box::new(bad)).is_err());
+    }
+
+    #[test]
+    fn fuzzy_query_char_outside_the_alphabet_matches_no_symbol() {
+        // over 255 symbols: every u16 code can be a real symbol, so a query
+        // char missing from the alphabet must not alias one (it used to be 255)
+        let terms: Vec<String> = (0..300u32).map(|i| char::from_u32(0x0400 + i).unwrap().to_string() + "q").collect();
+        let refs: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
+        let fm = FmIndex::open(Box::new(build(refs.iter().copied()).unwrap())).unwrap();
+        for i in 0..300u32 {
+            assert!(fm.find_fuzzy(&format!("{}q", char::from_u32(0x4E00 + i).unwrap()), 0).is_empty(), "{i}");
+            assert_eq!(fm.find_fuzzy(&format!("{}q", char::from_u32(0x0400 + i).unwrap()), 0), vec![(i + 1, 0)]);
+        }
+    }
+}

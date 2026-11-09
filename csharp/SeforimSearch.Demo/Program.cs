@@ -77,6 +77,8 @@ namespace SeforimSearch.Demo
                 Console.Error.WriteLine($"index size: {total / 1e6:F1} MB in {files.Length} files");
                 foreach (var g in files.GroupBy(f => f.Extension).OrderByDescending(g => g.Sum(f => f.Length)))
                     Console.Error.WriteLine($"  {g.Key,-10} {g.Sum(f => f.Length) / 1e6,9:F1} MB");
+                long fmi = files.Where(f => f.Extension == ".fmi").Sum(f => f.Length);
+                Console.Error.WriteLine(fmi > 0 ? $"FM sidecar: {fmi / 1e6:F1} MB" : "FM sidecar: none (leading-* and fuzzy use the walk)");
             }
             return 0;
         }

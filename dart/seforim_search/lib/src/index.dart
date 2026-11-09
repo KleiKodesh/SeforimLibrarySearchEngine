@@ -123,8 +123,8 @@ final class SeforimIndex implements Finalizable {
   /// walking the whole dictionary, with identical results. Needs a single
   /// segment: call after [IndexWriter.mergeAndClose]. Idempotent. Returns
   /// false (nothing built; searches use the walk) when the index has several
-  /// segments, no terms, or a dictionary with more than 64 distinct
-  /// characters (a marked index with nikud and te'amim).
+  /// segments or no terms. Throws (with the engine's reason) when the sidecar
+  /// cannot be built: a failure is never silent.
   bool buildFmSidecar() {
     final r = _n.indexBuildFmSidecar(handle);
     if (r < 0) throw _n.error();

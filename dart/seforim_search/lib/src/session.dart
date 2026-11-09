@@ -378,6 +378,11 @@ class SearchInfo {
   /// fuzzy query on an index without positions; the hits are in catalog order.
   static const relevanceNeedsPositions = 'relevance_needs_positions';
 
+  /// Notice: the index's FM sidecar file is corrupt, truncated or built over
+  /// another dictionary; leading-`*` and fuzzy words ran as walks (same hits,
+  /// slower). Rebuild it with `SeforimIndex.buildFmSidecar`.
+  static const fmSidecarUnusable = 'fm_sidecar_unusable';
+
   /// Notices about the search (not errors), e.g. [relevanceNeedsPositions].
   final List<String> notices;
 

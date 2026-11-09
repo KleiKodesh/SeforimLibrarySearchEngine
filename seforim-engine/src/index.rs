@@ -276,7 +276,8 @@ impl LineIndex {
     /// without walking the whole dictionary. Needs a single segment: call
     /// after [`LineWriter::merge_all`]. Returns false when the index has
     /// several segments or no terms (nothing built; searches still work
-    /// through the FST walk).
+    /// through the FST walk). Err when it cannot be built (reported, never
+    /// a silent skip).
     pub fn build_fm_sidecar(&self) -> Result<bool> {
         // the single-threaded tail of a build: normal priority even when the
         // calling thread opted into background mode (throttled, it drags)

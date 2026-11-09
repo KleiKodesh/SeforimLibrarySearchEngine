@@ -14,6 +14,8 @@
 pub mod fm_expand;
 pub mod fm_index;
 pub mod fm_sidecar;
+#[cfg(test)]
+mod fm_equivalence_tests;
 pub mod index;
 pub mod line_search;
 pub mod options;
@@ -36,6 +38,7 @@ pub use hebrew_fts::user_regex::classify as user_regex_kind;
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter, LINE_FLAG_NO_CROSS};
 pub use line_search::LineRegexStatus;
 pub use options::{ExcludeOptions, PhraseOptions, ProximityBase, SearchOptions, WordMatchSpec, WordOptions};
+pub use fm_sidecar::NOTICE_FM_SIDECAR_UNUSABLE;
 pub use relevance::{ResultsOrder, NOTICE_RELEVANCE_NEEDS_POSITIONS};
 pub use search::{
     CancelToken, ExcludeSpec, GroupSpec, HitCounts, PlacedHit, ProximitySpec, SearchInfo,
@@ -49,7 +52,7 @@ pub enum Error {
     Tantivy(tantivy::TantivyError),
     Io(std::io::Error),
     /// A request the index cannot serve (e.g. spacing without positions, an
-    /// FM-index over a dictionary with too many distinct characters).
+    /// FM-index over a dictionary with more than 65534 distinct characters).
     Unsupported(String),
     /// The search was cancelled through its [`CancelToken`].
     Cancelled,

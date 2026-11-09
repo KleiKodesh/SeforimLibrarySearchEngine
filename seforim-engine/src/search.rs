@@ -1505,10 +1505,12 @@ impl SearchResult {
         self.truncated || self.line.as_ref().is_some_and(|l| l.truncated)
     }
 
-    /// Notices about how the search was served, not errors. Today one:
+    /// Notices about how the search was served, not errors:
     /// [`NOTICE_RELEVANCE_NEEDS_POSITIONS`](crate::relevance::NOTICE_RELEVANCE_NEEDS_POSITIONS)
     /// (relevance order asked for a phrase / proximity / multi-word fuzzy
-    /// query on an index without positions: the hits are in catalog order).
+    /// query on an index without positions: the hits are in catalog order),
+    /// [`NOTICE_FM_SIDECAR_UNUSABLE`](crate::fm_sidecar::NOTICE_FM_SIDECAR_UNUSABLE)
+    /// (the FM sidecar file is corrupt or stale: walks served, same hits).
     pub fn notices(&self) -> &[String] {
         &self.notices
     }
@@ -1749,6 +1751,8 @@ impl SpanTermSource for AnySource {
 struct Walk<'a> {
     fm: Option<&'a FmIndex>,
     cap: usize,
+    /// Checked while an FM expansion verifies its candidates.
+    cancel: Option<&'a CancelToken>,
 }
 
 impl LineIndex {
@@ -2084,13 +2088,19 @@ impl LineIndex {
     }
 
     /// The FM-index sidecar to expand with, if the index has one for its
-    /// current single segment.
-    fn fm_sidecar_for(&self, searcher: &tantivy::Searcher) -> Option<Arc<FmIndex>> {
+    /// current single segment, and whether a sidecar file exists but is
+    /// unusable (the search then runs walks and carries
+    /// [`NOTICE_FM_SIDECAR_UNUSABLE`](crate::fm_sidecar::NOTICE_FM_SIDECAR_UNUSABLE)).
+    fn fm_sidecar_for(&self, searcher: &tantivy::Searcher) -> (Option<Arc<FmIndex>>, bool) {
         #[cfg(test)]
         if self.test_only_disable_fm.load(std::sync::atomic::Ordering::Relaxed) {
-            return None;
+            return (None, false);
         }
-        self.fm.get(&self.dir, searcher, self.fields.text)
+        match self.fm.lookup(&self.dir, searcher, self.fields.text) {
+            crate::fm_sidecar::FmLookup::Ready(fm) => (Some(fm), false),
+            crate::fm_sidecar::FmLookup::Missing => (None, false),
+            crate::fm_sidecar::FmLookup::Unusable(_) => (None, true),
+        }
     }
 
     /// The exact terms for a group the sidecar can expand (a leading-`*`
@@ -2129,6 +2139,7 @@ impl LineIndex {
                     suffix_only,
                     cap,
                     self.options.keep_marks,
+                    walk.cancel,
                 )?;
                 Ok(Some(terms))
             }
@@ -2148,6 +2159,7 @@ impl LineIndex {
                         q.distance_limit(),
                         cap,
                         self.options.keep_marks,
+                        walk.cancel,
                     )?
                 } else {
                     fm_expand::expand_fuzzy(
@@ -2158,6 +2170,7 @@ impl LineIndex {
                         q.distance_limit(),
                         cap,
                         self.options.keep_marks,
+                        walk.cancel,
                     )?
                 };
                 Ok(Some(terms))
@@ -2340,8 +2353,8 @@ impl LineIndex {
         }
 
         let searcher = self.reader.searcher();
-        let fm = self.fm_sidecar_for(&searcher);
-        let walk = Walk { fm: fm.as_deref(), cap: request.max_expanded_terms };
+        let (fm, fm_unusable) = self.fm_sidecar_for(&searcher);
+        let walk = Walk { fm: fm.as_deref(), cap: request.max_expanded_terms, cancel: cancel.as_ref() };
         let mut sinks = Vec::new();
         let mut relevance = request.order == ResultsOrder::Relevance;
         // The request groups the main sinks belong to, when not all of them
@@ -2498,6 +2511,9 @@ impl LineIndex {
         // A relevance score that needs positions the index lacks: the hits
         // come back in catalog order, with a notice (not an error).
         let mut notices: Vec<String> = Vec::new();
+        if fm_unusable {
+            notices.push(crate::fm_sidecar::NOTICE_FM_SIDECAR_UNUSABLE.to_string());
+        }
         if relevance
             && relevance::lacks_positions(
                 self.options.positions,

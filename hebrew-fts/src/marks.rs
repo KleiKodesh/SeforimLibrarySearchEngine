@@ -64,8 +64,9 @@ pub(crate) struct WeightPlan<'a> {
     pub mark_free: bool,
 }
 
-/// The exact typed form of `word` and its quote-free twin, as pinned terms.
-pub(crate) fn exact_forms(word: &str) -> Vec<Vec<u8>> {
+/// The exact typed form of `word` and its quote-free twin, as pinned terms
+/// (public for the FM sidecar's expansion, which pins the same terms).
+pub fn exact_forms(word: &str) -> Vec<Vec<u8>> {
     let mut forms = vec![word.as_bytes().to_vec()];
     let quote_free: String = word.chars().filter(|&c| !crate::chars::is_term_quote(c)).collect();
     if quote_free != word && !quote_free.is_empty() {

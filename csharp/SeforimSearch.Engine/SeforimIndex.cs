@@ -96,8 +96,8 @@ namespace SeforimSearch.Engine
         /// it instead of walking the whole dictionary, with identical results.
         /// Needs a single segment: call after <see cref="SeforimIndexWriter.MergeAndClose"/>.
         /// Idempotent. Returns false (nothing built; searches use the walk) when the
-        /// index has several segments, no terms, or a dictionary with more than 64
-        /// distinct characters (a marked index with nikud and te'amim).</summary>
+        /// index has several segments or no terms. Throws <see cref="SeforimEngineException"/>
+        /// (with the reason) when the sidecar cannot be built; a failure is never silent.</summary>
         public bool BuildFmSidecar()
         {
             int built = NativeMethods.se_index_build_fm_sidecar(_handle);

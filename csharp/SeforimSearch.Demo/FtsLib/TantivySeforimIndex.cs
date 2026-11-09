@@ -603,9 +603,24 @@ namespace FtsLib.Fts5
             {
                 writer.MergeAndClose();
                 Stage("merge into one segment", stage);
-                Engine().BuildFmSidecar();
-                Stage("FM-index sidecar", stage);
+                BuildFmSidecarReported(stage);
             }
+        }
+
+        /// <summary>Builds the FM sidecar and reports the outcome as a build stage line:
+        /// built (with its time), not built (several segments or no terms), or FAILED
+        /// with the engine's reason (then rethrown: never a silent skip; the index itself
+        /// is complete and searches use the walk until the sidecar is rebuilt).</summary>
+        private void BuildFmSidecarReported(System.Diagnostics.Stopwatch stage)
+        {
+            bool built;
+            try { built = Engine().BuildFmSidecar(); }
+            catch (Exception e)
+            {
+                Stage("FM-index sidecar FAILED: " + e.Message, stage);
+                throw;
+            }
+            Stage(built ? "FM-index sidecar" : "FM-index sidecar not built (several segments or no terms)", stage);
         }
 
         /// <summary>Merges the index into one segment if it has several (a no-op
@@ -616,7 +631,7 @@ namespace FtsLib.Fts5
         {
             using (var writer = heapBytes > 0 ? Engine().OpenWriter(heapBytes) : Engine().OpenWriter())
                 writer.MergeAndClose();
-            if (!Engine().HasFmSidecar) Engine().BuildFmSidecar();
+            if (!Engine().HasFmSidecar) BuildFmSidecarReported(System.Diagnostics.Stopwatch.StartNew());
         }
 
         public void Dispose()

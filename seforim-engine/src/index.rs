@@ -184,7 +184,7 @@ pub struct LineIndex {
     /// [`LineWriter`] performs. A running search keeps the searcher (the
     /// snapshot) it started with. When ANOTHER process writes the index,
     /// call [`LineIndex::reload`] (or reopen).
-    pub(crate) reader: IndexReader,
+    pub(crate) reader: SharedReader,
     /// The FM-index sidecar, opened on first use (see `fm_sidecar`).
     pub(crate) fm: crate::fm_sidecar::FmCache,
     /// TEST ONLY (compiled out of every non-test build): forces leading-`*`
@@ -228,7 +228,12 @@ impl LineIndex {
     }
 
     fn wrap(index: Index, fields: LineFields, options: IndexOptions, dir: &Path) -> Result<LineIndex> {
-        let reader = index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()?;
+        let reader = SharedReader {
+            reader: index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()?,
+            pending: Default::default(),
+            #[cfg(test)]
+            test_fail_reload: Default::default(),
+        };
         Ok(LineIndex {
             index,
             reader,
@@ -343,7 +348,15 @@ impl LineIndex {
     /// The index's shared reader (for tools and statistics; see the
     /// `reader` field: reloaded after this engine's own writes).
     pub fn reader(&self) -> Result<tantivy::IndexReader> {
-        Ok(self.reader.clone())
+        let _ = self.reader.searcher(); // retries a pending reload first
+        Ok(self.reader.reader.clone())
+    }
+
+    /// True when a write through this index's writer committed but the
+    /// reload after it failed: searches still see the previous snapshot and
+    /// the next search (or count) retries the reload.
+    pub fn reload_pending(&self) -> bool {
+        self.reader.pending.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Reloads the shared reader to the last commit on disk. Needed only
@@ -351,7 +364,7 @@ impl LineIndex {
     /// the index; this engine's own writer reloads it itself. Searches
     /// already running keep their snapshot.
     pub fn reload(&self) -> Result<()> {
-        Ok(self.reader.reload()?)
+        self.reader.reload()
     }
 
     /// The text field.
@@ -439,7 +452,60 @@ pub struct LineWriter {
     watcher: Option<crate::resources::Watcher>,
     /// The index's shared reader, reloaded after every commit, rollback
     /// and merge (issue #22).
+    reader: SharedReader,
+}
+
+/// The index's one reader (issue #22), shared by the index and its writers.
+#[derive(Clone)]
+pub(crate) struct SharedReader {
     reader: IndexReader,
+    /// Set when a write committed but the reload after it failed; the next
+    /// `searcher()` retries the reload.
+    pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// TEST ONLY: makes the reload after a write fail.
+    #[cfg(test)]
+    pub(crate) test_fail_reload: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SharedReader {
+    /// The current snapshot. When a reload after a write is pending it is
+    /// retried first; if it fails again the previous snapshot is returned
+    /// (never an error: the data it shows is a committed state).
+    pub(crate) fn searcher(&self) -> Searcher {
+        use std::sync::atomic::Ordering;
+        // clear BEFORE reloading: a write that fails its reload meanwhile
+        // sets the flag again and is not lost
+        if self.pending.swap(false, Ordering::AcqRel) && self.try_reload().is_err() {
+            self.pending.store(true, Ordering::Release);
+        }
+        self.reader.searcher()
+    }
+
+    /// Explicit reload (errors are returned; clears a pending retry).
+    pub(crate) fn reload(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let was = self.pending.swap(false, Ordering::AcqRel);
+        let result = self.try_reload();
+        if result.is_err() && was {
+            self.pending.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    /// After a write that is already durable: reload, and on failure mark it
+    /// pending instead of failing the write.
+    fn after_write(&self) {
+        let ok = self.try_reload().is_ok();
+        self.pending.store(!ok, std::sync::atomic::Ordering::Release);
+    }
+
+    fn try_reload(&self) -> Result<()> {
+        #[cfg(test)]
+        if self.test_fail_reload.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(crate::Error::Unsupported("test: reload fails".into()));
+        }
+        Ok(self.reader.reload()?)
+    }
 }
 
 impl LineWriter {
@@ -491,6 +557,11 @@ impl LineWriter {
 
     /// Commits everything queued, with an optional host payload stored
     /// atomically with it (see [`LineIndex::committed_payload`]).
+    ///
+    /// Ok means the commit is durable. The index's shared reader is reloaded
+    /// right after; if that reload fails the commit still returns Ok, searches
+    /// keep the previous snapshot, [`LineIndex::reload_pending`] turns true and
+    /// the next search or count retries the reload.
     pub fn commit(&mut self, payload: Option<&str>) -> Result<()> {
         // a commit is waited for (readers reload after it): normal priority
         // even when the calling thread opted into background mode
@@ -500,7 +571,7 @@ impl LineWriter {
             prepared.set_payload(p);
         }
         prepared.commit()?;
-        self.reader.reload()?;
+        self.reader.after_write();
         Ok(())
     }
 
@@ -523,10 +594,11 @@ impl LineWriter {
         }
     }
 
-    /// Drops everything queued since the last commit.
+    /// Drops everything queued since the last commit (the shared reader is
+    /// reloaded as after [`Self::commit`], same failure rule).
     pub fn rollback(&mut self) -> Result<()> {
         self.writer.rollback()?;
-        self.reader.reload()?;
+        self.reader.after_write();
         Ok(())
     }
 
@@ -566,8 +638,10 @@ impl LineWriter {
             }
         }
         let reader = self.reader.clone();
-        self.writer.wait_merging_threads()?;
-        reader.reload()?;
+        let waited = self.writer.wait_merging_threads();
+        // the merge may have landed even when waiting failed: reload anyway
+        reader.after_write();
+        waited?;
         Ok(())
     }
 }
@@ -668,6 +742,34 @@ mod tests {
         assert_eq!(index.reader.searcher().segment_readers().len(), 1);
         assert!(index.build_fm_sidecar().unwrap());
         assert!(index.has_fm_sidecar());
+    }
+
+    /// Issue #22: a failed reload after a durable commit does not fail the
+    /// commit; the old snapshot stays and the next search retries.
+    #[test]
+    fn failed_reload_after_commit_is_retried() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        w.add(&doc(1, "alpha")).unwrap();
+        w.commit(None).unwrap();
+        index.reader.test_fail_reload.store(true, Ordering::Release);
+        w.add(&doc(2, "alpha")).unwrap();
+        w.commit(Some("p2")).unwrap(); // durable: Ok although the reload failed
+        assert!(index.reload_pending());
+        assert_eq!(index.num_lines().unwrap(), 1); // previous snapshot, no error
+        assert_eq!(hits(&index, "alpha"), 1);
+        assert_eq!(index.committed_payload().unwrap().as_deref(), Some("p2"));
+        assert!(index.reload().is_err()); // the explicit reload reports it
+        assert!(index.reload_pending()); // and the retry stays armed
+        w.add(&doc(3, "alpha")).unwrap();
+        w.rollback().unwrap(); // the rollback path follows the same rule
+        assert!(index.reload_pending());
+        index.reader.test_fail_reload.store(false, Ordering::Release);
+        assert_eq!(hits(&index, "alpha"), 2); // retried and caught up
+        assert!(!index.reload_pending());
+        assert_eq!(index.num_lines().unwrap(), 2);
     }
 
     /// Issue #22: a write through ANOTHER handle is seen after `reload`.

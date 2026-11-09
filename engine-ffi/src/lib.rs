@@ -677,6 +677,10 @@ pub unsafe extern "C" fn se_writer_delete(writer: *mut LineWriter, line_id: u64)
 }
 
 /// Commits, storing `payload` (may be null) atomically with the documents.
+/// 0 means the commit is durable. The index's shared reader reloads right
+/// after; if that reload fails the commit still returns 0, searches keep the
+/// previous snapshot and the next search or count retries the reload
+/// (`se_index_reload` forces it and reports its error).
 ///
 /// # Safety
 /// `writer` must be live; `payload` valid for `payload_len` bytes or null.

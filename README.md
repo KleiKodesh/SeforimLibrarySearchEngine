@@ -671,7 +671,11 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   reader per open index (issue #22): every search, count and sidecar check
   takes its searcher from it; the index's own writers reload it after every
   commit, rollback and merge (no file watcher), and a running search keeps
-  the snapshot it started with. When another process or another handle on
+  the snapshot it started with. A commit is reported by its durability: if
+  the reload after it fails, the commit still succeeds, searches keep the
+  previous snapshot and the next search or count retries the reload (Rust
+  `LineIndex::reload_pending`; `se_index_reload` forces it and reports the
+  error). When another process or another handle on
   the same directory writes the index, the host calls `se_index_reload`
   (C# `Reload()`, Dart `reload()`) or reopens. Options are strict both ways: create's
   options JSON may omit a key (its default) but malformed JSON, a

@@ -1177,12 +1177,11 @@ impl SnippetSession {
         CancelToken::check(cancel)?;
         let matchers = &self.matchers;
         let negative = self.negative.as_slice();
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .min(texts.len().max(1));
+        let total: usize = texts.iter().map(&size).sum();
+        let threads = crate::pools::search_pool().current_num_threads().min(texts.len().max(1));
         let mut located: Vec<T> = Vec::with_capacity(texts.len());
-        if threads <= 1 || texts.len() < 32 {
+        // a small batch runs on the caller's thread (pools::PARALLEL_MIN_BYTES)
+        if threads <= 1 || !crate::pools::parallel(total, crate::pools::PARALLEL_MIN_BYTES) {
             for t in texts {
                 located.push(f(matchers, negative, &mut self.locator, t));
             }
@@ -1222,34 +1221,27 @@ impl SnippetSession {
                 self.pool.push(locator);
             }
             let mut parts: Vec<Option<Vec<T>>> = (0..chunks).map(|_| None).collect();
+            let mut done: Vec<Vec<(usize, Vec<T>)>> = (0..threads).map(|_| Vec::new()).collect();
             let f = &f;
-            std::thread::scope(|scope| {
+            // the persistent search pool: one task per locator, chunks taken
+            // from the shared counter
+            crate::pools::search_pool().scope(|scope| {
                 let (bounds, next) = (&bounds, &next);
-                let handles: Vec<_> = self.pool[..threads]
-                    .iter_mut()
-                    .map(|locator| {
-                        scope.spawn(move || {
-                            let mut done = Vec::new();
-                            loop {
-                                let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if c >= chunks || cancel.is_some_and(|t| t.is_cancelled()) {
-                                    break;
-                                }
-                                let part = &texts[bounds[c]..bounds[c + 1]];
-                                let res: Vec<_> =
-                                    part.iter().map(|t| f(matchers, negative, locator, t)).collect();
-                                done.push((c, res));
-                            }
-                            done
-                        })
-                    })
-                    .collect();
-                for h in handles {
-                    for (c, res) in h.join().expect("snippet thread panicked") {
-                        parts[c] = Some(res);
-                    }
+                for (locator, done) in self.pool[..threads].iter_mut().zip(done.iter_mut()) {
+                    scope.spawn(move |_| loop {
+                        let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if c >= chunks || cancel.is_some_and(|t| t.is_cancelled()) {
+                            break;
+                        }
+                        let part = &texts[bounds[c]..bounds[c + 1]];
+                        let res: Vec<_> = part.iter().map(|t| f(matchers, negative, locator, t)).collect();
+                        done.push((c, res));
+                    });
                 }
             });
+            for (c, res) in done.into_iter().flatten() {
+                parts[c] = Some(res);
+            }
             for p in parts {
                 // a chunk left undone: the token was cancelled
                 located.extend(p.ok_or(Error::Cancelled)?);

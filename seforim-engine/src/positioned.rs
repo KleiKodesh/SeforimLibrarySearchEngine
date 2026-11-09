@@ -193,8 +193,9 @@ impl PositionSource {
             // Work split across cores in two ways: by term (opening a posting
             // list is the fixed cost: at least 64 terms a part) and by doc
             // range (each part reopens its terms: at least 512 docs a part).
-            let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-            // (a small batch reads on the caller's thread: spawning costs more)
+            let threads = crate::pools::search_pool().current_num_threads();
+            // (a small batch reads on the caller's thread; a big one on the
+            // persistent search pool)
             let term_parts = if present.len() < 128 { 1 } else { threads.min(present.len() / 64) };
             let doc_parts = if wanted.len() < 1024 { 1 } else { (threads / term_parts).min(wanted.len() / 512).max(1) };
             let inv = &inv;
@@ -235,17 +236,13 @@ impl PositionSource {
                 let doc_chunk = wanted.len().div_ceil(doc_parts);
                 let read = &read;
                 let wanted = &wanted;
-                std::thread::scope(|scope| {
-                    let handles: Vec<_> = present
-                        .chunks(term_chunk)
-                        .flat_map(|t| wanted.chunks(doc_chunk).map(move |d| (t, d)))
-                        .map(|(t, d)| scope.spawn(move || read(t, d)))
-                        .collect();
-                    handles
-                        .into_iter()
-                        .map(|h| h.join().expect("positions thread panicked"))
-                        .collect::<Result<Vec<_>>>()
-                })?
+                let parts: Vec<_> = present
+                    .chunks(term_chunk)
+                    .flat_map(|t| wanted.chunks(doc_chunk).map(move |d| (t, d)))
+                    .collect();
+                use rayon::prelude::*;
+                crate::pools::search_pool()
+                    .install(|| parts.par_iter().map(|&(t, d)| read(t, d)).collect::<Result<Vec<_>>>())?
             };
             for (slot, pos, id) in found.into_iter().flatten() {
                 out[slot].push((pos, id));

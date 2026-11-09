@@ -896,6 +896,14 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
 - **Search:** every matching line in catalog order (or by relevance /
   generation, see the result order item), plus a snippet session.
   - The session locates snippets for a whole batch across all cores.
+  - Batch parallelism (issue #24): a batch of texts (locate, count, line
+    regex feed / full scan) runs on the caller's thread while it is small,
+    and on a persistent normal-priority search pool (rayon, one thread per
+    core, built once on first use; `pools::search_pool`) from a measured
+    cut-off: 32 KiB of text for locate / count, 8 KiB for line regex (it costs
+    more per byte). Positions reads use the same pool. The old per-call
+    thread spawn cost about 1 ms a batch (16 short lines: 0.04 ms, 32: 1.1
+    ms); see `examples/search_pool_bench.rs` and `pools.rs` for the numbers.
   - It applies the word-distance and order filters. A short window's
     neighbour context is the host's job, presentation only (no neighbour or
     DB logic in the engine, and no second locate).

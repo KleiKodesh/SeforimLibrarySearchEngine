@@ -153,27 +153,27 @@ impl LineRun {
     }
 }
 
-/// The matches of each text, across all cores (contiguous chunks, results
-/// in input order). Checks the cancel token per chunk.
+/// The matches of each text: on the caller's thread for a small batch, else
+/// across the search pool (contiguous chunks, results in input order; see
+/// `pools::LINE_REGEX_PARALLEL_MIN_BYTES`). Checks the cancel token per chunk.
 fn match_texts(plan: &LinePlan, texts: &[&str], cancel: Option<&CancelToken>) -> Result<Vec<Vec<(u32, u32)>>> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(texts.len().max(1));
-    if threads <= 1 || texts.len() < 32 {
+    let bytes: usize = texts.iter().map(|t| t.len()).sum();
+    if !crate::pools::parallel(bytes, crate::pools::LINE_REGEX_PARALLEL_MIN_BYTES) {
         let mut view = LineView::default();
         return Ok(texts.iter().map(|t| plan.match_ranges(t, &mut view)).collect());
     }
-    let chunk = texts.len().div_ceil(threads * 4);
-    let parts: Vec<Result<Vec<Vec<(u32, u32)>>>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = texts
-            .chunks(chunk)
-            .map(|part| {
-                scope.spawn(move || -> Result<Vec<Vec<(u32, u32)>>> {
-                    CancelToken::check(cancel)?;
-                    let mut view = LineView::default();
-                    Ok(part.iter().map(|t| plan.match_ranges(t, &mut view)).collect())
-                })
+    use rayon::prelude::*;
+    let pool = crate::pools::search_pool();
+    let chunk = texts.len().div_ceil(pool.current_num_threads() * 4).max(1);
+    let parts: Vec<Result<Vec<Vec<(u32, u32)>>>> = pool.install(|| {
+        texts
+            .par_chunks(chunk)
+            .map(|part| -> Result<Vec<Vec<(u32, u32)>>> {
+                CancelToken::check(cancel)?;
+                let mut view = LineView::default();
+                Ok(part.iter().map(|t| plan.match_ranges(t, &mut view)).collect())
             })
-            .collect();
-        handles.into_iter().map(|h| h.join().expect("line regex worker panicked")).collect()
+            .collect()
     });
     let mut out = Vec::with_capacity(texts.len());
     for p in parts {
@@ -703,5 +703,65 @@ mod tests {
             assert_eq!(verified, full, "pattern {}", pattern.escape_unicode());
         }
         assert!(checked > 60 && narrowed > 40, "checked {checked}, narrowed {narrowed}");
+    }
+
+    /// A batch big enough for the search pool gives exactly the results of
+    /// one-line batches (each on the caller's thread): line regex feed, full
+    /// scan, count and locate (issue #24).
+    #[test]
+    fn pooled_batches_equal_sequential() {
+        const ALPHA: &str = "\u{05d0}\u{05dc}\u{05e4}\u{05d4}";
+        const GAMMA: &str = "\u{05d2}\u{05de}\u{05dc}\u{05d4}";
+        let owned: Vec<String> = (0..600)
+            .map(|i| {
+                let w = [ALPHA, "\u{05d1}\u{05d9}\u{05ea}", GAMMA, "\u{05d3}\u{05dc}\u{05ea}", "\u{05e9}\u{05dc}\u{05d5}\u{05dd}"];
+                (0..12).map(|j| w[(i * 7 + j * 3 + i / 5) % 5]).collect::<Vec<_>>().join(" ")
+            })
+            .collect();
+        let texts: Vec<(u64, &str)> = owned.iter().map(|t| (1, t.as_str())).collect();
+        let total: usize = owned.iter().map(String::len).sum();
+        assert!(total > crate::pools::PARALLEL_MIN_BYTES && owned[0].len() < crate::pools::LINE_REGEX_PARALLEL_MIN_BYTES);
+        let (_d, index) = build(false, &texts);
+        let text_of = |id: u64| texts[(id - 100) as usize].1;
+        // full scan
+        let o = regex(r"/\w{4} \w{3}$/");
+        let lines: Vec<crate::PlacedHit> = (0..owned.len() as u64)
+            .map(|i| crate::PlacedHit { position: i, line_id: 100 + i, book_id: 1, next_line_id: None })
+            .collect();
+        let all: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let mut r = index.search_options(&o).unwrap();
+        assert!(r.line_regex().unwrap().full_scan);
+        let pooled = r.line_scan_batch(&lines, &all).unwrap();
+        let mut r = index.search_options(&o).unwrap();
+        let single: Vec<_> = (0..all.len()).flat_map(|i| r.line_scan_batch(&lines[i..=i], &all[i..=i]).unwrap()).collect();
+        assert_eq!(pooled, single);
+        assert!(pooled.iter().filter(|m| !m.is_empty()).count() > 50);
+        // candidate feed
+        let o = regex(&format!("/{ALPHA} .* {GAMMA}/"));
+        let mut r = index.search_options(&o).unwrap();
+        assert!(!r.line_regex().unwrap().full_scan);
+        let t: Vec<&str> = r.hits.iter().map(|h| text_of(h.line_id)).collect();
+        let pooled = r.line_match_batch(&t).unwrap();
+        let mut r = index.search_options(&o).unwrap();
+        let single: Vec<_> = t.iter().flat_map(|x| r.line_match_batch(&[x]).unwrap()).collect();
+        assert_eq!(pooled, single);
+        // count and locate (distance checked on the text: no positions)
+        let o = SearchOptions {
+            query: format!("{ALPHA} {GAMMA}"),
+            proximity: Some(crate::ProximitySpec::AnyOrder { distance: 1 }),
+            ..Default::default()
+        };
+        let mut r = index.search_options(&o).unwrap();
+        assert!(r.count_needs_text());
+        let t: Vec<&str> = r.hits.iter().map(|h| text_of(h.line_id)).collect();
+        assert!(t.iter().map(|x| x.len()).sum::<usize>() > crate::pools::PARALLEL_MIN_BYTES);
+        let pooled = r.count_batch(&t).unwrap();
+        let located = r.session.locate_many(&t);
+        let mut r = index.search_options(&o).unwrap();
+        let single: usize = t.iter().map(|x| r.count_batch(&[x]).unwrap()).sum();
+        assert_eq!(pooled, single);
+        assert!(pooled > 0);
+        let one: Vec<_> = t.iter().map(|x| r.session.locate(x)).collect();
+        assert_eq!(format!("{located:?}"), format!("{one:?}"));
     }
 }

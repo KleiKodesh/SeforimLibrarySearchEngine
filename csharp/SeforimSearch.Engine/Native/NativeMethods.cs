@@ -160,6 +160,12 @@ namespace SeforimSearch.Engine.Native
         public static extern SearchHandle se_search_cancellable(IndexHandle index, byte* request, UIntPtr requestLen, CancelTokenHandle token);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern SearchHandle se_search_stream(IndexHandle index, byte* request, UIntPtr requestLen, CancelTokenHandle token);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_search_stream_pull(SearchHandle search, ulong minHits, long timeoutMs);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern int se_last_error_cancelled();
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

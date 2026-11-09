@@ -23,6 +23,7 @@ pub mod resources;
 pub(crate) mod section_scope;
 pub(crate) mod cross_line;
 pub(crate) mod positioned;
+pub(crate) mod stream;
 pub mod search;
 
 pub use fm_index::FmIndex;
@@ -654,7 +655,11 @@ mod tests {
                 ..Default::default()
             }))
             .unwrap();
-        assert_eq!(ids(&r), vec![1, 2, 3, 4, 5, 6, 7]);
+        // decided from the positions during the search (issue #21): the
+        // hits are the lines the locator passes
+        let want: Vec<u64> = docs.iter().filter(|d| r.session.locate(&d.text).is_some()).map(|d| d.line_id).collect();
+        assert!(want.len() < 7);
+        assert_eq!(ids(&r), want);
         assert!(r.session.locate("ברכה תורה").is_none()); // adjacent: excluded
         assert!(r.session.locate("תורה ברכה גדולה").is_none()); // adjacent, any order
         assert!(r.session.locate("ברכה ואז הרבה מילים ואז תורה").is_some()); // too far apart
@@ -1425,7 +1430,9 @@ mod tests {
                 let no_text = req.max_word_distance.is_none() && !req.require_ordered && req.exclude.is_none()
                     && (req.proximity.is_none() || positions)
                     || req.groups.len() == 1;
-                assert_eq!(r.count_needs_text(), !no_text, "positions={positions} {req:?}");
+                // an index with positions decides every hit from its
+                // positions during the search (issue #21)
+                assert_eq!(r.count_needs_text(), !(no_text || positions), "positions={positions} {req:?}");
                 let hit_texts: Vec<&str> = r.hits.iter().map(|h| texts[h.line_id as usize].as_str()).collect();
                 if r.count_needs_text() {
                     assert!(!r.counts().exact);

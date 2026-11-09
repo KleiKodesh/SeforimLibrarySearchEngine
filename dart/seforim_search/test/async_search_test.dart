@@ -63,6 +63,24 @@ void main() {
     expect([for (final h in hits) h.lineId], [for (final h in want) h.lineId]);
   });
 
+  test('streamed search (issue #21): pulled until complete, same hits, exact counts', () async {
+    final index = SeforimIndex.open(tmp.path);
+    final s = index.searchStreaming(SearchOptions(word));
+    while (!s.pull(s.hitCount + 1)) {}
+    expect(s.isComplete, isTrue);
+    expect([for (final h in s.allHits()) h.lineId], [for (final h in syncHits()) h.lineId]);
+    expect(s.counts().exact, isTrue);
+    expect(s.counts().total, lines);
+    s.close();
+    index.close();
+    final a = await worker.searchStreaming(SearchOptions(word));
+    while (!await a.pull(a.hitCount + 1)) {}
+    expect(a.isComplete, isTrue);
+    expect(a.hitCount, lines);
+    expect((await a.counts()).exact, isTrue);
+    await a.close();
+  });
+
   test('session API: paging, counts, locate on the worker', () async {
     final s = await worker.search(SearchOptions(word));
     expect(s.hitCount, lines);

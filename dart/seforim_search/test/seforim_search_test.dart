@@ -162,7 +162,8 @@ void main() {
       groups: [const QueryGroup.word('בראשית'), const QueryGroup.word('הארץ')],
       maxWordDistance: 1,
     ));
-    expect(s.hitCount, 1);
+    // an index with positions drops the far match during the search (issue #21)
+    expect(s.hitCount, 0);
     expect(s.locateBatch([text2]).single, isNull);
     s.close();
   });
@@ -174,15 +175,35 @@ void main() {
       groups: [const QueryGroup.word(bereshit), const QueryGroup.word(haaretz)],
       maxWordDistance: 1,
     ));
-    expect(far.countNeedsText, isTrue);
-    expect(far.counts().exact, isFalse);
-    expect(far.countBatch([text2]), 0);
+    // an index with positions decides the hits during the search (issue
+    // #21): the far match is gone and the counts are exact at once
+    expect(far.countNeedsText, isFalse);
+    expect(far.hitCount, 0);
     final c = far.counts();
     expect(c.exact, isTrue);
     expect(c.total, 0);
     expect(c.byBook, isEmpty);
     expect(() => far.countBatch([text2]), throwsA(isA<SeforimEngineException>()));
     far.close();
+    // without positions the text decides it (FtsLib)
+    final dir = Directory.systemTemp.createTempSync('se_dart_flat_counts_');
+    final flat = SeforimIndex.create(dir.path, const IndexOptions(positions: false));
+    final w = flat.openWriter(heapBytes: 30000000, threads: 1);
+    w.add(LineDocument(lineId: 2, position: 0, bookId: 2, text: text2));
+    w.commit();
+    w.close();
+    final ff = flat.searchRequest(SearchRequest(
+      groups: [const QueryGroup.word(bereshit), const QueryGroup.word(haaretz)],
+      maxWordDistance: 1,
+    ));
+    expect(ff.countNeedsText, isTrue);
+    expect(ff.counts().exact, isFalse);
+    expect(ff.countBatch([text2]), 0);
+    expect(ff.counts().exact, isTrue);
+    expect(ff.counts().total, 0);
+    ff.close();
+    flat.close();
+    dir.deleteSync(recursive: true);
     final plain = index.searchRequest(SearchRequest(groups: [const QueryGroup.word(bereshit)]));
     expect(plain.countNeedsText, isFalse);
     final p = plain.counts();

@@ -25,17 +25,35 @@ namespace SeforimSearch.Engine
             return Task.Run(() => index.Search(options, ct), ct);
         }
 
+        /// <summary><see cref="SeforimIndex.SearchStreaming"/> on the thread pool: completes
+        /// as soon as the first hits are decided (issue #21).</summary>
+        public static Task<SearchSession> SearchStreamingAsync(this SeforimIndex index, SearchOptions options,
+                                                               CancellationToken ct = default)
+        {
+            if (index == null) throw new ArgumentNullException(nameof(index));
+            if (options == null) throw new ArgumentNullException(nameof(options));
+            return Task.Run(() => index.SearchStreaming(options, ct), ct);
+        }
+
+        /// <summary><see cref="SearchSession.Pull"/> on the thread pool. A running pull stops through the
+        /// search's own token (the one given to <c>SearchStreaming</c>), not <paramref name="ct"/>.</summary>
+        public static Task<bool> PullAsync(this SearchSession session, long minHits, int timeoutMs = -1,
+                                           CancellationToken ct = default) =>
+            Run(() => session.Pull(minHits, timeoutMs), ct);
+
         /// <summary>
         /// Runs a search and streams every hit in pages of <paramref name="pageSize"/>,
-        /// each page fetched on the thread pool when the consumer asks for it. The
-        /// session is disposed when the enumeration ends: completed, faulted,
-        /// cancelled or abandoned (<c>break</c> / <c>DisposeAsync</c>).
+        /// each page fetched on the thread pool when the consumer asks for it. On an
+        /// index with positions the search itself streams (issue #21): the first page
+        /// comes as soon as it is decided, not after the whole search. The session is
+        /// disposed when the enumeration ends: completed, faulted, cancelled or
+        /// abandoned (<c>break</c> / <c>DisposeAsync</c>).
         /// </summary>
         public static async IAsyncEnumerable<PlacedHit[]> SearchBatchesAsync(this SeforimIndex index,
             SearchOptions options, int pageSize = 4096, [EnumeratorCancellation] CancellationToken ct = default)
         {
             if (pageSize <= 0) throw new ArgumentOutOfRangeException(nameof(pageSize));
-            using var session = await index.SearchAsync(options, ct).ConfigureAwait(false);
+            using var session = await index.SearchStreamingAsync(options, ct).ConfigureAwait(false);
             await foreach (var page in session.HitBatchesAsync(pageSize, ct).ConfigureAwait(false))
                 yield return page;
         }
@@ -46,8 +64,12 @@ namespace SeforimSearch.Engine
         {
             if (session == null) throw new ArgumentNullException(nameof(session));
             if (pageSize <= 0) throw new ArgumentOutOfRangeException(nameof(pageSize));
-            for (long o = 0; o < session.HitCount; o += pageSize)
+            for (long o = 0; ; o += pageSize)
             {
+                // a streamed search: wait until the page is in (or the search is complete)
+                if (o + pageSize > session.HitCount && !session.IsComplete)
+                    await session.PullAsync(o + pageSize, -1, ct).ConfigureAwait(false);
+                if (o >= session.HitCount) yield break;
                 var page = await session.GetHitsAsync(o, pageSize, ct).ConfigureAwait(false);
                 if (page.Length == 0) yield break;
                 yield return page;

@@ -601,7 +601,10 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                                                       CancellationToken.None, 4096, out _, countRows);
                 }
                 catch (SeforimDb.SeforimDbContentCodecException) { countThrew = true; }
-                Check(!countThrew && counts!.Total == 0 && countRows.Count == 1 && countRows.LineIds()[0] == 11,
+                // (the fixture index has positions: the distance is decided from the
+                // positions during the search, issue #21, so the count reads no text
+                // and the unreadable line 11 counts as the hit it is)
+                Check(!countThrew && counts!.Exact && counts.Total == 1 && countRows.Count == 0,
                       $"CountByBook: unreadable row counted, not thrown (threw {countThrew}, rows {countRows.Count})");
                 var regexRows = new SeforimDbFtsUnreadableRows();
                 bool regexThrew = false;
@@ -725,6 +728,20 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                     }
                 }).GetAwaiter().GetResult();
                 Check(batches == 8 && got.SequenceEqual(want), "async batches differ from sync hits");
+
+                // a streamed search (issue #21): pulled until complete = the sync hits, exact counts
+                using (var s = index.SearchStreaming(opts))
+                {
+                    while (!s.Pull(s.HitCount + 1)) { }
+                    Check(s.IsComplete && s.AllHits().Select(h => h.LineId).SequenceEqual(want), "streamed hits differ");
+                    var c = s.GetCounts();
+                    Check(c.Exact && c.Total == 50, "streamed counts");
+                }
+                using (var s = index.SearchStreamingAsync(opts).GetAwaiter().GetResult())
+                {
+                    while (!s.PullAsync(s.HitCount + 1).GetAwaiter().GetResult()) { }
+                    Check(s.HitCount == 50, "streamed async hits " + s.HitCount);
+                }
 
                 // session calls on the thread pool
                 using (var s = index.SearchAsync(opts).GetAwaiter().GetResult())

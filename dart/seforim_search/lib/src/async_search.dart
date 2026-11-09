@@ -12,7 +12,7 @@ import 'session.dart';
 
 /// One page of hits streamed by [SearchWorker.searchStream] (issue #16).
 final class HitBatch {
-  const HitBatch(this.requestId, this.offset, this.hitCount, this.hits);
+  const HitBatch(this.requestId, this.offset, this.hitCount, this.hits, [this.complete = true]);
 
   /// The request this batch belongs to (one id per [SearchWorker.searchStream]).
   final int requestId;
@@ -20,14 +20,18 @@ final class HitBatch {
   /// Index of [hits]' first entry in the search's hits.
   final int offset;
 
-  /// Total matching lines of the search.
+  /// Matching lines of the search taken in so far (the total once
+  /// [complete]; the search streams on an index with positions, issue #21).
   final int hitCount;
+
+  /// True when every hit of the search is in ([hitCount] is the total).
+  final bool complete;
 
   /// Hits `[offset, offset + hits.length)`, in the search's order.
   final List<PlacedHit> hits;
 
   /// True for the last batch.
-  bool get isLast => offset + hits.length >= hitCount;
+  bool get isLast => complete && offset + hits.length >= hitCount;
 }
 
 /// A background isolate that owns its own [SeforimIndex] and runs searches
@@ -127,6 +131,15 @@ final class SearchWorker {
     return AsyncSearchSession._(this, id, hitCount, contextWords, cancel);
   }
 
+  /// [SeforimIndex.searchStreaming] on the worker: completes as soon as the
+  /// first hits are decided (issue #21); take the rest in with
+  /// [AsyncSearchSession.pull].
+  Future<AsyncSearchSession> searchStreaming(SearchOptions options, {SearchCancelToken? cancel}) async {
+    final (id, hitCount, complete) = await _call<(int, int, bool)>(
+        'searchStreaming', jsonEncode(options.toJson()), options.contextWords, cancel?.address);
+    return AsyncSearchSession._(this, id, hitCount, options.contextWords, cancel).._complete = complete;
+  }
+
   /// Runs a search and streams every hit in pages of [pageSize], pulled one
   /// page at a time (a paused listener pauses the worker's paging). The
   /// session is freed on the worker when the stream ends: after the last
@@ -157,21 +170,34 @@ final class SearchWorker {
 
     Future<void> run() async {
       try {
-        final s = session = await search(options, cancel: token);
+        // on an index with positions the search streams (issue #21): the
+        // first page comes as soon as it is decided
+        final s = session = await searchStreaming(options, cancel: token);
         var offset = 0;
-        do {
+        var sentLast = false;
+        while (true) {
           if (stopped) break;
           if (out.isPaused) {
             resumed = Completer<void>();
             await resumed!.future;
           }
           if (stopped) break;
+          if (offset + pageSize > s.hitCount && !s.isComplete) await s.pull(offset + pageSize);
+          if (stopped) break;
+          if (offset >= s.hitCount) {
+            // complete with every page sent: the last batch says so (empty
+            // when the last page was sent before the stream completed)
+            if (!sentLast) out.add(HitBatch(requestId, offset, s.hitCount, const []));
+            break;
+          }
           final page = await s.hits(offset, pageSize);
           if (stopped) break;
-          out.add(HitBatch(requestId, offset, s.hitCount, page));
           offset += page.length;
+          final batch = HitBatch(requestId, offset - page.length, s.hitCount, page, s.isComplete);
+          sentLast = batch.isLast;
+          out.add(batch);
           if (page.isEmpty) break;
-        } while (offset < s.hitCount);
+        }
       } catch (e, st) {
         if (!stopped) out.addError(e, st);
       } finally {
@@ -222,11 +248,25 @@ final class AsyncSearchSession {
   final SearchCancelToken? _cancel;
   var _closed = false;
 
-  /// Number of matching lines (before the snippet filters).
-  final int hitCount;
+  /// [SearchSession.hitCount] (taken in so far: see [pull]).
+  int hitCount;
+
+  var _complete = true;
+
+  /// [SearchSession.isComplete].
+  bool get isComplete => _complete;
 
   /// Words of context per side this search locates with.
   final int contextWords;
+
+  /// [SearchSession.pull] on the worker; updates [hitCount] and [isComplete].
+  Future<bool> pull(int minHits, {int timeoutMs = -1}) async {
+    if (_complete) return true;
+    final (complete, count) = await _call<(bool, int)>('pull', minHits, timeoutMs);
+    hitCount = count;
+    _complete = complete;
+    return complete;
+  }
 
   Future<T> _call<T>(String op, [Object? a, Object? b]) {
     if (_closed) return Future.error(StateError('SearchSession is closed'));
@@ -314,6 +354,19 @@ void _workerMain((SendPort, String, String?) args) {
           final sid = nextSession++;
           sessions[sid] = session;
           value = (sid, session.hitCount);
+        case 'searchStreaming':
+          final n = SeforimNative.instance;
+          final h = using((al) {
+            final (j, jl) = utf8Native(a as String, al);
+            return n.checkPtr(n.searchStream(index.handle, j, jl, c == null ? nullptr : Pointer.fromAddress(c as int)));
+          });
+          final session = SearchSession.internal(index, h, b as int, null, true);
+          final sid = nextSession++;
+          sessions[sid] = session;
+          value = (sid, session.hitCount, session.isComplete);
+        case 'pull':
+          final session = s();
+          value = (session.pull(b as int, timeoutMs: c as int), session.hitCount);
         case 'hits':
           value = s().hits(b as int, c as int);
         case 'locateBatch':

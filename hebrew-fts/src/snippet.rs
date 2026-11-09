@@ -304,6 +304,8 @@ pub struct SnippetWindowLocator {
     /// Scratch for [`find_all_matches`](Self::find_all_matches).
     unquoted: String,
     run: Vec<usize>,
+    /// See [`set_word_span`](Self::set_word_span).
+    word_span: bool,
 }
 
 impl Default for SnippetWindowLocator {
@@ -344,6 +346,7 @@ impl SnippetWindowLocator {
             match_mode: MatchMode::BestWindow,
             unquoted: String::new(),
             run: Vec::new(),
+            word_span: false,
         }
     }
 
@@ -353,6 +356,21 @@ impl SnippetWindowLocator {
     /// not [`tokenize_positioned`](Self::tokenize_positioned) (which stops early).
     pub fn set_match_mode(&mut self, mode: MatchMode) {
         self.match_mode = mode;
+    }
+
+    /// The tightest-window rule (issue #21). False (the default): FtsLib's
+    /// rule, the window spanning the fewest UTF-16 units. True: the window
+    /// spanning the fewest WORD positions, the earliest on a tie: the rule an
+    /// index with positions applies during the search (from the postings,
+    /// see [`tokenize_occurrences`](Self::tokenize_occurrences)), so a text
+    /// located afterwards picks the same window. The two rules differ only
+    /// in the occurrence chosen (measured on the full library: 0.1-3% of
+    /// the hits) and, through it, rarely in a distance filter: that filter
+    /// reads the chosen window's words, so a line whose character-tightest
+    /// window is too far apart in words but whose word-tightest one is not
+    /// passes under the word rule only.
+    pub fn set_word_span(&mut self, on: bool) {
+        self.word_span = on;
     }
 
     /// The current [`MatchMode`].
@@ -591,6 +609,22 @@ impl SnippetWindowLocator {
         true
     }
 
+    /// Loads a line's matched words straight from the index positions, with
+    /// no text: `occurrences` are the line's sorted `(position, term id)`
+    /// pairs (as for [`tokenize_positioned`](Self::tokenize_positioned)),
+    /// each one a token at its position. The `*_mapped` locate calls then
+    /// decide the match and its tightest window exactly as on the text
+    /// (only matched words can bound a window; a window's span is read in
+    /// word positions, see [`set_word_span`](Self::set_word_span)); the
+    /// descriptor's offsets are word positions, not text offsets.
+    pub fn tokenize_occurrences(&mut self, occurrences: &[(u32, u32)]) {
+        self.break_token = None;
+        self.text_tokens.load_positions(occurrences.iter().map(|o| o.0 as usize));
+        self.token_terms.clear();
+        self.token_terms.extend(occurrences.iter().map(|o| o.1));
+        self.positioned = true;
+    }
+
     /// Tokenizes two consecutive lines joined as `left + "\n" + right`
     /// (see [`TextTokens::tokenize_pair`]) for a cross-line locate: until
     /// the next [`tokenize`](Self::tokenize), every window the locate calls
@@ -635,9 +669,9 @@ impl SnippetWindowLocator {
         ordinals.extend(occurrences.iter().map(|&(_, o)| o));
         let split = occurrences.partition_point(|&(p, _)| p < break_position);
         let found = match proximity {
-            Proximity::Ordered { gaps } => ordered_window(synthetic, ordinals, prepared, gaps, Some(split), scratch),
+            Proximity::Ordered { gaps } => ordered_window(synthetic, ordinals, prepared, gaps, Some(split), scratch, true),
             Proximity::AnyOrder { max_span } => {
-                any_order_window(synthetic, ordinals, prepared, *max_span as usize, Some(split), scratch)
+                any_order_window(synthetic, ordinals, prepared, *max_span as usize, Some(split), scratch, true)
             }
         };
         found.is_some()
@@ -698,6 +732,7 @@ impl SnippetWindowLocator {
             positioned,
             marks,
             match_mode,
+            word_span,
             ..
         } = self;
         let brk = *break_token;
@@ -718,10 +753,10 @@ impl SnippetWindowLocator {
         // occurrences; the order check is this window's existence. Order off:
         // unchanged.
         let ordered = !partial && require_ordered && all_groups > 1;
-        let ordered_best = if ordered { ordered_cover_window(tokens, ordinals, prepared, brk, marks) } else { None };
+        let ordered_best = if ordered { ordered_cover_window(tokens, ordinals, prepared, brk, marks, *word_span) } else { None };
         let (i_left, i_right, score) = match ordered_best {
             Some(w) => w,
-            None => find_window(tokens, ordinals, prepared, group_count, required, brk),
+            None => find_window(tokens, ordinals, prepared, group_count, required, brk, *word_span),
         };
         if score == usize::MAX {
             return SnippetDescriptor::NO_MATCH;
@@ -849,6 +884,7 @@ impl SnippetWindowLocator {
             positioned,
             marks,
             match_mode,
+            word_span,
             ..
         } = self;
         let brk = *break_token;
@@ -861,8 +897,8 @@ impl SnippetWindowLocator {
         let ordinals = &ordinals[..];
         let k = prepared.group_count();
         let found = match proximity {
-            Proximity::Ordered { gaps } => ordered_window(tokens, ordinals, prepared, gaps, brk, scratch),
-            Proximity::AnyOrder { max_span } => any_order_window(tokens, ordinals, prepared, *max_span as usize, brk, scratch),
+            Proximity::Ordered { gaps } => ordered_window(tokens, ordinals, prepared, gaps, brk, scratch, *word_span),
+            Proximity::AnyOrder { max_span } => any_order_window(tokens, ordinals, prepared, *max_span as usize, brk, scratch, *word_span),
         };
         let Some((i_left, i_right, score)) = found else {
             return SnippetDescriptor::NO_MATCH;
@@ -927,6 +963,19 @@ impl SnippetWindowLocator {
     }
 }
 
+/// A window's span for picking the tightest one: UTF-16 units from its
+/// first token's start to its last token's end (FtsLib's rule), or, with
+/// `word` (an index with positions, issue #21), word positions from its
+/// first to its last token. Ties keep the earliest window either way.
+#[inline]
+fn span_of(tokens: &[TextToken], l: usize, r: usize, word: bool) -> usize {
+    if word {
+        tokens[r].position - tokens[l].position
+    } else {
+        tokens[r].utf16_end - tokens[l].utf16_start
+    }
+}
+
 // ── Window finding ────────────────────────────────────────────────────
 // Returns (i_left, i_right, score): token indices, not raw positions.
 
@@ -943,6 +992,7 @@ fn find_window(
     group_count: &mut Vec<usize>,
     required: usize,
     brk: Option<usize>,
+    word: bool,
 ) -> (usize, usize, usize) {
     let all_groups = prepared.group_count();
     if group_count.len() < all_groups {
@@ -975,7 +1025,7 @@ fn find_window(
         // and push `covered` past `required` in one step.
         while covered >= required {
             // Score in raw chars (used only for picking the tightest window).
-            let span = tokens[r].utf16_end - tokens[l].utf16_start;
+            let span = span_of(tokens, l, r, word);
             if brk.is_none() && span < best_score {
                 best_score = span;
                 best_i_left = l;
@@ -996,7 +1046,7 @@ fn find_window(
         if let (Some(b), Some(last)) = (brk, last_left_term) {
             if r >= b && ordinals[r] != NO_TERM && l > 0 {
                 let x = if l - 1 < b { l - 1 } else { last };
-                let span = tokens[r].utf16_end - tokens[x].utf16_start;
+                let span = span_of(tokens, x, r, word);
                 if span < best_score {
                     best_score = span;
                     best_i_left = x;
@@ -1091,6 +1141,7 @@ fn ordered_window(
     gaps: &[u32],
     brk: Option<usize>,
     scratch: &mut ProximityScratch,
+    word: bool,
 ) -> Option<(usize, usize, usize)> {
     let k = prepared.group_count();
     let ProximityScratch { chain, next, deque, .. } = scratch;
@@ -1132,7 +1183,7 @@ fn ordered_window(
         if brk.is_some_and(|b| end < b) {
             continue;
         }
-        let span = tokens[end].utf16_end - tokens[start].utf16_start;
+        let span = span_of(tokens, start, end, word);
         if best.is_none_or(|b| span < b.2) {
             best = Some((start, end, span));
         }
@@ -1153,6 +1204,7 @@ fn any_order_window(
     max_span: usize,
     brk: Option<usize>,
     scratch: &mut ProximityScratch,
+    word: bool,
 ) -> Option<(usize, usize, usize)> {
     let k = prepared.group_count();
     // Cross-line (`brk`): a feasible window crosses the break when it holds
@@ -1227,7 +1279,7 @@ fn any_order_window(
             }
             _ => l,
         };
-        let span = tokens[r].utf16_end - tokens[x].utf16_start;
+        let span = span_of(tokens, x, r, word);
         if best.is_none_or(|b| span < b.2) {
             best = Some((x, r, span));
         }
@@ -1242,6 +1294,10 @@ const FREE: usize = usize::MAX;
 /// the earliest on a tie. Per group the latest chain start so far; a chain
 /// ending at a token of the last group starts there. Cross-line (`brk`): the
 /// chain starts on the first line and ends on the next. None without one.
+/// `word` (the word rule, see [`span_of`]): the slots also follow in
+/// strictly increasing positions, so the two readings of a paired reading
+/// (one position) never chain: the rule reads positions only, the same on
+/// the text and on the index positions.
 #[inline(never)]
 fn ordered_cover_window(
     tokens: &[TextToken],
@@ -1249,15 +1305,29 @@ fn ordered_cover_window(
     prepared: &PreparedQueryGroups,
     brk: Option<usize>,
     sc: &mut MarkScratch,
+    word: bool,
 ) -> Option<(usize, usize, usize)> {
     let k = prepared.group_count();
-    let MarkScratch { last, starts, .. } = sc;
+    let MarkScratch { last, starts, ends: pending, .. } = sc;
     last.clear();
     last.resize(k, FREE);
+    pending.clear();
+    let mut at = usize::MAX; // the position whose chain starts are pending
     let mut best: Option<(usize, usize, usize)> = None;
     for t in 0..tokens.len() {
         if ordinals[t] == NO_TERM {
             continue;
+        }
+        if word && tokens[t].position != at {
+            // a new position: the previous one's starts take effect
+            for p in pending.chunks_exact(2) {
+                let (g, v) = (p[0], p[1]);
+                if last[g] == FREE || v > last[g] {
+                    last[g] = v;
+                }
+            }
+            pending.clear();
+            at = tokens[t].position;
         }
         let gs = prepared.groups_at(ordinals[t] as usize);
         starts.clear();
@@ -1274,11 +1344,13 @@ fn ordered_cover_window(
             }
             if g == k - 1 {
                 if brk.is_none_or(|b| t >= b) {
-                    let span = tokens[t].utf16_end - tokens[v].utf16_start;
+                    let span = span_of(tokens, v, t, word);
                     if best.is_none_or(|b| span < b.2) {
                         best = Some((v, t, span));
                     }
                 }
+            } else if word {
+                pending.extend([g, v]);
             } else if last[g] == FREE || v > last[g] {
                 last[g] = v;
             }

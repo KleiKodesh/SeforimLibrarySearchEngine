@@ -181,6 +181,21 @@ final class SeforimIndex implements Finalizable {
   SearchSession search(SearchOptions options, {SearchCancelToken? cancel}) =>
       _search(options.toJson(), options.contextWords, cancel);
 
+  /// [search] that returns as soon as the first hits are decided (issue
+  /// #21): on an index with positions the rest stream in, in the search's
+  /// order; take them in with [SearchSession.pull] (or page through
+  /// [SearchSession.allHits], which waits for each page). Every session call
+  /// works on the hits taken in so far; the counts are exact once
+  /// [SearchSession.isComplete]. [cancel] stops the stream. On an index
+  /// without positions the session is complete at once.
+  SearchSession searchStreaming(SearchOptions options, {SearchCancelToken? cancel}) {
+    return using((a) {
+      final (j, jl) = utf8Native(jsonEncode(options.toJson()), a);
+      final h = _n.checkPtr(_n.searchStream(handle, j, jl, cancel?.handle ?? nullptr));
+      return SearchSession.internal(this, h, options.contextWords, cancel, true);
+    });
+  }
+
   /// The low-level form: slots built by the caller ([SearchRequest]).
   SearchSession searchRequest(SearchRequest request) => _search(request.toJson(), request.contextWords);
 

@@ -43,6 +43,10 @@ STALE = [
     "`tantivy14` / `fts12`: schema-7 footnotes (`line_note`) are indexed as a virtual notes book right after "
     "each book with notes (issue #13; about 263k notes in 614 books on the local DB): positions, line counts, "
     "both full-DB rebuilds, the parity sets and the Otzaria hit-count comparison need a rerun.",
+    "Issue #21: on an index with positions the hits are decided from the positions during the search and the "
+    "snippet window is the word-tightest one (0.1-3% of the hits show another occurrence than FtsLib, a named "
+    "deviation): the positions-flavour parity sets need a rerun (snippet differences expected), the "
+    "no-positions flavour is unchanged.",
     "Hit-count comparison: the rows classified as our bugs (unterminated `<`, cross-line enumerators) "
     "and the fuzzy transposition rows are expected to change; not rerun yet.",
 ]
@@ -170,6 +174,7 @@ md.append(f"""## Engines compared
 | Otzaria tokenizer rules (one-letter words, digits, joiners, geresh, paired readings, 128-byte limit) in both engines | done |
 | Vocalized matching (nikud / te'amim) as a walk on a keep-marks index | done |
 | Exact totals + per-book counts, cancellation, pull streaming | done |
+| Hits decided from positions during the search, streamed in batches (issue #21): exact totals with no text, word-tightest window | done |
 | Non-blocking search in the packages (Dart worker isolate `SearchWorker`, C# `SearchAsync` / `IAsyncEnumerable` batches) | done |
 | Packaging (issue #17): C ABI version check at load (`se_abi_version`), Dart Native Assets hook (SHA-256 pinned prebuilt download / cargo / local file), NuGet RIDs win/linux/osx x64+arm64, release workflow + sync check | done |
 | Resume after a catalog position (FtsLib's `afterPosition`; C# demo `PositionOfLine`, Core's `StreamSearch` with `Restarted`) | done |
@@ -438,7 +443,7 @@ claude_block = "\n".join([
     f"Specs section: rerun it whenever the engine, index format or a full-DB run changes. Index formats: "
     f"ours `{INDEX_FORMAT}`, FtsLib `{FTSLIB_FORMAT}`. Features: FtsLib syntax + parity, per-word Otzaria "
     f"options as FST walks (cap per request, default 2000, global across segments), proximity / word match, vocalized walks, user regex "
-    f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, non-blocking package APIs, resume after position, "
+    f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, non-blocking package APIs, hits decided from positions + streamed (word-tightest window), resume after position, "
     f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, positions snippets, FM sidecar, all-matches locate + find in an open text, "
     f"morphology forms from the host (lexical tier, unmarked forms).",
     "Builds: " + "; ".join(l.strip("| ").replace(" | ", " ") for l in build_lines()) + ".",

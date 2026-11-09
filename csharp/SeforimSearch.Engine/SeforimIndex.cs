@@ -205,6 +205,46 @@ namespace SeforimSearch.Engine
             }
         }
 
+        /// <summary>
+        /// <see cref="Search(SearchOptions, CancellationToken)"/> that returns as soon as
+        /// the first hits are decided (issue #21): on an index with positions the rest
+        /// stream in, in the search's order; take them in with
+        /// <see cref="SearchSession.Pull"/> (or page through
+        /// <see cref="SearchSession.AllHits"/> / <c>HitBatchesAsync</c>, which wait for
+        /// each page). Every session call works on the hits taken in so far; the counts
+        /// are exact once <see cref="SearchSession.IsComplete"/>. Cancelling
+        /// <paramref name="ct"/> stops the stream. On an index without positions the
+        /// session is complete at once.
+        /// </summary>
+        public SearchSession SearchStreaming(SearchOptions options, CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+            var token = NativeMethods.se_cancel_token_new();
+            var registration = ct.CanBeCanceled
+                ? ct.Register(s => NativeMethods.se_cancel_token_cancel(((CancelTokenHandle)s!).DangerousGetHandle()), token)
+                : default;
+            SearchSession? session = null;
+            try
+            {
+                byte[] json = Interop.ToUtf8(options.ToJson());
+                fixed (byte* j = json)
+                    session = new SearchSession(
+                        Interop.Check(NativeMethods.se_search_stream(_handle, j, (UIntPtr)json.Length, token)),
+                        options.ContextWords, token, registration);
+                return session.Streaming();
+            }
+            catch
+            {
+                if (session != null) session.Dispose();
+                else
+                {
+                    registration.Dispose();
+                    token.Dispose();
+                }
+                throw;
+            }
+        }
+
         public void Dispose() => _handle.Dispose();
     }
 

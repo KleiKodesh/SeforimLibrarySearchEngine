@@ -800,6 +800,16 @@ impl TextTokens {
         split
     }
 
+    /// One synthetic token per given word position (no text: see
+    /// [`TextToken::at_position`]), replacing the tokens.
+    pub(crate) fn load_positions(&mut self, positions: impl Iterator<Item = usize>) {
+        self.norm.clear();
+        self.tokens.clear();
+        self.tokens.extend(positions.map(TextToken::at_position));
+        self.raw_utf16_len = self.tokens.last().map_or(0, |t| t.utf16_end);
+        self.visible_len = self.raw_utf16_len;
+    }
+
     /// The tokens from the last [`tokenize`](Self::tokenize) call.
     pub fn tokens(&self) -> &[TextToken] {
         &self.tokens

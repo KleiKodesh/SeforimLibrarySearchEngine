@@ -638,14 +638,17 @@ pub struct SnippetSession {
     unmarked: std::collections::HashSet<String>,
     /// See [`set_match_mode`](Self::set_match_mode).
     match_mode: hebrew_fts::MatchMode,
+    /// The locators pick the word-tightest window (an index with
+    /// positions, issue #21; see `SnippetWindowLocator::set_word_span`).
+    word_span: bool,
 }
 
 /// Term id -> ordinal maps of a positioned locate (see `crate::positioned`):
 /// one per matcher and per negative filter. Empty: the text path.
 #[derive(Clone, Copy, Default)]
-struct TermMaps<'a> {
-    matchers: &'a [Vec<u32>],
-    negatives: &'a [Vec<u32>],
+pub(crate) struct TermMaps<'a> {
+    pub matchers: &'a [Vec<u32>],
+    pub negatives: &'a [Vec<u32>],
 }
 
 impl TermMaps<'_> {
@@ -658,7 +661,8 @@ impl TermMaps<'_> {
 }
 
 /// One way a line can match: prepared terms plus the filters to apply.
-struct Matcher {
+#[derive(Clone)]
+pub(crate) struct Matcher {
     prepared: PreparedQueryGroups,
     original_group_count: usize,
     require_ordered: bool,
@@ -732,14 +736,7 @@ fn locate_tokenized_with(
     (text, next): HitText<'_>,
     maps: TermMaps<'_>,
 ) -> Option<(usize, Snippet)> {
-    if negative.iter().enumerate().any(|(i, n)| {
-        // a vocalized negative sees only lines that carry a mark (Otzaria's
-        // vocalized field)
-        if n.required {
-            return !n.excludes(locator, 0, maps.negative(i));
-        }
-        (!n.vocalized || hebrew_fts::chars::contains_attached_marks(text)) && n.excludes(locator, 0, maps.negative(i))
-    }) {
+    if negated(negative, locator, || hebrew_fts::chars::contains_attached_marks(text), maps) {
         return None;
     }
     if let Some(found) =
@@ -755,6 +752,39 @@ fn locate_tokenized_with(
             (i, s)
         })
     })
+}
+
+/// True when the text-level negatives drop the tokenized line (an excluded
+/// phrase present, a required one absent). `marked`: whether the line
+/// carries an attached mark (asked only for a vocalized negative).
+fn negated(
+    negative: &[NegativeFilter],
+    locator: &mut SnippetWindowLocator,
+    marked: impl Fn() -> bool,
+    maps: TermMaps<'_>,
+) -> bool {
+    negative.iter().enumerate().any(|(i, n)| {
+        // a vocalized negative sees only lines that carry a mark (Otzaria's
+        // vocalized field)
+        if n.required {
+            return !n.excludes(locator, 0, maps.negative(i));
+        }
+        (!n.vocalized || marked()) && n.excludes(locator, 0, maps.negative(i))
+    })
+}
+
+/// [`locate_tokenized_with`]'s decision for a line loaded from its index
+/// positions ([`SnippetWindowLocator::tokenize_occurrences`]): the same
+/// negatives and matchers, in-line only (issue #21, `crate::stream`).
+pub(crate) fn passes_tokenized(
+    matchers: &[Matcher],
+    negative: &[NegativeFilter],
+    locator: &mut SnippetWindowLocator,
+    marked: bool,
+    maps: TermMaps<'_>,
+) -> bool {
+    !negated(negative, locator, || marked, maps)
+        && matchers.iter().enumerate().any(|(i, m)| m.locate(locator, false, maps.matcher(i)).is_some())
 }
 
 /// One hit for [`SnippetSession::try_locate_lines`]: its lines, and the
@@ -786,7 +816,8 @@ fn join_lines<'a>(lines: &[(u64, &'a str)]) -> std::borrow::Cow<'a, str> {
 
 /// The excluded words checked on the line text: a line where they appear
 /// within the limits is dropped.
-struct NegativeFilter {
+#[derive(Clone)]
+pub(crate) struct NegativeFilter {
     prepared: PreparedQueryGroups,
     max_word_distance: usize,
     require_ordered: bool,
@@ -848,6 +879,7 @@ impl SnippetSession {
             force_positions: false,
             unmarked: Default::default(),
             match_mode: hebrew_fts::MatchMode::BestWindow,
+            word_span: false,
         }
     }
 
@@ -1218,6 +1250,7 @@ impl SnippetSession {
                     SnippetWindowLocator::new(context)
                 };
                 locator.set_match_mode(self.match_mode);
+                locator.set_word_span(self.word_span);
                 self.pool.push(locator);
             }
             let mut parts: Vec<Option<Vec<T>>> = (0..chunks).map(|_| None).collect();
@@ -1313,6 +1346,10 @@ pub struct SearchResult {
     pub(crate) line: Option<crate::line_search::LineRun>,
     /// See [`SearchInfo::order_stamp`].
     order_stamp: String,
+    /// The hits still being decided from the index positions (issue #21,
+    /// `crate::stream`): `hits` holds the ones decided so far, every one
+    /// passing. None: `hits` is complete.
+    stream: Option<crate::stream::HitStream>,
 }
 
 /// How a search was served (see [`SearchResult::info`]).
@@ -1354,7 +1391,100 @@ struct CountTally {
 
 impl SearchResult {
     pub(crate) fn new(hits: Vec<PlacedHit>, session: SnippetSession) -> SearchResult {
-        SearchResult { hits, session, tally: CountTally::default(), scores: None, notices: Vec::new(), truncated: false, line: None, order_stamp: String::new() }
+        SearchResult {
+            hits,
+            session,
+            tally: CountTally::default(),
+            scores: None,
+            notices: Vec::new(),
+            truncated: false,
+            line: None,
+            order_stamp: String::new(),
+            stream: None,
+        }
+    }
+
+    /// A result whose hits a producer thread streams (see `crate::stream`).
+    fn streamed(
+        mut session: SnippetSession,
+        source: crate::stream::Source,
+        filter: Option<crate::stream::HitFilter>,
+        relevance: bool,
+    ) -> Result<SearchResult> {
+        // the hits are exact as they arrive: no text decides them
+        session.count_needs_text = false;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = session.cancel.clone();
+        std::thread::Builder::new()
+            .name("seforim-search-stream".into())
+            .spawn(move || {
+                // a panic must not read as a complete stream (the sender
+                // dropped): it ends the stream with an error
+                let fail = tx.clone();
+                let run = std::panic::AssertUnwindSafe(|| crate::stream::produce(source, filter, cancel, tx));
+                if std::panic::catch_unwind(run).is_err() {
+                    let _ = fail.send(Err(Error::Unsupported("internal panic in the search stream".into())));
+                }
+            })
+            .map_err(Error::Io)?;
+        let mut r = SearchResult::new(Vec::new(), session);
+        r.stream = Some(crate::stream::HitStream { rx });
+        if relevance {
+            r.scores = Some(Vec::new());
+        }
+        Ok(r)
+    }
+
+    /// Streaming (issue #21): takes in the hits decided so far, waiting
+    /// until at least `min_hits` hits are in, the search is complete, or
+    /// `timeout` passes (None: no limit). Returns true once every hit is in
+    /// ([`hits`](Self::hits) final, [`counts`](Self::counts) exact). A
+    /// result that does not stream is complete at once. A cancelled search
+    /// returns [`Error::Cancelled`].
+    ///
+    /// On an index with positions every search streams: the blocking
+    /// [`LineIndex::search`] drains it before returning;
+    /// [`LineIndex::search_streaming`] returns after the first batch.
+    pub fn pull(&mut self, min_hits: usize, timeout: Option<std::time::Duration>) -> Result<bool> {
+        let deadline = timeout.map(|t| std::time::Instant::now() + t);
+        while let Some(stream) = &self.stream {
+            let got = if self.hits.len() >= min_hits {
+                // enough: take only what has already arrived
+                match stream.rx.try_recv() {
+                    Ok(Ok(batch)) => Ok(Some(batch)),
+                    Ok(Err(e)) => Err(Some(e)),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(false),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(None),
+                }
+            } else {
+                stream.recv(deadline)
+            };
+            match got {
+                Ok(Some(batch)) => self.append(batch),
+                Ok(None) => self.stream = None,
+                Err(Some(e)) => {
+                    self.stream = None;
+                    return Err(e);
+                }
+                Err(None) => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    /// True once every hit is in (see [`pull`](Self::pull)).
+    pub fn is_complete(&self) -> bool {
+        self.stream.is_none()
+    }
+
+    fn append(&mut self, batch: crate::stream::Batch) {
+        self.hits.extend_from_slice(&batch.hits);
+        if let Some(p) = self.session.positions.as_mut() {
+            p.hit_docs.extend_from_slice(&batch.docs);
+        }
+        if let (Some(all), Some(s)) = (self.scores.as_mut(), batch.scores) {
+            all.extend(s);
+        }
     }
 
     fn with_notices(mut self, notices: Vec<String>) -> SearchResult {
@@ -1462,11 +1592,12 @@ impl SearchResult {
             for h in &self.hits {
                 *books.entry(h.book_id).or_default() += 1;
             }
+            // streaming: the hits so far, exact once the stream is complete
             return HitCounts {
                 total: self.hits.len() as u64,
                 books: books.into_iter().collect(),
                 validated: self.hits.len() as u64,
-                exact: true,
+                exact: self.stream.is_none(),
             };
         }
         HitCounts {
@@ -1575,6 +1706,23 @@ impl SegmentCollector for PlacedSegmentCollector {
 }
 
 impl PlacedSegmentCollector {
+    /// [`collect`](SegmentCollector::collect) without a score.
+    pub(crate) fn collect_doc(&mut self, doc: DocId) {
+        self.collect(doc, 0.0);
+    }
+
+    /// Hits collected and not yet drained.
+    pub(crate) fn collected(&self) -> usize {
+        self.out.len()
+    }
+
+    /// The hits collected so far and their doc ids (aligned), leaving the
+    /// collector empty for the next chunk (`crate::stream`).
+    pub(crate) fn drain(&mut self) -> (Vec<PlacedHit>, Vec<DocId>) {
+        let docs = self.docs.as_mut().map(std::mem::take).unwrap_or_default();
+        (std::mem::take(&mut self.out), docs)
+    }
+
     /// The doc ids kept (relevance order), aligned with the hits.
     fn take_docs(&mut self) -> Vec<DocId> {
         self.docs.take().unwrap_or_default()
@@ -2057,7 +2205,38 @@ impl LineIndex {
         }
         let mut result = self.search_unstamped(request, cancel)?;
         result.order_stamp = stamp;
+        // a streamed search (an index with positions) is complete on return
+        result.pull(usize::MAX, None)?;
         Ok(result)
+    }
+
+    /// [`search_cancellable`](Self::search_cancellable) that returns as soon
+    /// as the first hits are decided (issue #21): on an index with positions
+    /// the rest stream in, in the search's order, while the host reads them;
+    /// take them in with [`SearchResult::pull`] (the hit list, its counts
+    /// and the snippet session work on the hits taken in so far; the counts
+    /// are exact once [`SearchResult::is_complete`]). Cancelling `cancel`
+    /// stops the stream (the next pull returns [`Error::Cancelled`]). On an
+    /// index without positions (and with cross-line matching) the result is
+    /// complete at once, as from [`search`](Self::search).
+    pub fn search_streaming(&self, request: &SearchRequest, cancel: Option<CancelToken>) -> Result<SearchResult> {
+        let stamp = self.order_stamp()?;
+        if request.after_position.is_some() && request.resume_stamp.as_ref().is_some_and(|s| *s != stamp) {
+            return Err(Error::StaleResume);
+        }
+        let mut result = self.search_unstamped(request, cancel)?;
+        result.order_stamp = stamp;
+        result.pull(1, None)?;
+        Ok(result)
+    }
+
+    /// [`search_streaming`](Self::search_streaming) for [`SearchOptions`].
+    pub fn search_options_streaming(
+        &self,
+        options: &SearchOptions,
+        cancel: Option<CancelToken>,
+    ) -> Result<SearchResult> {
+        self.search_streaming(&options.to_request(self.options.keep_marks)?, cancel)
     }
 
     /// The index's current order identity (see [`SearchInfo::order_stamp`]):
@@ -2152,7 +2331,9 @@ impl LineIndex {
             force_positions: false,
             unmarked: Default::default(),
             match_mode: hebrew_fts::MatchMode::BestWindow,
+            word_span: self.options.positions,
         };
+        session.locator.set_word_span(session.word_span);
         if section {
             session.require_ordered = false;
             session.max_word_distance = usize::MAX;
@@ -2601,7 +2782,27 @@ impl LineIndex {
             keep_docs: relevance || self.options.positions,
             after: request.after_position,
         };
-        for (ord, segment) in searcher.segment_readers().iter().enumerate() {
+        // An index with positions decides every hit from its positions and
+        // streams them (issue #21, `crate::stream`); a catalog-order search
+        // of the position-sorted index streams straight from the scorer.
+        // Cross-line matching keeps the text path (its pairs need texts).
+        #[allow(unused_mut)]
+        let mut stream = self.options.positions && !cross;
+        #[cfg(test)]
+        if self.test_only_text_decision.load(std::sync::atomic::Ordering::Relaxed) {
+            stream = false;
+        }
+        let mut scan: Option<crate::stream::Source> = None;
+        if stream && !relevance && request.order != ResultsOrder::Generation && self.catalog_ordered(&searcher) {
+            let segment = &searcher.segment_readers()[0];
+            let start = match request.after_position {
+                Some(after) => self.first_doc_after(segment, after)?,
+                None => 0,
+            };
+            let child = collector.for_segment(0, segment)?;
+            scan = Some(crate::stream::Source::scan(child, weight.scorer(segment, 1.0)?, segment, start));
+        }
+        for (ord, segment) in searcher.segment_readers().iter().enumerate().filter(|_| scan.is_none()) {
             CancelToken::check(cancel.as_ref())?;
             // A resume on a position-sorted segment starts at the first doc
             // past the bound (the collector filters the rest either way).
@@ -2924,10 +3125,59 @@ impl LineIndex {
             if timing {
                 eprintln!("  [timing] relevance {} hits: {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);
             }
+            if stream {
+                let source = self.sorted_source(&mut session, hits, Some(scores));
+                return Ok(self.stream_result(session, source, true)?.with_notices(notices).with_truncated(truncated));
+            }
             let mut result = SearchResult::new(hits, session).with_notices(notices).with_truncated(truncated);
             result.scores = Some(scores);
             return Ok(result);
         }
+        if stream {
+            let source = match scan {
+                Some(source) => source,
+                None => self.sorted_source(&mut session, hits, None),
+            };
+            return Ok(self.stream_result(session, source, false)?.with_notices(notices).with_truncated(truncated));
+        }
         Ok(SearchResult::new(hits, session).with_notices(notices).with_truncated(truncated))
+    }
+
+    /// Sorted hits (and their docs, set on the session) as a stream source.
+    fn sorted_source(
+        &self,
+        session: &mut SnippetSession,
+        hits: Vec<PlacedHit>,
+        scores: Option<Vec<Score>>,
+    ) -> crate::stream::Source {
+        let docs = session.positions.as_mut().map(|p| std::mem::take(&mut p.hit_docs)).unwrap_or_default();
+        debug_assert_eq!(docs.len(), hits.len());
+        crate::stream::Source::Hits { hits, docs, scores, at: 0 }
+    }
+
+    /// The streamed result (issue #21): the hits are decided from their
+    /// positions when the locator could still reject some
+    /// (`count_needs_text`), else every hit passes as it comes.
+    fn stream_result(
+        &self,
+        session: SnippetSession,
+        source: crate::stream::Source,
+        relevance: bool,
+    ) -> Result<SearchResult> {
+        let filter = match (&session.positions, session.count_needs_text) {
+            (Some(positions), true) => {
+                let mut locator = SnippetWindowLocator::new(0);
+                locator.set_word_span(true);
+                Some(crate::stream::HitFilter {
+                    matchers: session.matchers.clone(),
+                    negative: session.negative.clone(),
+                    source: positions.clone(),
+                    marked: if session.negative.iter().any(|n| n.vocalized) { self.fields.marked } else { None },
+                    locator,
+                })
+            }
+            _ => None,
+        };
+        SearchResult::streamed(session, source, filter, relevance)
     }
 }

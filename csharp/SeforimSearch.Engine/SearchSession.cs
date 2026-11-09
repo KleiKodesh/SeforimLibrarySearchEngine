@@ -35,8 +35,40 @@ namespace SeforimSearch.Engine
         /// <summary>Words of context per side this search locates with.</summary>
         public int ContextWords { get; }
 
-        /// <summary>Number of matching lines (before the snippet filters).</summary>
-        public long HitCount { get; }
+        /// <summary>Number of matching lines taken in so far (all of them unless the
+        /// search streams, see <see cref="Pull"/>). On an index without positions some
+        /// may still fail the snippet filters; on an index with positions every hit
+        /// passes (issue #21).</summary>
+        public long HitCount { get; private set; }
+
+        /// <summary>True once every hit is in: <see cref="HitCount"/> is final and
+        /// <see cref="GetCounts"/> exact. Always true unless the search streams
+        /// (<see cref="SeforimIndex.SearchStreaming(SearchOptions, CancellationToken)"/>).</summary>
+        public bool IsComplete { get; private set; } = true;
+
+        /// <summary>
+        /// A streamed search (issue #21): takes in the hits decided so far, waiting until
+        /// at least <paramref name="minHits"/> are in, the search is complete, or
+        /// <paramref name="timeoutMs"/> passes (negative: no limit; 0: only what has
+        /// arrived). Returns <see cref="IsComplete"/>. A cancelled search throws
+        /// <see cref="OperationCanceledException"/>.
+        /// </summary>
+        public bool Pull(long minHits, int timeoutMs = -1)
+        {
+            if (IsComplete) return true;
+            int r = NativeMethods.se_search_stream_pull(_handle, (ulong)Math.Max(0, minHits), timeoutMs);
+            if (r < 0) throw Interop.Fail(Interop.LastError());
+            HitCount = (long)NativeMethods.se_search_hit_count(_handle);
+            IsComplete = r == 1;
+            return IsComplete;
+        }
+
+        internal SearchSession Streaming()
+        {
+            IsComplete = false;
+            Pull(0, 0);
+            return this;
+        }
 
         /// <summary>Hits [<paramref name="offset"/>, offset+count), in the search's order (SearchOptions.Order; catalog by default).</summary>
         public PlacedHit[] GetHits(long offset, int count)
@@ -60,12 +92,17 @@ namespace SeforimSearch.Engine
             return hits;
         }
 
-        /// <summary>Every hit, in the search's order.</summary>
+        /// <summary>Every hit, in the search's order (a streamed search's hits as they
+        /// arrive, waiting for each page).</summary>
         public IEnumerable<PlacedHit> AllHits(int pageSize = 4096)
         {
-            for (long offset = 0; offset < HitCount; offset += pageSize)
+            for (long offset = 0; ; offset += pageSize)
+            {
+                if (offset + pageSize > HitCount) Pull(offset + pageSize);
+                if (offset >= HitCount) yield break;
                 foreach (var hit in GetHits(offset, pageSize))
                     yield return hit;
+            }
         }
 
         private SnippetMatchMode _matchMode;

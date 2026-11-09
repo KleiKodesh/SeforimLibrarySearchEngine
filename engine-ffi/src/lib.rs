@@ -72,7 +72,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 3;
+pub const SE_ABI_VERSION: u32 = 4;
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -858,7 +858,60 @@ pub unsafe extern "C" fn se_search_cancellable(
     })
 }
 
-/// Number of matching lines.
+/// `se_search_cancellable` that returns as soon as the first hits are
+/// decided (issue #21): on an index with positions the rest stream in, in
+/// the search's order, while the host reads them; `se_search_stream_pull`
+/// takes them in. Every other `se_search_*` call works on the hits taken in
+/// so far (`se_search_hit_count`, the copies, locates and counts: the
+/// counts' `exact` is true once the stream is complete). Cancelling
+/// `token` stops the stream. On an index without positions (or with
+/// cross-line matching) the result is complete at once.
+///
+/// # Safety
+/// As `se_search_cancellable`.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_stream(
+    index: *const LineIndex,
+    request_json: *const u8,
+    request_len: usize,
+    token: *const CancelToken,
+) -> *mut SearchResult {
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        let cancel = token.as_ref().cloned();
+        let json: serde_json::Value =
+            serde_json::from_str(str_arg(request_json, request_len)?).map_err(err)?;
+        let result = if json.get("query").is_some() {
+            let options: SearchOptions = serde_json::from_value(json).map_err(err)?;
+            index.search_options_streaming(&options, cancel).map_err(err)?
+        } else {
+            let request: SearchRequest = serde_json::from_value(json).map_err(err)?;
+            index.search_streaming(&request, cancel).map_err(err)?
+        };
+        Ok(Box::into_raw(Box::new(result)))
+    })
+}
+
+/// Takes in the streamed hits decided so far (see `se_search_stream`),
+/// waiting until at least `min_hits` hits are in, the search is complete,
+/// or `timeout_ms` passes (negative: no limit; 0: only what has arrived).
+/// Returns 1 when every hit is in (complete), 0 when more are coming, -1 on
+/// error (`se_last_error`; a cancelled search: `se_last_error_cancelled`).
+/// A search that does not stream returns 1 at once.
+///
+/// # Safety
+/// `search` must be live and not used by another thread during the call.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_stream_pull(search: *mut SearchResult, min_hits: u64, timeout_ms: i64) -> i32 {
+    guard(-1, || {
+        let search = search.as_mut().ok_or("null search")?;
+        let timeout = (timeout_ms >= 0).then(|| std::time::Duration::from_millis(timeout_ms as u64));
+        let min = usize::try_from(min_hits).unwrap_or(usize::MAX);
+        Ok(search.pull(min, timeout).map_err(err)? as i32)
+    })
+}
+
+/// Number of matching lines (taken in so far, for a streamed search).
 ///
 /// # Safety
 /// `search` must be live.

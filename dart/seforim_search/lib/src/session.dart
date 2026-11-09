@@ -10,9 +10,14 @@ import 'native.dart';
 /// One search: every matching line (catalog order unless [SearchOptions.order]) and the snippet state
 /// (prepared groups, distance/order filters, term table). Not thread-safe.
 final class SearchSession implements Finalizable {
-  SearchSession.internal(this._index, this._handle, this.contextWords, [this._cancel]) {
+  /// [streaming]: a session from `se_search_stream` (see [pull]).
+  SearchSession.internal(this._index, this._handle, this.contextWords, [this._cancel, bool streaming = false]) {
     _n.searchCloseFinalizer.attach(this, _handle, detach: this);
     hitCount = _n.searchHitCount(_handle);
+    if (streaming) {
+      isComplete = false;
+      pull(0, timeoutMs: 0);
+    }
   }
 
   static SeforimNative get _n => SeforimNative.instance;
@@ -27,8 +32,28 @@ final class SearchSession implements Finalizable {
   /// Words of context per side this search locates with.
   final int contextWords;
 
-  /// Number of matching lines (before the snippet filters).
-  late final int hitCount;
+  /// Number of matching lines taken in so far (all of them unless the search
+  /// streams, see [pull]). On an index without positions some may still fail
+  /// the snippet filters; on an index with positions every hit passes
+  /// (issue #21).
+  late int hitCount;
+
+  /// True once every hit is in: [hitCount] is final and [counts] exact.
+  /// Always true unless the search streams ([SeforimIndex.searchStreaming]).
+  bool isComplete = true;
+
+  /// A streamed search (issue #21): takes in the hits decided so far, waiting
+  /// until at least [minHits] are in, the search is complete, or [timeoutMs]
+  /// passes (negative: no limit; 0: only what has arrived). Returns
+  /// [isComplete]. A cancelled search throws [SearchCancelledException].
+  bool pull(int minHits, {int timeoutMs = -1}) {
+    if (isComplete) return true;
+    final r = _n.searchStreamPull(_h, minHits < 0 ? 0 : minHits, timeoutMs);
+    if (r < 0) throw _n.error();
+    hitCount = _n.searchHitCount(_h);
+    isComplete = r == 1;
+    return isComplete;
+  }
 
   Pointer<Void> get _h {
     if (_handle == nullptr) throw StateError('SearchSession is closed');
@@ -68,7 +93,10 @@ final class SearchSession implements Finalizable {
   }
 
   Iterable<PlacedHit> _allHits(int pageSize) sync* {
-    for (var o = 0; o < hitCount; o += pageSize) {
+    for (var o = 0;; o += pageSize) {
+      // a streamed search: wait until the page is in
+      if (o + pageSize > hitCount) pull(o + pageSize);
+      if (o >= hitCount) return;
       yield* hits(o, pageSize);
     }
   }

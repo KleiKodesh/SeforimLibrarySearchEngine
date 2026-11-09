@@ -192,6 +192,11 @@ pub struct LineIndex {
     /// can assert the sidecar and the walk give identical terms.
     #[cfg(test)]
     pub(crate) test_only_disable_fm: std::sync::atomic::AtomicBool,
+    /// TEST ONLY: an index with positions leaves its hits undecided (the
+    /// text decides them, as before issue #21), so a test can compare the
+    /// two decisions.
+    #[cfg(test)]
+    pub(crate) test_only_text_decision: std::sync::atomic::AtomicBool,
 }
 
 impl LineIndex {
@@ -243,6 +248,8 @@ impl LineIndex {
             fm: Default::default(),
             #[cfg(test)]
             test_only_disable_fm: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_only_text_decision: std::sync::atomic::AtomicBool::new(false),
         })
     }
 

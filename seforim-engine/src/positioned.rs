@@ -47,6 +47,7 @@ pub(crate) type DocKey = (u32, DocId);
 pub(crate) type Occurrences = Vec<(u32, u32)>;
 
 /// A search's matched terms and the postings to read their positions from.
+#[derive(Clone)]
 pub(crate) struct PositionSource {
     searcher: Searcher,
     text: Field,
@@ -165,6 +166,38 @@ impl PositionSource {
     /// for a batch of `lines` texts of `bytes` in all (see [`MIN_LINE_BYTES`]).
     pub(crate) fn pays_off(&self, lines: usize, bytes: usize) -> bool {
         bytes > lines.max(1) * (MIN_LINE_BYTES + BYTES_PER_TERM * self.terms.len())
+    }
+
+    /// Whether each of `docs` carries the `marked` line flag
+    /// ([`MARKED_LINE`](crate::index::MARKED_LINE): the line holds an
+    /// attached mark), read from the flag's postings (false for None).
+    pub(crate) fn marked_docs(&self, field: Field, docs: &[Option<DocKey>]) -> Result<Vec<bool>> {
+        let mut out = vec![false; docs.len()];
+        for (ord, seg) in self.searcher.segment_readers().iter().enumerate() {
+            let mut wanted: Vec<(DocId, usize)> = docs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, d)| d.filter(|d| d.0 == ord as u32).map(|d| (d.1, i)))
+                .collect();
+            if wanted.is_empty() {
+                continue;
+            }
+            wanted.sort_unstable();
+            let inv = seg.inverted_index(field)?;
+            let term = Term::from_field_u64(field, crate::index::MARKED_LINE);
+            let Some(mut p) = inv.read_postings(&term, IndexRecordOption::Basic)? else { continue };
+            for &(doc, slot) in &wanted {
+                let mut d = p.doc();
+                if d < doc {
+                    d = p.seek(doc);
+                }
+                if d == TERMINATED {
+                    break;
+                }
+                out[slot] = d == doc;
+            }
+        }
+        Ok(out)
     }
 
     /// Every matched term's positions in each of `docs`: per doc, sorted
@@ -423,6 +456,102 @@ mod tests {
         check(IndexOptions { positions: true, keep_marks: true }, 11);
     }
 
+    /// Issue #21: on an index with positions every hit is decided from its
+    /// positions during the search. The hits are exactly the candidates
+    /// (the hits the text decided before, every text-level check still
+    /// open) whose text the session's locator passes, for every request
+    /// shape; and the streamed search gives the blocking one's hits.
+    #[test]
+    fn hits_decided_from_positions_equal_the_text_decision() {
+        for (seed, keep_marks) in [(5u64, false), (13, true)] {
+            let lines = corpus(seed, 400);
+            let text_of = |id: u64| lines[(id - 1000) as usize].text.as_str();
+            let build = |positions: bool| {
+                let dir = tempfile::tempdir().unwrap();
+                let index = LineIndex::create(dir.path(), IndexOptions { positions, keep_marks }).unwrap();
+                let mut w = index.writer(50_000_000, 1).unwrap();
+                for l in &lines {
+                    w.add(l).unwrap();
+                }
+                w.commit(None).unwrap();
+                (dir, index)
+            };
+            let (_d1, index) = build(true);
+            let mut decided = 0;
+            for json in requests() {
+                let request: SearchRequest = serde_json::from_str(&json).unwrap();
+                let mut r = index.search(&request).unwrap();
+                assert!(r.is_complete() && !r.count_needs_text());
+                // the candidates: the same index, the text deciding
+                index.test_only_text_decision.store(true, std::sync::atomic::Ordering::Relaxed);
+                let candidates = index.search(&request).unwrap();
+                index.test_only_text_decision.store(false, std::sync::atomic::Ordering::Relaxed);
+                let want: Vec<u64> = candidates
+                    .hits
+                    .iter()
+                    .map(|h| h.line_id)
+                    .filter(|&id| r.session.locate(text_of(id)).is_some())
+                    .collect();
+                let got: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();
+                if got != want {
+                    let extra: Vec<String> = got.iter().filter(|i| !want.contains(i)).map(|&i| format!("{i}:{}", text_of(i).escape_unicode())).collect();
+                    let missing: Vec<String> = want.iter().filter(|i| !got.contains(i)).map(|&i| format!("{i}:{}", text_of(i).escape_unicode())).collect();
+                    panic!("{} extra {extra:?} missing {missing:?}", json.escape_unicode());
+                }
+                let c = r.counts();
+                assert!(c.exact);
+                assert_eq!(c.total, want.len() as u64);
+                decided += candidates.hits.len() - want.len();
+                // streamed: the same hits, batch by batch
+                let mut s = index.search_streaming(&request, None).unwrap();
+                while !s.pull(s.hits.len() + 1, Some(std::time::Duration::from_secs(10))).unwrap() {}
+                assert_eq!(s.hits, r.hits);
+            }
+            assert!(decided > 20, "too few hits dropped by their positions: {decided}");
+        }
+    }
+
+    /// Issue #21: the hits stream in batches in catalog order, the counts
+    /// grow with them and are exact once complete; cancelling stops it.
+    #[test]
+    fn streamed_hits_arrive_in_batches_and_cancel() {
+        let lines = corpus(21, 6000);
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        for l in &lines {
+            w.add(l).unwrap();
+        }
+        w.merge_all().unwrap();
+        let request: SearchRequest = serde_json::from_str(&format!(
+            "{{\"groups\":[{{\"kind\":\"word\",\"word\":\"{}\"}},{{\"kind\":\"word\",\"word\":\"{}\"}}],\"max_word_distance\":3}}",
+            W[0], W[1]
+        ))
+        .unwrap();
+        let all = index.search(&request).unwrap();
+        assert!(all.hits.len() > 1100, "{}", all.hits.len());
+        let mut s = index.search_streaming(&request, None).unwrap();
+        let mut sizes = vec![s.hits.len()];
+        while !s.pull(s.hits.len() + 1, None).unwrap() {
+            assert!(!s.counts().exact);
+            sizes.push(s.hits.len());
+        }
+        sizes.push(s.hits.len());
+        assert!(sizes[0] < all.hits.len(), "the first batch is not all: {sizes:?}");
+        assert_eq!(s.hits, all.hits);
+        assert!(s.hits.windows(2).all(|w| w[0].position < w[1].position));
+        assert_eq!(s.counts(), all.counts());
+        // cancelled mid-stream: the next pull says so
+        let token = crate::CancelToken::new();
+        let mut s = index.search_streaming(&request, Some(token.clone())).unwrap();
+        token.cancel();
+        match s.pull(usize::MAX, None) {
+            Err(crate::Error::Cancelled) => {}
+            Ok(true) => assert_eq!(s.hits, all.hits), // finished before the cancel
+            other => panic!("{:?}", other.map_err(|e| e.to_string())),
+        }
+    }
+
     #[test]
     fn a_text_that_is_not_the_indexed_one_falls_back() {
         let dir = tempfile::tempdir().unwrap();
@@ -466,6 +595,9 @@ mod tests {
         w.commit(None).unwrap();
         let mut c = flat.search(&request).unwrap();
         assert!(!c.session.locates_from_positions());
-        assert_eq!(a.session.locate_many(&swapped), c.session.locate_lines(&items));
+        // (the windows may differ: positions pick the word-tightest one,
+        // FtsLib's text path the character-tightest, issue #21)
+        let pass = |v: Vec<Option<crate::Snippet>>| v.iter().map(|s| s.is_some()).collect::<Vec<_>>();
+        assert_eq!(pass(a.session.locate_many(&swapped)), pass(c.session.locate_lines(&items)));
     }
 }

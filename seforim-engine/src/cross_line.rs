@@ -92,6 +92,46 @@ pub(crate) struct CrossInput<'a> {
     /// A vocalized search: only lines carrying the `marked` flag take part.
     pub marked: Option<tantivy::schema::Field>,
     pub cancel: Option<&'a CancelToken>,
+    /// Only the lines `L` in `[lo, hi)` (a streamed search's chunk, on the
+    /// one position-sorted segment: its doc order is the position order);
+    /// None: every line.
+    pub range: Option<(u64, u64)>,
+}
+
+/// What the cross-line pass needs from the index (owned, so a streaming
+/// producer can carry it).
+#[derive(Clone, Copy)]
+pub(crate) struct CrossIndex {
+    pub text: tantivy::schema::Field,
+    pub first: tantivy::schema::Field,
+    pub last: tantivy::schema::Field,
+    pub flags: tantivy::schema::Field,
+    pub positions: bool,
+    /// Every pair decided on the positions (see `find`).
+    pub decide: bool,
+}
+
+impl CrossIndex {
+    pub(crate) fn of(index: &LineIndex) -> Result<CrossIndex> {
+        let (Some(first), Some(last), Some(flags)) =
+            (index.fields.line_first, index.fields.line_last, index.fields.line_flags)
+        else {
+            return Err(Error::Unsupported(
+                "cross-line matching needs an index built with per-line data (content edges, line flags): rebuild the index"
+                    .into(),
+            ));
+        };
+        // An index with positions decides every pair on the joined positions
+        // (issue #21): FtsLib's distance / order and a cover across an edge
+        // enumerator too, not only Otzaria's proximity.
+        #[allow(unused_mut)]
+        let mut decide = index.options.positions;
+        #[cfg(test)]
+        if index.test_only_text_decision.load(std::sync::atomic::Ordering::Relaxed) {
+            decide = false;
+        }
+        Ok(CrossIndex { text: index.fields.text, first, last, flags, positions: index.options.positions, decide })
+    }
 }
 
 /// The cross-line pass's result.
@@ -173,51 +213,72 @@ struct Pair {
     right: (u32, DocId),
 }
 
-/// The cross-line pass (see the module docs).
-pub(crate) fn find(index: &LineIndex, searcher: &Searcher, input: &CrossInput<'_>) -> Result<CrossOutput> {
-    let (Some(first_field), Some(last_field), Some(flags_field)) =
-        (index.fields.line_first, index.fields.line_last, index.fields.line_flags)
-    else {
-        return Err(Error::Unsupported(
-            "cross-line matching needs an index built with per-line data (content edges, line flags): rebuild the index"
-                .into(),
-        ));
-    };
-    let field_name = |f| searcher.schema().get_field_name(f).to_string();
-    let (first_name, last_name, flags_name) = (field_name(first_field), field_name(last_field), field_name(flags_field));
-    let segments = searcher.segment_readers();
-    let mut columns = Vec::with_capacity(segments.len());
-    let mut max_position = 0u64;
-    for segment in segments {
-        let ff = segment.fast_fields();
-        let position = ff.u64("position")?;
-        max_position = max_position.max(position.max_value());
-        columns.push(LineColumns {
-            position,
-            line_id: ff.u64("line_id")?,
-            book_id: ff.u64("book_id")?,
-            first: ff.u64(&first_name)?,
-            last: ff.u64(&last_name)?,
-            flags: ff.u64(&flags_name)?,
-            sections: match input.drop_sections {
-                Some(_) => Some(SectionColumns::open(segment)?),
-                None => None,
-            },
-        });
+/// Every segment's per-line columns, opened once per search (opening them
+/// costs 10-20 ms on the full library: a streamed search keeps them for
+/// all its chunks).
+pub(crate) struct CrossColumns {
+    columns: Vec<LineColumns>,
+    max_position: u64,
+}
+
+impl CrossColumns {
+    /// `sections`: the negative query's section scope needs them.
+    pub(crate) fn open(ix: &CrossIndex, searcher: &Searcher, sections: bool) -> Result<CrossColumns> {
+        let field_name = |f| searcher.schema().get_field_name(f).to_string();
+        let (first_name, last_name, flags_name) = (field_name(ix.first), field_name(ix.last), field_name(ix.flags));
+        let segments = searcher.segment_readers();
+        let mut columns = Vec::with_capacity(segments.len());
+        let mut max_position = 0u64;
+        for segment in segments {
+            let ff = segment.fast_fields();
+            let position = ff.u64("position")?;
+            max_position = max_position.max(position.max_value());
+            columns.push(LineColumns {
+                position,
+                line_id: ff.u64("line_id")?,
+                book_id: ff.u64("book_id")?,
+                first: ff.u64(&first_name)?,
+                last: ff.u64(&last_name)?,
+                flags: ff.u64(&flags_name)?,
+                sections: if sections { Some(SectionColumns::open(segment)?) } else { None },
+            });
+        }
+        Ok(CrossColumns { columns, max_position })
     }
-    let nbits = max_position as usize + 2;
+
+    /// The last position of the index.
+    pub(crate) fn max_position(&self) -> u64 {
+        self.max_position
+    }
+}
+
+/// The cross-line pass (see the module docs). `opened`: the columns
+/// already opened for this searcher (None: opened here).
+pub(crate) fn find(
+    ix: &CrossIndex,
+    searcher: &Searcher,
+    input: &CrossInput<'_>,
+    opened: Option<&CrossColumns>,
+) -> Result<CrossOutput> {
+    let own;
+    let cols = match opened {
+        Some(c) => c,
+        None => {
+            own = CrossColumns::open(ix, searcher, input.drop_sections.is_some())?;
+            &own
+        }
+    };
+    let (columns, max_position) = (&cols.columns[..], cols.max_position);
+    // bits over the positions base..=end (the lines L and L + 1 in range)
+    let (base, end) = match input.range {
+        Some((lo, hi)) => (lo, hi),
+        None => (0, max_position + 1),
+    };
+    let nbits = (end - base) as usize + 2;
     let inline: HashSet<u64> = input.inline.iter().map(|h| h.position).collect();
     let mut locator = SnippetWindowLocator::new(0);
     locator.set_word_span(true);
-    // An index with positions decides every pair on the joined positions
-    // (issue #21): FtsLib's distance / order and a cover across an edge
-    // enumerator too, not only Otzaria's proximity.
-    #[allow(unused_mut)]
-    let mut decide = index.options.positions;
-    #[cfg(test)]
-    if index.test_only_text_decision.load(std::sync::atomic::Ordering::Relaxed) {
-        decide = false;
-    }
+    let decide = ix.decide;
 
     // Per line L: (exact, left, right) over every way of matching.
     let mut found: HashMap<u64, (bool, Pair)> = HashMap::new();
@@ -230,12 +291,12 @@ pub(crate) fn find(index: &LineIndex, searcher: &Searcher, input: &CrossInput<'_
         let slots: Vec<SlotLines> = m
             .terms
             .iter()
-            .map(|t| slot_lines(index, searcher, &columns, t, nbits, input))
+            .map(|t| slot_lines(ix, searcher, &columns, t, (base, end), input))
             .collect::<Result<_>>()?;
         let Some(candidates) = candidates(&slots, &m.rule, nbits) else {
             continue;
         };
-        let pairs = pairs(&slots, &candidates, &columns, &inline, input)?;
+        let pairs = pairs(&slots, &candidates, base, &columns, &inline, input)?;
         let pairs = drop_negative(pairs, searcher, input)?;
         check(input.cancel)?;
         match &m.rule {
@@ -244,16 +305,16 @@ pub(crate) fn find(index: &LineIndex, searcher: &Searcher, input: &CrossInput<'_
             CrossRule::Cover { .. } if decide => {
                 let (plain, edged): (Vec<Pair>, Vec<Pair>) = pairs.into_iter().partition(|p| plain_break(&columns, p));
                 mark(&mut found, plain.into_iter().map(|p| (p, true)));
-                let passed = verify_positions(index, searcher, &columns, m, &edged, &mut locator, input.cancel)?;
+                let passed = verify_positions(ix, searcher, &columns, m, &edged, &mut locator, input.cancel)?;
                 mark(&mut found, passed.into_iter().map(|p| (p, true)));
             }
             CrossRule::Cover { .. } => mark(&mut found, pairs.into_iter().map(|p| (p, plain_break(&columns, &p)))),
-            CrossRule::Proximity(_) if index.options.positions => {
-                let passed = verify_positions(index, searcher, &columns, m, &pairs, &mut locator, input.cancel)?;
+            CrossRule::Proximity(_) if ix.positions => {
+                let passed = verify_positions(ix, searcher, &columns, m, &pairs, &mut locator, input.cancel)?;
                 mark(&mut found, passed.into_iter().map(|p| (p, true)));
             }
             CrossRule::Text { .. } if decide => {
-                let passed = verify_positions(index, searcher, &columns, m, &pairs, &mut locator, input.cancel)?;
+                let passed = verify_positions(ix, searcher, &columns, m, &pairs, &mut locator, input.cancel)?;
                 mark(&mut found, passed.into_iter().map(|p| (p, true)));
             }
             _ => mark(&mut found, pairs.into_iter().map(|p| (p, false))),
@@ -283,6 +344,20 @@ pub(crate) fn find(index: &LineIndex, searcher: &Searcher, input: &CrossInput<'_
     Ok(out)
 }
 
+/// The first doc in `0..n` for which `pred` is false (`pred` true then false).
+fn partition(n: DocId, pred: impl Fn(DocId) -> bool) -> DocId {
+    let (mut lo, mut hi) = (0, n);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if pred(mid) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 fn check(cancel: Option<&CancelToken>) -> Result<()> {
     if cancel.is_some_and(|t| t.is_cancelled()) {
         return Err(Error::Cancelled);
@@ -299,27 +374,47 @@ fn mark(found: &mut HashMap<u64, (bool, Pair)>, pairs: impl Iterator<Item = (Pai
 }
 
 /// The alive lines holding any of `terms`, from their postings.
+/// `(base, end)`: only the lines at positions `base..=end` (bit `i` is
+/// position `base + i`).
 fn slot_lines(
-    index: &LineIndex,
+    ix: &CrossIndex,
     searcher: &Searcher,
     columns: &[LineColumns],
     terms: &[String],
-    nbits: usize,
+    (base, end): (u64, u64),
     input: &CrossInput<'_>,
 ) -> Result<SlotLines> {
-    let field = index.fields.text;
-    let mut bits = Bits::new(nbits);
+    let field = ix.text;
+    let mut bits = Bits::new((end - base) as usize + 2);
     let mut docs = Vec::new();
     for (ord, segment) in searcher.segment_readers().iter().enumerate() {
         let inverted = segment.inverted_index(field)?;
-        let mut seen = vec![0u64; (segment.max_doc() as usize).div_ceil(64)];
+        let max_doc = segment.max_doc();
+        // a range: the docs of its positions (doc order = position order
+        // on the one sorted segment)
+        let (doc_lo, doc_hi) = match input.range {
+            Some(_) => {
+                let pos = |d: DocId| columns[ord].position.first(d).unwrap_or(0);
+                let lo = partition(max_doc, |d| pos(d) < base);
+                let hi = partition(max_doc, |d| pos(d) <= end);
+                (lo, hi)
+            }
+            None => (0, max_doc),
+        };
+        let mut seen = vec![0u64; (max_doc as usize).div_ceil(64)];
+        if doc_lo >= doc_hi {
+            continue;
+        }
         for t in terms {
             check(input.cancel)?;
             let term = Term::from_field_text(field, t);
             let Some(info) = inverted.get_term_info(&term)? else { continue };
             let mut postings = inverted.read_postings_from_terminfo(&info, IndexRecordOption::Basic)?;
             let mut doc = postings.doc();
-            while doc != TERMINATED {
+            if doc < doc_lo {
+                doc = postings.seek(doc_lo);
+            }
+            while doc != TERMINATED && doc < doc_hi {
                 seen[doc as usize / 64] |= 1 << (doc % 64);
                 doc = postings.advance();
             }
@@ -332,7 +427,10 @@ fn slot_lines(
             if let Some(info) = inverted.get_term_info(&term)? {
                 let mut postings = inverted.read_postings_from_terminfo(&info, IndexRecordOption::Basic)?;
                 let mut doc = postings.doc();
-                while doc != TERMINATED {
+                if doc < doc_lo {
+                    doc = postings.seek(doc_lo);
+                }
+                while doc != TERMINATED && doc < doc_hi {
                     keep[doc as usize / 64] |= 1 << (doc % 64);
                     doc = postings.advance();
                 }
@@ -340,7 +438,8 @@ fn slot_lines(
             seen.iter_mut().zip(&keep).for_each(|(a, b)| *a &= b);
         }
         let alive = segment.alive_bitset();
-        for (i, &w) in seen.iter().enumerate() {
+        let words = (doc_lo as usize / 64)..(doc_hi as usize).div_ceil(64);
+        for (i, &w) in seen.iter().enumerate().skip(words.start).take(words.len()) {
             let mut w = w;
             while w != 0 {
                 let doc = (i * 64) as DocId + w.trailing_zeros();
@@ -349,7 +448,10 @@ fn slot_lines(
                     continue;
                 }
                 let Some(position) = columns[ord].position.first(doc) else { continue };
-                bits.set(position);
+                if position < base || position > end {
+                    continue;
+                }
+                bits.set(position - base);
                 docs.push((position, ord as u32, doc));
             }
         }
@@ -419,6 +521,7 @@ fn candidates(slots: &[SlotLines], rule: &CrossRule, nbits: usize) -> Option<Bit
 fn pairs(
     slots: &[SlotLines],
     candidates: &Bits,
+    base: u64,
     columns: &[LineColumns],
     inline: &HashSet<u64>,
     input: &CrossInput<'_>,
@@ -426,13 +529,18 @@ fn pairs(
     let mut docs: HashMap<u64, (u32, DocId)> = HashMap::new();
     for slot in slots {
         for &(position, seg, doc) in &slot.docs {
-            if candidates.get(position) || (position > 0 && candidates.get(position - 1)) {
+            let rel = position - base;
+            if candidates.get(rel) || (rel > 0 && candidates.get(rel - 1)) {
                 docs.insert(position, (seg, doc));
             }
         }
     }
     let mut out = Vec::new();
-    for position in candidates.ones() {
+    for rel in candidates.ones() {
+        let position = base + rel;
+        if input.range.is_some_and(|r| position >= r.1) {
+            continue; // L + 1 only: the next chunk's line
+        }
         if input.inline_exact && inline.contains(&position) {
             continue;
         }
@@ -501,7 +609,7 @@ fn drop_negative(pairs: Vec<Pair>, searcher: &Searcher, input: &CrossInput<'_>) 
 /// across the break, with a matched word on each line (an index with
 /// positions): the rule the locator applies to the two texts joined.
 fn verify_positions(
-    index: &LineIndex,
+    ix: &CrossIndex,
     searcher: &Searcher,
     columns: &[LineColumns],
     m: &CrossMatcher<'_>,
@@ -509,7 +617,7 @@ fn verify_positions(
     locator: &mut SnippetWindowLocator,
     cancel: Option<&CancelToken>,
 ) -> Result<Vec<Pair>> {
-    let field = index.fields.text;
+    let field = ix.text;
     // every term of the way of matching once, with its ordinal
     let mut terms: Vec<(&str, u32)> = Vec::new();
     let mut seen = HashSet::new();

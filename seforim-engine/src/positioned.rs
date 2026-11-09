@@ -590,6 +590,25 @@ mod tests {
         assert_eq!(s.hits, all.hits);
         assert!(s.hits.windows(2).all(|w| w[0].position < w[1].position));
         assert_eq!(s.counts(), all.counts());
+        // cross-line (issue #21): each chunk's pairs decided with it, in
+        // catalog order, the same hits as one pass over every line
+        for json in [
+            format!("{{\"groups\":[{{\"kind\":\"word\",\"word\":\"{}\"}},{{\"kind\":\"word\",\"word\":\"{}\"}}],\"max_word_distance\":3,\"cross_line\":true}}", W[0], W[1]),
+            format!("{{\"groups\":[{{\"kind\":\"word\",\"word\":\"{}\"}},{{\"kind\":\"word\",\"word\":\"{}\"}}],\"require_ordered\":true,\"cross_line\":true}}", W[2], W[3]),
+            format!("{{\"groups\":[{{\"kind\":\"word\",\"word\":\"{}\"}},{{\"kind\":\"word\",\"word\":\"{}\"}}],\"cross_line\":true,\"after_position\":1234}}", W[0], W[4]),
+        ] {
+            let request: SearchRequest = serde_json::from_str(&json).unwrap();
+            index.test_only_no_scan.store(true, std::sync::atomic::Ordering::Relaxed);
+            let whole = index.search(&request).unwrap();
+            index.test_only_no_scan.store(false, std::sync::atomic::Ordering::Relaxed);
+            let mut s = index.search_streaming(&request, None).unwrap();
+            let first = s.hits.len();
+            while !s.pull(s.hits.len() + 1, None).unwrap() {}
+            assert!(first < s.hits.len() || s.hits.len() < 1024, "streamed in one batch: {first}");
+            assert!(s.hits.iter().any(|h| h.next_line_id.is_some()));
+            assert_eq!(s.hits, whole.hits, "{}", json.escape_unicode());
+            assert_eq!(s.counts(), whole.counts());
+        }
         // cancelled mid-stream: the next pull says so
         let token = crate::CancelToken::new();
         let mut s = index.search_streaming(&request, Some(token.clone())).unwrap();

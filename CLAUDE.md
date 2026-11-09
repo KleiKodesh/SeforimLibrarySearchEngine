@@ -215,7 +215,7 @@ seforim.db knowledge). Hits carry no TOC entry; the host reads it by line id.
   FtsLib's fewest-UTF-16 rule (0.1-3% of hits show another occurrence). An index
   WITHOUT positions stays FtsLib's path step for step. Cross-line pairs are decided on the
   joined positions by the matcher itself (`verify_positions`, `tokenize_occurrences_across`),
-  then streamed. No per-hit window arena: the window is re-found for displayed rows.
+  chunk by chunk with the scan (`stream::CrossRun`, `CrossInput::range`). No per-hit window arena: the window is re-found for displayed rows.
 - Offsets are UTF-16 (.NET/JS indices) everywhere the page reads them.
 - Word model (user: "fix fts lib, make it match otzaria", 2026-10-21): FtsLib's words =
   Otzaria's: runs of letters AND ASCII digits, any length, one letter included (`ב5`

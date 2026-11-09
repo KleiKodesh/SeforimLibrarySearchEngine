@@ -917,9 +917,11 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     counts) works on the hits taken in so far; the counts are exact once
     complete; the cancel token stops the producer at its next chunk (the
     next pull fails as cancelled). The blocking `search` drains the stream,
-    so its results are complete as before. A cross-line search streams after
-    its cross-line pass (it needs every in-line hit first). An index without
-    positions is complete at once (not streamed).
+    so its results are complete as before. A cross-line search streams too:
+    each chunk's cross-line pairs (lines `L` from the previous chunk's end to
+    the chunk's last in-line hit; `L + 1` may be the next chunk's line, read
+    from the index) are decided with the chunk and merged into it in catalog
+    order. An index without positions is complete at once (not streamed).
 - **Search:** every matching line in catalog order (or by relevance /
   generation, see the result order item), plus a snippet session.
   - The session locates snippets for a whole batch across all cores.
@@ -1716,15 +1718,15 @@ of 5 runs after a warm-up, one process per query; before = `eefabda`):
 | two words, proximity any order (span query) | 7,417 | 29 -> 12 ms | 29 -> 24 ms | - | 15 -> 16 MB |
 | two words, proximity in order (span query) | 78,061 | 101 -> 13 ms | 101 -> 86 ms | - | 22 -> 22 MB |
 | three words, proximity | 2,008 | 59 -> 28 ms | 59 -> 39 ms | - | 18 -> 18 MB |
-| quoted phrase (cross-line) | 67,664 | 390 -> 422 ms | 390 -> 430 ms | - | 56 -> 56 MB |
-| two words, distance 5, cross-line | text -> 7,583 | text -> 71 ms | text (locate + fetch of every candidate pair) -> 92 ms | - | -> 24 MB |
+| quoted phrase (cross-line) | 67,664 | 390 -> 32 ms | 390 -> 294 ms | - | 56 -> 41 MB |
+| two words, distance 5, cross-line | text -> 7,583 | text -> 21 ms | text (locate + fetch of every candidate pair) -> 84 ms | - | -> 21 MB |
 
 Before, "first batch" = "complete" = the whole search (every hit
-collected). A cross-line search's first batch waits for the in-line
-collection and the cross-line pass: the quoted phrase measured slower
-(390 -> 422 ms; this run was noisier, the plain distance query also read
-42 ms instead of 28), so it may cost up to a third more before its first
-batch, and its hits are exact as before. "text": the exact total needed every candidate's text located
+collected). A cross-line search's chunk runs the cross-line pass on its
+own lines only (`CrossInput::range`: the slots' postings read from the
+chunk's first doc; the per-line columns opened once per search), so its
+first batch no longer waits for the whole search (cross-line rows: best
+of 3 runs). "text": the exact total needed every candidate's text located
 (locate time measured on a 2000-text sample and extrapolated, issue #21
 probe) plus fetching all those texts from seforim.db. The in-order query's
 78,061 hits now equal the in-order proximity's, as they should. Memory: no

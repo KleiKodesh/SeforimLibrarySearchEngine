@@ -197,6 +197,10 @@ pub struct LineIndex {
     /// two decisions.
     #[cfg(test)]
     pub(crate) test_only_text_decision: std::sync::atomic::AtomicBool,
+    /// TEST ONLY: a streamed search collects every hit first (no scan from
+    /// the scorer, one cross-line pass over every line).
+    #[cfg(test)]
+    pub(crate) test_only_no_scan: std::sync::atomic::AtomicBool,
 }
 
 impl LineIndex {
@@ -250,6 +254,8 @@ impl LineIndex {
             test_only_disable_fm: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             test_only_text_decision: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_only_no_scan: std::sync::atomic::AtomicBool::new(false),
         })
     }
 

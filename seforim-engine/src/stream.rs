@@ -28,7 +28,12 @@ use tantivy::fastfield::AliveBitSet;
 use tantivy::query::Scorer;
 use tantivy::{DocId, DocSet, Score, SegmentReader, TERMINATED};
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use crate::cross_line::{CrossIndex, CrossInput, CrossMatcher, CrossRule};
 use crate::positioned::{DocKey, PositionSource};
+use crate::section_scope::SectionKey;
 use crate::search::{passes_tokenized, CancelToken, Matcher, NegativeFilter, PlacedHit, PlacedSegmentCollector, TermMaps};
 use crate::{Error, Result};
 
@@ -55,6 +60,8 @@ pub(crate) enum Source {
         scorer: Box<dyn Scorer>,
         alive: Option<AliveBitSet>,
         max_doc: DocId,
+        /// Cross-line matching: each chunk's cross-line pairs, decided with it.
+        cross: Option<CrossRun>,
     },
     /// Hits already collected and put in the requested order.
     Hits {
@@ -77,13 +84,19 @@ impl Source {
             scorer.seek(start);
         }
         let alive = segment.alive_bitset().cloned();
-        Source::Scorer { child, scorer, alive, max_doc: if start >= max_doc && start > 0 { 0 } else { max_doc } }
+        Source::Scorer {
+            child,
+            scorer,
+            alive,
+            max_doc: if start >= max_doc && start > 0 { 0 } else { max_doc },
+            cross: None,
+        }
     }
 
     /// Up to `chunk` candidates (whole), and whether the source is spent.
     fn next(&mut self, chunk: usize, cancel: Option<&CancelToken>) -> Result<(Batch, bool)> {
         match self {
-            Source::Scorer { child, scorer, alive, max_doc } => {
+            Source::Scorer { child, scorer, alive, max_doc, cross } => {
                 let mut doc = if *max_doc == 0 { TERMINATED } else { scorer.doc() };
                 let mut seen = 0u32;
                 while doc != TERMINATED && child.collected() < chunk {
@@ -102,8 +115,13 @@ impl Source {
                 let (hits, docs) = child.drain();
                 // segment 0: a scan runs only on the one position-sorted
                 // segment (`LineIndex::catalog_ordered`)
-                let docs = hits.iter().zip(docs).map(|(h, d)| (h.line_id, 0, d)).collect();
-                Ok((Batch { hits, docs, scores: None }, doc == TERMINATED))
+                let docs: Vec<(u64, u32, DocId)> = hits.iter().zip(docs).map(|(h, d)| (h.line_id, 0, d)).collect();
+                let done = doc == TERMINATED;
+                let batch = Batch { hits, docs, scores: None };
+                match cross {
+                    Some(run) => Ok((run.chunk(batch, done, cancel)?, done)),
+                    None => Ok((batch, done)),
+                }
             }
             Source::Hits { hits, docs, scores, at } => {
                 let end = (*at + chunk).min(hits.len());
@@ -116,6 +134,88 @@ impl Source {
                 Ok((batch, end == hits.len()))
             }
         }
+    }
+}
+
+/// A streamed cross-line search's pass (see `crate::cross_line`): the
+/// lines `L` of each chunk, from the one before (`lo`) to the chunk's last
+/// in-line hit, are decided with the chunk; `L + 1` may be the next chunk's
+/// first line (read from the index, not from the chunk).
+pub(crate) struct CrossRun {
+    pub ix: CrossIndex,
+    pub searcher: tantivy::Searcher,
+    /// Each way of matching: its slots' terms, its matcher, its rule.
+    pub ways: Vec<(Vec<Vec<String>>, Matcher, CrossRule)>,
+    pub books: Option<Arc<HashSet<u64>>>,
+    pub negative: Option<Box<dyn tantivy::query::Weight>>,
+    pub drop_sections: Option<Arc<HashSet<SectionKey>>>,
+    pub marked: Option<tantivy::schema::Field>,
+    pub inline_exact: bool,
+    pub columns: crate::cross_line::CrossColumns,
+    /// The first line `L` not decided yet.
+    pub lo: u64,
+}
+
+impl CrossRun {
+    /// The chunk's in-line hits with its cross-line hits merged in, in
+    /// catalog order (in-line hits that continue get `next_line_id`).
+    fn chunk(&mut self, mut batch: Batch, done: bool, cancel: Option<&CancelToken>) -> Result<Batch> {
+        let hi = if done {
+            self.columns.max_position() + 1
+        } else {
+            batch.hits.last().map_or(self.lo, |h| h.position + 1)
+        };
+        if hi <= self.lo {
+            return Ok(batch);
+        }
+        let t = Instant::now();
+        let matchers: Vec<CrossMatcher<'_>> = self
+            .ways
+            .iter()
+            .map(|(terms, m, rule)| CrossMatcher { terms, prepared: &m.prepared, rule: rule.clone(), matcher: m })
+            .collect();
+        let out = crate::cross_line::find(
+            &self.ix,
+            &self.searcher,
+            &CrossInput {
+                matchers,
+                inline: &batch.hits,
+                inline_exact: self.inline_exact,
+                books: self.books.as_deref(),
+                negative: self.negative.as_deref(),
+                drop_sections: self.drop_sections.as_deref(),
+                marked: self.marked,
+                cancel,
+                range: Some((self.lo, hi)),
+            },
+            Some(&self.columns),
+        )?;
+        if std::env::var_os("SEFORIM_ENGINE_TIMING").is_some() {
+            eprintln!(
+                "  [timing] cross-line lines {}..{}: {} pairs, {:.1} ms",
+                self.lo,
+                hi,
+                out.hits.len() + out.inline_next.len(),
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        self.lo = hi;
+        // a scan runs on an index with positions: every pair is decided
+        // there, none is left for the texts
+        debug_assert!(!out.needs_text);
+        for h in &mut batch.hits {
+            if let Some(&next) = out.inline_next.get(&h.position) {
+                h.next_line_id = Some(next);
+            }
+        }
+        if out.hits.is_empty() {
+            return Ok(batch);
+        }
+        let mut all: Vec<(PlacedHit, (u64, u32, DocId))> = batch.hits.into_iter().zip(batch.docs).collect();
+        all.extend(out.hits.into_iter().map(|(h, (s, d))| (h, (h.line_id, s, d))));
+        all.sort_by_key(|x| x.0.position);
+        let (hits, docs) = all.into_iter().unzip();
+        Ok(Batch { hits, docs, scores: None })
     }
 }
 

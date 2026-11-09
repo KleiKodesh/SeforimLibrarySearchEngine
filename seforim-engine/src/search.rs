@@ -663,7 +663,7 @@ impl TermMaps<'_> {
 /// One way a line can match: prepared terms plus the filters to apply.
 #[derive(Clone)]
 pub(crate) struct Matcher {
-    prepared: PreparedQueryGroups,
+    pub(crate) prepared: PreparedQueryGroups,
     original_group_count: usize,
     require_ordered: bool,
     max_word_distance: usize,
@@ -2809,8 +2809,14 @@ impl LineIndex {
             stream = false;
         }
         let mut scan: Option<crate::stream::Source> = None;
-        // (cross-line needs every in-line hit first: collected, then streamed)
-        if stream && !cross && !relevance && request.order != ResultsOrder::Generation && self.catalog_ordered(&searcher) {
+        // (a cross-line search decides its pairs chunk by chunk, see below)
+        #[allow(unused_mut)]
+        let mut may_scan = stream;
+        #[cfg(test)]
+        if self.test_only_no_scan.load(std::sync::atomic::Ordering::Relaxed) {
+            may_scan = false;
+        }
+        if may_scan && !relevance && request.order != ResultsOrder::Generation && self.catalog_ordered(&searcher) {
             let segment = &searcher.segment_readers()[0];
             let start = match request.after_position {
                 Some(after) => self.first_doc_after(segment, after)?,
@@ -3005,7 +3011,50 @@ impl LineIndex {
 
         // Cross-line matching (see `cross_line`): after the in-line hits.
         let mut cross_keys: Vec<(u32, DocId)> = Vec::new();
-        if cross {
+        if let (true, Some(crate::stream::Source::Scorer { cross: slot, .. })) = (cross, scan.as_mut()) {
+            // streamed: the cross-line pass runs per chunk of the scan, on
+            // the chunk's lines (issue #21)
+            let main_rule = if let Some(p) = &proximity {
+                CrossRule::Proximity(p.clone())
+            } else if let Some(min) = partial_min {
+                CrossRule::Cover { min }
+            } else if let Some(gaps) = &request.gaps {
+                CrossRule::Proximity(Proximity::Ordered { gaps: gaps.clone() })
+            } else if request.max_word_distance.is_none() && !request.require_ordered {
+                CrossRule::Cover { min: usize::MAX }
+            } else {
+                CrossRule::Text { ordered: request.require_ordered }
+            };
+            let mut ways = Vec::new();
+            let mut m_index = 0;
+            if main_ok {
+                ways.push((group_terms.clone(), session.matchers[0].clone(), main_rule));
+                m_index = 1;
+            }
+            for (i, terms) in phrase_terms.iter().enumerate() {
+                ways.push((
+                    terms.clone(),
+                    session.matchers[m_index + i].clone(),
+                    CrossRule::Proximity(Proximity::Ordered { gaps: vec![0; terms.len().saturating_sub(1)] }),
+                ));
+            }
+            let ix = cross_line::CrossIndex::of(self)?;
+            *slot = Some(crate::stream::CrossRun {
+                ix,
+                columns: cross_line::CrossColumns::open(&ix, &searcher, drop_sections.is_some())?,
+                searcher: searcher.clone(),
+                ways,
+                books: books.clone(),
+                negative: match &negative_union {
+                    Some(q) => Some(q.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?),
+                    None => None,
+                },
+                drop_sections: drop_sections.clone(),
+                marked: if request.vocalized { Some(self.marked_field()?) } else { None },
+                inline_exact: !session.count_needs_text,
+                lo: request.after_position.map_or(0, |a| a + 1),
+            });
+        } else if cross {
             let t = std::time::Instant::now();
             let main_rule = if let Some(p) = &proximity {
                 CrossRule::Proximity(p.clone())
@@ -3042,7 +3091,7 @@ impl LineIndex {
                 None => None,
             };
             let out = cross_line::find(
-                self,
+                &cross_line::CrossIndex::of(self)?,
                 &searcher,
                 &CrossInput {
                     matchers,
@@ -3057,7 +3106,9 @@ impl LineIndex {
                         None
                     },
                     cancel: cancel.as_ref(),
+                    range: None,
                 },
+                None,
             )?;
             for h in &mut hits {
                 if let Some(&next) = out.inline_next.get(&h.position) {

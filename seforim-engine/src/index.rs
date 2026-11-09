@@ -290,12 +290,27 @@ impl LineIndex {
         let _normal = tantivy::indexer::NormalPrioritySection::enter();
         // another LineIndex over this dir may have merged: see the last commit
         self.reader.reload()?;
-        crate::fm_sidecar::build(&self.reader.searcher(), self.fields.text, &self.dir)
+        self.fm.clear();
+        let built = crate::fm_sidecar::build(&self.reader.searcher(), self.fields.text, &self.dir);
+        // a search during the build may have cached the file being replaced
+        self.fm.clear();
+        built
     }
 
     /// True when a sidecar matching the current single segment exists.
     pub fn has_fm_sidecar(&self) -> bool {
         self.fm.get(&self.dir, &self.reader.searcher(), self.fields.text).is_some()
+    }
+
+    /// Why the sidecar file of the current single segment cannot be used
+    /// (corrupt, truncated, an unknown format, built over another
+    /// dictionary), or None when it is usable or absent. A search that met
+    /// this carries [`NOTICE_FM_SIDECAR_UNUSABLE`](crate::NOTICE_FM_SIDECAR_UNUSABLE).
+    pub fn fm_sidecar_problem(&self) -> Option<String> {
+        match self.fm.lookup(&self.dir, &self.reader.searcher(), self.fields.text) {
+            crate::fm_sidecar::FmLookup::Unusable(reason) => Some(reason),
+            _ => None,
+        }
     }
 
     /// True when the docs of `searcher` are in ascending catalog `position`

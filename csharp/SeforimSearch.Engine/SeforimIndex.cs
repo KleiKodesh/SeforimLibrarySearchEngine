@@ -108,6 +108,18 @@ namespace SeforimSearch.Engine
         /// <summary>True when a sidecar matching the current single segment exists.</summary>
         public bool HasFmSidecar => NativeMethods.se_index_has_fm_sidecar(_handle) == 1;
 
+        /// <summary>Why the FM sidecar file cannot be used (the reason behind the search
+        /// notice <see cref="SearchInfo.FmSidecarUnusable"/>), or null when it is usable
+        /// or absent. Rebuild it with <see cref="BuildFmSidecar"/>.</summary>
+        public string? FmSidecarProblem
+        {
+            get
+            {
+                string s = Interop.TakeString(NativeMethods.se_index_fm_sidecar_problem(_handle));
+                return s.Length == 0 ? null : s;
+            }
+        }
+
         /// <summary>Number of lines in the index (a cheap count: no JSON, no payload), as of
         /// the last commit through this index's writers or the last <see cref="Reload"/>.</summary>
         public long NumLines

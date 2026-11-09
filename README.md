@@ -1074,7 +1074,12 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     and fuzzy words run as walks (same hits) and the search carries the
     notice `fm_sidecar_unusable` (delivered like `relevance_needs_positions`,
     C# `SearchInfo.FmSidecarUnusable`, Dart `SearchInfo.fmSidecarUnusable`)
-    until the sidecar is rebuilt; this and the build error change bumped the C ABI to 5. A search
+    until the sidecar is rebuilt; this and the build error change bumped the C ABI to 5.
+    The reason is read with `LineIndex::fm_sidecar_problem` (C ABI
+    `se_index_fm_sidecar_problem`, C# `SeforimIndex.FmSidecarProblem`, Dart
+    `fmSidecarProblem`; ABI 6). A broken file is remembered by its size and
+    modification time and re-checked only when it changes, the index moves to
+    another segment, or the sidecar is rebuilt (not re-opened per search). A search
     cancelled during an FM expansion stops with `Cancelled`. The sidecar
     is used whenever it is present (no per-search switch).
   - Measured on the full index (1,755,598 terms): built in 2.4 s, 41 MB;

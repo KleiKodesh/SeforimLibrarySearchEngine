@@ -134,6 +134,14 @@ final class SeforimIndex implements Finalizable {
   /// True when a sidecar matching the current single segment exists.
   bool get hasFmSidecar => _n.indexHasFmSidecar(handle) == 1;
 
+  /// Why the FM sidecar file cannot be used (the reason behind the search
+  /// notice [SearchInfo.fmSidecarUnusable]), or null when it is usable or
+  /// absent. Rebuild it with [buildFmSidecar].
+  String? get fmSidecarProblem {
+    final s = _n.takeString(_n.indexFmSidecarProblem(handle));
+    return s.isEmpty ? null : s;
+  }
+
   /// Number of lines in the index (a cheap count: no JSON, no payload), as of
   /// the last commit through this index's writers or the last [reload].
   int get numLines {

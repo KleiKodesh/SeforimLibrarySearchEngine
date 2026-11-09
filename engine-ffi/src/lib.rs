@@ -72,7 +72,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 5;
+pub const SE_ABI_VERSION: u32 = 6;
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -377,6 +377,20 @@ pub unsafe extern "C" fn se_index_has_fm_sidecar(index: *const LineIndex) -> i32
     guard(0, || {
         let index = index.as_ref().ok_or("null index")?;
         Ok(index.has_fm_sidecar() as i32)
+    })
+}
+
+/// Why the index's FM sidecar file cannot be used (the reason behind the
+/// search notice `fm_sidecar_unusable`), or "" when it is usable or absent.
+/// Free with `se_string_free`; null on error.
+///
+/// # Safety
+/// `index` must be a live index.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_fm_sidecar_problem(index: *const LineIndex) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        Ok(out_string(index.fm_sidecar_problem().unwrap_or_default()))
     })
 }
 

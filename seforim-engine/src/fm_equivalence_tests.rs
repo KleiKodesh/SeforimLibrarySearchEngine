@@ -251,11 +251,45 @@ fn unusable_sidecar_falls_back_to_the_walk_with_a_notice() {
             assert_eq!(&run(&index, &lines, &o, false), want);
         }
         assert_eq!(notices(&index), [NOTICE_FM_SIDECAR_UNUSABLE.to_string()]);
+        let reason = index.fm_sidecar_problem().expect("a reason");
+        assert!(reason.contains(".fmi"), "{reason}");
+        // remembered: the same broken file gives the cached reason
+        assert_eq!(index.fm_sidecar_problem().as_deref(), Some(reason.as_str()));
         // rebuilding repairs it, and the notice goes
         assert!(index.build_fm_sidecar().unwrap());
         assert!(index.has_fm_sidecar());
         assert!(notices(&index).is_empty());
+        assert_eq!(index.fm_sidecar_problem(), None);
     }
+}
+
+#[test]
+fn a_broken_sidecar_is_remembered_until_the_file_changes() {
+    let lines = corpus();
+    let (dir, index) = index_over(&lines, false);
+    assert!(index.build_fm_sidecar().unwrap());
+    let path = fmi_path(dir.path());
+    drop(index);
+    let index = LineIndex::open(dir.path()).unwrap();
+    std::fs::write(&path, vec![7u8; 100]).unwrap();
+    let first = index.fm_sidecar_problem().expect("unusable");
+    assert!(first.contains("bad magic"), "{first}");
+    // the cache answers while the file keeps its identity
+    let searcher = index.reader.searcher();
+    assert!(matches!(
+        index.fm.lookup(&index.dir, &searcher, index.fields.text),
+        crate::fm_sidecar::FmLookup::Unusable(r) if r == first
+    ));
+    // another broken content (other size): re-checked, a new reason
+    let mut bytes = vec![0u8; 50];
+    bytes[..4].copy_from_slice(&crate::fm_index::MAGIC.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    let second = index.fm_sidecar_problem().expect("unusable");
+    assert_ne!(second, first);
+    // the file removed: missing, no problem
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(index.fm_sidecar_problem(), None);
+    assert!(!index.has_fm_sidecar());
 }
 
 #[test]

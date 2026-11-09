@@ -97,10 +97,25 @@ pub enum FmLookup {
 /// Rebuild the sidecar (`build_fm_sidecar`) to fix it.
 pub const NOTICE_FM_SIDECAR_UNUSABLE: &str = "fm_sidecar_unusable";
 
-/// Lazily opened sidecar, keyed by the segment it belongs to.
+/// What the cache knows about a segment's sidecar file.
+enum Cached {
+    Ready(Arc<FmIndex>),
+    /// Found unusable; valid while the file keeps this identity (size,
+    /// modification time), so a broken file is not re-opened on every search.
+    Unusable { identity: (u64, Option<std::time::SystemTime>), reason: String },
+}
+
+/// The identity of a file for the unusable cache: its size and mtime.
+fn file_identity(path: &Path) -> std::io::Result<(u64, Option<std::time::SystemTime>)> {
+    let meta = std::fs::metadata(path)?;
+    Ok((meta.len(), meta.modified().ok()))
+}
+
+/// Lazily opened sidecar, keyed by the segment it belongs to (a reload to
+/// another segment re-checks).
 #[derive(Default)]
 pub struct FmCache {
-    inner: Mutex<Option<(SegmentId, Arc<FmIndex>)>>,
+    inner: Mutex<Option<(SegmentId, Cached)>>,
 }
 
 impl FmCache {
@@ -113,9 +128,15 @@ impl FmCache {
         }
     }
 
+    /// Forgets what is cached (after a sidecar build).
+    pub fn clear(&self) {
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     /// [`get`](Self::get), telling a missing sidecar from an unusable one.
-    /// Only a usable sidecar is cached: an unusable file is checked again
-    /// on the next search, so a rebuilt sidecar is picked up.
+    /// An unusable file is remembered with its identity (size, mtime) and
+    /// checked again only when the file changes, the index moves to another
+    /// segment, or a sidecar build clears the cache.
     pub fn lookup(&self, dir: &Path, searcher: &tantivy::Searcher, text: Field) -> FmLookup {
         let segments = searcher.segment_readers();
         if segments.len() != 1 {
@@ -123,13 +144,34 @@ impl FmCache {
         }
         let segment = &segments[0];
         let id = segment.segment_id();
-        if let Some((cached_id, fm)) = &*self.inner.lock().unwrap_or_else(|e| e.into_inner()) {
+        let path = sidecar_path(dir, id);
+        if let Some((cached_id, cached)) = &*self.inner.lock().unwrap_or_else(|e| e.into_inner()) {
             if *cached_id == id {
-                return FmLookup::Ready(fm.clone());
+                match cached {
+                    Cached::Ready(fm) => return FmLookup::Ready(fm.clone()),
+                    Cached::Unusable { identity, reason } => match file_identity(&path) {
+                        Ok(now) if now == *identity => return FmLookup::Unusable(reason.clone()),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FmLookup::Missing,
+                        _ => {}
+                    },
+                }
             }
         }
-        let path = sidecar_path(dir, id);
-        let file = match std::fs::File::open(&path) {
+        let result = self.open(&path, segment, text);
+        let cached = match &result {
+            FmLookup::Ready(fm) => Some(Cached::Ready(fm.clone())),
+            FmLookup::Unusable(reason) => file_identity(&path)
+                .ok()
+                .map(|identity| Cached::Unusable { identity, reason: reason.clone() }),
+            FmLookup::Missing => None,
+        };
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = cached.map(|c| (id, c));
+        result
+    }
+
+    /// Opens and checks the sidecar file of `segment`.
+    fn open(&self, path: &Path, segment: &tantivy::SegmentReader, text: Field) -> FmLookup {
+        let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FmLookup::Missing,
             Err(e) => return FmLookup::Unusable(format!("cannot open {}: {e}", path.display())),
@@ -155,8 +197,6 @@ impl FmCache {
                 fm.term_count()
             ));
         }
-        let fm = Arc::new(fm);
-        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, fm.clone()));
-        FmLookup::Ready(fm)
+        FmLookup::Ready(Arc::new(fm))
     }
 }

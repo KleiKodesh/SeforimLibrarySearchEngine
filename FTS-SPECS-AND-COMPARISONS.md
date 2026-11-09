@@ -36,7 +36,7 @@ Current index formats: ours `tantivy16`, FtsLib `fts12`.
 | One search options object, per-word options (negative words too), alternatives, acronyms | done |
 | Otzaria proximity (per-pair gaps, any order), word match (all/any/most/at least N) | done |
 | Otzaria tokenizer rules (one-letter words, digits, joiners, geresh, paired readings, 128-byte limit) in both engines | done |
-| Vocalized matching (nikud / te'amim) as a walk on a keep-marks index | done |
+| Vocalized matching (nikud / te'amim) as a walk on a keep-marks index (plain, wildcard and fuzzy words) | done |
 | Exact totals + per-book counts, cancellation, pull streaming | done |
 | Hits decided from positions during the search, streamed in batches (issue #21): exact totals with no text, word-tightest window | done |
 | Non-blocking search in the packages (Dart worker isolate `SearchWorker`, C# `SearchAsync` / `IAsyncEnumerable` batches) | done |

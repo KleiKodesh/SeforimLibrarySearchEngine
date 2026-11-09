@@ -212,7 +212,9 @@ impl HebrewFuzzyQuery {
         let word: String = self
             .word
             .chars()
-            .filter(|&c| !(self.ignore_quotes && crate::chars::is_term_quote(c)) && !crate::chars::is_term_mark(c))
+            .filter(|&c| {
+                !(self.ignore_quotes && crate::chars::is_term_quote(c)) && !crate::chars::is_term_mark(c)
+            })
             .collect();
         LevenshteinDfa {
             dfa: builder.build_dfa(&word),
@@ -230,7 +232,7 @@ impl HebrewFuzzyQuery {
 
     /// The word without marks: the form the distances are measured from.
     pub fn mark_free_word(&self) -> String {
-        self.word.chars().filter(|&c| !crate::chars::is_term_mark(c)).collect()
+        crate::chars::strip_term_marks(&self.word).into_owned()
     }
 
     fn configure<A>(&self, mut weight: AutomatonWeight<A>, dfa: Arc<LevenshteinDfa>, segments: Option<&[tantivy::SegmentReader]>) -> AutomatonWeight<A>

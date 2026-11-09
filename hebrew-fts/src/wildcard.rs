@@ -354,7 +354,11 @@ impl WildcardAutomaton {
                 if used < self.pattern.budget {
                     let len = utf8_len(byte);
                     let next = pack(v, t, 0, used + 1, len - 1);
-                    let next = if self.pattern.free_marks && len == 2 { with_held(next, byte) } else { next };
+                    let next = if self.pattern.free_marks && len == 2 {
+                        with_held(next, byte)
+                    } else {
+                        next
+                    };
                     self.close_into(next, out);
                 }
             }

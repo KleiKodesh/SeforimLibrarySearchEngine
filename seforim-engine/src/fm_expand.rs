@@ -11,6 +11,7 @@
 
 use std::cmp::Reverse;
 
+use hebrew_fts::chars::strip_term_marks;
 use hebrew_fts::fuzzy::{Distance, LevenshteinDfa};
 use hebrew_fts::wildcard::WildcardAutomaton;
 use hebrew_fts::marks::{strip_mark_bytes, zero_width_chars};
@@ -39,8 +40,8 @@ pub fn fm_wildcard_shape(pattern: &str, ignore_quotes: bool) -> Option<(String, 
     }
     // A vocalized pattern's typed marks: the sidecar's text is mark-free, so
     // the core is searched without them (the walk's automaton verifies them).
-    let core: String = pattern.trim_matches('*').chars().filter(|&c| !hebrew_fts::chars::is_term_mark(c)).collect();
-    let core = core.as_str();
+    let core = strip_term_marks(pattern.trim_matches('*'));
+    let core: &str = &core;
     if core.chars().count() < hebrew_fts::wildcard::MIN_ANCHOR_LENGTH
         || core.contains('*')
         || core.contains(['"', '\''])
@@ -192,7 +193,8 @@ pub fn expand_fuzzy(
             }
         }
     }
-    cap_like_the_walk(dict, kept, cap, marked_terms, &hebrew_fts::marks::exact_forms(&strip_marks(word)))
+    let pinned = hebrew_fts::marks::exact_forms(&strip_term_marks(word));
+    cap_like_the_walk(dict, kept, cap, marked_terms, &pinned)
 }
 
 /// Edit distance over chars (insert, delete, substitute, and a swap of two
@@ -252,16 +254,13 @@ pub fn expand_fuzzy_quote_free(
         }
         let Ok(term) = std::str::from_utf8(&buf) else { continue };
         let form: Vec<char> = text_form(term).chars().collect();
-        if let Some(d) = levenshtein_within(&form, &query, max_distance as usize).filter(|&d| d >= min_distance) {
+        let d = levenshtein_within(&form, &query, max_distance as usize);
+        if let Some(d) = d.filter(|&d| d >= min_distance) {
             kept.push((d as u32, buf.clone()));
         }
     }
-    cap_like_the_walk(dict, kept, cap, marked_terms, &hebrew_fts::marks::exact_forms(&strip_marks(word)))
-}
-
-/// `word` without its marks (a vocalized fuzzy word's pinned forms).
-fn strip_marks(word: &str) -> String {
-    word.chars().filter(|&c| !hebrew_fts::chars::is_term_mark(c)).collect()
+    let pinned = hebrew_fts::marks::exact_forms(&strip_term_marks(word));
+    cap_like_the_walk(dict, kept, cap, marked_terms, &pinned)
 }
 
 #[cfg(test)]

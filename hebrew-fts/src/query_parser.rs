@@ -228,7 +228,13 @@ fn parse_piece(raw: &str, keep_marks: bool) -> Vec<Option<QueryTerm>> {
         // A wildcard or fuzzy word keeps its typed marks on an index that
         // keeps them (the engine keeps the required ones, or drops them all
         // when nikud / te'amim matching is off).
-        let with_marks = || if keep_marks { marked.normalize(word).text } else { normalised.clone() };
+        let with_marks = || {
+            if keep_marks {
+                marked.normalize(word).text
+            } else {
+                normalised.clone()
+            }
+        };
         if normalised.contains(['*', '?']) {
             out.push(Some(QueryTerm::Wildcard(with_marks())));
         } else if let Some(distance) = fuzzy {

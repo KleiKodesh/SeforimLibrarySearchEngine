@@ -672,7 +672,7 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
             let pattern = required_marks_form(&pattern, o.match_nikud, o.match_teamim);
             // spelling variants are other letters: the typed marks have no
             // place on them (Otzaria), so they match mark-free
-            let plain = mark_free(&pattern);
+            let plain = hebrew_fts::chars::strip_term_marks(&pattern);
             let variants: Vec<GroupSpec> = match (o.ktiv_male_haser, star_core(&plain)) {
                 (true, Some((lead, core, trail))) => ktiv_variants(core, o.ktiv_rules)
                     .into_iter()
@@ -704,11 +704,6 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
             with_variants(GroupSpec::Grammar { word, prefixes, suffixes, ignore_quotes }, variants)
         }
     }
-}
-
-/// `s` without its marks.
-fn mark_free(s: &str) -> String {
-    s.chars().filter(|&c| !hebrew_fts::chars::is_term_mark(c)).collect()
 }
 
 /// A quoted phrase's word options: none of the expansions, only the base

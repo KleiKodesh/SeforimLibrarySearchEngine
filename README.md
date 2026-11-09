@@ -683,7 +683,12 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   the reload after it fails, the commit still succeeds, searches keep the
   previous snapshot and the next search or count retries the reload (Rust
   `LineIndex::reload_pending`; `se_index_reload` forces it and reports the
-  error). When another process or another handle on
+  error). After every commit, rollback and merge, and when a writer opens,
+  the writer deletes the files no snapshot uses any more (issue #29: merged-away
+  segments and their `.fmi` sidecars stayed on disk for good, doubling the
+  index). A search still holding an old snapshot keeps reading it; a file
+  that could not be deleted then is retried at the next write or writer
+  open. When another process or another handle on
   the same directory writes the index, the host calls `se_index_reload`
   (C# `Reload()`, Dart `reload()`) or reopens. Options are strict both ways: create's
   options JSON may omit a key (its default) but malformed JSON, a

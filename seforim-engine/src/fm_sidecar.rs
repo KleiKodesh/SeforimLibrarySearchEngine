@@ -19,6 +19,22 @@ pub fn sidecar_path(dir: &Path, segment: SegmentId) -> PathBuf {
     dir.join(format!("{}.fmi", segment.uuid_string()))
 }
 
+/// Deletes the sidecars (`<segment>.fmi`) of segments not in `live` (issue
+/// #29: a merge left the old segment's sidecar behind). Best effort: a file
+/// still mapped by a running search cannot be deleted on Windows and is
+/// retried at the next write's garbage collection.
+pub(crate) fn remove_dead_sidecars(dir: &Path, live: &[SegmentId]) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let live: Vec<String> = live.iter().map(|id| format!("{}.fmi", id.uuid_string())).collect();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.ends_with(".fmi") && !live.iter().any(|l| l == name) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// The FM text form of a dictionary term: its quotes and marks dropped
 /// (FtsLib's terms carried neither). Candidates found through it are
 /// verified against the real term, so this only widens the candidate set,
@@ -463,6 +479,17 @@ impl FmCache {
         match self.lookup(dir, searcher, text) {
             FmLookup::Ready(fm) => Some(fm),
             FmLookup::Missing | FmLookup::Unusable(_) => None,
+        }
+    }
+
+    /// Drops the cached sidecar when it belongs to a segment that is no
+    /// longer in `live` (after a merge), so its mapping is released and the
+    /// file can be deleted (Windows cannot delete a mapped file, issue #29).
+    pub fn forget_unless(&self, live: &[SegmentId]) {
+        let mut state = self.state();
+        if state.entry.as_ref().is_some_and(|(id, _)| !live.contains(id)) {
+            state.entry = None;
+            state.generation += 1;
         }
     }
 

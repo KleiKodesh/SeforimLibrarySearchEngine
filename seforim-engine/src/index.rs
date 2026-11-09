@@ -492,14 +492,19 @@ impl LineIndex {
             .memory_budget_per_thread(heap / threads)
             .low_priority_threads(low_priority)
             .build();
-        Ok(LineWriter {
+        let mut writer = LineWriter {
             writer: self.index.writer_with_options(options)?,
             fields: self.fields,
             threads,
             watcher: None,
             reader: self.reader.clone(),
             _repair: self.fm_repair.writer_guard(),
-        })
+            fm: self.fm.clone(),
+            dir: self.dir.clone(),
+        };
+        // files a previous merge could not delete (still mapped then)
+        writer.collect_garbage();
+        Ok(writer)
     }
 
     /// Starts a writer in the auto mode (issue #19, see [`crate::resources`]):
@@ -517,14 +522,18 @@ impl LineIndex {
             .build();
         let writer = self.index.writer_with_options(options)?;
         let watcher = resources::Watcher::start(writer.memory_budget(), threads);
-        Ok(LineWriter {
+        let mut writer = LineWriter {
             writer,
             fields: self.fields,
             threads,
             watcher: Some(watcher),
             reader: self.reader.clone(),
             _repair: self.fm_repair.writer_guard(),
-        })
+            fm: self.fm.clone(),
+            dir: self.dir.clone(),
+        };
+        writer.collect_garbage();
+        Ok(writer)
     }
 }
 
@@ -540,6 +549,9 @@ pub struct LineWriter {
     reader: SharedReader,
     /// Holds off the automatic FM sidecar rebuild while the writer is open.
     _repair: crate::fm_sidecar::WriterGuard,
+    /// The index's sidecar cache and directory, for [`Self::collect_garbage`].
+    fm: std::sync::Arc<crate::fm_sidecar::FmCache>,
+    dir: PathBuf,
 }
 
 /// The index's one reader (issue #22), shared by the index and its writers.
@@ -659,6 +671,7 @@ impl LineWriter {
         }
         prepared.commit()?;
         self.reader.after_write();
+        self.collect_garbage();
         Ok(())
     }
 
@@ -686,7 +699,30 @@ impl LineWriter {
     pub fn rollback(&mut self) -> Result<()> {
         self.writer.rollback()?;
         self.reader.after_write();
+        self.collect_garbage();
         Ok(())
+    }
+
+    /// Deletes the files no snapshot uses any more (issue #29). tantivy
+    /// collects garbage when a commit or merge lands, but our shared reader
+    /// still held the old segments then (it reloads right AFTER), so they
+    /// were kept, and on Windows a file that is still memory-mapped cannot
+    /// be deleted at all. So, after every write and when a writer opens:
+    /// drop the cached sidecar of a dead segment, run tantivy's garbage
+    /// collection (segments still held by a running search's searcher stay
+    /// live; a file that fails to delete stays managed and is retried at the
+    /// next write or writer open), and delete the sidecars of dead segments.
+    /// Best effort: it never fails the write.
+    fn collect_garbage(&mut self) {
+        let live: Vec<_> = self.reader.reader.searcher().segment_readers().iter().map(|s| s.segment_id()).collect();
+        self.fm.forget_unless(&live);
+        let _ = self.writer.garbage_collect_files().wait();
+        // sidecars: keep the current snapshot's and every committed segment's
+        let mut keep = live;
+        if let Ok(ids) = self.writer.index().searchable_segment_ids() {
+            keep.extend(ids);
+        }
+        crate::fm_sidecar::remove_dead_sidecars(&self.dir, &keep);
     }
 
     /// Merges all segments into one (for a shipped, read-mostly index) and
@@ -724,9 +760,14 @@ impl LineWriter {
                 Err(e) => return Err(e.into()),
             }
         }
+        // our merge has landed (waited above): reload, then delete the
+        // merged-away files (issue #29) while we still hold the writer
+        self.reader.after_write();
+        self.collect_garbage();
         let reader = self.reader.clone();
         let waited = self.writer.wait_merging_threads();
-        // the merge may have landed even when waiting failed: reload anyway
+        // a background merge that was still running may land while waiting:
+        // reload anyway; its leftovers go at the next writer open
         reader.after_write();
         waited?;
         Ok(())
@@ -880,6 +921,89 @@ mod tests {
         assert_eq!(index.reader.searcher().segment_readers().len(), 1);
         assert!(index.build_fm_sidecar().unwrap());
         assert!(index.has_fm_sidecar());
+    }
+
+    /// Bytes in `dir` and the segment ids that own files there (`<uuid>.*`,
+    /// sidecars included).
+    fn dir_state(dir: &Path) -> (u64, std::collections::BTreeSet<String>) {
+        let mut bytes = 0;
+        let mut ids = std::collections::BTreeSet::new();
+        for e in fs::read_dir(dir).unwrap().flatten() {
+            bytes += e.metadata().map_or(0, |m| m.len());
+            let name = e.file_name().to_string_lossy().to_string();
+            let stem = name.split('.').next().unwrap_or("");
+            if stem.len() == 32 && stem.chars().all(|c| c.is_ascii_hexdigit()) {
+                ids.insert(stem.to_string());
+            }
+        }
+        (bytes, ids)
+    }
+
+    fn uuid(id: tantivy::index::SegmentId) -> String {
+        id.uuid_string()
+    }
+
+    /// Issue #29: a merge left the old segments' files (and the old
+    /// segment's FM sidecar) on disk for good: the shared reader still held
+    /// them when tantivy collected garbage, and on Windows a mapped file
+    /// cannot be deleted. Now the merge deletes them once no snapshot uses
+    /// them; a search still holding an old snapshot keeps them until the
+    /// next write or writer open after it ends.
+    #[test]
+    fn merge_deletes_the_old_segment_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let text: String = (0..400).map(|i| format!("word{i} alpha{} ", i % 37)).collect();
+        // one merged segment with its sidecar, mapped by a search
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        for i in 0..300 {
+            w.add(&doc(i, &text)).unwrap();
+            if i % 100 == 99 {
+                w.commit(None).unwrap();
+            }
+        }
+        w.merge_all().unwrap();
+        assert!(index.build_fm_sidecar().unwrap());
+        assert!(index.has_fm_sidecar()); // the sidecar is now mapped
+        let old = uuid(index.reader.searcher().segment_readers()[0].segment_id());
+        assert_eq!(hits(&index, "*lpha3"), 300);
+        // more lines, then a merge while a search holds the old snapshot
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        for i in 300..400 {
+            w.add(&doc(i, &text)).unwrap();
+        }
+        w.commit(None).unwrap();
+        let held = index.reader.searcher();
+        let (before, _) = dir_state(dir.path());
+        w.merge_all().unwrap();
+        let (peak, ids) = dir_state(dir.path());
+        let new = uuid(index.reader.searcher().segment_readers()[0].segment_id());
+        // a held snapshot keeps working: its files are kept while it is
+        // live (tantivy's inventory), or, once deleted, stay readable
+        // through their open mappings (deleted while mapped on every OS)
+        let count = held.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap();
+        assert_eq!(count, 400);
+        assert!(ids.contains(&new));
+        drop(held);
+        // the next writer open collects what the held search kept
+        drop(index.writer(50_000_000, 1).unwrap());
+        assert!(index.build_fm_sidecar().unwrap());
+        let (after, ids) = dir_state(dir.path());
+        assert!(!ids.contains(&old), "the old segment and its sidecar are gone");
+        assert_eq!(ids, [new.clone()].into_iter().collect(), "only the merged segment remains");
+        eprintln!("issue #29 fixture: before merge {before} B, after merge {peak} B, after cleanup {after} B");
+        // without a held search the merge itself cleans up
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        w.add(&doc(500, "alpha")).unwrap();
+        w.commit(None).unwrap();
+        w.merge_all().unwrap();
+        let (_, ids) = dir_state(dir.path());
+        let newest = uuid(index.reader.searcher().segment_readers()[0].segment_id());
+        assert_eq!(ids, [newest].into_iter().collect(), "merge_all deletes the merged-away files and sidecar");
+        // and a reopen sees a clean index
+        drop(index);
+        let index = LineIndex::open(dir.path()).unwrap();
+        assert_eq!(hits(&index, "alpha"), 1);
     }
 
     /// Issue #22: a failed reload after a durable commit does not fail the

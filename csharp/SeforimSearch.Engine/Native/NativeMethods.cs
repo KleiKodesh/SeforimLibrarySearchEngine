@@ -71,6 +71,12 @@ namespace SeforimSearch.Engine.Native
         public static extern int se_index_has_fm_sidecar(IndexHandle index);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_index_set_fm_auto_repair(IndexHandle index, int on);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_index_fm_sidecar_rebuilding(IndexHandle index);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr se_index_fm_sidecar_problem(IndexHandle index);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

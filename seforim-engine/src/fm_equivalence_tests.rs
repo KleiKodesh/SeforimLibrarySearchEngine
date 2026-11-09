@@ -545,3 +545,50 @@ fn concurrent_searches_during_a_rebuild_stay_correct() {
         assert_eq!(&run(&index, &lines, o, false), want);
     }
 }
+
+#[test]
+fn a_leftover_temp_file_is_removed_on_open_and_before_a_build() {
+    let lines = corpus();
+    let (dir, index) = index_over(&lines, false);
+    let seg = index.reader.searcher().segment_readers()[0].segment_id();
+    let tmp = crate::fm_sidecar::sidecar_path(dir.path(), seg).with_extension("fmi.tmp");
+    let other = dir.path().join("0123.fmi.tmp");
+    // an interrupted build left these behind
+    std::fs::write(&tmp, b"half").unwrap();
+    std::fs::write(&other, b"half").unwrap();
+    assert!(index.build_fm_sidecar().unwrap());
+    assert!(!tmp.exists() && !other.exists());
+    drop(index);
+    std::fs::write(&other, b"half").unwrap();
+    let _index = LineIndex::open(dir.path()).unwrap();
+    assert!(!other.exists(), "open must remove a leftover temp file");
+}
+
+#[test]
+fn dropping_the_index_stops_a_background_rebuild_promptly() {
+    let lines = corpus();
+    let (_dir, index, path) = broken_index(&lines);
+    index.fm_repair.test_only_delay_ms.store(60_000, Ordering::Relaxed);
+    index.search_options(&SearchOptions { query: format!("*{}*", s(&[SHIN, LAMED])), ..Default::default() }).unwrap();
+    assert!(index.fm_sidecar_rebuilding());
+    let repair = index.fm_repair.clone();
+    let begun = std::time::Instant::now();
+    drop(index); // never waits for the thread
+    assert!(begun.elapsed() < std::time::Duration::from_millis(500));
+    // the thread ends (drops its handle) long before its 60 s delay
+    while std::sync::Arc::strong_count(&repair) > 1 {
+        assert!(begun.elapsed() < std::time::Duration::from_secs(5), "the rebuild did not stop");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(!repair.running());
+    // nothing written: the broken file is untouched, no temp left
+    assert_eq!(std::fs::read(&path).unwrap(), vec![7u8; 100]);
+    assert!(!path.with_extension("fmi.tmp").exists());
+}
+
+#[test]
+fn a_cancelled_fm_build_stops() {
+    let flag = std::sync::atomic::AtomicBool::new(true);
+    let r = crate::fm_index::build_cancellable(["ab", "cd"], Some(&flag));
+    assert!(r.is_err_and(|e| e.0 == crate::fm_index::BUILD_CANCELLED));
+}

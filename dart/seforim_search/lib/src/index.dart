@@ -134,6 +134,16 @@ final class SeforimIndex implements Finalizable {
   /// True when a sidecar matching the current single segment exists.
   bool get hasFmSidecar => _n.indexHasFmSidecar(handle) == 1;
 
+  /// The engine's automatic FM sidecar rebuild (default on): a search that
+  /// finds the sidecar of a one-segment index missing or unusable starts one
+  /// background rebuild.
+  set fmAutoRepair(bool on) {
+    if (_n.indexSetFmAutoRepair(handle, on ? 1 : 0) < 0) throw _n.error();
+  }
+
+  /// True while the engine's background FM sidecar rebuild runs.
+  bool get fmSidecarRebuilding => _n.indexFmSidecarRebuilding(handle) == 1;
+
   /// Why the FM sidecar file cannot be used (the reason behind the search
   /// notice [SearchInfo.fmSidecarUnusable]), `rebuilding: ...` while the
   /// engine's background rebuild runs, `FM sidecar rebuild failed: ...` after

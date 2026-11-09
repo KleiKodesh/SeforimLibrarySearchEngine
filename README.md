@@ -1092,8 +1092,15 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     `fm_sidecar_problem` reports `rebuilding: <reason>` while it runs and
     `FM sidecar rebuild failed: ...` after a failure; Rust
     `LineIndex::set_fm_auto_repair(false)` turns it off and
-    `fm_sidecar_rebuilding()` tells whether it runs (Rust only, no C ABI
-    change). A search
+    `fm_sidecar_rebuilding()` tells whether it runs (C ABI
+    `se_index_set_fm_auto_repair` / `se_index_fm_sidecar_rebuilding`, C#
+    `SeforimIndex.SetFmAutoRepair` / `FmSidecarRebuilding`, Dart
+    `fmAutoRepair` / `fmSidecarRebuilding`; ABI 7). The rebuild thread is
+    never joined: dropping the index sets a cancel flag the build checks
+    between stages, so it stops promptly and never delays a drop or the
+    process exit. A temp file left by a build that never finished
+    (`*.fmi.tmp`, the app closed mid-build) is removed when the index is
+    opened and before every build. A search
     cancelled during an FM expansion stops with `Cancelled`. The sidecar
     is used whenever it is present (no per-search switch).
   - Measured on the full index (1,755,598 terms): built in 2.4 s, 41 MB;

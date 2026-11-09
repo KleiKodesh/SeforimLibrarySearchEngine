@@ -72,7 +72,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 6;
+pub const SE_ABI_VERSION: u32 = 7;
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -377,6 +377,32 @@ pub unsafe extern "C" fn se_index_has_fm_sidecar(index: *const LineIndex) -> i32
     guard(0, || {
         let index = index.as_ref().ok_or("null index")?;
         Ok(index.has_fm_sidecar() as i32)
+    })
+}
+
+/// Turns the engine's automatic FM sidecar rebuild on (`on` != 0, the
+/// default) or off. 0 on success, -1 on error.
+///
+/// # Safety
+/// `index` must be a live index.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_set_fm_auto_repair(index: *const LineIndex, on: i32) -> i32 {
+    guard(-1, || {
+        let index = index.as_ref().ok_or("null index")?;
+        index.set_fm_auto_repair(on != 0);
+        Ok(0)
+    })
+}
+
+/// 1 while the engine's background FM sidecar rebuild runs, 0 otherwise.
+///
+/// # Safety
+/// `index` must be a live index.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_fm_sidecar_rebuilding(index: *const LineIndex) -> i32 {
+    guard(0, || {
+        let index = index.as_ref().ok_or("null index")?;
+        Ok(index.fm_sidecar_rebuilding() as i32)
     })
 }
 

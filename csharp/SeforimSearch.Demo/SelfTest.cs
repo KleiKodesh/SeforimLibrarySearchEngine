@@ -39,6 +39,7 @@ namespace SeforimSearch.Demo
                 ("end to end: build tantivy16 + search in catalog order", EndToEnd),
                 ("stream: chunks, resume, Restarted, cancellation (Core's StreamSearch)", Stream),
                 ("async engine API (issue #16): batches = sync hits, cancel, abandon, errors", AsyncEngine),
+                ("FM sidecar auto-repair (issue #28): background build, switchable", FmAutoRepair),
                 ("native ABI check (issue #17): loaded = expected, mismatch names both and the path", AbiCheck),
                 ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
             };
@@ -61,6 +62,30 @@ namespace SeforimSearch.Demo
             SqliteConnection.ClearAllPools();
             try { Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
             return failed == 0 ? 0 : 1;
+        }
+
+        private static void FmAutoRepair(string db, string dir)
+        {
+            string d = Path.Combine(dir, "fm-repair");
+            using (var index = SeforimIndex.Create(d))
+            {
+                var w = index.OpenWriter(30_000_000, 1);
+                w.Add(new LineDocument { LineId = 1, Position = 0, BookId = 1, Text = "alpha beta" });
+                w.Add(new LineDocument { LineId = 2, Position = 1, BookId = 1, Text = "gamma alphabet" });
+                w.MergeAndClose();
+                index.SetFmAutoRepair(false);
+                using (index.Search(new SearchOptions("*lph*"))) { }
+                Check(!index.FmSidecarRebuilding && !index.HasFmSidecar, "off: no rebuild");
+                index.SetFmAutoRepair(true);
+                using (var s = index.Search(new SearchOptions("*lph*")))
+                    Check(s.HitCount == 2, "walk hits while rebuilding: " + s.HitCount);
+                var until = DateTime.UtcNow.AddSeconds(30);
+                while (index.FmSidecarRebuilding && DateTime.UtcNow < until)
+                    System.Threading.Thread.Sleep(10);
+                Check(!index.FmSidecarRebuilding, "the rebuild finished");
+                Check(index.HasFmSidecar, "the rebuilt sidecar is used");
+                Check(index.FmSidecarProblem == null, "no problem left");
+            }
         }
 
         private static void AbiCheck(string db, string dir)

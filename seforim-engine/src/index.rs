@@ -205,6 +205,14 @@ pub struct LineIndex {
     pub(crate) test_only_no_scan: std::sync::atomic::AtomicBool,
 }
 
+impl Drop for LineIndex {
+    /// Stops a running background sidecar build at its next check (never
+    /// waits for it).
+    fn drop(&mut self) {
+        self.fm_repair.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl LineIndex {
     /// Creates a fresh index in `dir`, wiping whatever it held.
     pub fn create(dir: &Path, options: IndexOptions) -> Result<LineIndex> {
@@ -268,6 +276,8 @@ impl LineIndex {
     pub fn open(dir: &Path) -> Result<LineIndex> {
         let options = read_options(dir)?;
         let index = Index::open(MmapDirectory::open(dir)?)?;
+        // a sidecar build stopped mid-way (the process ended) left its temp file
+        crate::fm_sidecar::remove_leftover_temps(dir);
         hebrew_fts::register_hebrew_tokenizer(index.tokenizers());
         check_schema(&index.schema(), options)?;
         let (_, mut fields) = line_schema(options);

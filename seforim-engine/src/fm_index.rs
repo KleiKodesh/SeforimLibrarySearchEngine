@@ -87,6 +87,22 @@ impl std::fmt::Display for FmBuildError {
 /// term i has rowid i + 1). Every term must be non-empty; any Unicode
 /// scalar is allowed, astral included (at most 65534 distinct chars).
 pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, FmBuildError> {
+    build_cancellable(terms, None)
+}
+
+/// The message of a build stopped through its cancel flag.
+pub const BUILD_CANCELLED: &str = "build cancelled";
+
+/// [`build`], stopping between its stages once `cancel` is set (an engine
+/// background build whose index was dropped): Err([`BUILD_CANCELLED`]).
+pub fn build_cancellable<'a>(
+    terms: impl IntoIterator<Item = &'a str>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Vec<u8>, FmBuildError> {
+    let check = || match cancel {
+        Some(c) if c.load(std::sync::atomic::Ordering::Relaxed) => Err(FmBuildError(BUILD_CANCELLED.into())),
+        _ => Ok(()),
+    };
     let terms: Vec<&str> = terms.into_iter().collect();
 
     // Alphabet = the distinct chars present, in code-point order (code
@@ -124,6 +140,7 @@ pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, Fm
     let wide = !astral.is_empty();
     let sigma = char_of.len();
 
+    check()?;
     // Text, plus the rowid of the term each position belongs to. A SEP
     // carries the FOLLOWING term's rowid (never read: every match range
     // starts at a term character; FtsLib stored 0 there), END carries 0.
@@ -161,7 +178,9 @@ pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, Fm
     w += 1;
     text[w] = END_CODE;
 
+    check()?;
     let suffix_array = build_suffix_array(&text, sort_key_bits(sigma));
+    check()?;
 
     let mut bwt = vec![0 as Code; n];
     for (row, &p) in suffix_array.iter().enumerate() {
@@ -177,6 +196,7 @@ pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, Fm
         c[s + 1] = c[s] + symbol_count[s] as u32;
     }
 
+    check()?;
     // Huffman-shaped wavelet tree.
     let tree = HuffmanTree::build(&symbol_count);
     let mut node_bits: Vec<BitWriter> = (0..tree.left.len()).map(|_| BitWriter::default()).collect();
@@ -190,6 +210,7 @@ pub fn build<'a>(terms: impl IntoIterator<Item = &'a str>) -> Result<Vec<u8>, Fm
 
     let rowid_bits = 32 - max_rowid.leading_zeros() as usize;
 
+    check()?;
     // Serialize.
     let mut node_offsets = vec![0u64; node_bits.len()];
     let mut bitvector_bytes = 0u64;

@@ -446,4 +446,29 @@ void main() {
     idx.close();
     dir.deleteSync(recursive: true);
   });
+  test('FM sidecar auto-repair: built in the background, switchable (issue #28)', () {
+    final dir = Directory.systemTemp.createTempSync('se_dart_fm_');
+    final idx = SeforimIndex.create(dir.path);
+    final w = idx.openWriter(heapBytes: 30000000, threads: 1);
+    w.add(const LineDocument(lineId: 1, position: 0, bookId: 1, text: 'alpha beta'));
+    w.add(const LineDocument(lineId: 2, position: 1, bookId: 1, text: 'gamma alphabet'));
+    w.mergeAndClose();
+    idx.fmAutoRepair = false;
+    idx.search(SearchOptions('*lph*')).close();
+    expect(idx.fmSidecarRebuilding, isFalse);
+    expect(idx.hasFmSidecar, isFalse);
+    idx.fmAutoRepair = true;
+    final s = idx.search(SearchOptions('*lph*'));
+    expect(s.hitCount, 2);
+    s.close();
+    final until = DateTime.now().add(const Duration(seconds: 30));
+    while (idx.fmSidecarRebuilding && DateTime.now().isBefore(until)) {
+      sleep(const Duration(milliseconds: 10));
+    }
+    expect(idx.fmSidecarRebuilding, isFalse);
+    expect(idx.hasFmSidecar, isTrue);
+    expect(idx.fmSidecarProblem, isNull);
+    idx.close();
+    dir.deleteSync(recursive: true);
+  });
 }

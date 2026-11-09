@@ -44,6 +44,30 @@ fn sidecar_matches(path: &Path, num_terms: usize) -> bool {
 /// when the sidecar cannot be built (I/O failure, a dictionary the FM-index
 /// cannot hold): never a silent skip, the host reports it.
 pub fn build(searcher: &tantivy::Searcher, text: Field, dir: &Path) -> Result<bool> {
+    build_cancellable(searcher, text, dir, None)
+}
+
+/// Removes the temp files of sidecar builds that never finished (a process
+/// stopped mid-build): `<segment>.fmi.tmp`. Best effort.
+pub(crate) fn remove_leftover_temps(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let leftover = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".fmi.tmp"));
+        if leftover && path.is_file() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// [`build`] that stops once `cancel` is set (Err, nothing written).
+pub(crate) fn build_cancellable(
+    searcher: &tantivy::Searcher,
+    text: Field,
+    dir: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<bool> {
+    let cancelled = || cancel.is_some_and(|c| c.load(Ordering::Relaxed));
     let segments = searcher.segment_readers();
     if segments.len() != 1 {
         return Ok(false);
@@ -61,13 +85,18 @@ pub fn build(searcher: &tantivy::Searcher, text: Field, dir: &Path) -> Result<bo
     let mut forms: Vec<String> = Vec::with_capacity(dict.num_terms());
     let mut stream = dict.stream()?;
     while stream.advance() {
+        if forms.len() % 65536 == 0 && cancelled() {
+            return Err(Error::Unsupported(format!("FM sidecar not built: {}", fm_index::BUILD_CANCELLED)));
+        }
         let term = std::str::from_utf8(stream.key())
             .map_err(|_| Error::Unsupported("FM sidecar: a dictionary term is not UTF-8".into()))?;
         forms.push(text_form(term));
     }
-    let bytes = fm_index::build(forms.iter().map(|s| s.as_str()))
+    let bytes = fm_index::build_cancellable(forms.iter().map(|s| s.as_str()), cancel)
         .map_err(|e| Error::Unsupported(format!("FM sidecar not built: {e}")))?;
 
+    // a temp file left by a build that never finished goes first
+    remove_leftover_temps(dir);
     // publish atomically: the new file is complete before it takes the
     // sidecar's name, so a search sees the old file (or none), never half
     let tmp = path.with_extension("fmi.tmp");
@@ -138,6 +167,10 @@ pub(crate) struct Repair {
     state: Mutex<RepairState>,
     /// Held by every sidecar build (background or explicit).
     pub(crate) build_lock: Mutex<()>,
+    /// Set when the index is dropped: a running background build stops at
+    /// its next check. The thread is never joined, so it cannot delay a
+    /// drop or the process exit.
+    pub(crate) cancel: AtomicBool,
     /// TEST ONLY: how many background builds were started.
     #[cfg(test)]
     pub(crate) test_only_starts: AtomicUsize,
@@ -161,6 +194,7 @@ impl Repair {
             writers: AtomicUsize::new(0),
             state: Mutex::new(RepairState::default()),
             build_lock: Mutex::new(()),
+            cancel: AtomicBool::new(false),
             #[cfg(test)]
             test_only_starts: AtomicUsize::new(0),
             #[cfg(test)]
@@ -276,8 +310,18 @@ impl Repair {
         // drop any cached mapping of the file being replaced
         cache.clear();
         #[cfg(test)]
-        std::thread::sleep(std::time::Duration::from_millis(self.test_only_delay_ms.load(Ordering::Relaxed)));
-        let result = build(searcher, text, dir);
+        {
+            let until = std::time::Instant::now()
+                + std::time::Duration::from_millis(self.test_only_delay_ms.load(Ordering::Relaxed));
+            while std::time::Instant::now() < until && !self.cancel.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        let result = build_cancellable(searcher, text, dir, Some(&self.cancel));
+        if self.cancel.load(Ordering::Relaxed) {
+            // the index was dropped: nothing to record
+            return None;
+        }
         // the next search re-reads the published file
         cache.clear();
         match result {

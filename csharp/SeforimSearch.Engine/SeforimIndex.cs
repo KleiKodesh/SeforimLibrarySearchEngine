@@ -108,6 +108,13 @@ namespace SeforimSearch.Engine
         /// <summary>True when a sidecar matching the current single segment exists.</summary>
         public bool HasFmSidecar => NativeMethods.se_index_has_fm_sidecar(_handle) == 1;
 
+        /// <summary>The engine's automatic FM sidecar rebuild (default on): a search that finds the
+        /// sidecar of a one-segment index missing or unusable starts one background rebuild.</summary>
+        public void SetFmAutoRepair(bool on) => Interop.Check(NativeMethods.se_index_set_fm_auto_repair(_handle, on ? 1 : 0));
+
+        /// <summary>True while the engine's background FM sidecar rebuild runs.</summary>
+        public bool FmSidecarRebuilding => NativeMethods.se_index_fm_sidecar_rebuilding(_handle) == 1;
+
         /// <summary>Why the FM sidecar file cannot be used (the reason behind the search
         /// notice <see cref="SearchInfo.FmSidecarUnusable"/>), "rebuilding: ..." while the engine's
         /// background rebuild runs, "FM sidecar rebuild failed: ..." after it failed, or null

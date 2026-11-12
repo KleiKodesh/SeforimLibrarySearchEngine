@@ -42,12 +42,13 @@ use std::collections::{HashMap, HashSet};
 
 use hebrew_fts::{PreparedQueryGroups, Proximity, SnippetWindowLocator};
 use tantivy::columnar::Column;
-use tantivy::query::Weight;
+use std::ops::ControlFlow;
+use tantivy::query::{SimpleUnion, Weight};
 use tantivy::schema::IndexRecordOption;
 use tantivy::{DocId, DocSet, Searcher, Term, TERMINATED};
 
 use crate::index::{LineIndex, LINE_FLAG_LEADING_MARKER, LINE_FLAG_NO_CROSS, LINE_FLAG_TRAILING_MARKER};
-use crate::positioned::{DocKey, PositionSource, NONE};
+use crate::positioned::{marked_postings, DocKey, PositionSource, NONE};
 use crate::search::{CancelToken, PlacedHit};
 use crate::section_scope::{SectionColumns, SectionKey};
 use crate::{Error, Result};
@@ -402,60 +403,41 @@ fn slot_lines(
             }
             None => (0, max_doc),
         };
-        let mut seen = vec![0u64; (max_doc as usize).div_ceil(64)];
         if doc_lo >= doc_hi {
             continue;
         }
+        // the union of the slot's terms (tantivy's own), from `doc_lo`
+        let mut postings = Vec::new();
         for t in terms {
-            check(input.cancel)?;
-            let term = Term::from_field_text(field, t);
-            let Some(info) = inverted.get_term_info(&term)? else { continue };
-            let mut postings = inverted.read_postings_from_terminfo(&info, IndexRecordOption::Basic)?;
-            let mut doc = postings.doc();
-            if doc < doc_lo {
-                doc = postings.seek(doc_lo);
-            }
-            while doc != TERMINATED && doc < doc_hi {
-                seen[doc as usize / 64] |= 1 << (doc % 64);
-                doc = postings.advance();
+            if let Some(p) = inverted.read_postings(&Term::from_field_text(field, t), IndexRecordOption::Basic)? {
+                postings.push(p);
             }
         }
-        if let Some(marked) = input.marked {
-            // a vocalized search: unmarked lines take no part
-            let mut keep = vec![0u64; seen.len()];
-            let term = Term::from_field_u64(marked, crate::index::MARKED_LINE);
-            let inverted = segment.inverted_index(marked)?;
-            if let Some(info) = inverted.get_term_info(&term)? {
-                let mut postings = inverted.read_postings_from_terminfo(&info, IndexRecordOption::Basic)?;
-                let mut doc = postings.doc();
-                if doc < doc_lo {
-                    doc = postings.seek(doc_lo);
-                }
-                while doc != TERMINATED && doc < doc_hi {
-                    keep[doc as usize / 64] |= 1 << (doc % 64);
-                    doc = postings.advance();
-                }
-            }
-            seen.iter_mut().zip(&keep).for_each(|(a, b)| *a &= b);
+        let mut union = SimpleUnion::build(postings);
+        if union.doc() < doc_lo {
+            union.seek(doc_lo);
         }
-        let alive = segment.alive_bitset();
-        let words = (doc_lo as usize / 64)..(doc_hi as usize).div_ceil(64);
-        for (i, &w) in seen.iter().enumerate().skip(words.start).take(words.len()) {
-            let mut w = w;
-            while w != 0 {
-                let doc = (i * 64) as DocId + w.trailing_zeros();
-                w &= w - 1;
-                if alive.is_some_and(|a| !a.is_alive(doc)) {
-                    continue;
-                }
-                let Some(position) = columns[ord].position.first(doc) else { continue };
-                if position < base || position > end {
-                    continue;
-                }
+        // a vocalized search: unmarked lines take no part
+        let mut marked = match input.marked {
+            Some(field) => match marked_postings(segment, field)? {
+                Some(p) => Some(p),
+                None => continue,
+            },
+            None => None,
+        };
+        crate::search::drain_alive(&mut union, segment.alive_bitset(), input.cancel, |doc, alive| {
+            if doc >= doc_hi {
+                return ControlFlow::Break(());
+            }
+            if !alive || marked.as_mut().is_some_and(|m| (if m.doc() < doc { m.seek(doc) } else { m.doc() }) != doc) {
+                return ControlFlow::Continue(());
+            }
+            if let Some(position) = columns[ord].position.first(doc).filter(|p| (base..=end).contains(p)) {
                 bits.set(position - base);
                 docs.push((position, ord as u32, doc));
             }
-        }
+            ControlFlow::Continue(())
+        })?;
     }
     Ok(SlotLines { bits, docs })
 }

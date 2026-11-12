@@ -46,6 +46,16 @@ pub(crate) type DocKey = (u32, DocId);
 /// One line's matched words: sorted `(position, term id)`.
 pub(crate) type Occurrences = Vec<(u32, u32)>;
 
+/// The postings of the `marked` line flag ([`MARKED_LINE`](crate::index::MARKED_LINE):
+/// the lines holding an attached mark) in `segment`; None when no line has it.
+pub(crate) fn marked_postings(
+    segment: &tantivy::SegmentReader,
+    field: Field,
+) -> Result<Option<tantivy::postings::SegmentPostings>> {
+    let term = Term::from_field_u64(field, crate::index::MARKED_LINE);
+    Ok(segment.inverted_index(field)?.read_postings(&term, IndexRecordOption::Basic)?)
+}
+
 /// A search's matched terms and the postings to read their positions from.
 #[derive(Clone)]
 pub(crate) struct PositionSource {
@@ -183,9 +193,7 @@ impl PositionSource {
                 continue;
             }
             wanted.sort_unstable();
-            let inv = seg.inverted_index(field)?;
-            let term = Term::from_field_u64(field, crate::index::MARKED_LINE);
-            let Some(mut p) = inv.read_postings(&term, IndexRecordOption::Basic)? else { continue };
+            let Some(mut p) = marked_postings(seg, field)? else { continue };
             for &(doc, slot) in &wanted {
                 let mut d = p.doc();
                 if d < doc {

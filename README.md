@@ -403,9 +403,13 @@ is clean, and CHANGELOG.md has the entry.
    - *How:* a new mapping type, `Reordered`: upstream's sorted merge assumes the new ids
      of one segment increase with its old ones (a k-way merge of postings, a sequential
      store read). For `Reordered` the postings of each term are buffered (docs with their
-     positions), sorted by new doc id and written; the store reads each doc by address;
-     the fast fields are written column by column in the new order with the replaced
-     values (numeric and bool fast fields). Other merges are unchanged.
+     positions), sorted by new doc id and written; a term with more than 256K docs goes
+     in windows of new doc ids (its postings read once per window), so the buffers stay
+     small (about 256K docs per window for a term spread over the index); the store reads each doc by address; the fast fields go through the normal
+     columnar merge, and a replaced field's values are a function of the doc's old
+     address (`FastFieldValueFn`), computed while the column is written (columnar
+     `merge_columnar_replacing`), never held at once. So a reordering merge needs no more
+     memory than a plain merge. Other merges are unchanged.
 
 Also small: `get_match_term_infos` honours the cap and the sink, and
 `RegexPhraseWeight` is reachable crate-internally so SpanQuery can reuse its
@@ -696,7 +700,12 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   old and the new segment together (about twice the index). Full DB (7.9M lines, index
   with positions 1.76 GB, SSD): 2.56 min (plan 263 ms, postings 1.9 min, per-line fields + store 0.3 min, FM sidecar
   0.1 min; one tenth of the books moved), peak working set 2,582 MB, peak disk 3,434 MB (old +
-  new segment); a plain one-segment merge on the same SSD takes 1.23 min with its sidecar. Tests: `seforim-engine/src/resort.rs`,
+  new segment); a plain one-segment merge on the same SSD takes 1.23 min with its sidecar. Memory (Rust probe, same copy on SSD, peak private bytes): the re-sort's merge
+  200 MB, a plain one-segment merge 198 MB (before this fix the re-sort's merge took
+  794 MB: whole fast-field columns and the new positions held at once, 16-24 bytes per
+  line in the plan, unbounded per-term buffers); time 1.91 min with the sidecar (was
+  1.46-1.77 min). The FM sidecar rebuild after it peaks at 770 MB, the same as a build's
+  sidecar step. Tests: `seforim-engine/src/resort.rs`,
   tantivy `indexer/reorder.rs`, Dart `resortAndClose`.
 - **Index:** create or open; positions optional; add/delete/commit lines
   (`line_id`, `position`, `book_id`, text indexed but not stored; see the

@@ -56,57 +56,105 @@ pub type ResortProgressFn = std::sync::Arc<dyn Fn(ResortStage, u64, u64) + Send 
 
 /// The reorder plan: lines sorted by (new book rank, old position), each
 /// line's new position = its book's new start + its offset in the book.
+///
+/// Memory: the plan holds one address per line (the order tantivy needs) and
+/// a few entries per book; the new positions are computed per line while
+/// tantivy writes them (`fast_field_values`), never held at once. So the
+/// re-sort needs no more memory than a plain merge.
 pub(crate) fn plan(readers: &[SegmentReader], book_order: &[u64]) -> Result<ReorderPlan> {
-    // every alive line: (book, old position, address); each book's span
-    let mut lines: Vec<(u64, u64, DocAddress)> = Vec::new();
-    let mut span: HashMap<u64, (u64, u64)> = HashMap::new();
+    let mut books_col = Vec::with_capacity(readers.len());
+    let mut positions_col = Vec::with_capacity(readers.len());
+    for reader in readers {
+        books_col.push(reader.fast_fields().u64("book_id")?);
+        positions_col.push(reader.fast_fields().u64("position")?);
+    }
+    let value = |col: &[tantivy::columnar::Column<u64>], addr: DocAddress| {
+        col[addr.segment_ord as usize].first(addr.doc_id)
+            .ok_or_else(|| Error::Unsupported("a line without book_id or position".into()))
+    };
+    // pass 1: each book's span (first, last position) and line count
+    let mut books: HashMap<u64, Book> = HashMap::new();
     for (ord, reader) in readers.iter().enumerate() {
-        let book = reader.fast_fields().u64("book_id")?;
-        let position = reader.fast_fields().u64("position")?;
         for doc in reader.doc_ids_alive() {
-            let (Some(b), Some(p)) = (book.first(doc), position.first(doc)) else {
-                return Err(Error::Unsupported("a line without book_id or position".into()));
-            };
-            let s = span.entry(b).or_insert((p, p));
-            s.0 = s.0.min(p);
-            s.1 = s.1.max(p);
-            lines.push((b, p, DocAddress::new(ord as u32, doc)));
+            let addr = DocAddress::new(ord as u32, doc);
+            let (b, p) = (value(&books_col, addr)?, value(&positions_col, addr)?);
+            let book = books.entry(b).or_insert(Book { first: p, last: p, lines: 0, start: None, slot: 0 });
+            book.first = book.first.min(p);
+            book.last = book.last.max(p);
+            book.lines += 1;
         }
     }
-    // new start of each book, in the host's order
-    let mut start: HashMap<u64, u64> = HashMap::with_capacity(span.len());
-    let mut cursor = 0u64;
+    // the new order of the books: the host's, then the unlisted ones in their old order
+    let mut ordered: Vec<u64> = Vec::with_capacity(books.len());
+    let mut listed: HashMap<u64, ()> = HashMap::with_capacity(book_order.len());
     for &book in book_order {
-        if start.contains_key(&book) {
+        if listed.insert(book, ()).is_some() {
             return Err(Error::Unsupported(format!("book {book} appears twice in the new order")));
         }
-        let Some(&(first, last)) = span.get(&book) else {
-            // a book of the catalog with no indexed line: nothing to place
-            start.insert(book, u64::MAX);
-            continue;
-        };
-        start.insert(book, cursor);
-        cursor += last - first + 1;
+        // a book of the catalog with no indexed line: nothing to place
+        if books.contains_key(&book) {
+            ordered.push(book);
+        }
     }
-    // books the host's order does not list go last, in their old order
     let mut missing: Vec<(u64, u64)> =
-        span.iter().filter(|(b, _)| !start.contains_key(b)).map(|(&b, &(first, _))| (first, b)).collect();
+        books.iter().filter(|(b, _)| !listed.contains_key(b)).map(|(&b, book)| (book.first, b)).collect();
+    drop(listed);
     missing.sort_unstable();
-    for (_, book) in missing {
-        let (first, last) = span[&book];
-        start.insert(book, cursor);
-        cursor += last - first + 1;
+    ordered.extend(missing.into_iter().map(|(_, b)| b));
+    // each book's new start position and its slice of the new doc order
+    let (mut cursor, mut slot) = (0u64, 0usize);
+    for b in &ordered {
+        let book = books.get_mut(b).expect("listed above");
+        book.start = Some(cursor);
+        book.slot = slot;
+        cursor += book.last - book.first + 1;
+        slot += book.lines as usize;
     }
-    let new_position = |book: u64, old: u64| start[&book] + (old - span[&book].0);
-    let mut keyed: Vec<(u64, DocAddress)> =
-        lines.into_iter().map(|(b, p, addr)| (new_position(b, p), addr)).collect();
-    // stable on equal positions (a duplicate position keeps segment / doc order)
-    keyed.sort_by_key(|&(p, addr)| (p, addr.segment_ord, addr.doc_id));
-    let positions: Vec<u64> = keyed.iter().map(|k| k.0).collect();
-    Ok(ReorderPlan {
-        new_to_old: keyed.into_iter().map(|k| k.1).collect(),
-        fast_field_values: vec![("position".to_string(), positions)],
-    })
+    // pass 2: each line into its book's slice, then each slice in old position order
+    // (stable on equal positions: segment / doc order). In an index already in catalog
+    // order the slices come out sorted and the sort is a check.
+    let mut fill: HashMap<u64, usize> = books.iter().map(|(&b, book)| (b, book.slot)).collect();
+    let mut new_to_old = vec![DocAddress::new(0, 0); slot];
+    for (ord, reader) in readers.iter().enumerate() {
+        for doc in reader.doc_ids_alive() {
+            let addr = DocAddress::new(ord as u32, doc);
+            let next = fill.get_mut(&value(&books_col, addr)?).expect("seen in pass 1");
+            new_to_old[*next] = addr;
+            *next += 1;
+        }
+    }
+    drop(fill);
+    let key = |addr: &DocAddress| {
+        (positions_col[addr.segment_ord as usize].first(addr.doc_id).unwrap_or(0), addr.segment_ord, addr.doc_id)
+    };
+    for b in &ordered {
+        let book = &books[b];
+        let slice = &mut new_to_old[book.slot..book.slot + book.lines as usize];
+        if !slice.windows(2).all(|w| key(&w[0]) <= key(&w[1])) {
+            slice.sort_by_cached_key(key);
+        }
+    }
+    // the new position of a line: old position + its book's shift
+    let shift: HashMap<u64, i64> =
+        books.iter().map(|(&b, book)| (b, book.start.expect("placed above") as i64 - book.first as i64)).collect();
+    drop(books);
+    let new_position: tantivy::indexer::FastFieldValueFn = Box::new(move |addr: DocAddress| {
+        let seg = addr.segment_ord as usize;
+        let (b, p) = (books_col[seg].first(addr.doc_id).unwrap_or(0), positions_col[seg].first(addr.doc_id).unwrap_or(0));
+        (p as i64 + shift.get(&b).copied().unwrap_or(0)) as u64
+    });
+    Ok(ReorderPlan { new_to_old, fast_field_values: vec![("position".to_string(), new_position)] })
+}
+
+/// A book of the plan.
+struct Book {
+    first: u64,
+    last: u64,
+    lines: u64,
+    /// new first position
+    start: Option<u64>,
+    /// first new doc of the book
+    slot: usize,
 }
 
 #[cfg(test)]

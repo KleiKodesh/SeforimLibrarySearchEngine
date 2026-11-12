@@ -11,7 +11,7 @@ namespace SeforimSearch.Demo
     /// <summary>
     /// Demo console:
     ///   build  [--db path] [--index dir] [--max-lines N] [--no-positions] [--keep-marks]
-    ///   search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] query...
+    ///   search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--page-size N] [--pages N] query...
     ///   selftest [--dir path] [--keep]   (C# corpus-pool and end-to-end tests on a small fixture)
     ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] [--regex] [--order catalog|relevance|generation] [--cancel-after MS] query...
     ///   load   [--db path] [--index dir] --queries file [--searchers N] [--rounds R] [--commit-every MS] [--update-lines K] [--update-from P]
@@ -93,7 +93,7 @@ namespace SeforimSearch.Demo
         private static int Search(SeforimDbFtsEngine engine, string[] args)
         {
             var words = args.Skip(1).Where((a, i) => !a.StartsWith("--", StringComparison.Ordinal)
-                && (i == 0 || !new[] { "--db", "--index", "--distance", "--repeat", "--resume-after" }.Contains(args[i]))).ToArray();
+                && (i == 0 || !new[] { "--db", "--index", "--distance", "--repeat", "--resume-after", "--page-size", "--pages" }.Contains(args[i]))).ToArray();
             string query = string.Join(" ", words);
             int distance = int.TryParse(Option(args, "--distance"), out var d) ? d : int.MaxValue;
             var wordOptions = new WalkOptions
@@ -117,12 +117,21 @@ namespace SeforimSearch.Demo
             // ported coordinator: the first frame carries Restarted when the line cannot be placed.
             int resumeAfterLineId = int.TryParse(Option(args, "--resume-after"), out int ra) && ra > 0 ? ra : 0;
             var coordinator = new SeforimDbFtsIndexCoordinator(engine) { WordOptions = wordOptions };
+            // Page-by-page display (KitveiHakodesh's snippet model, the page's ensureSnippets): the
+            // first page renders from the texts seeded on the stream (Core SeedSnippetTexts, the
+            // first 100 hits); a later page asks the coordinator for its rows' texts
+            // (ftsSnippetTexts, at most 200 ids per request, short rows with their neighbour
+            // context in the same statement), with the list's lookahead, cached.
+            int pageSize = int.TryParse(Option(args, "--page-size"), out var ps) && ps > 0 ? ps : 10;
+            int pages = int.TryParse(Option(args, "--pages"), out var pg) && pg > 0 ? pg : 1;
             for (int run = 1; run <= repeat; run++)
             {
             var terms = new List<string>();   // the receiver's table: NewTerms appended per frame
             var sw = Stopwatch.StartNew();
             TimeSpan? first = null;
-            int total = 0, shown = run == 1 ? 0 : 10, frames = 0;
+            int total = 0, frames = 0, printedPages = run == 1 ? 0 : pages;
+            var all = new List<FtsHit>();   // every hit so far, in display order (descriptors only)
+            var cache = new FtsSnippetTextCache((ids, shorts) => Task.FromResult(coordinator.SnippetTexts(ids, shorts)));
             string? error = null;
             int unreadableRows = 0;
             string? unreadableError = null;
@@ -136,21 +145,16 @@ namespace SeforimSearch.Demo
                 terms.AddRange(chunk.NewTerms);
                 if (chunk.Results.Count > 0) first ??= sw.Elapsed;
                 total += chunk.Results.Count;
-                foreach (var hit in chunk.Results)
-                {
-                    if (shown >= 10) break;
-                    shown++;
-                    // The seeded snippet text (Core's FtsSnippetText): the matched line, plus
-                    // plain neighbour context for a short window (presentation only).
-                    var text = chunk.SnippetTexts.Find(t => t.LineId == hit.LineId);
-                    string rendered = text == null ? "" : Render(text.Text, hit);
-                    if (text != null && (hit.SnippetFlags & FtsHit.SnippetFlagShort) != 0)
-                        rendered = WithContext(rendered, text, hit, 8);
-                    Console.WriteLine($"line {hit.LineId} book {hit.BookId} dist {hit.WordDistance}: " + rendered);
-                }
+                cache.Seed(chunk.SnippetTexts);
+                all.AddRange(chunk.Results);
+                // the first page as soon as its rows are in (the seeded texts cover it)
+                if (printedPages == 0 && all.Count >= pageSize) PrintPage(all, cache, printedPages++, pageSize);
                 return Task.CompletedTask;
             }, System.Threading.CancellationToken.None, resumeAfterLineId).GetAwaiter().GetResult();
             if (error != null) { Console.Error.WriteLine("search failed: " + error); return 1; }
+            while (printedPages < pages && printedPages * pageSize < all.Count) PrintPage(all, cache, printedPages++, pageSize);
+            if (run == 1)
+                Console.Error.WriteLine($"snippet texts: {cache.Requests} on-demand requests (at most {FtsSnippetTextCache.FetchBatch} ids each)");
             if (FtsLib.Fts5.HostTiming.Enabled) Console.Error.WriteLine(FtsLib.Fts5.HostTiming.Report());
             Console.Error.WriteLine($"search: {total:N0} hits in {sw.Elapsed.TotalMilliseconds:F0} ms " +
                                     $"(first batch {first?.TotalMilliseconds:F0} ms); terms: {string.Join(", ", terms)}");
@@ -282,6 +286,27 @@ namespace SeforimSearch.Demo
                 else sb.Append(c);
             }
             return sb.Append('"').ToString();
+        }
+
+        /// <summary>One page of hits (rows <paramref name="page"/> * size ..), its texts taken from
+        /// the cache: fetched on demand with the list's lookahead (60 ahead, 20 behind) when the
+        /// seeded ones do not cover it.</summary>
+        private static void PrintPage(List<FtsHit> all, FtsSnippetTextCache cache, int page, int size)
+        {
+            int from = page * size, count = Math.Min(size, all.Count - from);
+            if (count <= 0) return;
+            cache.EnsureAround(all, from, count).GetAwaiter().GetResult();
+            Console.WriteLine($"-- page {page + 1} (rows {from + 1}-{from + count}) --");
+            for (int i = from; i < from + count; i++)
+            {
+                var hit = all[i];
+                bool isShort = (hit.SnippetFlags & FtsHit.SnippetFlagShort) != 0;
+                // the matched line, plus plain neighbour context for a short window
+                var text = cache.TextOf(hit.LineId, isShort);
+                string rendered = text == null ? "" : Render(text.Text, hit);
+                if (text != null && isShort) rendered = WithContext(rendered, text, hit, 8);
+                Console.WriteLine($"{i + 1}. line {hit.LineId} book {hit.BookId} dist {hit.WordDistance}: " + rendered);
+            }
         }
 
         /// <summary>Plain-text rendering of a descriptor: tags stripped, marks in [ ].</summary>

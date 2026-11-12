@@ -650,6 +650,30 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             Check(full[0].Stage == "validate" && !full[0].Restarted && full[0].Results.Count == 0, "first frame = validate");
             Check(full[full.Count - 1].Done && full[full.Count - 1].Error == null, "last frame = Done");
             Check(full.Count(f => f.Done) == 1, "one Done frame");
+
+            // KitveiHakodesh's snippet model: the first SeedSnippetTextHitCount hits' texts ride on
+            // the stream; later rows ask the coordinator (ftsSnippetTexts) through the page cache,
+            // at most FetchBatch ids per request, with the list's lookahead.
+            var hitsInOrder = full.SelectMany(f => f.Results).ToList();
+            var seeded = full.SelectMany(f => f.SnippetTexts).ToList();
+            Check(seeded.Select(t => t.LineId).OrderBy(x => x).SequenceEqual(
+                      hitsInOrder.Take(SeforimDbFtsSearcher.SeedSnippetTextHitCount).Select(h => h.LineId).OrderBy(x => x)),
+                  $"seeded texts = the first {SeforimDbFtsSearcher.SeedSnippetTextHitCount} hits ({seeded.Count})");
+            var onDemand = c.SnippetTexts(seeded.Select(t => t.LineId).ToList(), Array.Empty<long>());
+            Check(onDemand.Count == seeded.Count && onDemand.All(t => seeded.Any(x => x.LineId == t.LineId && x.Text == t.Text)),
+                  "an on-demand read returns the seeded texts");
+            var cache = new FtsSnippetTextCache((ids, shorts) => Task.FromResult(c.SnippetTexts(ids, shorts)));
+            cache.Seed(seeded);
+            cache.EnsureAround(hitsInOrder, 0, 30).GetAwaiter().GetResult();
+            Check(cache.Requests == 0, "the first page renders from the seeded texts: " + cache.Requests);
+            cache.EnsureAround(hitsInOrder, 600, 30).GetAwaiter().GetResult();
+            Check(cache.Requests == 1, "a later page: one request with its lookahead: " + cache.Requests);
+            Check(Enumerable.Range(580, 110).All(i => cache.TextOf(hitsInOrder[i].LineId, false) is { Text.Length: > 0 }),
+                  "shown rows + 60 ahead + 20 behind cached");
+            Check(cache.TextOf(hitsInOrder[579].LineId, false) == null, "nothing before the lookbehind");
+            cache.EnsureAround(hitsInOrder, 0, hitsInOrder.Count).GetAwaiter().GetResult();
+            Check(cache.Requests == 1 + (hitsInOrder.Count - SeforimDbFtsSearcher.SeedSnippetTextHitCount - 110 + FtsSnippetTextCache.FetchBatch - 1) / FtsSnippetTextCache.FetchBatch,
+                  "requests split at FetchBatch ids: " + cache.Requests);
             var fullIds = full.SelectMany(f => f.Results).Select(h => h.LineId).ToList();
             Check(fullIds.Count == 2 * LinesPerBook / 3, $"full stream {fullIds.Count} hits");
             var resultFrames = full.Where(f => f.Results.Count > 0).ToList();

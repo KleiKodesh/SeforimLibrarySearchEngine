@@ -138,7 +138,8 @@ void main() {
   group('SearchPage on a synthetic seforim.db', () {
     late Directory dir;
     late SeforimDb db;
-    late SeforimIndex index;
+    late SeforimIndex index; // with positions (the default)
+    late SeforimIndex noPositions; // FtsLib's flavour: no positions
     // line id, book, line index, section, text
     const lines = [
       (1, 1, 0, 70, 'alpha beta gamma'),
@@ -171,17 +172,25 @@ void main() {
       }
       w.close();
       db = SeforimDb.open('${dir.path}/seforim.db');
-      index = SeforimIndex.create('${dir.path}/idx');
-      final iw = index.openWriter(heapBytes: 30000000, threads: 1);
-      var pos = 0;
-      for (final l in lines) {
-        iw.add(LineDocument(lineId: l.$1, position: pos++, bookId: l.$2, text: l.$5));
+      SeforimIndex build(String name, IndexOptions options) {
+        final built = SeforimIndex.create('${dir.path}/$name', options);
+        final iw = built.openWriter(heapBytes: 30000000, threads: 1);
+        var pos = 0;
+        for (final l in lines) {
+          iw.add(LineDocument(lineId: l.$1, position: pos++, bookId: l.$2, text: l.$5));
+        }
+        iw.commit('done');
+        iw.close();
+        return built;
       }
-      iw.commit('done');
-      iw.close();
+
+      index = build('idx', const IndexOptions());
+      noPositions = build('idx-np', const IndexOptions(positions: false));
     });
 
     tearDownAll(() {
+      index.close();
+      noPositions.close();
       db.close();
       try {
         dir.deleteSync(recursive: true);
@@ -203,9 +212,24 @@ void main() {
       expect([for (final g in p.groups.single.sections) g.members.length], [2, 1]);
     });
 
-    test('distance needs texts: partial without counting, exact after', () {
+    // Issue #21: on an index WITH positions the distance is decided from the
+    // positions during the search: every hit already passes, totals exact at once.
+    test('distance, index with positions: decided without texts', () {
       final cat = Catalog.read(db);
       final s = index.search(SearchOptions('alpha beta', maxWordDistance: 2));
+      expect(s.countNeedsText, isFalse);
+      final p = SearchPage.take(db, s, cat, exactCounts: false);
+      expect(p.status, CountStatus.exact);
+      expect(p.totalCount, 4); // line 3 is too far apart
+      expect(p.counts.byBook, {1: 2, 2: 1, 3: 1});
+      expect(p.categoryCounts['/A/A1'], 2);
+      expect(p.hitCount, 4); // the far line is not a hit
+    });
+
+    // FtsLib's flavour (no positions): the distance is checked on the line text.
+    test('distance, index without positions: partial without counting, exact after', () {
+      final cat = Catalog.read(db);
+      final s = noPositions.search(SearchOptions('alpha beta', maxWordDistance: 2));
       expect(s.countNeedsText, isTrue);
       final partial = SearchPage.take(db, s, cat, exactCounts: false);
       expect(partial.status, CountStatus.partial);

@@ -39,6 +39,29 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 
         private SeforimDbFtsEngine GetEngine() => _engine ?? throw new InvalidOperationException("no database");
 
+        /// <summary>
+        /// Core's SnippetTexts (the service's ftsSnippetTexts): the snippet texts for the rows a
+        /// page shows, each line's own text, and for the lines the hit flagged short also their
+        /// neighbour context, in one statement (<see cref="SeforimDbFtsCorpus.FetchSnippetTexts"/>).
+        /// No index, no query, no locate: the descriptor already rode on the hit. Works while the
+        /// index is still building. A page asks for at most
+        /// <see cref="FtsSnippetTextCache.FetchBatch"/> ids at a time.
+        /// </summary>
+        public List<FtsSnippetText> SnippetTexts(IReadOnlyList<long> lineIds, IReadOnlyList<long> shortLineIds)
+        {
+            if (!HasDb || (lineIds.Count == 0 && shortLineIds.Count == 0)) return new List<FtsSnippetText>();
+            try
+            {
+                using var corpus = GetEngine().OpenCorpus();
+                return corpus.FetchSnippetTexts(lineIds, shortLineIds);
+            }
+            catch (Exception ex)
+            {
+                _log(FtsIndexLogLevel.Error, "FTS snippet texts failed", ex);
+                return new List<FtsSnippetText>();
+            }
+        }
+
         // ── Streaming search (ftsSearchStream) ───────────────────────────────────────
         // Frames are pushed through emit until the search finishes. Backpressure: each batch
         // awaits emit before the next one is built. Results are never capped.

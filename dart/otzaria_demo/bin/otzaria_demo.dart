@@ -8,6 +8,7 @@ import 'package:otzaria_demo/acronym_lexicon.dart';
 import 'package:otzaria_demo/magic_dictionary.dart';
 import 'package:otzaria_demo/facets.dart';
 import 'package:otzaria_demo/grouping.dart';
+import 'package:otzaria_demo/snippet_texts.dart';
 import 'package:otzaria_demo/translation_lexicon.dart';
 import 'package:seforim_search/seforim_search.dart';
 
@@ -43,7 +44,7 @@ search options (Otzaria names):
   --book TEXT         only books whose title/category contains TEXT
   --group section|identical  (Otzaria's grouping; limit/offset then count groups)
   --group-scan N      identical: hits read for signatures (default 20000)
-  --limit N (100) --offset N (0)  --context N (8)
+  --limit N (100: rows per page) --offset N (0) --pages N (1: pages shown one after another)  --context N (8)
   --count             exact totals: all lines passing every filter, and per book
   --order catalog|relevance  results order (Otzaria's sortBy; default catalog)
   word alternatives: write a,b in the query (Otzaria sets them per word in the UI)
@@ -54,7 +55,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
   final m = <String, String?>{};
   const valued = {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
-    'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'context', 'native', 'zstd', 'spacing', 'match',
+    'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'pages', 'context', 'native', 'zstd', 'spacing', 'match',
     'match-count', 'exclude', 'exclude-scope', 'exclude-options', 'dictionary', 'acronyms', 'group', 'group-scan',
     'order', 'scope', 'lexical',
   };
@@ -344,7 +345,8 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
       !o.containsKey('count') &&
       !(request.userRegex && SeforimIndex.userRegexKind(request.query) == 'line')) {
     index.close();
-    await _pageAsync(db, dir, o['native'], request, contextWords, titles, limit, offset);
+    await _pageAsync(db, dir, o['native'], request, contextWords, titles, limit, offset, _int(o, 'pages') ?? 1,
+        info.positions);
     return;
   }
   final sw = Stopwatch()..start();
@@ -394,55 +396,21 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
     return;
   }
 
-  // Page through hits in hit order (--order), locate snippets per batch, keep the
-  // ones that pass the filters, until offset+limit results exist.
-  final results = <(PlacedHit, String, Snippet)>[];
-  var passed = 0;
-  final it = hits.iterator;
-  var hitNo = 0; // the next hit's index in the search's hits
-  var more = true;
-  while (more && results.length < limit) {
-    final batch = <PlacedHit>[];
-    final batchStart = hitNo;
-    while (batch.length < 256 && (more = it.moveNext())) {
-      batch.add(it.current);
-      hitNo++;
-    }
-    if (batch.isEmpty) break;
-    final texts = db.lineTexts([...batch.map((h) => h.lineId), for (final h in batch) if (h.nextLineId != null) h.nextLineId!]);
-    final lineTexts = [for (final h in batch) texts[h.lineId] ?? ''];
-    final nextTexts = [for (final h in batch) h.nextLineId == null ? null : texts[h.nextLineId] ?? ''];
-    // a cross-line hit is located over its line and the next one (joined at a
-    // line break); otherwise the hits go as their lines (positions index: the
-    // matched words come from the postings)
-    final snippets = batch.any((h) => h.nextLineId != null)
-        ? session.locatePairs(lineTexts, nextTexts)
-        : session.locateLines([
-            for (var i = 0; i < batch.length; i++) HitLines(batchStart + i, [(batch[i].lineId, lineTexts[i])])
-          ]);
-    for (var i = 0; i < batch.length && results.length < limit; i++) {
-      final s = snippets[i];
-      if (s == null) continue;
-      if (passed++ < offset) continue;
-      final joined = s.breakAt == null ? lineTexts[i] : '${lineTexts[i]}\n${nextTexts[i]}';
-      results.add((batch[i], joined, s));
-    }
-  }
-  final refs = db.heRefs(results.map((r) => r.$1.lineId));
-  final terms = session.takeNewTerms();
-
-  stdout.writeln('Query: ${request.query}, matching lines: ${session.hitCount}'
-      ', search ${searchMs}ms, '
-      'page ${sw.elapsedMilliseconds}ms');
-  stdout.writeln('Matched words: ${terms.take(30).join(', ')}${terms.length > 30 ? ' …' : ''}');
-  if (o.containsKey('count')) _printCounts(db, session, titles);
-  var n = offset;
-  final rendered = renderAll(results);
-  for (var i = 0; i < results.length; i++) {
-    final h = results[i].$1;
-    stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})${_noteTag(db, h.lineId, h.bookId)}');
-    stdout.writeln('   ${rendered[i]}');
-  }
+  // The plain result pages: KitveiHakodesh's snippet model (_showPages).
+  await _showPages(db, titles, info.positions, contextWords, limit, offset, _int(o, 'pages') ?? 1, session.hitCount,
+      (from, count) async => session.hits(from, count),
+      (first, batch, lineTexts, nextTexts) async => batch.any((h) => h.nextLineId != null)
+          ? session.locatePairs(lineTexts, nextTexts)
+          : session.locateLines([
+              for (var i = 0; i < batch.length; i++) HitLines(first + i, [(batch[i].lineId, lineTexts[i])])
+            ]), () async {
+    final terms = session.takeNewTerms();
+    stdout.writeln('Query: ${request.query}, matching lines: ${session.hitCount}'
+        ', search ${searchMs}ms, '
+        'page ${sw.elapsedMilliseconds}ms');
+    stdout.writeln('Matched words: ${terms.take(30).join(', ')}${terms.length > 30 ? ' …' : ''}');
+    if (o.containsKey('count')) _printCounts(db, session, titles);
+  });
   session.close();
   index.close();
 }
@@ -450,7 +418,7 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
 /// The result page through [SearchWorker] (issue #16): the same hits,
 /// snippets and output as the sync path, with the engine on a worker isolate.
 Future<void> _pageAsync(SeforimDb db, String dir, String? nativePath, SearchOptions request, int contextWords,
-    Map<int, String> titles, int limit, int offset) async {
+    Map<int, String> titles, int limit, int offset, int pages, bool positions) async {
   final worker = await SearchWorker.spawn(dir, nativePath: nativePath);
   final sw = Stopwatch()..start(); // as the sync path: the search, not the isolate start
   final cancel = SearchCancelToken();
@@ -463,49 +431,140 @@ Future<void> _pageAsync(SeforimDb db, String dir, String? nativePath, SearchOpti
         stderr.writeln('notice: $n');
       }
       if (searchInfo.truncated) stderr.writeln('truncated: a walk hit its expansion cap');
-      final results = <(PlacedHit, String, Snippet)>[];
-      var passed = 0;
-      for (var hitNo = 0; hitNo < session.hitCount && results.length < limit; hitNo += 256) {
-        final batch = await session.hits(hitNo, 256);
-        if (batch.isEmpty) break;
-        final texts = db.lineTexts(
-            [...batch.map((h) => h.lineId), for (final h in batch) if (h.nextLineId != null) h.nextLineId!]);
-        final lineTexts = [for (final h in batch) texts[h.lineId] ?? ''];
-        final nextTexts = [for (final h in batch) h.nextLineId == null ? null : texts[h.nextLineId] ?? ''];
-        final snippets = batch.any((h) => h.nextLineId != null)
-            ? await session.locatePairs(lineTexts, nextTexts)
-            : await session.locateLines([
-                for (var i = 0; i < batch.length; i++) HitLines(hitNo + i, [(batch[i].lineId, lineTexts[i])])
-              ]);
-        for (var i = 0; i < batch.length && results.length < limit; i++) {
-          final s = snippets[i];
-          if (s == null) continue;
-          if (passed++ < offset) continue;
-          final joined = s.breakAt == null ? lineTexts[i] : '${lineTexts[i]}\n${nextTexts[i]}';
-          results.add((batch[i], joined, s));
-        }
-      }
-      final refs = db.heRefs(results.map((r) => r.$1.lineId));
-      final terms = await session.takeNewTerms();
-      stdout.writeln('Query: ${request.query}, matching lines: ${session.hitCount}'
-          ', search ${searchMs}ms, page ${sw.elapsedMilliseconds}ms (worker isolate)');
-      stdout.writeln('Matched words: ${terms.take(30).join(', ')}${terms.length > 30 ? ' …' : ''}');
-      bool isShort(Snippet s) => s.isShort(contextWords) && s.breakAt == null;
-      final context = db.snippetTexts(const [], [for (final r in results) if (isShort(r.$3)) r.$1.lineId]);
-      var n = offset;
-      for (final (h, text, s) in results) {
-        final shown = isShort(s) && context[h.lineId] != null
-            ? _withContext(_render(text, s), context[h.lineId]!, s, contextWords)
-            : _render(text, s);
-        stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})${_noteTag(db, h.lineId, h.bookId)}');
-        stdout.writeln('   $shown');
-      }
+      await _showPages(db, titles, positions, contextWords, limit, offset, pages, session.hitCount,
+          (from, count) => session.hits(from, count),
+          (first, batch, lineTexts, nextTexts) => batch.any((h) => h.nextLineId != null)
+              ? session.locatePairs(lineTexts, nextTexts)
+              : session.locateLines([
+                  for (var i = 0; i < batch.length; i++) HitLines(first + i, [(batch[i].lineId, lineTexts[i])])
+                ]), () async {
+        final terms = await session.takeNewTerms();
+        stdout.writeln('Query: ${request.query}, matching lines: ${session.hitCount}'
+            ', search ${searchMs}ms, page ${sw.elapsedMilliseconds}ms (worker isolate)');
+        stdout.writeln('Matched words: ${terms.take(30).join(', ')}${terms.length > 30 ? ' …' : ''}');
+      });
     } finally {
       await session.close();
     }
   } finally {
     await worker.close();
   }
+}
+
+/// The plain result pages, page by page, in KitveiHakodesh's snippet model
+/// (Core SearchInBatches / BuildBatch, the service's ftsSnippetTexts, the
+/// page's ensureSnippets):
+///
+/// - each hit's window is located ONCE. Index without positions (FtsLib): the
+///   search reads the texts of a batch of 256 hits, locates them, keeps the ones
+///   that pass; index with positions: every hit already passed during the
+///   search (issue #21), so a hit is located only when its row is reached, over
+///   the text read for display (no text is read for the skipped [offset] hits).
+/// - the first [seedSnippetTextHitCount] passing hits' texts ride along (the
+///   batch already read them); a later row's text is fetched when its page is
+///   shown, at most [snippetFetchBatch] ids per request, [snippetLookAhead] rows
+///   ahead / [snippetLookBehind] behind, a SHORT row's +-2 neighbour lines in the
+///   same statement, cached ([SnippetTextCache]).
+Future<void> _showPages(
+  SeforimDb db,
+  Map<int, String> titles,
+  bool positions,
+  int contextWords,
+  int limit,
+  int offset,
+  int pages,
+  int hitCount,
+  Future<List<PlacedHit>> Function(int from, int count) hits,
+  Future<List<Snippet?>> Function(int first, List<PlacedHit> batch, List<String> lineTexts, List<String?> nextTexts)
+      locate,
+  Future<void> Function() header,
+) async {
+  final cache = SnippetTextCache((ids, shorts) => db.snippetTexts(ids, shorts));
+  bool isShort(Snippet s) => s.isShort(contextWords) && s.breakAt == null;
+  SnippetRow rowOf(PlacedHit h, Snippet s) => (lineId: h.lineId, short: isShort(s));
+  List<SnippetRow> linesOf(PlacedHit h) =>
+      [(lineId: h.lineId, short: false), if (h.nextLineId != null) (lineId: h.nextLineId!, short: false)];
+
+  final rows = <(PlacedHit, Snippet)>[]; // passing hits from [offset] on, located
+  var hitNo = 0, passed = 0;
+  if (positions) hitNo = passed = offset < hitCount ? offset : hitCount; // every hit passes
+
+  // Locates hits until [need] rows exist or the hits run out.
+  Future<void> fill(int need) async {
+    while (rows.length < need && hitNo < hitCount) {
+      if (positions) {
+        // the rows to show plus the lookahead: their texts in one request each 200
+        final batch = await hits(hitNo, need - rows.length + snippetLookAhead);
+        if (batch.isEmpty) break;
+        final shown = batch.sublist(0, need - rows.length < batch.length ? need - rows.length : batch.length);
+        await cache.ensure([for (final h in batch) ...linesOf(h)]);
+        String textOf(int id) => cache.textOf((lineId: id, short: false))?.text ?? '';
+        final snippets = await locate(hitNo, shown, [for (final h in shown) textOf(h.lineId)],
+            [for (final h in shown) h.nextLineId == null ? null : textOf(h.nextLineId!)]);
+        hitNo += shown.length;
+        for (var i = 0; i < shown.length; i++) {
+          if (snippets[i] != null) rows.add((shown[i], snippets[i]!));
+        }
+        continue;
+      }
+      final batch = await hits(hitNo, 256);
+      if (batch.isEmpty) break;
+      final first = hitNo;
+      hitNo += batch.length;
+      final texts = db.lineTexts([...batch.map((h) => h.lineId), for (final h in batch) if (h.nextLineId != null) h.nextLineId!]);
+      final lineTexts = [for (final h in batch) texts[h.lineId] ?? ''];
+      final nextTexts = [for (final h in batch) h.nextLineId == null ? null : texts[h.nextLineId] ?? ''];
+      final snippets = await locate(first, batch, lineTexts, nextTexts);
+      final seedShort = <int>[];
+      for (var i = 0; i < batch.length; i++) {
+        final s = snippets[i];
+        if (s == null) continue;
+        // seed: the first passing hits keep the texts the batch read (Core SeedSnippetTexts)
+        if (passed < seedSnippetTextHitCount) {
+          if (isShort(s)) {
+            seedShort.add(batch[i].lineId);
+          } else {
+            cache.seed([
+              SnippetText(batch[i].lineId, lineTexts[i], '', ''),
+              if (batch[i].nextLineId != null) SnippetText(batch[i].nextLineId!, nextTexts[i]!, '', ''),
+            ]);
+          }
+        }
+        if (passed++ >= offset) rows.add((batch[i], s));
+      }
+      // the seeded short rows' context: one statement for the batch
+      if (seedShort.isNotEmpty) cache.seed(db.snippetTexts(const [], seedShort).values, withContext: true);
+    }
+  }
+
+  await fill(limit);
+  await header();
+  for (var page = 0; page < pages; page++) {
+    final from = page * limit;
+    if (page > 0) await fill(from + limit);
+    if (from >= rows.length) break;
+    final count = from + limit > rows.length ? rows.length - from : limit;
+    // the rows shown, with the lookahead, before any of them is printed
+    final display = [for (final (h, s) in rows) rowOf(h, s)];
+    await cache.ensureAround(display, from, count);
+    await cache.ensure([for (final (h, _) in rows.sublist(from, from + count)) ...linesOf(h).skip(1)]);
+    final shown = rows.sublist(from, from + count);
+    final refs = db.heRefs(shown.map((r) => r.$1.lineId));
+    if (pages > 1) stdout.writeln('-- page ${page + 1} (rows ${offset + from + 1}-${offset + from + count}) --');
+    var n = offset + from;
+    for (final (h, s) in shown) {
+      final t = cache.textOf(rowOf(h, s)) ?? SnippetText(h.lineId, '', '', '');
+      final text = s.breakAt == null
+          ? t.text
+          : '${t.text}\n${cache.textOf((lineId: h.nextLineId!, short: false))?.text ?? ''}';
+      final window = _render(text, s);
+      final row = isShort(s) ? _withContext(window, t, s, contextWords) : window;
+      stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})'
+          '${_noteTag(db, h.lineId, h.bookId)}');
+      stdout.writeln('   $row');
+    }
+  }
+  stderr.writeln('snippet texts: ${cache.requests} on-demand requests (at most $snippetFetchBatch ids each)');
 }
 
 /// A user regex of Otzaria's Line kind: the engine matches each line's text.

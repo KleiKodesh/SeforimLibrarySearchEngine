@@ -1682,6 +1682,13 @@ stay available):
     seeded, short ones with their ±2 neighbour context from
     `FetchSnippetTexts`: plain ids by primary key and short ids with their
     neighbours in ONE statement)
+  - snippet texts on demand (KitveiHakodesh's model): later hits carry only
+    their descriptor; `SeforimDbFtsIndexCoordinator.SnippetTexts(lineIds,
+    shortLineIds)` (Core's, the service's `ftsSnippetTexts`) reads a page's
+    rows, and `FtsSnippetTextCache` is the page side (`ensureSnippets`): at
+    most 200 ids per request, short rows' context in the same statement,
+    lookahead 60 ahead / 20 behind, in-flight requests shared, LRU of 1500.
+    `search --page-size N --pages N` shows the results page by page through it.
 - **FtsLib facade with the same names:** `FtsDocumentPlacement`,
   `SearchResult`, `SnippetDescriptor` (the query string goes to the engine
   as `SearchOptions`; FtsLib's `QueryParser` is ported in hebrew-fts), and
@@ -1720,7 +1727,17 @@ stay available):
   local DB (all 7,660,127 rows decode as UTF-8, no NUL), so none handled.
 - **Dart demo** (`dart/otzaria_demo`) does the same: no widening; short rows
   get plain ±2 neighbour context from `SeforimDb.snippetTexts` (one statement
-  per page), rendered as the KitveiHakodesh page does (`withContext`).
+  per request), rendered as the KitveiHakodesh page does (`withContext`).
+  Snippet texts follow KitveiHakodesh's model (`lib/snippet_texts.dart`,
+  `SnippetTextCache`): index without positions, the batch reads its texts to
+  locate (FtsLib) and the first 100 passing hits keep them (seed); index with
+  positions, every hit already passed during the search (issue #21), so no
+  text is read for skipped hits and a hit is located when its row is reached.
+  Rows are shown page by page (`--limit` rows per page, `--pages N`); a page's
+  missing texts are fetched at most 200 ids per request with the 60 / 20
+  lookahead, in-flight requests shared, LRU of 1500. On a positions index a
+  row's shortness is known only after its locate, so a page with short rows
+  makes one more request for their context.
 
 ## Build and search reports
 

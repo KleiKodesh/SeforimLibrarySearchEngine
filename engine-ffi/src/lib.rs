@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 10; // 10: word-level descriptors (word_windows, se_search_copy_windows, se_search_finish_windows)
+pub const SE_ABI_VERSION: u32 = 11; // 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -1930,6 +1930,170 @@ pub unsafe extern "C" fn se_search_close(search: *mut SearchResult) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// semantic search (issue #18): the vector sidecar, semantic-only search and
+// hybrid fusion. The host supplies every vector; the library runs no model.
+
+unsafe fn slice_arg<'a, T>(ptr: *const T, len: usize, name: &str) -> Result<&'a [T], String> {
+    if len == 0 {
+        return Ok(&[]);
+    }
+    if ptr.is_null() {
+        return Err(format!("null {name}"));
+    }
+    Ok(std::slice::from_raw_parts(ptr, len))
+}
+
+/// Adds / removes / replaces line vectors in the index's vector sidecar
+/// (`<index>/vectors/`) and publishes a new generation (searches keep the
+/// old one until it is in). Removals first: whole books (`remove_books`,
+/// the per-book update of issue #29), single lines (`remove_lines`); then
+/// `add_count` lines: `line_ids[i]`, `book_ids[i]` and the f32 vector
+/// `vectors[i * dims .. (i + 1) * dims]` (L2-normalized by the engine; a
+/// zero vector is an error). A line id added again replaces its vector.
+/// `dims` must match an existing store. Runs in the OS background mode;
+/// blocking (call from a worker thread or `*_async`). `token` null or live
+/// (cancelled: nothing published). Returns JSON
+/// `{"generation":N,"lines":N,"books":N,"removed":N,"added":N,"rebuilt":bool}`
+/// (free with `se_string_free`), null on error.
+///
+/// # Safety
+/// `index` live; every array valid for its count (`vectors` for
+/// `add_count * dims` floats); `token` null or live.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn se_vectors_update(
+    index: *const LineIndex,
+    dims: u32,
+    remove_books: *const u64,
+    remove_books_count: usize,
+    remove_lines: *const u64,
+    remove_lines_count: usize,
+    line_ids: *const u64,
+    book_ids: *const u64,
+    vectors: *const f32,
+    add_count: usize,
+    token: *const CancelToken,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        let dims = dims as usize;
+        let lines = slice_arg(line_ids, add_count, "line_ids")?;
+        let books = slice_arg(book_ids, add_count, "book_ids")?;
+        let floats = slice_arg(vectors, add_count.checked_mul(dims).ok_or("too many floats")?, "vectors")?;
+        let mut update = seforim_engine::semantic::VectorUpdate {
+            remove_books: slice_arg(remove_books, remove_books_count, "remove_books")?.to_vec(),
+            remove_lines: slice_arg(remove_lines, remove_lines_count, "remove_lines")?.to_vec(),
+            add: Vec::with_capacity(add_count),
+        };
+        for i in 0..add_count {
+            update.add.push(seforim_engine::semantic::VectorRecord {
+                line_id: check_id("line_id", lines[i])?,
+                book_id: check_id("book_id", books[i])?,
+                vector: floats[i * dims..(i + 1) * dims].to_vec(),
+            });
+        }
+        let stats = index.update_vectors(dims, &update, token.as_ref()).map_err(err)?;
+        let json = serde_json::json!({
+            "generation": stats.generation,
+            "lines": stats.lines,
+            "books": stats.books,
+            "removed": stats.removed,
+            "added": stats.added,
+            "rebuilt": stats.rebuilt,
+        });
+        Ok(out_string(json.to_string()))
+    })
+}
+
+/// The vector sidecar's size: JSON `{"dims":N,"lines":N,"books":N,"generation":N}`,
+/// or `null` (the JSON literal) when the index has no vectors. Free with
+/// `se_string_free`; a null pointer on error.
+///
+/// # Safety
+/// `index` must be a live index.
+#[no_mangle]
+pub unsafe extern "C" fn se_vectors_info(index: *const LineIndex) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        Ok(out_string(serde_json::to_string(&index.vector_info().map_err(err)?).map_err(err)?))
+    })
+}
+
+/// Semantic search: the `k` lines closest (cosine) to the host's query
+/// vector (`query`, `dims` floats, same model as the stored vectors).
+/// `options_json` (may be empty): `{"k":10,"books":[..]|null,"oversample":3.0,
+/// "exact_threshold":20000}`: `books` = the lexical search's filter; a
+/// filter leaving at most `exact_threshold` lines is an exact scan, else the
+/// HNSW graph is asked for `k * oversample` candidates that are rescored
+/// with the full vectors. Returns JSON `{"hits":[{"line_id","book_id",
+/// "score"}],"exact":bool,"allowed":N,"generation":N}` (best first, ties by
+/// line id; no vectors: no hits), null on error. `token` null or live.
+///
+/// # Safety
+/// `index` live; `query` valid for `dims` floats; `options_json` valid
+/// for `options_len` bytes; `token` null or live.
+#[no_mangle]
+pub unsafe extern "C" fn se_semantic_search(
+    index: *const LineIndex,
+    query: *const f32,
+    dims: usize,
+    options_json: *const u8,
+    options_len: usize,
+    token: *const CancelToken,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        let query = slice_arg(query, dims, "query")?;
+        let text = str_arg(options_json, options_len)?;
+        let options: seforim_engine::semantic::SemanticOptions =
+            if text.trim().is_empty() { Default::default() } else { serde_json::from_str(text).map_err(err)? };
+        let result = index.semantic_search(query, &options, token.as_ref()).map_err(err)?;
+        Ok(out_string(serde_json::to_string(&result).map_err(err)?))
+    })
+}
+
+/// Hybrid ranking: EVERY hit of the finished lexical search `search` fused
+/// with a semantic hit list (`semantic_json`: the `hits` array of
+/// `se_semantic_search`, or its whole result object). `query` is the
+/// lexical query text (the weighted fusion's alpha by query type).
+/// `fusion_json` (may be empty = weighted, alpha by query type):
+/// `{"strategy":"weighted","alpha":0.5|null,"bm25_k":10}` or
+/// `{"strategy":"rrf","k":60}`. Weighted needs the search in relevance
+/// order; a streamed search must be pulled to the end. Returns a JSON array
+/// `[{"line_id","book_id","position":N|null,"fused","lexical":x|null,
+/// "semantic":x|null,"source":"lexical"|"semantic"|"both"}]`, best first
+/// (ties by line id); null on error.
+///
+/// # Safety
+/// `search` a live session; each text valid for its length.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_fuse_semantic(
+    search: *const SearchResult,
+    query: *const u8,
+    query_len: usize,
+    semantic_json: *const u8,
+    semantic_len: usize,
+    fusion_json: *const u8,
+    fusion_len: usize,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let search = search.as_ref().ok_or("null search")?;
+        let query = str_arg(query, query_len)?;
+        let value: serde_json::Value = serde_json::from_str(str_arg(semantic_json, semantic_len)?).map_err(err)?;
+        let value = match value {
+            serde_json::Value::Object(mut o) => o.remove("hits").ok_or("semantic_json: no hits")?,
+            other => other,
+        };
+        let semantic: Vec<seforim_engine::semantic::SemanticHit> = serde_json::from_value(value).map_err(err)?;
+        let text = str_arg(fusion_json, fusion_len)?;
+        let fusion: seforim_engine::semantic::FusionOptions =
+            if text.trim().is_empty() { Default::default() } else { serde_json::from_str(text).map_err(err)? };
+        let fused = search.fuse_semantic(query, &semantic, &fusion).map_err(err)?;
+        Ok(out_string(serde_json::to_string(&fused).map_err(err)?))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2235,5 +2399,74 @@ mod tests {
 
     fn se_last_error_message() -> String {
         unsafe { CStr::from_ptr(se_last_error()).to_str().unwrap().to_string() }
+    }
+
+    #[test]
+    fn semantic_search_through_the_c_abi() {
+        unsafe {
+            let dir = std::env::temp_dir().join(format!("se_ffi_semantic_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let d = dir.to_string_lossy().into_owned();
+            let index = se_index_create(d.as_ptr(), d.len(), ptr::null(), 0);
+            assert!(!index.is_null());
+            let writer = se_writer_open(index, 30_000_000, 1);
+            for (id, book, text) in [(1u64, 5u64, "abc def"), (2, 5, "def"), (3, 6, "ghi")] {
+                assert_eq!(se_writer_add(writer, id, id, book, text.as_ptr(), text.len()), 0);
+            }
+            assert_eq!(se_writer_commit(writer, ptr::null(), 0), 0);
+            se_writer_close(writer);
+
+            let take = |p: *mut c_char| {
+                assert!(!p.is_null(), "{}", se_last_error_message());
+                let s = CStr::from_ptr(p).to_str().unwrap().to_string();
+                se_string_free(p);
+                s
+            };
+            assert_eq!(take(se_vectors_info(index)), "null");
+            let ids = [1u64, 2, 3];
+            let books = [5u64, 5, 6];
+            let vectors = [1.0f32, 0.0, 0.0, 0.9, 0.1, 0.0, 0.0, 0.0, 1.0];
+            let stats = take(se_vectors_update(
+                index, 3, ptr::null(), 0, ptr::null(), 0, ids.as_ptr(), books.as_ptr(), vectors.as_ptr(), 3, ptr::null(),
+            ));
+            assert!(stats.contains("\"lines\":3"), "{stats}");
+            assert!(take(se_vectors_info(index)).contains("\"dims\":3"));
+
+            let q = [1.0f32, 0.0, 0.0];
+            let opts = r#"{"k":2}"#;
+            let sem = take(se_semantic_search(index, q.as_ptr(), 3, opts.as_ptr(), opts.len(), ptr::null()));
+            let v: serde_json::Value = serde_json::from_str(&sem).unwrap();
+            assert_eq!(v["hits"][0]["line_id"], 1);
+            assert_eq!(v["hits"][1]["line_id"], 2);
+            // wrong dims: an error
+            assert!(se_semantic_search(index, q.as_ptr(), 2, ptr::null(), 0, ptr::null()).is_null());
+            assert!(se_last_error_message().contains("dims"));
+            // a zero vector is refused at ingest
+            let zero = [0.0f32; 3];
+            assert!(se_vectors_update(index, 3, ptr::null(), 0, ptr::null(), 0, ids.as_ptr(), books.as_ptr(), zero.as_ptr(), 1, ptr::null())
+                .is_null());
+
+            // hybrid: the lexical search in relevance order, fused with the semantic hits
+            let req = r#"{"query":"ghi","order":"relevance"}"#;
+            let search = se_search(index, req.as_ptr(), req.len());
+            assert!(!search.is_null(), "{}", se_last_error_message());
+            let query = "ghi";
+            let fused = take(se_search_fuse_semantic(search, query.as_ptr(), query.len(), sem.as_ptr(), sem.len(), ptr::null(), 0));
+            let f: serde_json::Value = serde_json::from_str(&fused).unwrap();
+            let lines: Vec<u64> = f.as_array().unwrap().iter().map(|e| e["line_id"].as_u64().unwrap()).collect();
+            assert_eq!(lines.len(), 3);
+            assert!(lines.contains(&3));
+            let rrf = r#"{"strategy":"rrf","k":60}"#;
+            let fused = take(se_search_fuse_semantic(search, query.as_ptr(), query.len(), sem.as_ptr(), sem.len(), rrf.as_ptr(), rrf.len()));
+            assert!(fused.contains("\"source\":\"semantic\""));
+            se_search_close(search);
+
+            // a book removed
+            let rm = [5u64];
+            let stats = take(se_vectors_update(index, 3, rm.as_ptr(), 1, ptr::null(), 0, ptr::null(), ptr::null(), ptr::null(), 0, ptr::null()));
+            assert!(stats.contains("\"lines\":1"), "{stats}");
+            se_index_close(index);
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

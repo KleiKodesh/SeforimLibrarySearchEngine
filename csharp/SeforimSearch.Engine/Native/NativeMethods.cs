@@ -247,5 +247,22 @@ namespace SeforimSearch.Engine.Native
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern void se_search_close(IntPtr search);
+
+        // semantic search (issue #18)
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_vectors_update(IndexHandle index, uint dims, ulong* removeBooks, UIntPtr removeBooksCount,
+                                                      ulong* removeLines, UIntPtr removeLinesCount, ulong* lineIds, ulong* bookIds,
+                                                      float* vectors, UIntPtr addCount, CancelTokenHandle token);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_vectors_info(IndexHandle index);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_semantic_search(IndexHandle index, float* query, UIntPtr dims, byte* options,
+                                                       UIntPtr optionsLen, CancelTokenHandle token);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_search_fuse_semantic(SearchHandle search, byte* query, UIntPtr queryLen,
+                                                            byte* semantic, UIntPtr semanticLen, byte* fusion, UIntPtr fusionLen);
     }
 }

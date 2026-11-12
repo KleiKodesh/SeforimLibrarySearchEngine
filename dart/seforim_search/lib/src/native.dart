@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 10;
+const int seforimAbiVersion = 11;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -209,6 +209,21 @@ final class SeforimNative {
             Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>)>('se_search_stream'),
         searchStreamPull = lib.lookupFunction<Int32 Function(Pointer<Void>, Uint64, Int64),
             int Function(Pointer<Void>, int, int)>('se_search_stream_pull'),
+        vectorsUpdate = lib.lookupFunction<
+            Pointer<Utf8> Function(Pointer<Void>, Uint32, Pointer<Uint64>, Size, Pointer<Uint64>, Size, Pointer<Uint64>,
+                Pointer<Uint64>, Pointer<Float>, Size, Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Void>, int, Pointer<Uint64>, int, Pointer<Uint64>, int, Pointer<Uint64>,
+                Pointer<Uint64>, Pointer<Float>, int, Pointer<Void>)>('se_vectors_update'),
+        vectorsInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Void>)>('se_vectors_info'),
+        semanticSearch = lib.lookupFunction<
+            Pointer<Utf8> Function(Pointer<Void>, Pointer<Float>, Size, Pointer<Uint8>, Size, Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Void>, Pointer<Float>, int, Pointer<Uint8>, int, Pointer<Void>)>(
+            'se_semantic_search'),
+        fuseSemantic = lib.lookupFunction<
+            Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Uint8>, Size),
+            Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int)>(
+            'se_search_fuse_semantic'),
         lastErrorCancelled = lib.lookupFunction<Int32 Function(), int Function()>('se_last_error_cancelled'),
         cancelTokenNew = lib.lookupFunction<Pointer<Void> Function(), Pointer<Void> Function()>('se_cancel_token_new'),
         cancelTokenCancel = lib.lookupFunction<_CloseC, _CloseD>('se_cancel_token_cancel'),
@@ -304,6 +319,11 @@ final class SeforimNative {
   final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>) searchCancellable;
   final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>) searchStream;
   final int Function(Pointer<Void>, int, int) searchStreamPull;
+  final Pointer<Utf8> Function(Pointer<Void>, int, Pointer<Uint64>, int, Pointer<Uint64>, int, Pointer<Uint64>,
+      Pointer<Uint64>, Pointer<Float>, int, Pointer<Void>) vectorsUpdate;
+  final Pointer<Utf8> Function(Pointer<Void>) vectorsInfo;
+  final Pointer<Utf8> Function(Pointer<Void>, Pointer<Float>, int, Pointer<Uint8>, int, Pointer<Void>) semanticSearch;
+  final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int) fuseSemantic;
   final int Function() lastErrorCancelled;
   final Pointer<Void> Function() cancelTokenNew;
   final void Function(Pointer<Void>) cancelTokenCancel;

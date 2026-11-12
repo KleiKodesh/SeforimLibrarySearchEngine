@@ -1,0 +1,16 @@
+[package]
+name = "seforim-vectors"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Vector sidecar for semantic search: a usearch HNSW index (i8) plus full-precision vectors for rescore and exact filtered scans, keyed by line id. The host supplies the vectors; no model runs here."
+license = "MIT"
+
+[dependencies]
+usearch = { version = "2.26", default-features = false }
+memmap2 = "0.9"
+fs4 = "0.13.1"
+cxx = "1"
+
+[dev-dependencies]
+tempfile = "3"

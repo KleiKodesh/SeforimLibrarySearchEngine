@@ -29,6 +29,7 @@ pub(crate) mod cross_line;
 pub(crate) mod positioned;
 pub(crate) mod stream;
 pub mod search;
+pub mod semantic;
 
 pub use fm_index::FmIndex;
 /// Otzaria's `keep_second_of_paired_readings` (its query sanitizer): every

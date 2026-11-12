@@ -1,3 +1,10 @@
 # Faster iteration: rust-lld links much faster than MSVC link.exe.
+# crt-static (issue #18): the native library links the C/C++ runtime
+# statically, so usearch's C++ adds no msvcp140.dll / vcruntime140_1.dll
+# dependency (one self-contained DLL; it no longer needs vcruntime140.dll either).
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

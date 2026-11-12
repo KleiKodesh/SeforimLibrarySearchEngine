@@ -46,6 +46,7 @@ namespace SeforimSearch.Demo
                 ("native ABI check (issue #17): loaded = expected, mismatch names both and the path", AbiCheck),
                 ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
                 ("per-book update (issue #29): changed / grown / removed books, crash mid-update, background merge", BookUpdates),
+                ("semantic search (issue #18): vectors, semantic-only, book filter, hybrid fusion, cancel", Semantic),
             };
             int failed = 0;
             foreach (var (name, body) in tests)
@@ -173,6 +174,47 @@ namespace SeforimSearch.Demo
                 Check(Hits(engine, "beta").SequenceEqual(Book1()), "book 1 alone");
                 Resumes(engine, Book1());
             }
+        }
+
+        private static void Semantic(string db, string dir)
+        {
+            string d = Path.Combine(dir, "semantic");
+            using var index = SeforimIndex.Create(d);
+            var w = index.OpenWriter(30_000_000, 1);
+            w.Add(new LineDocument { LineId = 1, Position = 0, BookId = 5, Text = "alpha beta" });
+            w.Add(new LineDocument { LineId = 2, Position = 1, BookId = 5, Text = "gamma" });
+            w.Add(new LineDocument { LineId = 3, Position = 2, BookId = 6, Text = "delta" });
+            w.MergeAndClose();
+            Check(index.GetVectorInfo() == null, "no vectors yet");
+            var update = new VectorUpdate { Dims = 3 };
+            update.Add.Add(new LineVector { LineId = 1, BookId = 5, Vector = new[] { 1f, 0f, 0f } });
+            update.Add.Add(new LineVector { LineId = 2, BookId = 5, Vector = new[] { 0.9f, 0.1f, 0f } });
+            update.Add.Add(new LineVector { LineId = 3, BookId = 6, Vector = new[] { 0f, 0f, 1f } });
+            var stats = index.UpdateVectorsAsync(update).GetAwaiter().GetResult();
+            Check(stats.Lines == 3 && stats.Books == 2, "update stats: " + stats.Lines);
+            Check(index.GetVectorInfo()!.Dims == 3, "info dims");
+            var sem = index.SemanticSearchAsync(new[] { 1f, 0f, 0f }, new SemanticOptions { K = 2 }).GetAwaiter().GetResult();
+            Check(sem.Hits.Length == 2 && sem.Hits[0].LineId == 1 && sem.Hits[1].LineId == 2, "semantic order");
+            var filtered = index.SemanticSearch(new[] { 1f, 0f, 0f }, new SemanticOptions { K = 5, Books = new long[] { 6 } });
+            Check(filtered.Hits.Length == 1 && filtered.Hits[0].BookId == 6 && filtered.Exact, "book filter");
+            using (var s = index.Search(new SearchOptions("delta") { Order = ResultsOrder.Relevance }))
+            {
+                var fused = s.FuseSemanticAsync("delta", sem).GetAwaiter().GetResult();
+                Check(fused.Length == 3, "hybrid keeps the lexical hit and adds the semantic ones: " + fused.Length);
+                Check(fused.Any(f => f.LineId == 3 && f.Source == "lexical" && f.Position == 2), "lexical side");
+                Check(fused.Any(f => f.LineId == 1 && f.Source == "semantic" && f.Position == null), "semantic side");
+                var rrf = s.FuseSemantic("delta", sem, new FusionOptions { Strategy = FusionStrategy.Rrf });
+                Check(rrf.Length == 3, "rrf");
+            }
+            using (var cts = new CancellationTokenSource())
+            {
+                cts.Cancel();
+                Check(Throws<OperationCanceledException>(() => index.SemanticSearch(new[] { 1f, 0f, 0f }, null, cts.Token)), "cancelled");
+            }
+            Check(Throws<SeforimEngineException>(() => index.SemanticSearch(new[] { 1f, 0f }, null)), "wrong dims");
+            var remove = new VectorUpdate { Dims = 3 };
+            remove.RemoveBooks.Add(5);
+            Check(index.UpdateVectors(remove).Lines == 1, "book removed");
         }
 
         private static void AsyncOpen(string db, string dir)

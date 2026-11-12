@@ -206,6 +206,8 @@ pub struct LineIndex {
     /// The background full merge after an update (issue #29, see
     /// [`crate::background_merge`]).
     pub(crate) bg: std::sync::Arc<crate::background_merge::Scheduler>,
+    /// The vector sidecar (semantic search, issue #18), opened on first use.
+    pub(crate) vectors: crate::semantic::VectorCache,
 }
 
 impl Drop for LineIndex {
@@ -276,6 +278,7 @@ impl LineIndex {
             #[cfg(test)]
             test_only_no_scan: std::sync::atomic::AtomicBool::new(false),
             bg: crate::background_merge::scheduler_for(dir),
+            vectors: Default::default(),
         })
     }
 

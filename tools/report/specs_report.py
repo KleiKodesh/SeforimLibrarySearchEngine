@@ -193,6 +193,7 @@ md.append(f"""## Engines compared
 | Snippets from index positions (`locate_lines`, per-batch cost rule) | done |
 | Morphology (Otzaria's MagicDictionary) as host lexicon: dictionary forms as `lexical_forms` (lexical tier in relevance), blacklisted forms searched but not marked (`unmarked_alternatives` / `unmarked_lexical_forms`), per-word cap | done (Dart demo host); unit tests |
 | Negative query defaults to the positive proximity (Otzaria's negativeDistance; `proximity_base` under a custom spacing) | done |
+| Semantic search (issue #18): vector sidecar beside the index (usearch HNSW, i8, static in the native library; f16 full vectors), host-supplied vectors keyed by line id, per-book updates, book filter (exact scan under a threshold, else filtered HNSW), oversample + rescore, cancellation; hybrid = every lexical hit fused with the semantic top k (Otzaria weighted fusion by query type, or RRF) | built; synthetic-vector unit tests; embedding model not chosen, no real vectors |
 """)
 
 md.append("## Index builds (full DB, 7,080,797 lines)\n")
@@ -488,7 +489,7 @@ claude_block = "\n".join([
     f"options as FST walks (cap per request, default 2000, global across segments), proximity / word match, vocalized walks (plain, wildcard and fuzzy words), user regex "
     f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, re-sort into a new catalog order (one merge), per-book updates + background merge (restart on open), non-blocking package APIs, hits decided from positions + streamed (word-tightest window, word-level descriptors finished for display), resume after position, "
     f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, positions snippets, FM sidecar, all-matches locate + find in an open text, "
-    f"morphology forms from the host (lexical tier, unmarked forms).",
+    f"morphology forms from the host (lexical tier, unmarked forms), semantic search + hybrid fusion over host-supplied vectors (usearch HNSW sidecar, model not chosen).",
     "Builds: " + "; ".join(l.strip("| ").replace(" | ", " ") for l in build_lines()) + ".",
     ("Parity with FtsLib: all sets identical (" + ", ".join(x[0] for x in PAR_RUN) + "; both flavours)."
      if PAR_ALL_SAME else "Parity with FtsLib: " + parity_summary() + "."),

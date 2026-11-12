@@ -2,12 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
 import 'index.dart';
 import 'models.dart';
 import 'native.dart';
+import 'semantic.dart';
 import 'session.dart';
 
 /// One page of hits streamed by [SearchWorker.searchStream] (issue #16).
@@ -121,6 +123,18 @@ final class SearchWorker {
   /// the session ([SearchCancelledException]).
   Future<AsyncSearchSession> search(SearchOptions options, {SearchCancelToken? cancel}) =>
       _open(options.toJson(), options.contextWords, cancel);
+
+  /// [SemanticIndex.semanticSearch] on the worker (issue #18).
+  Future<SemanticResult> semanticSearch(Float32List query, [SemanticOptions options = const SemanticOptions(),
+          SearchCancelToken? cancel]) =>
+      _call('semanticSearch', null, (query, options), cancel?.address);
+
+  /// [SemanticIndex.updateVectors] on the worker (background priority).
+  Future<VectorUpdateStats> updateVectors(VectorUpdate update, {SearchCancelToken? cancel}) =>
+      _call('updateVectors', null, update, cancel?.address);
+
+  /// [SemanticIndex.vectorInfo] on the worker.
+  Future<VectorInfo?> vectorInfo() => _call('vectorInfo');
 
   /// [search] with slots built by the caller ([SearchRequest]).
   Future<AsyncSearchSession> searchRequest(SearchRequest request, {SearchCancelToken? cancel}) =>
@@ -306,6 +320,11 @@ final class AsyncSearchSession {
   /// [SearchSession.counts].
   Future<HitCounts> counts() => _call('counts');
 
+  /// [SearchSession.fuseSemantic] on the worker (issue #18).
+  Future<List<FusedHit>> fuseSemantic(String query, SemanticResult semantic,
+          [FusionOptions fusion = const FusionOptions()]) =>
+      _call('fuseSemantic', (query, semantic, fusion));
+
   /// [SearchSession.info].
   Future<SearchInfo> info() => _call('info');
 
@@ -401,6 +420,16 @@ void _workerMain((SendPort, String, String?) args) {
           value = s().takeNewTerms();
         case 'matchMode':
           s().matchMode = SnippetMatchMode.values[b as int];
+        case 'semanticSearch':
+          final (query, options) = b as (Float32List, SemanticOptions);
+          value = index.semanticSearch(query, options, null, c as int?);
+        case 'updateVectors':
+          value = index.updateVectors(b as VectorUpdate, cancelAddress: c as int?);
+        case 'vectorInfo':
+          value = index.vectorInfo();
+        case 'fuseSemantic':
+          final (query, semantic, fusion) = b as (String, SemanticResult, FusionOptions);
+          value = s().fuseSemantic(query, semantic, fusion);
         case 'close':
           sessions.remove(a as int)?.close();
         case 'dispose':

@@ -15,6 +15,7 @@ namespace SeforimSearch.Engine
     public sealed unsafe class SearchSession : IDisposable
     {
         private readonly SearchHandle _handle;
+        internal SearchHandle Handle => _handle;
 
         private readonly CancelTokenHandle? _cancel;
         private CancellationTokenRegistration _registration;

@@ -6,6 +6,7 @@ import 'package:ffi/ffi.dart';
 import 'index.dart';
 import 'models.dart';
 import 'native.dart';
+import 'semantic.dart';
 
 /// One search: every matching line (catalog order unless [SearchOptions.order]) and the snippet state
 /// (prepared groups, distance/order filters, term table). Not thread-safe.
@@ -58,6 +59,21 @@ final class SearchSession implements Finalizable {
   Pointer<Void> get _h {
     if (_handle == nullptr) throw StateError('SearchSession is closed');
     return _handle;
+  }
+
+  /// Hybrid ranking (issue #18): EVERY hit of this finished search fused with
+  /// [semantic] (from [SemanticIndex.semanticSearch] with the same book
+  /// filter). Weighted fusion needs the search in relevance order; a
+  /// streamed search must be pulled to the end ([pull]). [query] is the
+  /// lexical query text (the weighted alpha by query type).
+  List<FusedHit> fuseSemantic(String query, SemanticResult semantic, [FusionOptions fusion = const FusionOptions()]) {
+    final text = using((al) {
+      final (q, ql) = utf8Native(query, al);
+      final (s, sl) = utf8Native(semantic.json, al);
+      final (f, fl) = utf8Native(jsonEncode(fusion.toJson()), al);
+      return _n.takeString(_n.fuseSemantic(_h, q, ql, s, sl, f, fl));
+    });
+    return (jsonDecode(text) as List).map((e) => FusedHit.fromJson(e as Map<String, dynamic>)).toList();
   }
 
   /// Hits [offset, offset+count), in the search's order ([SearchOptions.order]; catalog by default).

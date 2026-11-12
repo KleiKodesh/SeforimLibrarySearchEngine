@@ -8,6 +8,12 @@
 //! uses, and the test oracle of the scanner (`scanner_reference.rs`) runs it
 //! on the scanner's visible text.
 //!
+//! Word boundaries and paired-reading detection therefore exist twice:
+//! here ([`next_token_boundaries`], [`paired_reading_after`]) and inside the
+//! scanner's state machine (normalization is shared: [`Normalizer`]). A change
+//! to either must be made in both; the scanner's property test against
+//! `scanner_reference` is the contract that catches drift.
+//!
 //! `wildcards`: the query parser's mode, where FtsLib's wildcard chars `*`
 //! and `?` are word chars (in text `*` is transparent and `?` a separator).
 

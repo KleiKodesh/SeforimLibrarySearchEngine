@@ -17,11 +17,7 @@
 
 use tantivy_fst::Automaton;
 
-/// The quote bytes an index term can hold (the tokenizer folds ׳/״ to '"').
-#[inline]
-fn is_quote(byte: u8) -> bool {
-    byte == b'\'' || byte == b'"'
-}
+use crate::chars::is_term_quote_byte;
 
 /// Wraps `A`: accepts a term `A` accepts as written or without its quotes.
 /// With `enabled == false` it is `A` itself.
@@ -100,7 +96,7 @@ where
     fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
         let alive = |s: A::State| self.inner.can_match(&s).then_some(s);
         match state {
-            QuoteFreeState::Same { state, .. } if !self.enabled || !is_quote(byte) => {
+            QuoteFreeState::Same { state, .. } if !self.enabled || !is_term_quote_byte(byte) => {
                 QuoteFreeState::Same {
                     state: self.inner.accept(state, byte),
                     letters: true,
@@ -117,12 +113,12 @@ where
                 bare_letters,
             } => QuoteFreeState::Split {
                 literal: literal.as_ref().and_then(|s| alive(self.inner.accept(s, byte))),
-                bare: if is_quote(byte) {
+                bare: if is_term_quote_byte(byte) {
                     bare.clone()
                 } else {
                     bare.as_ref().and_then(|s| alive(self.inner.accept(s, byte)))
                 },
-                bare_letters: *bare_letters || !is_quote(byte),
+                bare_letters: *bare_letters || !is_term_quote_byte(byte),
             },
         }
     }

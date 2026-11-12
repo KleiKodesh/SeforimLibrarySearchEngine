@@ -6,18 +6,18 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+// Every word reaching these generators is a normalized query word
+// (`tokenize_query` folds each geresh / gershayim form to `'` / `"`), so the
+// term quotes are the only quotes it can hold (test
+// `query_words_hold_only_term_quotes`).
+use crate::chars::is_term_quote;
+
 /// Cap on כתיב מלא/חסר variants of one form (Otzaria `MAX_SPELLING_BRANCHES`).
 pub const KTIV_VARIANTS_CAP: usize = 32;
 
 /// The same cap when the variants fan through grammatical prefixes/suffixes or
 /// Aramaic prefixes (Otzaria `MAX_GRAMMATICAL_SPELLING_BRANCHES`).
 pub const KTIV_GRAMMATICAL_VARIANTS_CAP: usize = 16;
-
-/// The quote bytes a word can carry (the index folds ׳/״ to them).
-#[inline]
-fn is_quote(c: char) -> bool {
-    matches!(c, '\'' | '"' | '\u{05F3}' | '\u{05F4}')
-}
 
 /// כתיב מלא/חסר, a port of Otzaria's `generate_spelling_variations`
 /// (hebrew_query.rs): up to `limit` variants by rule-based edits of י/ו, the
@@ -60,7 +60,7 @@ pub fn ktiv_male_haser_variants_limited(word: &str, limit: usize) -> Vec<String>
     if n >= 64 {
         return vec![word.to_string()];
     }
-    let letters = chars.iter().filter(|&&c| !is_quote(c)).count();
+    let letters = chars.iter().filter(|&&c| !is_term_quote(c)).count();
 
     let mut edits: Vec<Edit> = Vec::new();
     for (i, &c) in chars.iter().enumerate() {
@@ -77,7 +77,7 @@ pub fn ktiv_male_haser_variants_limited(word: &str, limit: usize) -> Vec<String>
                     }
                 }
             }
-            c if is_quote(c) => edits.push(Edit::Del(i)),
+            c if is_term_quote(c) => edits.push(Edit::Del(i)),
             _ => {}
         }
     }
@@ -109,7 +109,7 @@ pub fn ktiv_male_haser_variants_limited(word: &str, limit: usize) -> Vec<String>
                         'ו' => vav += 1,
                         _ => {}
                     }
-                    if !is_quote(chars[pos]) {
+                    if !is_term_quote(chars[pos]) {
                         deleted_letters += 1;
                     }
                 }
@@ -260,7 +260,7 @@ const TYPO_INSERTION_LETTERS: [char; 13] =
 /// marks not counted.
 pub fn typo_letter_count(word: &str) -> usize {
     word.chars()
-        .filter(|&c| !is_quote(c) && !crate::chars::is_nikud(c) && !crate::chars::is_taam(c))
+        .filter(|&c| !is_term_quote(c) && !crate::chars::is_nikud(c) && !crate::chars::is_taam(c))
         .count()
 }
 
@@ -372,6 +372,28 @@ pub fn expand_set(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn query_words_hold_only_term_quotes() {
+        use crate::{tokenize_query, QueryTerm, QueryToken};
+        // geresh / gershayim in every typed form: ASCII, Hebrew punctuation,
+        // typographic quotes
+        let q = "\u{05D0}\u{05F3}\u{05D1} \u{05D2}\u{05F4}\u{05D3} \u{05D4}\u{2019}\u{05D5} \u{05D6}\u{201D}\u{05D7}";
+        for keep_marks in [false, true] {
+            let words: Vec<String> = tokenize_query(q, keep_marks)
+                .into_iter()
+                .filter_map(|t| match t {
+                    QueryToken::Word { term: Some(QueryTerm::Word(w)), .. } => Some(w),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(words.len(), 4);
+            for w in &words {
+                assert!(w.chars().any(is_term_quote), "{}", w.escape_unicode());
+                assert!(!w.chars().any(|c| crate::chars::is_quote(c) && !is_term_quote(c)), "{}", w.escape_unicode());
+            }
+        }
+    }
     use super::*;
 
     fn has(word: &str, variant: &str) -> bool {

@@ -25,6 +25,18 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         public int[] SnippetMarks { get; set; } = System.Array.Empty<int>();
         public int SnippetFlags { get; set; }
 
+        /// <summary>Index with positions: the window decided during the search, as word
+        /// positions (word-level descriptor). Null once the descriptor above is final (always
+        /// on an index without positions). Demo host side: not part of Core's DTO.</summary>
+        public SeforimSearch.Engine.WordWindow? Window { get; set; }
+
+        /// <summary>Turns <see cref="Window"/> into the final descriptor with the line text
+        /// (<see cref="FtsWindowFinisher.Finish"/>). Null when nothing is pending.</summary>
+        public FtsWindowFinisher? Finisher { get; set; }
+
+        /// <summary>The snippet descriptor still waits for the line text (<see cref="Window"/>).</summary>
+        public bool IsPending => Window != null;
+
         public const int SnippetFlagLeadingEllipsis = 1;
         public const int SnippetFlagTrailingEllipsis = 2;
         /// <summary>The window holds fewer words than the requested context: the line is too

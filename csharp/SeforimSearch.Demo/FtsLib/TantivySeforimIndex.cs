@@ -63,6 +63,24 @@ namespace FtsLib.Fts5
             }
         }
 
+        /// <summary><see cref="SearchSession.GetWordWindows"/>: hits' word-level descriptors.</summary>
+        public WordWindow[] GetWordWindows(long offset, int count)
+        {
+            lock (_lock) return _session.GetWordWindows(offset, count);
+        }
+
+        /// <summary><see cref="SearchSession.FinishWindows"/>: word-level descriptors plus the
+        /// line texts -> snippets, no window search; new matched terms are recorded.</summary>
+        public Snippet?[] FinishWindows(IReadOnlyList<WordWindow> windows, IReadOnlyList<string> texts)
+        {
+            lock (_lock)
+            {
+                var finished = _session.FinishWindows(windows, texts);
+                _terms.AddRange(_session.TakeNewTerms());
+                return finished;
+            }
+        }
+
         /// <summary><see cref="SearchSession.LocateLines"/> (hits given as their lines).</summary>
         public Snippet?[] LocateLines(IReadOnlyList<HitLines> hits)
         {
@@ -141,6 +159,10 @@ namespace FtsLib.Fts5
             _openCorpus = openCorpus ?? throw new ArgumentNullException(nameof(openCorpus));
         }
 
+        /// <summary>The index keeps word positions: hits and their windows are decided during
+        /// the search (word-level descriptors), texts are read only for display.</summary>
+        public bool HasPositions => Engine().GetInfo().Positions;
+
         public bool IsBuilt => SeforimIndex.Exists(_indexPath) && (ReadBuildState()?.Complete ?? false);
 
         private SeforimIndex Engine()
@@ -167,6 +189,11 @@ namespace FtsLib.Fts5
             // The engine parses the query (FtsLib's QueryParser rules) and builds
             // one walk per word with these options.
             var request = WithBaseBooks(ToRequest(query, options));
+            // An index with positions decides every hit AND its window during the search
+            // (issue #21): keep the window as a word-level descriptor, so no text is read here;
+            // the page finishes it with the text of the rows it shows.
+            bool positions = Engine().GetInfo().Positions;
+            request.WordWindows = positions;
             // Resume (FtsLib's afterPosition: rowid > position, 0 = from the start). FtsLib's
             // positions start at 1 and the engine's at 0 (same order), so FtsLib's position p
             // is the engine's p - 1; the engine bounds the hits while collecting.
@@ -194,6 +221,16 @@ namespace FtsLib.Fts5
                 if (hits.Length == 0) break;
 
                 if (firstFetch) { onStage?.Invoke("fetch"); firstFetch = false; }
+                var windows = positions ? session.GetWordWindows(first, hits.Length) : Array.Empty<WordWindow>();
+                if (windows.Length == hits.Length)
+                {
+                    // decided with their windows: no text read (a cross-line pair, which has
+                    // no descriptor, does not occur in this facade: it never asks cross-line)
+                    for (int i = 0; i < hits.Length; i++)
+                        yield return new SearchResult(hits[i].LineId, string.Empty,
+                            new FtsDocumentPlacement(hits[i].BookId, 0), session, first + i) { Window = windows[i] };
+                    continue;
+                }
                 var ids = new long[hits.Length];
                 for (int i = 0; i < hits.Length; i++) ids[i] = hits[i].LineId;
                 // withPlacement: false = the text only (all the locate reads); the placement
@@ -400,6 +437,7 @@ namespace FtsLib.Fts5
             var bySession = new Dictionary<SearchSessionRef, List<SearchResult>>();
             foreach (var r in results)
             {
+                if (r.Window is { IsNone: false }) continue;   // decided with its window: finished for display
                 if (!bySession.TryGetValue(r.Session, out var list)) bySession[r.Session] = list = new List<SearchResult>();
                 list.Add(r);
             }

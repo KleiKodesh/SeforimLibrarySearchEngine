@@ -306,6 +306,11 @@ pub struct SnippetWindowLocator {
     run: Vec<usize>,
     /// See [`set_word_span`](Self::set_word_span).
     word_span: bool,
+    /// The last passing locate's best window as the word positions of its
+    /// end tokens (see [`last_window_positions`](Self::last_window_positions)).
+    last_window: Option<(usize, usize)>,
+    /// See [`force_window_positions`](Self::force_window_positions).
+    forced_window: Option<(usize, usize)>,
 }
 
 impl Default for SnippetWindowLocator {
@@ -347,6 +352,8 @@ impl SnippetWindowLocator {
             unquoted: String::new(),
             run: Vec::new(),
             word_span: false,
+            last_window: None,
+            forced_window: None,
         }
     }
 
@@ -371,6 +378,27 @@ impl SnippetWindowLocator {
     /// passes under the word rule only.
     pub fn set_word_span(&mut self, on: bool) {
         self.word_span = on;
+    }
+
+    /// The best window the last locate call found, as the word positions of
+    /// its first and last matched tokens (None: that call did not match).
+    /// After [`tokenize_occurrences`](Self::tokenize_occurrences) this is the
+    /// window decided from the index positions with no text: a word-level
+    /// descriptor that [`force_window_positions`](Self::force_window_positions)
+    /// turns into text offsets later, without searching for the window again.
+    pub fn last_window_positions(&self) -> Option<(usize, usize)> {
+        self.last_window
+    }
+
+    /// Makes the NEXT locate call use this best window instead of searching
+    /// for one: `(left, right)` are the word positions of its first and last
+    /// matched tokens (a [`last_window_positions`](Self::last_window_positions)
+    /// value). The call then only expands it by the context, marks its
+    /// occurrences and reports its offsets on the tokenized text, by the same
+    /// rules as a located window. No matched token at either position (the
+    /// text disagrees with the positions): no match. Consumed by that call.
+    pub fn force_window_positions(&mut self, window: Option<(usize, usize)>) {
+        self.forced_window = window;
     }
 
     /// The current [`MatchMode`].
@@ -745,9 +773,13 @@ impl SnippetWindowLocator {
             marks,
             match_mode,
             word_span,
+            last_window,
+            forced_window,
             ..
         } = self;
         let brk = *break_token;
+        let forced = forced_window.take();
+        *last_window = None;
         let tokens = text_tokens.tokens();
         if tokens.is_empty() {
             return SnippetDescriptor::NO_MATCH;
@@ -756,6 +788,16 @@ impl SnippetWindowLocator {
 
         fill_ordinals(ordinals, text_tokens, prepared, positioned.then_some((&token_terms[..], term_map)));
         let ordinals = &ordinals[..];
+        // A forced window (word positions): the window rules run on its
+        // tokens only, so the same token at a shared position is chosen.
+        let (sub, off, brk_s) = match forced {
+            Some(w) => match forced_range(tokens, ordinals, w) {
+                Some((a, b)) => ((&tokens[a..=b], &ordinals[a..=b]), a, None),
+                None => return SnippetDescriptor::NO_MATCH,
+            },
+            None => ((tokens, ordinals), 0, brk),
+        };
+        let shift = |w: (usize, usize, usize)| (w.0 + off, w.1 + off, w.2);
 
         let all_groups = prepared.group_count();
         let partial = *min_groups > 0 && *min_groups < all_groups;
@@ -765,14 +807,16 @@ impl SnippetWindowLocator {
         // occurrences; the order check is this window's existence. Order off:
         // unchanged.
         let ordered = !partial && require_ordered && all_groups > 1;
-        let ordered_best = if ordered { ordered_cover_window(tokens, ordinals, prepared, brk, marks, *word_span) } else { None };
+        let ordered_best =
+            if ordered { ordered_cover_window(sub.0, sub.1, prepared, brk_s, marks, *word_span).map(shift) } else { None };
         let (i_left, i_right, score) = match ordered_best {
             Some(w) => w,
-            None => find_window(tokens, ordinals, prepared, group_count, required, brk, *word_span),
+            None => shift(find_window(sub.0, sub.1, prepared, group_count, required, brk_s, *word_span)),
         };
         if score == usize::MAX {
             return SnippetDescriptor::NO_MATCH;
         }
+        *last_window = Some((tokens[i_left].position, tokens[i_right].position));
 
         let (snap_start, snap_end, s_idx, e_idx) =
             expand_window(tokens, raw_len, i_left, i_right, *context_words);
@@ -897,9 +941,13 @@ impl SnippetWindowLocator {
             marks,
             match_mode,
             word_span,
+            last_window,
+            forced_window,
             ..
         } = self;
         let brk = *break_token;
+        let forced = forced_window.take();
+        *last_window = None;
         let tokens = text_tokens.tokens();
         if tokens.is_empty() {
             return SnippetDescriptor::NO_MATCH;
@@ -908,13 +956,22 @@ impl SnippetWindowLocator {
         fill_ordinals(ordinals, text_tokens, prepared, positioned.then_some((&token_terms[..], term_map)));
         let ordinals = &ordinals[..];
         let k = prepared.group_count();
-        let found = match proximity {
-            Proximity::Ordered { gaps } => ordered_window(tokens, ordinals, prepared, gaps, brk, scratch, *word_span),
-            Proximity::AnyOrder { max_span } => any_order_window(tokens, ordinals, prepared, *max_span as usize, brk, scratch, *word_span),
+        let (sub, off, brk_s) = match forced {
+            Some(w) => match forced_range(tokens, ordinals, w) {
+                Some((a, b)) => ((&tokens[a..=b], &ordinals[a..=b]), a, None),
+                None => return SnippetDescriptor::NO_MATCH,
+            },
+            None => ((tokens, ordinals), 0, brk),
         };
+        let found = match proximity {
+            Proximity::Ordered { gaps } => ordered_window(sub.0, sub.1, prepared, gaps, brk_s, scratch, *word_span),
+            Proximity::AnyOrder { max_span } => any_order_window(sub.0, sub.1, prepared, *max_span as usize, brk_s, scratch, *word_span),
+        }
+        .map(|w| (w.0 + off, w.1 + off, w.2));
         let Some((i_left, i_right, score)) = found else {
             return SnippetDescriptor::NO_MATCH;
         };
+        *last_window = Some((tokens[i_left].position, tokens[i_right].position));
         if *match_mode == MatchMode::AllMatches {
             // every full occurrence in the text (issue #4 rule, whole text)
             let rule = match proximity {
@@ -973,6 +1030,19 @@ impl SnippetWindowLocator {
     pub fn context_words(&self) -> usize {
         self.context_words
     }
+}
+
+/// A forced best window (see `force_window_positions`) as the token range
+/// `a..=b` holding every token at word positions `left..=right`. None when
+/// the text holds no matched token at either end position.
+fn forced_range(tokens: &[TextToken], ordinals: &[u32], (left, right): (usize, usize)) -> Option<(usize, usize)> {
+    let matched = |t: usize, p: usize| tokens[t].position == p && ordinals[t] != NO_TERM;
+    let a = tokens.partition_point(|t| t.position < left);
+    let b = tokens.partition_point(|t| t.position <= right);
+    if a >= b || !(a..b).any(|t| matched(t, left)) || !(a..b).any(|t| matched(t, right)) {
+        return None;
+    }
+    Some((a, b - 1))
 }
 
 /// A window's span for picking the tightest one: UTF-16 units from its

@@ -209,13 +209,24 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             Action<string>? onStage = null)
         {
             onStage?.Invoke("snippets");   // before Parallel.For: never call onStage from a worker
+            FtsWindowFinisher? finisher = null;
             // The whole batch is located in ONE engine call, multi-core inside the engine;
             // TryBuildHit below then reads each result's located window.
             index.LocateSnippetWindows(results);
             var built = new FtsHit?[results.Count];
 
+            for (int i = 0; i < results.Count; i++)
+            {
+                // index with positions: passed with its window decided; finished for display
+                if (results[i].Window is { IsNone: false } w)
+                {
+                    finisher ??= new FtsWindowFinisher(results[i].Session, terms, contextWords);
+                    built[i] = new FtsHit { LineId = results[i].LineId, Window = w, Finisher = finisher };
+                }
+            }
             Parallel.For(0, results.Count, new ParallelOptions { CancellationToken = cancellationToken }, i =>
             {
+                if (built[i] != null) return;
                 if (TryBuildHit(index, results[i], requireOrdered, contextWords, maxWordDistance, terms, out FtsHit? hit))
                     built[i] = hit;
             });
@@ -235,6 +246,32 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 ? new List<FtsSnippetText>()
                 : SeedSnippetTexts(corpus, results, built, seeded);
             return new SeforimDbFtsHitBatch(passing, snippetTexts);
+        }
+
+        /// <summary>
+        /// Index with positions: finishes every pending hit of <paramref name="hits"/> (its window
+        /// decided during the search) with its line text, read in one statement per chunk. For
+        /// callers that need every descriptor at once (the parity dump, tests); a page finishes
+        /// only the rows it shows (<see cref="FtsSnippetTextCache.EnsureFinished"/>).
+        /// </summary>
+        /// <returns>The matched-term strings the finishing added to the search's term table
+        /// (the receiver appends them, as a frame's NewTerms).</returns>
+        public static List<string> FinishPending(SeforimDbFtsEngine engine, IReadOnlyList<FtsHit> hits)
+        {
+            var pending = hits.Where(h => h.IsPending && h.Finisher != null).ToList();
+            var added = new List<string>();
+            if (pending.Count == 0) return added;
+            var texts = new Dictionary<long, string>();
+            using (var corpus = engine.OpenCorpus())
+                foreach (var t in corpus.FetchSnippetTexts(pending.Select(h => h.LineId).ToList(), Array.Empty<long>()))
+                    texts[t.LineId] = t.Text;
+            foreach (var group in pending.GroupBy(h => h.Finisher!))
+            {
+                var list = group.ToList();
+                group.Key.Finish(list, list.Select(h => texts.TryGetValue(h.LineId, out var t) ? t : "").ToList());
+                added.AddRange(group.Key.Terms.TakeNewTerms());
+            }
+            return added;
         }
 
         /// <summary>
@@ -266,9 +303,25 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         {
             var texts = new List<FtsSnippetText>(seeded.Count);
             List<long>? shortIds = null;
+            // index with positions: the seeded hits' texts are read now (one statement) and
+            // their descriptors finished, so the first screen still needs no round-trip
+            var pending = seeded.Where(i => built[i]!.IsPending).ToList();
+            var pendingTexts = new Dictionary<long, string>();
+            if (pending.Count > 0)
+            {
+                foreach (var t in corpus().FetchSnippetTexts(pending.Select(i => built[i]!.LineId).ToList(), Array.Empty<long>()))
+                    pendingTexts[t.LineId] = t.Text;
+                var hits = pending.Select(i => built[i]!).ToList();
+                hits[0].Finisher!.Finish(hits, hits.Select(h => pendingTexts.TryGetValue(h.LineId, out var t) ? t : "").ToList());
+            }
             foreach (int i in seeded)
             {
                 var hit = built[i]!;
+                if (pendingTexts.TryGetValue(hit.LineId, out var text) && (hit.SnippetFlags & FtsHit.SnippetFlagShort) == 0)
+                {
+                    texts.Add(new FtsSnippetText { LineId = hit.LineId, Text = text });
+                    continue;
+                }
                 if ((hit.SnippetFlags & FtsHit.SnippetFlagShort) != 0) (shortIds ??= new List<long>()).Add(hit.LineId);
                 else texts.Add(new FtsSnippetText { LineId = hit.LineId, Text = results[i].Content });
             }
@@ -319,7 +372,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// marks also say which 1-3 concrete terms occur in this line, and nothing else
         /// has to.
         /// </summary>
-        private static void CopySnippetDescriptor(FtsHit hit, in SnippetDescriptor window, FtsTermTable terms)
+        internal static void CopySnippetDescriptor(FtsHit hit, in SnippetDescriptor window, FtsTermTable terms)
         {
             hit.SnippetStart = window.SnapStart;
             hit.SnippetEnd = window.SnapEnd;

@@ -219,6 +219,64 @@ namespace SeforimSearch.Engine
             return results;
         }
 
+        /// <summary>
+        /// The word-level descriptors of hits [<paramref name="offset"/>, offset+count), in hit
+        /// order (<see cref="SearchOptions.WordWindows"/>): the best window decided from the index
+        /// positions during the search, no text read. Empty when the search did not keep them.
+        /// </summary>
+        public WordWindow[] GetWordWindows(long offset, int count)
+        {
+            if (count <= 0 || offset >= HitCount) return Array.Empty<WordWindow>();
+            count = (int)Math.Min(count, HitCount - offset);
+            var raw = new uint[count * 3];
+            ulong copied;
+            fixed (uint* r = raw)
+                copied = NativeMethods.se_search_copy_windows(_handle, (ulong)offset, (ulong)count, r);
+            var windows = new WordWindow[(int)copied];
+            for (int i = 0; i < windows.Length; i++)
+                windows[i] = new WordWindow(raw[3 * i], raw[3 * i + 1], raw[3 * i + 2]);
+            return windows;
+        }
+
+        /// <summary>
+        /// Turns word-level descriptors plus the hits' texts into final snippets WITHOUT searching
+        /// for the window again: only the context, the marks and the UTF-16 offsets are computed
+        /// (the same snippet <see cref="LocatePairs"/> gives). A hit whose descriptor is
+        /// <see cref="WordWindow.None"/> (a cross-line pair) is located as <see cref="LocatePairs"/>
+        /// does. Null: the text disagrees with the positions.
+        /// </summary>
+        public Snippet?[] FinishWindows(IReadOnlyList<WordWindow> windows, IReadOnlyList<string> texts,
+                                        IReadOnlyList<string?>? nextTexts = null)
+        {
+            int n = texts.Count;
+            if (windows.Count != n) throw new ArgumentException("one window per text");
+            var results = new Snippet?[n];
+            if (n == 0) return results;
+            var flat = new uint[3 * n];
+            for (int i = 0; i < n; i++)
+            {
+                flat[3 * i] = windows[i].Matcher;
+                flat[3 * i + 1] = windows[i].Left;
+                flat[3 * i + 2] = windows[i].Right;
+            }
+            uint[] data = WithPairs(texts, nextTexts ?? new string?[n], (p, l, np, nl) =>
+            {
+                fixed (uint* w = flat)
+                    return Interop.TakeBuffer(NativeMethods.se_search_finish_windows(_handle, w, p, l, np, nl, (UIntPtr)n));
+            });
+            int at = 0;
+            for (int i = 0; i < n; i++)
+            {
+                uint kind = data[at++];
+                if (kind == 0) continue;
+                int? brk = kind == 2 ? (int?)data[at++] : null;
+                var s = Snippet.Read(data, ref at);
+                s.BreakAt = brk;
+                results[i] = s;
+            }
+            return results;
+        }
+
         /// <summary><see cref="CountBatch"/> for hits given with their next line's text.</summary>
         public long CountBatchPairs(IReadOnlyList<string> texts, IReadOnlyList<string?> nextTexts)
         {

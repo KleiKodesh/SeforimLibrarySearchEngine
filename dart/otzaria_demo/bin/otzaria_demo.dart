@@ -334,6 +334,9 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
   req.warnings.toSet().forEach((w) => stderr.writeln('warning: $w'));
   request.crossLine = o.containsKey('cross-line');
   request.sameSection = o['scope'] == 'section';
+  // positions index: each hit keeps the window decided during the search
+  // (word-level descriptor); display only finishes it with the text
+  request.wordWindows = info.positions;
 
   final limit = _int(o, 'limit') ?? 100, offset = _int(o, 'offset') ?? 0;
   final titles = db.bookTitles();
@@ -399,6 +402,8 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
   // The plain result pages: KitveiHakodesh's snippet model (_showPages).
   await _showPages(db, titles, info.positions, contextWords, limit, offset, _int(o, 'pages') ?? 1, session.hitCount,
       (from, count) async => session.hits(from, count),
+      (from, count) async => session.wordWindows(from, count),
+      (windows, lineTexts, nextTexts) async => session.finishWindows(windows, lineTexts, nextTexts),
       (first, batch, lineTexts, nextTexts) async => batch.any((h) => h.nextLineId != null)
           ? session.locatePairs(lineTexts, nextTexts)
           : session.locateLines([
@@ -433,6 +438,8 @@ Future<void> _pageAsync(SeforimDb db, String dir, String? nativePath, SearchOpti
       if (searchInfo.truncated) stderr.writeln('truncated: a walk hit its expansion cap');
       await _showPages(db, titles, positions, contextWords, limit, offset, pages, session.hitCount,
           (from, count) => session.hits(from, count),
+          (from, count) => session.wordWindows(from, count),
+          (windows, lineTexts, nextTexts) => session.finishWindows(windows, lineTexts, nextTexts),
           (first, batch, lineTexts, nextTexts) => batch.any((h) => h.nextLineId != null)
               ? session.locatePairs(lineTexts, nextTexts)
               : session.locateLines([
@@ -455,11 +462,14 @@ Future<void> _pageAsync(SeforimDb db, String dir, String? nativePath, SearchOpti
 /// (Core SearchInBatches / BuildBatch, the service's ftsSnippetTexts, the
 /// page's ensureSnippets):
 ///
-/// - each hit's window is located ONCE. Index without positions (FtsLib): the
+/// - each hit's window is decided ONCE. Index without positions (FtsLib): the
 ///   search reads the texts of a batch of 256 hits, locates them, keeps the ones
-///   that pass; index with positions: every hit already passed during the
-///   search (issue #21), so a hit is located only when its row is reached, over
-///   the text read for display (no text is read for the skipped [offset] hits).
+///   that pass; index with positions: every hit passed during the search
+///   (issue #21) with its window decided from the positions (word-level
+///   descriptor, `wordWindows`), so no text is read during the search; a row
+///   reached for display is finished with its text (`finishWindows`: context,
+///   marks and offsets only, no window search; a cross-line pair, which has no
+///   descriptor, is located from its two lines).
 /// - the first [seedSnippetTextHitCount] passing hits' texts ride along (the
 ///   batch already read them); a later row's text is fetched when its page is
 ///   shown, at most [snippetFetchBatch] ids per request, [snippetLookAhead] rows
@@ -475,6 +485,8 @@ Future<void> _showPages(
   int pages,
   int hitCount,
   Future<List<PlacedHit>> Function(int from, int count) hits,
+  Future<List<WordWindow>> Function(int from, int count) windowsOf,
+  Future<List<Snippet?>> Function(List<WordWindow> windows, List<String> lineTexts, List<String?> nextTexts) finish,
   Future<List<Snippet?>> Function(int first, List<PlacedHit> batch, List<String> lineTexts, List<String?> nextTexts)
       locate,
   Future<void> Function() header,
@@ -499,7 +511,9 @@ Future<void> _showPages(
         final shown = batch.sublist(0, need - rows.length < batch.length ? need - rows.length : batch.length);
         await cache.ensure([for (final h in batch) ...linesOf(h)]);
         String textOf(int id) => cache.textOf((lineId: id, short: false))?.text ?? '';
-        final snippets = await locate(hitNo, shown, [for (final h in shown) textOf(h.lineId)],
+        final windows = await windowsOf(hitNo, shown.length);
+        final snippets = await finish(windows.length == shown.length ? windows : List.filled(shown.length, WordWindow.none),
+            [for (final h in shown) textOf(h.lineId)],
             [for (final h in shown) h.nextLineId == null ? null : textOf(h.nextLineId!)]);
         hitNo += shown.length;
         for (var i = 0; i < shown.length; i++) {

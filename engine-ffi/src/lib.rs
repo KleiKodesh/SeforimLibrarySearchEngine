@@ -44,7 +44,7 @@ use std::path::PathBuf;
 use std::ptr;
 
 use seforim_engine::{
-    CancelToken, HitLines, IndexOptions, LineDoc, LineIndex, LineWriter, SearchOptions, SearchRequest, SearchResult, Snippet,
+    CancelToken, HitLines, IndexOptions, LineDoc, LineIndex, LineWriter, SearchOptions, SearchRequest, SearchResult, Snippet, WordWindow,
 };
 
 thread_local! {
@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 9;
+pub const SE_ABI_VERSION: u32 = 10; // 10: word-level descriptors (word_windows, se_search_copy_windows, se_search_finish_windows)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -1254,6 +1254,38 @@ pub unsafe extern "C" fn se_search_copy_next_lines(
     })
 }
 
+/// Copies the word-level descriptors of hits `[offset, offset+count)` into
+/// `out`, three u32 per hit: matcher, left, right (the best window decided
+/// from the index positions during the search, as the word positions of its
+/// first and last matched words; `u32::MAX` x3 = none, a cross-line pair).
+/// Kept only when the request asked (`"word_windows": true`) on an index
+/// with positions. Returns how many hits were copied (0: none kept).
+///
+/// # Safety
+/// `out` must hold `3 * count` u32.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_copy_windows(
+    search: *const SearchResult,
+    offset: u64,
+    count: u64,
+    out: *mut u32,
+) -> u64 {
+    guard(0, || {
+        let search = search.as_ref().ok_or("null search")?;
+        let windows = search.word_windows(offset as usize, count as usize);
+        if windows.is_empty() || out.is_null() {
+            return Ok(0);
+        }
+        let out = std::slice::from_raw_parts_mut(out, windows.len() * 3);
+        for (o, w) in out.chunks_exact_mut(3).zip(windows) {
+            o[0] = w.matcher;
+            o[1] = w.left;
+            o[2] = w.right;
+        }
+        Ok(windows.len() as u64)
+    })
+}
+
 /// Number of u32 a located snippet occupies in the flat form, beyond its marks:
 /// score, word_distance, window_word_count, start, end, flags, mark_count.
 pub const SNIPPET_HEADER_U32: usize = 7;
@@ -1594,6 +1626,63 @@ pub unsafe extern "C" fn se_search_locate_pairs(
         let search = search.as_mut().ok_or("null search")?;
         let items = pair_args(texts, lens, next_texts, next_lens, count)?;
         let located = search.session.try_locate_pairs(&items).map_err(err)?;
+        let mut out = Vec::with_capacity(count * 16);
+        for snippet in located {
+            match snippet {
+                Some(s) => {
+                    match s.break_at {
+                        Some(at) => {
+                            out.push(2);
+                            out.push(at as u32);
+                        }
+                        None => out.push(1),
+                    }
+                    write_snippet(&s, &mut out);
+                }
+                None => out.push(0),
+            }
+        }
+        Ok(SeBuffer::from_vec(out))
+    })
+}
+
+/// Turns word-level descriptors (`se_search_copy_windows`) plus the hits'
+/// texts into final snippets without searching for the window again: per
+/// hit, `windows` holds its three u32 (matcher, left, right), `texts` its
+/// line and `next_texts` its next line (cross-line, or null). A hit whose
+/// descriptor is none (`u32::MAX`) is located as `se_search_locate_pairs`
+/// does. Output as `se_search_locate_pairs`.
+///
+/// # Safety
+/// As `se_search_locate_pairs`; `windows` holds `3 * count` u32.
+#[no_mangle]
+pub unsafe extern "C" fn se_search_finish_windows(
+    search: *mut SearchResult,
+    windows: *const u32,
+    texts: *const *const u8,
+    lens: *const usize,
+    next_texts: *const *const u8,
+    next_lens: *const usize,
+    count: usize,
+) -> SeBuffer {
+    let empty = SeBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    guard(empty, || {
+        let search = search.as_mut().ok_or("null search")?;
+        if count > 0 && windows.is_null() {
+            return Err("null windows".into());
+        }
+        let items = pair_args(texts, lens, next_texts, next_lens, count)?;
+        let w = if count == 0 { &[][..] } else { std::slice::from_raw_parts(windows, count * 3) };
+        let items: Vec<(WordWindow, &str, Option<&str>)> = items
+            .into_iter()
+            .enumerate()
+            .map(|(i, (t, n))| (WordWindow { matcher: w[3 * i], left: w[3 * i + 1], right: w[3 * i + 2] }, t, n))
+            .collect();
+        let located = search.finish_windows(&items).map_err(err)?;
         let mut out = Vec::with_capacity(count * 16);
         for snippet in located {
             match snippet {

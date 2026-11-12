@@ -183,6 +183,13 @@ namespace SeforimSearch.Engine.Native
         public static extern ulong se_search_copy_next_lines(SearchHandle search, ulong offset, ulong count, ulong* output);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ulong se_search_copy_windows(SearchHandle search, ulong offset, ulong count, uint* output);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern SeBuffer se_search_finish_windows(SearchHandle search, uint* windows, IntPtr* texts, UIntPtr* lens,
+                                                               IntPtr* nextTexts, UIntPtr* nextLens, UIntPtr count);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern SeBuffer se_search_locate_pairs(SearchHandle search, IntPtr* texts, UIntPtr* lens,
                                                              IntPtr* nextTexts, UIntPtr* nextLens, UIntPtr count);
 

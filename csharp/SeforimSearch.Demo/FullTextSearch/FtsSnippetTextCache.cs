@@ -133,7 +133,30 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             var wanted = new List<FtsHit>(to - from);
             for (int i = Math.Min(first, rows.Count); i < shownEnd; i++) wanted.Add(rows[i]);
             for (int i = from; i < to; i++) wanted.Add(rows[i]);
-            return Ensure(wanted);
+            return EnsureFinished(wanted);
+        }
+
+        /// <summary>Receives the matched-term strings a finishing added to its search's term
+        /// table (append them to the receiver's table, as a frame's NewTerms).</summary>
+        public Action<List<string>>? OnNewTerms { get; set; }
+
+        /// <summary><see cref="Ensure"/>, then (index with positions) the pending hits'
+        /// descriptors finished with their texts (<see cref="FtsWindowFinisher"/>: the window
+        /// was decided during the search, only offsets and marks are computed), then the rows
+        /// that turned out short ask for their neighbour context.</summary>
+        public async Task EnsureFinished(IReadOnlyList<FtsHit> rows)
+        {
+            await Ensure(rows).ConfigureAwait(false);
+            var pending = rows.Where(h => h.IsPending && h.Finisher != null).Distinct().ToList();
+            if (pending.Count == 0) return;
+            foreach (var group in pending.GroupBy(h => h.Finisher!))
+            {
+                var hits = group.ToList();
+                group.Key.Finish(hits, hits.Select(h => TextOf(h.LineId, false)?.Text ?? "").ToList());
+                var added = group.Key.Terms.TakeNewTerms();
+                if (added.Count > 0) OnNewTerms?.Invoke(added);
+            }
+            await Ensure(pending).ConfigureAwait(false);
         }
 
         private async Task FetchInto(List<long> plain, List<long> shorts, TaskCompletionSource<bool> done)

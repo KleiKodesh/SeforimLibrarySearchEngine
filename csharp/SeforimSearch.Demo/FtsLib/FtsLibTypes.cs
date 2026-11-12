@@ -54,6 +54,11 @@ namespace FtsLib.SeforimDb
 
         internal Fts5.SearchSessionRef Session { get; }
 
+        /// <summary>The word-level descriptor decided from the index positions during the
+        /// search (index with positions): the line passed, its window is known, and no text
+        /// was read (<see cref="Content"/> is empty). Null: FtsLib's path (text read, located).</summary>
+        internal SeforimSearch.Engine.WordWindow? Window { get; set; }
+
         /// <summary>The hit's index in its search's hits (-1 unknown): lets the engine
         /// locate the snippet from the index positions without looking the line up.</summary>
         internal long HitIndex { get; }

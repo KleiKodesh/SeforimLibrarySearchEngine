@@ -1689,6 +1689,16 @@ stay available):
     most 200 ids per request, short rows' context in the same statement,
     lookahead 60 ahead / 20 behind, in-flight requests shared, LRU of 1500.
     `search --page-size N --pages N` shows the results page by page through it.
+  - index with positions: `TantivySeforimIndex.Search` asks for word-level
+    descriptors and reads no text; such hits arrive pending (`FtsHit.Window`,
+    `FtsHit.Finisher`), the first 100 are finished in the batch with their
+    seeded texts, the rest when the page shows them
+    (`FtsSnippetTextCache.EnsureFinished`: texts, finish, then the short rows'
+    context) or all at once (`SeforimDbFtsSearcher.FinishPending`, used by the
+    parity dump). A finished row's new matched terms reach the receiver
+    through `OnNewTerms` / the returned list. An unreadable row on such an
+    index stays a hit (the index decided it) and is counted when its text is
+    read. Index without positions: Core's path unchanged.
 - **FtsLib facade with the same names:** `FtsDocumentPlacement`,
   `SearchResult`, `SnippetDescriptor` (the query string goes to the engine
   as `SearchOptions`; FtsLib's `QueryParser` is ported in hebrew-fts), and
@@ -1731,8 +1741,9 @@ stay available):
   Snippet texts follow KitveiHakodesh's model (`lib/snippet_texts.dart`,
   `SnippetTextCache`): index without positions, the batch reads its texts to
   locate (FtsLib) and the first 100 passing hits keep them (seed); index with
-  positions, every hit already passed during the search (issue #21), so no
-  text is read for skipped hits and a hit is located when its row is reached.
+  positions, the search keeps each hit's word-level descriptor
+  (`wordWindows`), no text is read during the search, and a row reached for
+  display is finished with its text (`finishWindows`, no window search).
   Rows are shown page by page (`--limit` rows per page, `--pages N`); a page's
   missing texts are fetched at most 200 ids per request with the 60 / 20
   lookahead, in-flight requests shared, LRU of 1500. On a positions index a
@@ -1913,6 +1924,28 @@ word, a plain AND, spans already on positions) no position is read: the
 hits pass as they come. The hits are streamed (see "Cancellation and
 streaming"). Code: `seforim-engine/src/stream.rs`.
 
+**Word-level descriptors** (option `word_windows`, ABI 10; C#
+`SearchOptions.WordWindows`, Dart `wordWindows`): every hit then keeps the
+window the search decided, as a `WordWindow` (which way of matching passed,
+and the word positions of the window's first and last matched words), read
+with `se_search_copy_windows` (C# `GetWordWindows`, Dart `wordWindows`). The
+host reads no text during the search; for the rows it shows,
+`se_search_finish_windows` (C# / Dart `FinishWindows` / `finishWindows`) turns
+a descriptor plus the line text into the final snippet WITHOUT searching for
+the window again: the locator's forced-window mode
+(`SnippetWindowLocator::force_window_positions`) runs the window rules only
+over the tokens between the two positions (so a paired reading sharing a
+position resolves to the same token), then expands the context, marks the
+occurrences and computes the UTF-16 offsets as a located window does. The
+result equals the located snippet (tests
+`word_windows_finished_equal_located_snippets`, Dart `word_windows_test`).
+With the option on, every hit's positions are read during the search (also
+for queries that otherwise need none: one word, a plain AND). A cross-line
+pair has no descriptor (`WordWindow::NONE`, most pairs are decided from the
+per-line bitmaps): finishing locates it from its two lines. A text that
+disagrees with the positions (the line changed since indexing) finishes as
+no snippet. Off (default): nothing kept, nothing costs.
+
 Cross-line matching on an index with positions decides every candidate pair
 on the joined positions (`cross_line.rs`: `L` up to its last content word,
 `L + 1` from its first content word, from the `line_last` / `line_first`
@@ -1927,9 +1960,9 @@ the user's decision): a session on an index with positions picks, on the
 displayed rows' texts too, the window spanning the fewest word positions,
 the earliest on a tie, so the snippet shows the same occurrence the search
 decided on. Text is read only for the rows displayed (UTF-16 offsets of the
-window and marks). Nothing per hit is kept beyond the hit and its doc: the
-window is a pure function of the positions and is found again for a
-displayed row at no extra cost. A deviation from FtsLib, named under
+window and marks). By default nothing per hit is kept beyond the hit and its
+doc: the window is a pure function of the positions and is found again for a
+displayed row. A deviation from FtsLib, named under
 "Differences from FtsLib". An index without positions keeps FtsLib's path
 step for step (character-tightest window, the text decides).
 

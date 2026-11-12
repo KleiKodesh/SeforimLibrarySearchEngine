@@ -286,6 +286,13 @@ final class AsyncSearchSession {
   Future<List<Snippet?>> locatePairs(List<String> texts, List<String?> nextTexts) =>
       _call('locatePairs', texts, nextTexts);
 
+  /// [SearchSession.wordWindows].
+  Future<List<WordWindow>> wordWindows(int offset, int count) => _call('wordWindows', offset, count);
+
+  /// [SearchSession.finishWindows].
+  Future<List<Snippet?>> finishWindows(List<WordWindow> windows, List<String> texts, [List<String?>? nextTexts]) =>
+      _call('finishWindows', windows, (texts, nextTexts));
+
   /// [SearchSession.countNeedsText].
   Future<bool> get countNeedsText => _call('countNeedsText');
 
@@ -375,6 +382,11 @@ void _workerMain((SendPort, String, String?) args) {
           value = s().locateLines((b as List).cast<HitLines>());
         case 'locatePairs':
           value = s().locatePairs((b as List).cast<String>(), (c as List).cast<String?>());
+        case 'wordWindows':
+          value = s().wordWindows(b as int, c as int);
+        case 'finishWindows':
+          final (texts, next) = c as (List<String>, List<String?>?);
+          value = s().finishWindows((b as List).cast<WordWindow>(), texts, next);
         case 'countNeedsText':
           value = s().countNeedsText;
         case 'countBatch':

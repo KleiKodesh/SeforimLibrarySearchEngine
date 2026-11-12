@@ -293,7 +293,7 @@ impl PositionSource {
 
 #[cfg(test)]
 mod tests {
-    use crate::{HitLines, IndexOptions, LineDoc, LineIndex, SearchRequest};
+    use crate::{HitLines, IndexOptions, LineDoc, LineIndex, SearchRequest, WordWindow};
 
     const W: [&str; 6] = [
         "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
@@ -519,6 +519,53 @@ mod tests {
             }
             assert!(decided > 20, "too few hits dropped by their positions: {decided}");
             assert!(crossed > 20, "too few cross-line hits: {crossed}");
+        }
+    }
+
+    /// Word-level descriptors (`word_windows`): the window decided from
+    /// the positions during the search, turned into a snippet with the line
+    /// text by `finish_windows` (no window search), equals the snippet the
+    /// session locates on the same text, for every request shape, with and
+    /// without matching across lines (a cross-line pair has no word-level
+    /// descriptor and is located from its two lines). Not asked: none kept.
+    #[test]
+    fn word_windows_finished_equal_located_snippets() {
+        for (seed, keep_marks) in [(5u64, false), (13, true)] {
+            let lines = corpus(seed, 400);
+            let text_of = |id: u64| lines[(id - 1000) as usize].text.as_str();
+            let dir = tempfile::tempdir().unwrap();
+            let index = LineIndex::create(dir.path(), IndexOptions { positions: true, keep_marks }).unwrap();
+            let mut w = index.writer(50_000_000, 1).unwrap();
+            for l in &lines {
+                w.add(l).unwrap();
+            }
+            w.commit(None).unwrap();
+            let (mut finished, mut with_window) = (0, 0);
+            let crossing: Vec<String> =
+                requests().iter().map(|r| format!("{},\"cross_line\":true}}", &r[..r.len() - 1])).collect();
+            for json in requests().into_iter().chain(crossing) {
+                let plain: SearchRequest = serde_json::from_str(&json).unwrap();
+                let Ok(r0) = index.search(&plain) else { continue };
+                assert!(r0.word_windows(0, usize::MAX).is_empty(), "kept without being asked");
+                let asked = format!("{},\"word_windows\":true}}", &json[..json.len() - 1]);
+                let request: SearchRequest = serde_json::from_str(&asked).unwrap();
+                let mut r = index.search(&request).unwrap();
+                assert_eq!(r.hits, r0.hits, "{}", json.escape_unicode());
+                let windows = r.word_windows(0, r.hits.len()).to_vec();
+                assert_eq!(windows.len(), r.hits.len());
+                let hits = r.hits.clone();
+                let items: Vec<(WordWindow, &str, Option<&str>)> =
+                    hits.iter().zip(&windows).map(|(h, &w)| (w, text_of(h.line_id), h.next_line_id.map(text_of))).collect();
+                let got = r.finish_windows(&items).unwrap();
+                for ((h, w), g) in hits.iter().zip(&windows).zip(got) {
+                    let want = r.session.locate_pair(text_of(h.line_id), h.next_line_id.map(text_of));
+                    assert!(want.is_some());
+                    assert_eq!(g, want, "{} line {} window {w:?}", json.escape_unicode(), h.line_id);
+                    with_window += w.is_some() as usize;
+                    finished += 1;
+                }
+            }
+            assert!(with_window > 200, "too few word-level descriptors: {with_window} of {finished}");
         }
     }
 

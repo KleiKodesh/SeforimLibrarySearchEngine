@@ -414,6 +414,14 @@ pub struct SearchRequest {
     /// their own lines; `cross_line` has no meaning here and is ignored.
     /// Needs an index with section ids.
     pub same_section: bool,
+    /// Word-level descriptors (issue #21 follow-up): on an index with
+    /// positions every hit's best window, decided from the positions during
+    /// the search, is kept as a [`WordWindow`] ([`SearchResult::word_windows`]),
+    /// and [`SearchResult::finish_windows`] turns it plus the line text into
+    /// the final snippet without searching for the window again. Every hit
+    /// then reads its positions during the search (the decision does anyway
+    /// whenever a text-level rule applies). Off (default): costs nothing.
+    pub word_windows: bool,
     /// Otzaria's user regex of the `Line` kind (the whole wrapped query,
     /// `/.../`): matched on each line's text (see `crate::line_search`).
     /// When set, every other field but `books` and `context_words` is unused.
@@ -470,6 +478,7 @@ impl Default for SearchRequest {
             vocalized: false,
             cross_line: false,
             same_section: false,
+            word_windows: false,
             line_regex: None,
             after_position: None,
             resume_stamp: None,
@@ -651,6 +660,8 @@ pub struct SnippetSession {
     /// The locators pick the word-tightest window (an index with
     /// positions, issue #21; see `SnippetWindowLocator::set_word_span`).
     word_span: bool,
+    /// See `SearchRequest::word_windows`.
+    word_windows: bool,
 }
 
 /// Term id -> ordinal maps of a positioned locate (see `crate::positioned`):
@@ -786,15 +797,51 @@ fn negated(
 /// [`locate_tokenized_with`]'s decision for a line loaded from its index
 /// positions ([`SnippetWindowLocator::tokenize_occurrences`]): the same
 /// negatives and matchers, in-line only (issue #21, `crate::stream`).
-pub(crate) fn passes_tokenized(
+/// Whether a hit passes, decided on the tokens the locator holds (from the
+/// index positions), with its word-level descriptor: the first matcher that
+/// passes and its best window's word positions.
+pub(crate) fn decide_tokenized(
     matchers: &[Matcher],
     negative: &[NegativeFilter],
     locator: &mut SnippetWindowLocator,
     marked: bool,
     maps: TermMaps<'_>,
-) -> bool {
-    !negated(negative, locator, || marked, maps)
-        && matchers.iter().enumerate().any(|(i, m)| m.locate(locator, false, maps.matcher(i)).is_some())
+) -> Option<WordWindow> {
+    if negated(negative, locator, || marked, maps) {
+        return None;
+    }
+    for (i, m) in matchers.iter().enumerate() {
+        if m.locate(locator, false, maps.matcher(i)).is_some() {
+            // no window known: no descriptor (finishing then locates from the text)
+            return Some(match locator.last_window_positions() {
+                Some((left, right)) => WordWindow { matcher: i as u32, left: left as u32, right: right as u32 },
+                None => WordWindow::NONE,
+            });
+        }
+    }
+    None
+}
+
+/// A hit's word-level descriptor (see `SearchRequest::word_windows`): which
+/// way of matching passed (`matcher`, an index into the session's ways) and
+/// its best window as the word positions of the first and last matched
+/// words. Decided from the index positions with no text; turned into text
+/// offsets by [`SearchResult::finish_windows`]. [`WordWindow::NONE`]: no
+/// word-level descriptor (a cross-line pair: located from its two lines).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WordWindow {
+    pub matcher: u32,
+    pub left: u32,
+    pub right: u32,
+}
+
+impl WordWindow {
+    pub const NONE: WordWindow = WordWindow { matcher: u32::MAX, left: u32::MAX, right: u32::MAX };
+
+    /// False for [`WordWindow::NONE`].
+    pub fn is_some(&self) -> bool {
+        self.matcher != u32::MAX
+    }
 }
 
 /// One hit for [`SnippetSession::try_locate_lines`]: its lines, and the
@@ -890,6 +937,7 @@ impl SnippetSession {
             unmarked: Default::default(),
             match_mode: hebrew_fts::MatchMode::BestWindow,
             word_span: false,
+            word_windows: false,
         }
     }
 
@@ -1098,6 +1146,40 @@ impl SnippetSession {
                 r.map(|(i, s)| self.number_marks(i, s))
             })
             .collect())
+    }
+
+    /// Turns word-level descriptors (see `SearchRequest::word_windows`)
+    /// into final snippets: each item is a hit's [`WordWindow`], its line's
+    /// text and, for a hit with `next_line_id`, the next line's text. The
+    /// window is NOT searched again: the text is tokenized, the descriptor's
+    /// word positions name the best window, and only the context expansion,
+    /// the occurrence marks and the UTF-16 offsets are computed, by the same
+    /// rules as [`try_locate_lines`](Self::try_locate_lines) (so the result
+    /// equals the located snippet). An item with [`WordWindow::NONE`] (a
+    /// cross-line pair) is located from its texts as
+    /// [`try_locate_pairs`](Self::try_locate_pairs) does. None: the text
+    /// disagrees with the positions (the line changed since indexing).
+    pub fn try_finish_windows(&mut self, items: &[(WordWindow, &str, Option<&str>)]) -> Result<Vec<Option<Snippet>>> {
+        let mut out = Vec::with_capacity(items.len());
+        for &(w, text, next) in items {
+            CancelToken::check(self.cancel.as_ref())?;
+            let usable = w.is_some() && (w.matcher as usize) < self.matchers.len() && self.line.is_none();
+            if !usable {
+                out.push(self.locate_pair(text, next));
+                continue;
+            }
+            if text.is_empty() {
+                out.push(None);
+                continue;
+            }
+            let i = w.matcher as usize;
+            self.locator.tokenize(text);
+            self.locator.force_window_positions(Some((w.left as usize, w.right as usize)));
+            let located = self.matchers[i].locate(&mut self.locator, false, &[]);
+            self.locator.force_window_positions(None);
+            out.push(located.map(|s| self.number_marks(i, s)));
+        }
+        Ok(out)
     }
 
     /// [`try_locate_lines`](Self::try_locate_lines), every entry None once
@@ -1359,6 +1441,8 @@ pub struct SearchResult {
     /// `crate::stream`): `hits` holds the ones decided so far, every one
     /// passing. None: `hits` is complete.
     stream: Option<crate::stream::HitStream>,
+    /// See `SearchRequest::word_windows`: aligned with `hits`. None: not asked.
+    windows: Option<Vec<WordWindow>>,
 }
 
 /// How a search was served (see [`SearchResult::info`]).
@@ -1410,6 +1494,7 @@ impl SearchResult {
             line: None,
             order_stamp: String::new(),
             stream: None,
+            windows: None,
         }
     }
 
@@ -1436,8 +1521,12 @@ impl SearchResult {
                 }
             })
             .map_err(Error::Io)?;
+        let windows = session.word_windows;
         let mut r = SearchResult::new(Vec::new(), session);
         r.stream = Some(crate::stream::HitStream { rx });
+        if windows {
+            r.windows = Some(Vec::new());
+        }
         if relevance {
             r.scores = Some(Vec::new());
         }
@@ -1487,6 +1576,12 @@ impl SearchResult {
     }
 
     fn append(&mut self, batch: crate::stream::Batch) {
+        if let Some(all) = self.windows.as_mut() {
+            match &batch.windows {
+                Some(w) => all.extend_from_slice(w),
+                None => all.extend(std::iter::repeat(WordWindow::NONE).take(batch.hits.len())),
+            }
+        }
         self.hits.extend_from_slice(&batch.hits);
         if let Some(p) = self.session.positions.as_mut() {
             p.hit_docs.extend_from_slice(&batch.docs);
@@ -1522,6 +1617,21 @@ impl SearchResult {
     /// (the FM sidecar file is corrupt or stale: walks served, same hits).
     pub fn notices(&self) -> &[String] {
         &self.notices
+    }
+
+    /// The word-level descriptors of hits `[offset, offset + count)`, in
+    /// hit order (see `SearchRequest::word_windows`). Empty when the search
+    /// did not keep them (not asked, or an index without positions).
+    pub fn word_windows(&self, offset: usize, count: usize) -> &[WordWindow] {
+        match &self.windows {
+            Some(w) if offset < w.len() => &w[offset..(offset + count).min(w.len())],
+            _ => &[],
+        }
+    }
+
+    /// See [`SnippetSession::try_finish_windows`].
+    pub fn finish_windows(&mut self, items: &[(WordWindow, &str, Option<&str>)]) -> Result<Vec<Option<Snippet>>> {
+        self.session.try_finish_windows(items)
     }
 
     /// How the search was served (the C ABI's `se_search_info`).
@@ -2391,6 +2501,7 @@ impl LineIndex {
             unmarked: Default::default(),
             match_mode: hebrew_fts::MatchMode::BestWindow,
             word_span: self.options.positions,
+            word_windows: request.word_windows && self.options.positions,
         };
         session.locator.set_word_span(session.word_span);
         if section {
@@ -3285,7 +3396,7 @@ impl LineIndex {
         source: crate::stream::Source,
         relevance: bool,
     ) -> Result<SearchResult> {
-        let filter = match (&session.positions, session.count_needs_text) {
+        let filter = match (&session.positions, session.count_needs_text || session.word_windows) {
             (Some(positions), true) => {
                 let mut locator = SnippetWindowLocator::new(0);
                 locator.set_word_span(true);
@@ -3295,6 +3406,7 @@ impl LineIndex {
                     source: positions.clone(),
                     marked: if session.negative.iter().any(|n| n.vocalized) { self.fields.marked } else { None },
                     locator,
+                    windows: session.word_windows,
                 })
             }
             _ => None,

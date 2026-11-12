@@ -566,11 +566,17 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                 int snippets = 0;
                 foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
                              engine, "beta", int.MaxValue, false, 8, null, new FtsTermTable()))
+                {
+                    // index with positions: hits past the seed carry a word-level descriptor
+                    Check(!engine.Index.HasPositions || batch.Hits.Skip(Math.Max(0, SeforimDbFtsSearcher.SeedSnippetTextHitCount - got.Count)).All(h => h.IsPending),
+                          "positions: later hits wait for their text");
+                    SeforimDbFtsSearcher.FinishPending(engine, batch.Hits);
                     foreach (var hit in batch.Hits)
                     {
                         got.Add(hit.LineId);
                         if (hit.SnippetMarks.Length > 0) snippets++;
                     }
+                }
                 Check(got.SequenceEqual(expected.Select(i => (long)i)), $"round {round}: hits {got.Count}, expected {expected.Count} in catalog order");
                 Check(snippets == got.Count, "every hit has a marked snippet");
             }
@@ -605,6 +611,8 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                          engine, "beta", int.MaxValue, false, 8, null, new FtsTermTable()))
             {
                 seeded.AddRange(batch.SnippetTexts);
+                // index with positions: shortness is known once the descriptor is finished
+                SeforimDbFtsSearcher.FinishPending(engine, batch.Hits);
                 foreach (var hit in batch.Hits)
                     if ((hit.SnippetFlags & FtsHit.SnippetFlagShort) != 0) shortHits++;
             }
@@ -667,12 +675,15 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             cache.EnsureAround(hitsInOrder, 0, 30).GetAwaiter().GetResult();
             Check(cache.Requests == 0, "the first page renders from the seeded texts: " + cache.Requests);
             cache.EnsureAround(hitsInOrder, 600, 30).GetAwaiter().GetResult();
-            Check(cache.Requests == 1, "a later page: one request with its lookahead: " + cache.Requests);
+            // one request with its lookahead; on an index with positions the short rows'
+            // context is a second one (shortness is known once the window is finished)
+            Check(cache.Requests == (engine.Index.HasPositions ? 2 : 1), "a later page: one request with its lookahead: " + cache.Requests);
             Check(Enumerable.Range(580, 110).All(i => cache.TextOf(hitsInOrder[i].LineId, false) is { Text.Length: > 0 }),
                   "shown rows + 60 ahead + 20 behind cached");
             Check(cache.TextOf(hitsInOrder[579].LineId, false) == null, "nothing before the lookbehind");
             cache.EnsureAround(hitsInOrder, 0, hitsInOrder.Count).GetAwaiter().GetResult();
-            Check(cache.Requests == 1 + (hitsInOrder.Count - SeforimDbFtsSearcher.SeedSnippetTextHitCount - 110 + FtsSnippetTextCache.FetchBatch - 1) / FtsSnippetTextCache.FetchBatch,
+            // with positions every chunk is asked twice: its texts, then (all rows short) the context
+            Check(cache.Requests == (engine.Index.HasPositions ? 2 : 1) * (1 + (hitsInOrder.Count - SeforimDbFtsSearcher.SeedSnippetTextHitCount - 110 + FtsSnippetTextCache.FetchBatch - 1) / FtsSnippetTextCache.FetchBatch),
                   "requests split at FetchBatch ids: " + cache.Requests);
             var fullIds = full.SelectMany(f => f.Results).Select(h => h.LineId).ToList();
             Check(fullIds.Count == 2 * LinesPerBook / 3, $"full stream {fullIds.Count} hits");
@@ -693,6 +704,8 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                 Check(resumed.All(f => f.SnippetTexts.Count == 0), "a resumed stream seeds no snippet texts");
                 // Term ids restart in the resumed stream: its own NewTerms resolve its own marks.
                 var table = resumed.SelectMany(f => f.NewTerms).ToList();
+                // index with positions: unseeded hits get their marks (and terms) when finished
+                table.AddRange(SeforimDbFtsSearcher.FinishPending(engine, rest));
                 Check(table.Count > 0 && rest.All(h => Marks(h).All(t => t < table.Count)), "resumed term ids index its own table");
             }
 
@@ -804,7 +817,10 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                 }
                 SqliteConnection.ClearAllPools();
                 var afterHits = NotesSearch(engine, "gamma", out var bad);
-                Check(afterHits.Count == 0 && bad.Count == 1 && bad.LineIds()[0] == 11, "unreadable line counted, search not aborted: " + bad.Count);
+                // without positions the text decides: the line is no hit; with positions the index
+                // decided it and the unreadable text is counted when it is read (the seed)
+                Check(afterHits.Count == (engine.Index.HasPositions ? 1 : 0) && bad.Count == 1 && bad.LineIds()[0] == 11,
+                      "unreadable line counted, search not aborted: " + bad.Count);
                 Check(bad.FirstError?.Contains("Line 11") == true, "error names the line: " + bad.FirstError);
                 NotesSearch(engine, "thetanote", out var badNote);
                 Check(badNote.Count == 1 && badNote.LineIds()[0] == n10, "unreadable note counted by its virtual id");

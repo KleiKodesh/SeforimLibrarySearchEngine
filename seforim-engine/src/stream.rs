@@ -34,7 +34,7 @@ use std::sync::Arc;
 use crate::cross_line::{CrossIndex, CrossInput, CrossMatcher, CrossRule};
 use crate::positioned::{DocKey, PositionSource};
 use crate::section_scope::SectionKey;
-use crate::search::{passes_tokenized, CancelToken, Matcher, NegativeFilter, PlacedHit, PlacedSegmentCollector, TermMaps};
+use crate::search::{decide_tokenized, CancelToken, Matcher, NegativeFilter, PlacedHit, PlacedSegmentCollector, TermMaps, WordWindow};
 use crate::{Error, Result};
 
 /// Candidate hits in the first chunk (a first page arrives fast), doubling
@@ -48,6 +48,9 @@ pub(crate) struct Batch {
     pub hits: Vec<PlacedHit>,
     pub docs: Vec<(u64, u32, DocId)>,
     pub scores: Option<Vec<Score>>,
+    /// Each hit's word-level descriptor (`SearchRequest::word_windows`),
+    /// aligned with `hits`; None: not asked.
+    pub windows: Option<Vec<WordWindow>>,
 }
 
 /// Where the producer takes its candidate hits from.
@@ -117,7 +120,7 @@ impl Source {
                 // segment (`LineIndex::catalog_ordered`)
                 let docs: Vec<(u64, u32, DocId)> = hits.iter().zip(docs).map(|(h, d)| (h.line_id, 0, d)).collect();
                 let done = doc == TERMINATED;
-                let batch = Batch { hits, docs, scores: None };
+                let batch = Batch { hits, docs, scores: None, windows: None };
                 match cross {
                     Some(run) => Ok((run.chunk(batch, done, cancel)?, done)),
                     None => Ok((batch, done)),
@@ -129,6 +132,7 @@ impl Source {
                     hits: hits[*at..end].to_vec(),
                     docs: docs[*at..end].to_vec(),
                     scores: scores.as_ref().map(|s| s[*at..end].to_vec()),
+                    windows: None,
                 };
                 *at = end;
                 Ok((batch, end == hits.len()))
@@ -215,7 +219,7 @@ impl CrossRun {
         all.extend(out.hits.into_iter().map(|(h, (s, d))| (h, (h.line_id, s, d))));
         all.sort_by_key(|x| x.0.position);
         let (hits, docs) = all.into_iter().unzip();
-        Ok(Batch { hits, docs, scores: None })
+        Ok(Batch { hits, docs, scores: None, windows: None })
     }
 }
 
@@ -228,11 +232,14 @@ pub(crate) struct HitFilter {
     /// a line carries a mark (Otzaria's `contains_attached_marks`).
     pub marked: Option<tantivy::schema::Field>,
     pub locator: SnippetWindowLocator,
+    /// Keep each passing hit's word-level descriptor (`SearchRequest::word_windows`).
+    pub windows: bool,
 }
 
 impl HitFilter {
-    /// Whether each of `docs` passes, from its positions alone.
-    fn passes(&mut self, docs: &[(u64, u32, DocId)], crossing: &[bool]) -> Result<Vec<bool>> {
+    /// Whether each of `docs` passes, from its positions alone, with its
+    /// word-level descriptor ([`WordWindow::NONE`] for a cross-line pair).
+    fn passes(&mut self, docs: &[(u64, u32, DocId)], crossing: &[bool]) -> Result<Vec<Option<WordWindow>>> {
         let keys: Vec<Option<DocKey>> = docs.iter().map(|&(_, s, d)| Some((s, d))).collect();
         let occurrences = self.source.occurrences(&keys)?;
         let marked = match self.marked {
@@ -245,12 +252,12 @@ impl HitFilter {
             if crossing[i] {
                 // a cross-line pair the cross-line pass already decided on
                 // the joined positions (`next_line_id`): it passes across
-                out.push(true);
+                out.push(Some(WordWindow::NONE));
                 continue;
             }
             self.locator.tokenize_occurrences(o);
             let line_marked = marked.as_ref().is_none_or(|m| m[i]);
-            out.push(passes_tokenized(&self.matchers, &self.negative, &mut self.locator, line_marked, maps));
+            out.push(decide_tokenized(&self.matchers, &self.negative, &mut self.locator, line_marked, maps));
         }
         Ok(out)
     }
@@ -277,7 +284,8 @@ pub(crate) fn produce(
             candidates += batch.hits.len();
             if let Some(f) = filter.as_mut().filter(|_| !batch.hits.is_empty()) {
                 let crossing: Vec<bool> = batch.hits.iter().map(|h| h.next_line_id.is_some()).collect();
-                let pass = f.passes(&batch.docs, &crossing)?;
+                let decided = f.passes(&batch.docs, &crossing)?;
+                let pass: Vec<bool> = decided.iter().map(Option::is_some).collect();
                 let mut keep = pass.iter();
                 batch.hits.retain(|_| *keep.next().unwrap());
                 let mut keep = pass.iter();
@@ -285,6 +293,9 @@ pub(crate) fn produce(
                 if let Some(s) = batch.scores.as_mut() {
                     let mut keep = pass.iter();
                     s.retain(|_| *keep.next().unwrap());
+                }
+                if f.windows {
+                    batch.windows = Some(decided.into_iter().flatten().collect());
                 }
             }
             kept += batch.hits.len();

@@ -127,6 +127,9 @@ pub struct SearchOptions {
     /// Otzaria's SameSection scope for the query (see
     /// `SearchRequest::same_section`). Off by default.
     pub same_section: bool,
+    /// Word-level descriptors (see `SearchRequest::word_windows`). Off by
+    /// default (costs nothing).
+    pub word_windows: bool,
     /// Resume (FtsLib's `afterPosition`): only lines at catalog positions
     /// strictly after this one (see `SearchRequest::after_position`).
     /// None = from the start.
@@ -192,6 +195,7 @@ impl Default for SearchOptions {
             base_books: Vec::new(),
             cross_line: false,
             same_section: false,
+            word_windows: false,
             after_position: None,
             resume_stamp: None,
             max_expanded_terms: hebrew_fts::DEFAULT_MAX_EXPANDED_TERMS,
@@ -353,6 +357,7 @@ impl SearchOptions {
                         book_generations: self.book_generations.clone(),
                         base_books: self.base_books.clone(),
                         cross_line: self.cross_line,
+                        word_windows: self.word_windows,
                         after_position: self.after_position,
                         resume_stamp: self.resume_stamp.clone(),
                         max_expanded_terms: self.max_expanded_terms,
@@ -568,6 +573,7 @@ impl SearchOptions {
             vocalized,
             cross_line: self.cross_line,
             same_section: self.same_section,
+            word_windows: self.word_windows,
             line_regex: None,
             after_position: self.after_position,
             resume_stamp: self.resume_stamp.clone(),

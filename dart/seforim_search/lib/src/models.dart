@@ -609,6 +609,7 @@ class SearchOptions {
     Set<int>? baseBooks,
     this.crossLine = false,
     this.sameSection = false,
+    this.wordWindows = false,
     this.afterPosition,
     this.resumeStamp,
     this.maxExpandedTerms,
@@ -629,6 +630,13 @@ class SearchOptions {
   /// the start of the next line of the same book (one break at most). Such
   /// a hit has [PlacedHit.nextLineId]. Off by default (FtsLib).
   bool crossLine;
+
+  /// Word-level descriptors: on an index with positions every hit keeps the
+  /// best window decided from the positions during the search ([WordWindow],
+  /// [SearchSession.wordWindows]); [SearchSession.finishWindows] turns it plus
+  /// the line text into the snippet without searching for the window again.
+  /// Off (default): costs nothing.
+  bool wordWindows;
 
   /// Otzaria's SameSection scope: every word (or [wordMatch]'s count)
   /// anywhere in one section; the hits are its lines holding a word.
@@ -732,6 +740,7 @@ class SearchOptions {
         'query': query,
         if (userRegex) 'user_regex': true,
         if (crossLine) 'cross_line': true,
+        if (wordWindows) 'word_windows': true,
         if (sameSection) 'same_section': true,
         if (afterPosition != null) 'after_position': afterPosition,
         if (resumeStamp != null) 'resume_stamp': resumeStamp,
@@ -946,4 +955,25 @@ class PhraseOptions {
   final bool ignoreQuotes;
 
   Map<String, Object?> toJson() => {'query': query, 'ignore_quotes': ignoreQuotes};
+}
+
+/// A hit's word-level descriptor ([SearchOptions.wordWindows]): which way of
+/// matching passed and its best window as the word positions of its first
+/// and last matched words, decided from the index positions with no text.
+/// [none]: no descriptor (a cross-line pair, located from its two lines).
+class WordWindow {
+  const WordWindow(this.matcher, this.left, this.right);
+  static const none = WordWindow(0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF);
+  final int matcher, left, right;
+  bool get isNone => matcher == 0xFFFFFFFF;
+
+  @override
+  bool operator ==(Object other) =>
+      other is WordWindow && other.matcher == matcher && other.left == left && other.right == right;
+
+  @override
+  int get hashCode => Object.hash(matcher, left, right);
+
+  @override
+  String toString() => 'WordWindow($matcher, $left, $right)';
 }

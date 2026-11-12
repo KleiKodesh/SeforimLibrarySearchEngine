@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 9;
+const int seforimAbiVersion = 10;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -132,6 +132,13 @@ final class SeforimNative {
             int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int)>('se_writer_add_lines'),
         searchCopyNextLines = lib.lookupFunction<Uint64 Function(Pointer<Void>, Uint64, Uint64, Pointer<Uint64>),
             int Function(Pointer<Void>, int, int, Pointer<Uint64>)>('se_search_copy_next_lines'),
+        searchCopyWindows = lib.lookupFunction<Uint64 Function(Pointer<Void>, Uint64, Uint64, Pointer<Uint32>),
+            int Function(Pointer<Void>, int, int, Pointer<Uint32>)>('se_search_copy_windows'),
+        finishWindows = lib.lookupFunction<
+            SeBuffer Function(Pointer<Void>, Pointer<Uint32>, Pointer<Pointer<Uint8>>, Pointer<Size>,
+                Pointer<Pointer<Uint8>>, Pointer<Size>, Size),
+            SeBuffer Function(Pointer<Void>, Pointer<Uint32>, Pointer<Pointer<Uint8>>, Pointer<Size>,
+                Pointer<Pointer<Uint8>>, Pointer<Size>, int)>('se_search_finish_windows'),
         locatePairs = lib.lookupFunction<
             SeBuffer Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Pointer<Pointer<Uint8>>,
                 Pointer<Size>, Size),
@@ -271,6 +278,9 @@ final class SeforimNative {
   /// section, text length, flags | reserved << 32), texts concatenated.
   final int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int) writerAddLines;
   final int Function(Pointer<Void>, int, int, Pointer<Uint64>) searchCopyNextLines;
+  final int Function(Pointer<Void>, int, int, Pointer<Uint32>) searchCopyWindows;
+  final SeBuffer Function(Pointer<Void>, Pointer<Uint32>, Pointer<Pointer<Uint8>>, Pointer<Size>,
+      Pointer<Pointer<Uint8>>, Pointer<Size>, int) finishWindows;
   final SeBuffer Function(
       Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) locatePairs;
   final int Function(

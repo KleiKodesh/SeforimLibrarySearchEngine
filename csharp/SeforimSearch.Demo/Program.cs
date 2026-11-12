@@ -132,6 +132,8 @@ namespace SeforimSearch.Demo
             int total = 0, frames = 0, printedPages = run == 1 ? 0 : pages;
             var all = new List<FtsHit>();   // every hit so far, in display order (descriptors only)
             var cache = new FtsSnippetTextCache((ids, shorts) => Task.FromResult(coordinator.SnippetTexts(ids, shorts)));
+            // index with positions: a finished row adds its matched terms to the receiver's table
+            cache.OnNewTerms = terms.AddRange;
             string? error = null;
             int unreadableRows = 0;
             string? unreadableError = null;
@@ -247,6 +249,8 @@ namespace SeforimSearch.Demo
                                  engine, query, distance, false, SeforimDbFtsSearcher.DefaultContextWords, dumpWordOptions, terms,
                                  unreadable: unreadable))
                     {
+                        // index with positions: the hits' descriptors are finished with their texts
+                        SeforimDbFtsSearcher.FinishPending(engine, batch.Hits);
                         var all = terms.All();
                         foreach (var h in batch.Hits)
                         {

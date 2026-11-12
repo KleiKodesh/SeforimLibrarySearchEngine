@@ -188,6 +188,57 @@ final class SearchSession implements Finalizable {
     return out;
   }
 
+  /// The word-level descriptors of hits `[offset, offset + count)`, in hit
+  /// order ([SearchOptions.wordWindows]): the best window decided from the
+  /// index positions during the search, no text read. Empty when the search
+  /// did not keep them.
+  List<WordWindow> wordWindows(int offset, int count) {
+    if (count <= 0 || offset < 0 || offset >= hitCount) return const [];
+    if (count > hitCount - offset) count = hitCount - offset;
+    final raw = calloc<Uint32>(count * 3);
+    try {
+      final copied = _n.searchCopyWindows(_h, offset, count, raw);
+      final v = raw.asTypedList(copied * 3);
+      return [for (var i = 0; i < copied; i++) WordWindow(v[i * 3], v[i * 3 + 1], v[i * 3 + 2])];
+    } finally {
+      calloc.free(raw);
+    }
+  }
+
+  /// Turns word-level descriptors plus the hits' texts into final snippets
+  /// WITHOUT searching for the window again: only the context, the marks and
+  /// the UTF-16 offsets are computed (the snippet [locatePairs] gives). A
+  /// [WordWindow.none] hit (a cross-line pair) is located as [locatePairs]
+  /// does. Null: the text disagrees with the positions.
+  List<Snippet?> finishWindows(List<WordWindow> windows, List<String> texts, [List<String?>? nextTexts]) {
+    final n = texts.length;
+    if (windows.length != n) throw ArgumentError('one window per text');
+    final out = List<Snippet?>.filled(n, null);
+    if (n == 0) return out;
+    final w = calloc<Uint32>(3 * n);
+    try {
+      for (var i = 0; i < n; i++) {
+        w[3 * i] = windows[i].matcher;
+        w[3 * i + 1] = windows[i].left;
+        w[3 * i + 2] = windows[i].right;
+      }
+      final data = _withPairs(texts, nextTexts ?? List<String?>.filled(n, null),
+          (p, l, np, nl) => _n.takeBuffer(_n.finishWindows(_h, w, p, l, np, nl, n)));
+      var at = 0;
+      for (var i = 0; i < n; i++) {
+        final kind = data[at++];
+        if (kind == 0) continue;
+        final brk = kind == 2 ? data[at++] : null;
+        final (s, next) = Snippet.read(data, at, brk);
+        out[i] = s;
+        at = next;
+      }
+    } finally {
+      calloc.free(w);
+    }
+    return out;
+  }
+
   /// [countBatch] for hits given with their next line's text.
   int countBatchPairs(List<String> texts, List<String?> nextTexts) {
     final passed =

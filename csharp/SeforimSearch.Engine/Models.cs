@@ -669,6 +669,13 @@ namespace SeforimSearch.Engine
         /// <see cref="PlacedHit.NextLineId"/>; locate it with
         /// <see cref="SearchSession.LocatePairs"/>. Off by default (FtsLib).</summary>
         public bool CrossLine { get; set; }
+
+        /// <summary>Word-level descriptors: on an index with positions every hit keeps the best
+        /// window decided from the positions during the search (<see cref="WordWindow"/>,
+        /// <see cref="SearchSession.GetWordWindows"/>), and <see cref="SearchSession.FinishWindows"/>
+        /// turns it plus the line text into the snippet without searching for the window again.
+        /// Off (default): costs nothing.</summary>
+        public bool WordWindows { get; set; }
         /// <summary>Otzaria's SameSection scope: every word (or WordMatch's count) anywhere in
         /// one section; the hits are that section's lines holding a word.</summary>
         public bool SameSection { get; set; }
@@ -720,6 +727,7 @@ namespace SeforimSearch.Engine
                     .Append(",\"any_order\":").Append(ProximityBaseAnyOrder ? "true" : "false").Append('}');
             }
             if (CrossLine) sb.Append(",\"cross_line\":true");
+            if (WordWindows) sb.Append(",\"word_windows\":true");
             if (SameSection) sb.Append(",\"same_section\":true");
             WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes, KtivMaleHaser,
                 PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes, SpellingErrors,
@@ -1114,5 +1122,32 @@ namespace SeforimSearch.Engine
         }
 
         private static int Clamp(uint v) => v > int.MaxValue ? int.MaxValue : (int)v;
+    }
+
+    /// <summary>
+    /// A hit's word-level descriptor (<see cref="SearchOptions.WordWindows"/>): which way of
+    /// matching passed and its best window as the word positions of the first and last matched
+    /// words, decided from the index positions with no text. <see cref="None"/>: no descriptor
+    /// (a cross-line pair, located from its two lines).
+    /// </summary>
+    public readonly struct WordWindow : IEquatable<WordWindow>
+    {
+        public WordWindow(uint matcher, uint left, uint right)
+        {
+            Matcher = matcher;
+            Left = left;
+            Right = right;
+        }
+
+        public static readonly WordWindow None = new WordWindow(uint.MaxValue, uint.MaxValue, uint.MaxValue);
+
+        public uint Matcher { get; }
+        public uint Left { get; }
+        public uint Right { get; }
+        public bool IsNone => Matcher == uint.MaxValue;
+
+        public bool Equals(WordWindow other) => Matcher == other.Matcher && Left == other.Left && Right == other.Right;
+        public override bool Equals(object? obj) => obj is WordWindow w && Equals(w);
+        public override int GetHashCode() => (int)(Matcher * 31 + Left * 17 + Right);
     }
 }

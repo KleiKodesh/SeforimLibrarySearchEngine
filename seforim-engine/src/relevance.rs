@@ -58,14 +58,13 @@
 //! back in catalog order with the notice [`NOTICE_RELEVANCE_NEEDS_POSITIONS`]
 //! (`SearchResult::notices`).
 
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use tantivy::postings::{Postings, SegmentPostings};
-use tantivy::query::{Bm25StatisticsProvider, Bm25Weight, PhraseScorer, Weight};
+use tantivy::query::{Bm25StatisticsProvider, Bm25Weight, PhraseScorer, SimpleUnion, Weight};
 use tantivy::schema::{Field, IndexRecordOption};
-use tantivy::{DocId, DocSet, InvertedIndexReader, Score, Searcher, SegmentReader, Term, TERMINATED};
+use tantivy::{DocId, DocSet, InvertedIndexReader, Score, Searcher, SegmentReader, Term};
 
 use crate::search::{CancelToken, GroupSpec, PlacedHit};
 use crate::{Error, Result};
@@ -454,127 +453,29 @@ impl Bm25StatisticsProvider for SharedStatistics<'_> {
     }
 }
 
-/// The union of several terms' postings in one segment, positioned on one
-/// doc at a time: frequencies summed, positions merged (sorted, deduped, as
-/// tantivy's own posting unions).
-struct TermUnion {
-    postings: Vec<SegmentPostings>,
-    /// Postings past the current doc, smallest doc on top.
-    heap: BinaryHeap<Reverse<(DocId, usize)>>,
-    /// Postings on the current doc.
-    on_doc: Vec<usize>,
-    doc: DocId,
+/// The union of several terms' postings in one segment: tantivy's own
+/// [`SimpleUnion`] (frequencies summed, positions merged and deduplicated).
+type TermUnion = SimpleUnion<SegmentPostings>;
+
+/// The union of `terms` in this segment; None when no term is in it.
+fn open_union<S: AsRef<str>>(
+    inverted: &InvertedIndexReader,
+    field: Field,
+    terms: &[S],
+    option: IndexRecordOption,
+) -> Result<Option<TermUnion>> {
+    let mut postings = Vec::new();
+    for t in terms {
+        if let Some(p) = inverted.read_postings(&Term::from_field_text(field, t.as_ref()), option)? {
+            postings.push(p);
+        }
+    }
+    Ok((!postings.is_empty()).then(|| SimpleUnion::build(postings)))
 }
 
-impl TermUnion {
-    /// None when no term is in this segment.
-    fn open<S: AsRef<str>>(
-        inverted: &InvertedIndexReader,
-        field: Field,
-        terms: &[S],
-        option: IndexRecordOption,
-    ) -> Result<Option<TermUnion>> {
-        let mut postings = Vec::new();
-        for t in terms {
-            if let Some(p) = inverted.read_postings(&Term::from_field_text(field, t.as_ref()), option)? {
-                postings.push(p);
-            }
-        }
-        if postings.is_empty() {
-            return Ok(None);
-        }
-        let heap = postings
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.doc() != TERMINATED)
-            .map(|(i, p)| Reverse((p.doc(), i)))
-            .collect();
-        let mut u = TermUnion { postings, heap, on_doc: Vec::new(), doc: TERMINATED };
-        u.settle();
-        Ok(Some(u))
-    }
-
-    /// Moves the smallest doc's postings out of the heap.
-    fn settle(&mut self) {
-        self.on_doc.clear();
-        let Some(&Reverse((doc, _))) = self.heap.peek() else {
-            self.doc = TERMINATED;
-            return;
-        };
-        self.doc = doc;
-        while let Some(&Reverse((d, i))) = self.heap.peek() {
-            if d != doc {
-                break;
-            }
-            self.heap.pop();
-            self.on_doc.push(i);
-        }
-    }
-
-    fn reinsert(&mut self, i: usize) {
-        let d = self.postings[i].doc();
-        if d != TERMINATED {
-            self.heap.push(Reverse((d, i)));
-        }
-    }
-
-    /// True when the union holds `doc` (docs asked in ascending order).
-    fn holds(&mut self, doc: DocId) -> bool {
-        self.seek(doc) == doc
-    }
-}
-
-impl DocSet for TermUnion {
-    fn advance(&mut self) -> DocId {
-        for i in std::mem::take(&mut self.on_doc) {
-            self.postings[i].advance();
-            self.reinsert(i);
-        }
-        self.settle();
-        self.doc
-    }
-
-    fn seek(&mut self, target: DocId) -> DocId {
-        if self.doc >= target {
-            return self.doc;
-        }
-        for i in std::mem::take(&mut self.on_doc) {
-            self.postings[i].seek(target);
-            self.reinsert(i);
-        }
-        while let Some(&Reverse((d, i))) = self.heap.peek() {
-            if d >= target {
-                break;
-            }
-            self.heap.pop();
-            self.postings[i].seek(target);
-            self.reinsert(i);
-        }
-        self.settle();
-        self.doc
-    }
-
-    fn doc(&self) -> DocId {
-        self.doc
-    }
-
-    fn size_hint(&self) -> u32 {
-        self.postings.iter().fold(0u32, |a, p| a.saturating_add(p.size_hint()))
-    }
-}
-
-impl Postings for TermUnion {
-    fn term_freq(&self) -> u32 {
-        self.on_doc.iter().map(|&i| self.postings[i].term_freq()).sum()
-    }
-
-    fn append_positions_with_offset(&mut self, offset: u32, output: &mut Vec<u32>) {
-        for &i in &self.on_doc {
-            self.postings[i].append_positions_with_offset(offset, output);
-        }
-        output.sort_unstable();
-        output.dedup();
-    }
+/// True when the union holds `doc` (docs asked in ascending order).
+fn holds(union: &mut TermUnion, doc: DocId) -> bool {
+    union.seek(doc) == doc
 }
 
 /// One part of a score, opened on one segment, asked docs in ascending order.
@@ -598,14 +499,14 @@ impl Part {
     fn score(&mut self, doc: DocId) -> (Score, Score) {
         match self {
             Part::Const { union, boost } => {
-                if union.holds(doc) {
+                if holds(union, doc) {
                     (*boost, 0.0)
                 } else {
                     (0.0, 0.0)
                 }
             }
             Part::Exact { union, bm25, fieldnorms } => {
-                if !union.holds(doc) {
+                if !holds(union, doc) {
                     return (0.0, 0.0);
                 }
                 (
@@ -629,7 +530,7 @@ impl Part {
                 let mut all = true;
                 for u in unions.iter_mut() {
                     // every union is asked, so each stays positioned for the next doc
-                    all &= u.holds(doc);
+                    all &= holds(u, doc);
                 }
                 if all {
                     (unions.len() as Score, 0.0)
@@ -639,7 +540,7 @@ impl Part {
             }
             Part::Span { unions, positions } => {
                 for (u, p) in unions.iter_mut().zip(positions.iter_mut()) {
-                    if !u.holds(doc) {
+                    if !holds(u, doc) {
                         return (0.0, 0.0);
                     }
                     u.positions(p);
@@ -794,7 +695,7 @@ pub(crate) fn scores(
                     // one word: 1; several words anywhere: 1 per word, all required
                     let mut unions = Vec::with_capacity(terms.len());
                     for t in terms {
-                        match TermUnion::open(&inverted, field, t, IndexRecordOption::Basic)? {
+                        match open_union(&inverted, field, t, IndexRecordOption::Basic)? {
                             Some(u) => unions.push(u),
                             None => {
                                 unions.clear();
@@ -861,7 +762,7 @@ fn phrase_part(
 ) -> Result<Option<Part>> {
     let mut slots = Vec::with_capacity(terms.len());
     for (i, t) in terms.iter().enumerate() {
-        match TermUnion::open(inverted, field, t, IndexRecordOption::WithFreqsAndPositions)? {
+        match open_union(inverted, field, t, IndexRecordOption::WithFreqsAndPositions)? {
             Some(u) => slots.push((i, u)),
             None => return Ok(None),
         }
@@ -1032,7 +933,7 @@ impl MainWeights {
         let mut parts = Vec::new();
         let basic = IndexRecordOption::Basic;
         let slot_const = |terms: &[String], boost: Score, parts: &mut Vec<Part>| -> Result<()> {
-            if let Some(union) = TermUnion::open(inverted, field, terms, basic)? {
+            if let Some(union) = open_union(inverted, field, terms, basic)? {
                 parts.push(Part::Const { union, boost });
             }
             Ok(())
@@ -1040,7 +941,7 @@ impl MainWeights {
         let fuzzy_parts = |f: &FuzzyWeights, parts: &mut Vec<Part>| -> Result<()> {
             let fieldnorms = segment.get_fieldnorms_reader(field)?;
             for (spellings, bm25) in &f.exact {
-                if let Some(union) = TermUnion::open(inverted, field, spellings, IndexRecordOption::WithFreqs)? {
+                if let Some(union) = open_union(inverted, field, spellings, IndexRecordOption::WithFreqs)? {
                     parts.push(Part::Exact { union, bm25: bm25.clone(), fieldnorms: fieldnorms.clone() });
                 }
             }
@@ -1076,7 +977,7 @@ impl MainWeights {
                 for (terms, words, bm25) in &self.required {
                     let mut unions = Vec::with_capacity(terms.len());
                     for t in terms {
-                        match TermUnion::open(inverted, field, t, IndexRecordOption::Basic)? {
+                        match open_union(inverted, field, t, IndexRecordOption::Basic)? {
                             Some(u) => unions.push(u),
                             None => {
                                 unions.clear();
@@ -1101,7 +1002,7 @@ impl MainWeights {
                 let (words, bm25) = self.lexical_phrase.as_ref().unwrap();
                 let mut unions = Vec::with_capacity(m.terms.len());
                 for t in &m.terms {
-                    match TermUnion::open(inverted, field, t, IndexRecordOption::Basic)? {
+                    match open_union(inverted, field, t, IndexRecordOption::Basic)? {
                         Some(u) => unions.push(u),
                         None => return Ok(parts),
                     }
@@ -1122,7 +1023,7 @@ impl MainWeights {
             Shape::AnyOrder => {
                 let mut unions = Vec::with_capacity(m.terms.len());
                 for t in &m.terms {
-                    match TermUnion::open(inverted, field, t, IndexRecordOption::WithFreqsAndPositions)? {
+                    match open_union(inverted, field, t, IndexRecordOption::WithFreqsAndPositions)? {
                         Some(u) => unions.push(u),
                         None => return Ok(parts),
                     }

@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:otzaria_demo/book_updates.dart';
 import 'package:otzaria_demo/otzaria_query.dart';
 import 'package:otzaria_demo/seforim_db.dart';
 import 'package:otzaria_demo/note_ids.dart';
@@ -13,6 +14,8 @@ import 'package:seforim_search/seforim_search.dart';
 const _usage = '''
 otzaria_demo build  [--db path] [--index dir] [--max-lines N] [--keep-marks] [--no-positions]
 otzaria_demo search [--db path] [--index dir] [options] <query>
+otzaria_demo update [--db path] [--index dir] [--wait] [--watch]
+                    per-book update by book.contentHash, then the background merge
 
 search options (Otzaria names):
   --mode exact|advanced|fuzzy     (default advanced)
@@ -88,6 +91,14 @@ Future<void> main(List<String> args) async {
     switch (args[0]) {
       case 'build':
         _build(db, indexDir, o);
+      case 'update':
+        // issue #29: changed / new / removed books re-indexed, then the background merge
+        final index = SeforimIndex.open(indexDir);
+        try {
+          exitCode = await runUpdateCommand(index, db, wait: o.containsKey('wait'), watch: o.containsKey('watch'));
+        } finally {
+          index.close();
+        }
       case 'search':
         db.clearUnreadable();
         await _search(db, indexDir, o, rest.join(' '));

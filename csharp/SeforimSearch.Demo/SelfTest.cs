@@ -45,6 +45,7 @@ namespace SeforimSearch.Demo
                 ("load mode (issue #31): concurrent searches while a writer commits", LoadMode),
                 ("native ABI check (issue #17): loaded = expected, mismatch names both and the path", AbiCheck),
                 ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
+                ("per-book update (issue #29): changed / grown / removed books, crash mid-update, background merge", BookUpdates),
             };
             int failed = 0;
             foreach (var (name, body) in tests)
@@ -67,6 +68,111 @@ namespace SeforimSearch.Demo
             if (!args.Contains("--keep"))
                 try { Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
             return failed == 0 ? 0 : 1;
+        }
+
+        private static void BookUpdates(string fixtureDb, string dir)
+        {
+            string db = Path.Combine(dir, "updates.db");
+            File.Copy(fixtureDb, db, true);
+            void Sql(string sql)
+            {
+                using var c = new SqliteConnection($"Data Source={db};Pooling=False");
+                c.Open();
+                using var cmd = c.CreateCommand();
+                cmd.CommandText = sql;
+                cmd.ExecuteNonQuery();
+            }
+            Sql("ALTER TABLE book ADD COLUMN contentHash INTEGER; UPDATE book SET contentHash = id * 1000;");
+            string index = Path.Combine(dir, "update-index");
+            List<long> Hits(SeforimDbFtsEngine e, string q, long after = 0)
+            {
+                var got = new List<long>();
+                foreach (var batch in new SeforimDbFtsSearcher().SearchInBatches(
+                             e, q, int.MaxValue, false, 8, null, new FtsTermTable(), afterPosition: after))
+                    foreach (var hit in batch.Hits) got.Add(hit.LineId);
+                return got;
+            }
+            // the fixture's beta lines of a book (every third line), in reading order
+            List<long> Beta(int book) =>
+                Enumerable.Range(0, LinesPerBook).Where(k => k % 3 == 0).Select(k => (long)((book - 1) * LinesPerBook + k + 1)).ToList();
+            void Resumes(SeforimDbFtsEngine e, List<long> expected)
+            {
+                // positions = the DB's current numbering: a resume after the n-th hit gives the rest
+                e.InvalidateBookPositions();
+                foreach (int n in new[] { 1, expected.Count / 2, expected.Count - 1 })
+                {
+                    long? after = e.PositionOfLine(expected[n - 1]);
+                    Check(after.HasValue, "resume line placed");
+                    var rest = Hits(e, "beta", after!.Value);
+                    Check(expected.Skip(n).SequenceEqual(rest), $"resume after hit {n}: {rest.Count} != {expected.Count - n}");
+                }
+            }
+            // book 1 with line 2 (index 1) turned into a beta line
+            List<long> Book1() { var b = Beta(1); b.Insert(1, 2); return b; }
+
+            using (var engine = new SeforimDbFtsEngine(index, db))
+            {
+                engine.Index.BuildLines(linesPerCommit: 500, heapBytes: 60_000_000);
+                var r = engine.Index.UpdateChangedBooks();
+                Check(r.Applicable && r.Changed + r.Added + r.Removed == 0, "adopt: " + r);
+                Check(engine.Index.ReadBuildState()!.Books != null, "book hashes recorded");
+                r = engine.Index.UpdateChangedBooks();
+                Check(r.Applicable && r.Changed == 0 && !r.MergeStarted, "nothing changed: " + r);
+
+                // book 1 changed, same line count: plain merge, positions kept, book 2 untouched
+                Sql("UPDATE line SET content = 'omega beta' WHERE id = 2; UPDATE book SET contentHash = 1001 WHERE id = 1;");
+                r = engine.Index.UpdateChangedBooks();
+                Check(r.Changed == 1 && !r.Repack && r.LinesWritten == LinesPerBook, "changed book: " + r);
+                engine.Index.WaitBackgroundMerge();
+                Check(Hits(engine, "omega").SequenceEqual(new long[] { 2 }), "the changed line is found");
+                var beta = Beta(2).Concat(Book1()).ToList();
+                Check(Hits(engine, "beta").SequenceEqual(beta), "beta in catalog order after the update");
+                Resumes(engine, beta);
+            }
+            Check(!File.Exists(Path.Combine(index, "background_merge.json")), "merge record removed");
+
+            // book 2 (first in the catalog) grows by two lines: repack, book 1 renumbered
+            Sql($"INSERT INTO line (id, bookId, lineIndex, content, heRef) VALUES (9001, 2, {LinesPerBook}, 'psi beta', ''), (9002, 2, {LinesPerBook + 1}, 'psi', '');" +
+                "UPDATE book SET contentHash = 2001 WHERE id = 2;");
+            using (var engine = new SeforimDbFtsEngine(index, db))
+            {
+                var r = engine.Index.UpdateChangedBooks();
+                Check(r.Changed == 1 && r.Repack && r.MergeStarted, "grown book: " + r);
+                engine.Index.WaitBackgroundMerge();
+                Check(Hits(engine, "psi").SequenceEqual(new long[] { 9001, 9002 }), "new lines found");
+                var beta = Beta(2).Concat(new long[] { 9001 }).Concat(Book1()).ToList();
+                Check(Hits(engine, "beta").SequenceEqual(beta), "beta in catalog order after the repack");
+                Resumes(engine, beta);
+                Check(engine.PositionOfLine(1) == LinesPerBook + 3, "book 1 starts after the grown book 2");
+
+                // crash mid-update: both books change, one commit per book, cancelled after the first
+                Sql("UPDATE line SET content = 'rho' WHERE id = 3; UPDATE book SET contentHash = 1002 WHERE id = 1;" +
+                    $"UPDATE line SET content = 'rho' WHERE id = {LinesPerBook + 2}; UPDATE book SET contentHash = 2002 WHERE id = 2;");
+                engine.Index.UpdateLinesPerCommit = 1;
+                using var cts = new CancellationTokenSource();
+                bool cancelled = false;
+                try { engine.Index.UpdateChangedBooks(cts.Token, line => { if (line.Contains(" 1 / 2 books")) cts.Cancel(); }); }
+                catch (OperationCanceledException) { cancelled = true; }
+                Check(cancelled, "the update was cancelled after its first book");
+                var mid = engine.Index.ReadBuildState()!;
+                Check(!string.IsNullOrEmpty(mid.Pending) && mid.Pending!.Split(',').Length == 1, "one book still pending: " + mid.Pending);
+                Check(Hits(engine, "rho").Count == 1, "the first book's commit is visible, the other book is whole and old");
+                r = engine.Index.UpdateChangedBooks();
+                Check(r.Changed == 1 && string.IsNullOrEmpty(engine.Index.ReadBuildState()!.Pending), "resumed: " + r);
+                engine.Index.WaitBackgroundMerge();
+                Check(Hits(engine, "rho").SequenceEqual(new long[] { LinesPerBook + 2, 3 }), "both books updated, catalog order");
+
+                // a removed book: its lines go, the next book moves up
+                Sql("DELETE FROM line WHERE bookId = 2; DELETE FROM book WHERE id = 2;");
+                r = engine.Index.UpdateChangedBooks();
+                Check(r.Removed == 1 && r.Repack, "removed book: " + r);
+                engine.Index.WaitBackgroundMerge();
+                Check(Hits(engine, "psi").Count == 0, "removed book's lines gone");
+                engine.InvalidateBookPositions();
+                Check(engine.PositionOfLine(1) == 1, "book 1 is first now");
+                Check(Hits(engine, "beta").SequenceEqual(Book1()), "book 1 alone");
+                Resumes(engine, Book1());
+            }
         }
 
         private static void AsyncOpen(string db, string dir)

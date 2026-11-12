@@ -50,6 +50,7 @@ namespace SeforimSearch.Demo
             if (command == "count") return Count(engine, args);
             if (command == "load") return LoadCommand.Run(engine, args);
             if (command == "resort") return ResortCommand.Run(engine, db, index, args);
+            if (command == "update") return UpdateCommand.Run(engine, db, args);
             Console.Error.WriteLine("unknown command " + command);
             return 2;
         }

@@ -118,7 +118,7 @@ namespace FtsLib.Fts5
     /// SnippetDescriptors; BuildLines
     /// builds or resumes the index from the corpus.
     /// </summary>
-    public sealed class TantivySeforimIndex : IDisposable
+    public sealed partial class TantivySeforimIndex : IDisposable
     {
         /// <summary>The file whose presence means a searchable index.</summary>
         public const string IndexFileName = "meta.json";
@@ -439,7 +439,9 @@ namespace FtsLib.Fts5
 
         // ── Build ─────────────────────────────────────────────────────
 
-        /// <summary>The build watermark, committed atomically with the documents.</summary>
+        /// <summary>The build watermark, committed atomically with the documents. A complete
+        /// index also records each book's <c>contentHash</c> and line counts (<see cref="Books"/>)
+        /// and the books a per-book update has not finished (<see cref="Pending"/>), issue #29.</summary>
         public sealed class BuildState
         {
             public long LastLineId;
@@ -447,15 +449,38 @@ namespace FtsLib.Fts5
             public long TotalLines;
             public bool Complete;
             public string Fingerprint = "";
+            /// <summary>"bookId:contentHash:lines:notes;..." (null = not recorded: an index built
+            /// before issue #29, adopted at the next update when its fingerprint still matches).</summary>
+            public string? Books;
+            /// <summary>"bookId,bookId,..." of a per-book update in progress (null or "" = none).</summary>
+            public string? Pending;
 
-            public string Serialize() => string.Join("|",
-                "v1", LastLineId.ToString(CultureInfo.InvariantCulture), LinesDone.ToString(CultureInfo.InvariantCulture),
-                TotalLines.ToString(CultureInfo.InvariantCulture), Complete ? "1" : "0", Fingerprint);
+            // v2 puts the new fields before the fingerprint, which may itself hold '|'
+            public string Serialize() => Books == null && string.IsNullOrEmpty(Pending)
+                ? string.Join("|", "v1", LastLineId.ToString(CultureInfo.InvariantCulture), LinesDone.ToString(CultureInfo.InvariantCulture),
+                    TotalLines.ToString(CultureInfo.InvariantCulture), Complete ? "1" : "0", Fingerprint)
+                : string.Join("|", "v2", LastLineId.ToString(CultureInfo.InvariantCulture), LinesDone.ToString(CultureInfo.InvariantCulture),
+                    TotalLines.ToString(CultureInfo.InvariantCulture), Complete ? "1" : "0", Books ?? "-", Pending ?? "", Fingerprint);
 
             public static BuildState? Parse(string? payload)
             {
                 if (string.IsNullOrEmpty(payload)) return null;
-                var parts = payload!.Split(new[] { '|' }, 6);
+                if (payload!.StartsWith("v2|", StringComparison.Ordinal))
+                {
+                    var p2 = payload.Split(new[] { '|' }, 8);
+                    if (p2.Length != 8) return null;
+                    return new BuildState
+                    {
+                        LastLineId = long.Parse(p2[1], CultureInfo.InvariantCulture),
+                        LinesDone = long.Parse(p2[2], CultureInfo.InvariantCulture),
+                        TotalLines = long.Parse(p2[3], CultureInfo.InvariantCulture),
+                        Complete = p2[4] == "1",
+                        Books = p2[5] == "-" ? null : p2[5],
+                        Pending = p2[6],
+                        Fingerprint = p2[7],
+                    };
+                }
+                var parts = payload.Split(new[] { '|' }, 6);
                 if (parts.Length != 6 || parts[0] != "v1") return null;
                 return new BuildState
                 {

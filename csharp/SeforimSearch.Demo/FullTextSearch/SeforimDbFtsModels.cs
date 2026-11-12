@@ -152,6 +152,13 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         private readonly object _lock = new object();
         private System.Collections.Generic.Dictionary<long, (long First, long Count)>? _bookPositions;
 
+        /// <summary>Forgets the cached book position runs (call after a per-book index update,
+        /// issue #29: the catalog numbering may have moved).</summary>
+        public void InvalidateBookPositions()
+        {
+            lock (_lock) _bookPositions = null;
+        }
+
         /// <summary>
         /// The index position of a line (<see cref="SeforimDbFtsCorpus.PositionOfLine"/>), to
         /// resume a search after it. Null when the line cannot be placed (gone from the library,

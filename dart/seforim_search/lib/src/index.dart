@@ -209,6 +209,65 @@ final class SeforimIndex implements Finalizable {
     if (_n.indexReload(handle) != 0) throw _n.error();
   }
 
+  /// Starts the background full merge after an update (issue #29): its own
+  /// thread at background priority merges every segment into one and
+  /// rebuilds the FM sidecar; searches go on and switch to the merged
+  /// segment when it is published. [bookOrder] null = a plain merge
+  /// (positions kept; nothing to do on one segment); not null = a REPACK in
+  /// that book order (every position renumbered densely, the re-sort's
+  /// rules), needed after an update that changed a book's line count or
+  /// added / removed a book. The request is recorded beside the index and
+  /// restarted by [SeforimIndex.open] when it did not finish. Opening a
+  /// writer stops it first. Returns false when there is nothing to do.
+  bool startBackgroundMerge([List<int>? bookOrder]) => _backgroundMerge(bookOrder, 0) == 1;
+
+  /// Records a background merge WITHOUT starting it: a host about to write
+  /// an update that needs a repack records it first, so a process that ends
+  /// mid-update still repacks at the next open or [startBackgroundMerge].
+  /// null keeps a recorded order.
+  void recordBackgroundMerge(List<int>? bookOrder) => _backgroundMerge(bookOrder, 1);
+
+  int _backgroundMerge(List<int>? bookOrder, int flags) {
+    final int r;
+    if (bookOrder == null) {
+      r = _n.indexStartBackgroundMerge(handle, nullptr, 0, flags);
+    } else {
+      r = using((a) {
+        final ids = a<Uint64>(bookOrder.isEmpty ? 1 : bookOrder.length);
+        ids.asTypedList(bookOrder.length).setAll(0, bookOrder);
+        return _n.indexStartBackgroundMerge(handle, ids, bookOrder.length, flags);
+      });
+    }
+    if (r < 0) throw _n.error();
+    return r;
+  }
+
+  int _backgroundMergeState() {
+    final s = _n.indexBackgroundMergeState(handle);
+    if (s < 0) throw _n.error();
+    return s;
+  }
+
+  /// True while the background merge runs.
+  bool get backgroundMergeRunning => _backgroundMergeState() & 1 != 0;
+
+  /// True while a background merge is recorded and not finished (running,
+  /// stopped, failed or interrupted).
+  bool get backgroundMergePending => _backgroundMergeState() & 2 != 0;
+
+  /// Waits for the background merge (blocking: run it on a worker isolate);
+  /// throws its error when it failed.
+  void waitBackgroundMerge() {
+    if (_n.indexWaitBackgroundMerge(handle) != 0) throw _n.error();
+  }
+
+  /// Stops the background merge (a repack at once, a plain merge already
+  /// running is waited for); its record stays, so the next open or start
+  /// restarts it.
+  void stopBackgroundMerge() {
+    if (_n.indexStopBackgroundMerge(handle) != 0) throw _n.error();
+  }
+
   /// Starts a writer. With no arguments (the default): the AUTO mode
   /// (issue #19), one thread per core in the OS background mode and a memory
   /// budget that follows the machine (large while idle; the minimum under
@@ -345,6 +404,11 @@ final class IndexWriter implements Finalizable {
 
   /// Queues deletion of a line. An update is delete + add.
   void delete(int lineId) => _n.checkStatus(_n.writerDelete(_h, lineId));
+
+  /// Queues deletion of every line of a book (issue #29, a per-book update:
+  /// delete the book, add its new lines, then ONE commit). Lines added after
+  /// this call are kept.
+  void deleteBook(int bookId) => _n.checkStatus(_n.writerDeleteBook(_h, bookId));
 
   /// Commits; [payload] is stored atomically with the documents.
   void commit([String? payload]) {

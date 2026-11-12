@@ -172,6 +172,65 @@ namespace SeforimSearch.Engine
                 throw new SeforimEngineException(Interop.LastError());
         }
 
+        /// <summary>Starts the background full merge after an update (issue #29): its own thread
+        /// at background priority merges every segment into one and rebuilds the FM sidecar;
+        /// searches go on and switch to the merged segment when it is published. <paramref name="bookOrder"/>
+        /// null = a plain merge (positions kept; nothing to do on one segment); not null = a REPACK
+        /// in that book order (every position renumbered densely, the re-sort's rules), needed
+        /// after an update that changed a book's line count or added / removed a book. The
+        /// request is recorded beside the index and restarted by <see cref="Open"/> when it did not
+        /// finish. Opening a writer stops it first. Returns false when there is nothing to do.</summary>
+        public bool StartBackgroundMerge(long[]? bookOrder = null) => BackgroundMerge(bookOrder, 0) == 1;
+
+        /// <summary>Records a background merge WITHOUT starting it: a host about to write an update
+        /// that needs a repack records it first, so a process that ends mid-update still repacks at
+        /// the next open or <see cref="StartBackgroundMerge"/>. null keeps a recorded order.</summary>
+        public void RecordBackgroundMerge(long[]? bookOrder) => BackgroundMerge(bookOrder, 1);
+
+        private int BackgroundMerge(long[]? bookOrder, uint flags)
+        {
+            int r;
+            if (bookOrder == null)
+                r = NativeMethods.se_index_start_background_merge(_handle, null, UIntPtr.Zero, flags);
+            else
+            {
+                var ids = new ulong[Math.Max(1, bookOrder.Length)];
+                for (int i = 0; i < bookOrder.Length; i++) ids[i] = (ulong)bookOrder[i];
+                fixed (ulong* p = ids) r = NativeMethods.se_index_start_background_merge(_handle, p, (UIntPtr)bookOrder.Length, flags);
+            }
+            if (r < 0) throw new SeforimEngineException(Interop.LastError());
+            return r;
+        }
+
+        /// <summary>True while the background merge runs.</summary>
+        public bool BackgroundMergeRunning => (BackgroundMergeState() & 1) != 0;
+
+        /// <summary>True while a background merge is recorded and not finished (running,
+        /// stopped, failed or interrupted).</summary>
+        public bool BackgroundMergePending => (BackgroundMergeState() & 2) != 0;
+
+        private int BackgroundMergeState()
+        {
+            int s = NativeMethods.se_index_background_merge_state(_handle);
+            if (s < 0) throw new SeforimEngineException(Interop.LastError());
+            return s;
+        }
+
+        /// <summary>Waits for the background merge (blocking); throws its error when it failed.</summary>
+        public void WaitBackgroundMerge()
+        {
+            if (NativeMethods.se_index_wait_background_merge(_handle) != 0)
+                throw new SeforimEngineException(Interop.LastError());
+        }
+
+        /// <summary>Stops the background merge (a repack at once, a plain merge already running
+        /// is waited for); its record stays, so the next open or start restarts it.</summary>
+        public void StopBackgroundMerge()
+        {
+            if (NativeMethods.se_index_stop_background_merge(_handle) != 0)
+                throw new SeforimEngineException(Interop.LastError());
+        }
+
         /// <summary>Starts a writer in the AUTO mode (the default, issue #19): one thread per
         /// core in the OS background mode, and a memory budget that follows the machine
         /// (large while idle; the minimum under memory pressure or while the user is active,
@@ -347,6 +406,10 @@ namespace SeforimSearch.Engine
 
         /// <summary>Queues deletion of a line. An update is Delete + Add.</summary>
         public void Delete(long lineId) => Interop.Check(NativeMethods.se_writer_delete(_handle, (ulong)lineId));
+
+        /// <summary>Queues deletion of every line of a book (issue #29, a per-book update: delete
+        /// the book, add its new lines, then ONE commit). Lines added after this call are kept.</summary>
+        public void DeleteBook(long bookId) => Interop.Check(NativeMethods.se_writer_delete_book(_handle, (ulong)bookId));
 
         /// <summary>Commits; <paramref name="payload"/> is stored atomically with the
         /// documents (read back via <see cref="SeforimIndex.GetInfo"/>).</summary>

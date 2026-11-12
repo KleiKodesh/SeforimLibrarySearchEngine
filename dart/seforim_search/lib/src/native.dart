@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 8;
+const int seforimAbiVersion = 9;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -144,6 +144,16 @@ final class SeforimNative {
                 Pointer<Size>, int)>('se_search_count_batch_pairs'),
         writerDelete = lib.lookupFunction<Int32 Function(Pointer<Void>, Uint64),
             int Function(Pointer<Void>, int)>('se_writer_delete'),
+        writerDeleteBook = lib.lookupFunction<Int32 Function(Pointer<Void>, Uint64),
+            int Function(Pointer<Void>, int)>('se_writer_delete_book'),
+        indexStartBackgroundMerge = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint64>, Size, Uint32),
+            int Function(Pointer<Void>, Pointer<Uint64>, int, int)>('se_index_start_background_merge'),
+        indexBackgroundMergeState = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
+            'se_index_background_merge_state'),
+        indexWaitBackgroundMerge = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
+            'se_index_wait_background_merge'),
+        indexStopBackgroundMerge = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
+            'se_index_stop_background_merge'),
         writerCommit = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint8>, Size),
             int Function(Pointer<Void>, Pointer<Uint8>, int)>('se_writer_commit'),
         writerRollback = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
@@ -250,6 +260,11 @@ final class SeforimNative {
   final void Function() threadBackgroundEnd;
   final int Function(Pointer<Void>, int, int, int, Pointer<Uint8>, int) writerAdd;
   final int Function(Pointer<Void>, int) writerDelete;
+  final int Function(Pointer<Void>, int) writerDeleteBook;
+  final int Function(Pointer<Void>, Pointer<Uint64>, int, int) indexStartBackgroundMerge;
+  final int Function(Pointer<Void>) indexBackgroundMergeState;
+  final int Function(Pointer<Void>) indexWaitBackgroundMerge;
+  final int Function(Pointer<Void>) indexStopBackgroundMerge;
   final int Function(Pointer<Void>, int, int, int, int, int, Pointer<Uint8>, int) writerAddLine;
 
   /// `se_writer_add_lines`: records of 6 u64 words (line, position, book,

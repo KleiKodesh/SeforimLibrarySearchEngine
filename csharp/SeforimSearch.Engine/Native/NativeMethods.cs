@@ -116,6 +116,21 @@ namespace SeforimSearch.Engine.Native
         public static extern int se_writer_delete(WriterHandle writer, ulong lineId);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_writer_delete_book(WriterHandle writer, ulong bookId);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_index_start_background_merge(IndexHandle index, ulong* bookIds, UIntPtr count, uint flags);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_index_background_merge_state(IndexHandle index);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_index_wait_background_merge(IndexHandle index);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_index_stop_background_merge(IndexHandle index);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern int se_writer_commit(WriterHandle writer, byte* payload, UIntPtr payloadLen);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

@@ -203,6 +203,9 @@ pub struct LineIndex {
     /// the scorer, one cross-line pass over every line).
     #[cfg(test)]
     pub(crate) test_only_no_scan: std::sync::atomic::AtomicBool,
+    /// The background full merge after an update (issue #29, see
+    /// [`crate::background_merge`]).
+    pub(crate) bg: std::sync::Arc<crate::background_merge::Scheduler>,
 }
 
 impl Drop for LineIndex {
@@ -210,6 +213,9 @@ impl Drop for LineIndex {
     /// waits for it).
     fn drop(&mut self) {
         self.fm_repair.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        // a background merge stops at its next check (a plain merge already
+        // running finishes; it publishes atomically)
+        self.bg.cancel_detached();
     }
 }
 
@@ -269,6 +275,7 @@ impl LineIndex {
             test_only_text_decision: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             test_only_no_scan: std::sync::atomic::AtomicBool::new(false),
+            bg: crate::background_merge::scheduler_for(dir),
         })
     }
 
@@ -289,7 +296,14 @@ impl LineIndex {
         fields.line_last = schema.get_field("line_last").ok();
         fields.line_flags = schema.get_field("line_flags").ok();
         fields.section_id = schema.get_field("section_id").ok();
-        Self::wrap(index, fields, options, dir)
+        let index = Self::wrap(index, fields, options, dir)?;
+        // issue #29: an update's merge that did not finish (the process
+        // ended) restarts in the background (unit tests start it explicitly)
+        // (best effort: a read-only or locked index still opens for search)
+        if !cfg!(test) {
+            let _ = index.resume_background_merge();
+        }
+        Ok(index)
     }
 
     /// Builds the FM-index sidecar over the term dictionary (FtsLib's
@@ -484,6 +498,75 @@ impl LineIndex {
         num_threads: usize,
         low_priority: bool,
     ) -> Result<LineWriter> {
+        // one writer per index: a running background merge holds it, so it
+        // stops first (a plain merge already running is waited for)
+        self.bg.stop();
+        self.parts().writer_with(heap_bytes, num_threads, low_priority)
+    }
+
+    /// What a writer needs from the index, cloneable to another thread (the
+    /// background merge).
+    pub(crate) fn parts(&self) -> WriterParts {
+        WriterParts {
+            index: self.index.clone(),
+            fields: self.fields,
+            reader: self.reader.clone(),
+            fm_repair: self.fm_repair.clone(),
+            fm: self.fm.clone(),
+            dir: self.dir.clone(),
+        }
+    }
+
+    /// Starts a writer in the auto mode (issue #19, see [`crate::resources`]):
+    /// one thread per core in the OS background mode, and a memory budget
+    /// that follows the machine (large while idle, the minimum under memory
+    /// pressure or while the user is active; lowering it flushes the
+    /// workers' segments at their next batch). A running background merge
+    /// stops first, as in [`Self::writer_with`].
+    pub fn writer_auto(&self) -> Result<LineWriter> {
+        self.bg.stop();
+        self.parts().writer_auto()
+    }
+}
+
+/// The parts of a [`LineIndex`] a writer uses.
+#[derive(Clone)]
+pub(crate) struct WriterParts {
+    index: Index,
+    fields: LineFields,
+    reader: SharedReader,
+    fm_repair: std::sync::Arc<crate::fm_sidecar::Repair>,
+    fm: std::sync::Arc<crate::fm_sidecar::FmCache>,
+    dir: PathBuf,
+}
+
+impl WriterParts {
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub(crate) fn num_segments(&self) -> Result<usize> {
+        Ok(self.index.searchable_segment_ids()?.len())
+    }
+
+    /// [`LineIndex::build_fm_sidecar`] for the background merge (same lock
+    /// and cache rules, at the calling thread's priority).
+    pub(crate) fn build_fm_sidecar(&self) -> Result<bool> {
+        self.reader.reload()?;
+        let _build = self.fm_repair.build_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.fm.clear();
+        let built = crate::fm_sidecar::build(&self.reader.searcher(), self.fields.text, &self.dir);
+        self.fm.clear();
+        self.fm_repair.reset();
+        built
+    }
+
+    pub(crate) fn writer_with(
+        &self,
+        heap_bytes: usize,
+        num_threads: usize,
+        low_priority: bool,
+    ) -> Result<LineWriter> {
         const MIN_HEAP_PER_THREAD: usize = 15_000_000;
         let heap = heap_bytes.max(MIN_HEAP_PER_THREAD);
         let threads = num_threads.max(1).min(heap / MIN_HEAP_PER_THREAD).max(1);
@@ -507,12 +590,7 @@ impl LineIndex {
         Ok(writer)
     }
 
-    /// Starts a writer in the auto mode (issue #19, see [`crate::resources`]):
-    /// one thread per core in the OS background mode, and a memory budget
-    /// that follows the machine (large while idle, the minimum under memory
-    /// pressure or while the user is active; lowering it flushes the
-    /// workers' segments at their next batch).
-    pub fn writer_auto(&self) -> Result<LineWriter> {
+    fn writer_auto(&self) -> Result<LineWriter> {
         use crate::resources;
         let threads = resources::auto_threads();
         let options = IndexWriterOptions::builder()
@@ -652,6 +730,19 @@ impl LineWriter {
     pub fn delete(&mut self, line_id: u64) {
         self.writer
             .delete_term(Term::from_field_u64(self.fields.line_id, line_id));
+    }
+
+    /// Queues the deletion of every line of a book (issue #29, a per-book
+    /// update: delete the book, add its new lines, then ONE commit, never a
+    /// commit in between; issue #32). Reads the `book_id` fast field (no
+    /// extra index field). Lines added after this call in the same batch
+    /// are kept (a delete applies to the lines added before it).
+    pub fn delete_book(&mut self, book_id: u64) -> Result<()> {
+        use std::ops::Bound;
+        let term = Term::from_field_u64(self.fields.book_id, book_id);
+        let query = tantivy::query::RangeQuery::new(Bound::Included(term.clone()), Bound::Included(term));
+        self.writer.delete_query(Box::new(query))?;
+        Ok(())
     }
 
     /// Commits everything queued, with an optional host payload stored
@@ -840,6 +931,25 @@ impl LineWriter {
         Ok(lines)
     }
 
+    /// [`Self::merge_all`] at background priority (issue #29): a merge policy
+    /// that merges every segment into one schedules the merge at the commit,
+    /// so it runs on tantivy's merge thread in the background mode (this
+    /// writer must be low priority; an explicit merge always runs at normal
+    /// priority). Same memory as [`Self::merge_all`]. Not cancellable once
+    /// started (it publishes atomically). The merged-away files are
+    /// collected by the caller with a new writer (the merge lands while this
+    /// one waits).
+    pub(crate) fn merge_all_in_background(mut self) -> Result<()> {
+        let payload = self.writer.index().load_metas()?.payload;
+        self.writer.set_merge_policy(Box::new(MergeEverything));
+        self.commit(payload.as_deref())?;
+        let reader = self.reader.clone();
+        let waited = self.writer.wait_merging_threads();
+        reader.after_write();
+        waited?;
+        Ok(())
+    }
+
     /// Merges all segments into one (for a shipped, read-mostly index) and
     /// waits for it.
     ///
@@ -886,6 +996,19 @@ impl LineWriter {
         reader.after_write();
         waited?;
         Ok(())
+    }
+}
+
+/// Merges every segment into one (the background full merge, issue #29).
+#[derive(Debug)]
+struct MergeEverything;
+
+impl tantivy::merge_policy::MergePolicy for MergeEverything {
+    fn compute_merge_candidates(&self, segments: &[tantivy::SegmentMeta]) -> Vec<tantivy::merge_policy::MergeCandidate> {
+        if segments.len() < 2 {
+            return Vec::new();
+        }
+        vec![tantivy::merge_policy::MergeCandidate(segments.iter().map(|s| s.id()).collect())]
     }
 }
 

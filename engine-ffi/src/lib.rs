@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 8;
+pub const SE_ABI_VERSION: u32 = 9;
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -468,6 +468,90 @@ pub unsafe extern "C" fn se_index_reload(index: *const LineIndex) -> i32 {
     })
 }
 
+/// Starts the background full merge after an update (issue #29): on its own
+/// thread at background priority, merging every segment into one and
+/// rebuilding the FM sidecar; searches go on meanwhile and switch to the
+/// merged segment when it is published (atomically). `book_ids` null: a
+/// plain merge (the lines keep their positions; nothing to do on one
+/// segment). Not null (`count` ids, may be 0): a REPACK in that book order
+/// (the re-sort's rules; every position renumbered densely), needed after an
+/// update that changed a book's line count or added / removed a book. A
+/// recorded unfinished repack is kept when a plain merge is asked. The
+/// request is recorded beside the index; `se_index_open` restarts an
+/// unfinished one (or merges an index with several segments). Opening a
+/// writer stops a running merge first (a repack at once, a plain merge is
+/// waited for). `flags` bit 0 = RECORD only, do not start (a host about to
+/// write an update that needs a repack records it first, so a process that
+/// ends mid-update still repacks at the next open or start; returns 0).
+/// Returns 1 when started, 0 when there is nothing to do, -1 on error.
+///
+/// # Safety
+/// `index` must be live; `book_ids` valid for `count` u64 or null.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_start_background_merge(
+    index: *const LineIndex,
+    book_ids: *const u64,
+    count: usize,
+    flags: u32,
+) -> i32 {
+    guard(-1, || {
+        let index = index.as_ref().ok_or("null index")?;
+        let order = if book_ids.is_null() {
+            None
+        } else if count == 0 {
+            Some(Vec::new())
+        } else {
+            Some(std::slice::from_raw_parts(book_ids, count).to_vec())
+        };
+        if flags & 1 != 0 {
+            index.record_background_merge(order).map_err(err)?;
+            return Ok(0);
+        }
+        Ok(index.start_background_merge(order).map_err(err)? as i32)
+    })
+}
+
+/// The background merge's state: bit 0 = running, bit 1 = pending (recorded
+/// and not finished: running, stopped, failed or interrupted). -1 on error.
+///
+/// # Safety
+/// `index` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_background_merge_state(index: *const LineIndex) -> i32 {
+    guard(-1, || {
+        let index = index.as_ref().ok_or("null index")?;
+        Ok(index.background_merge_running() as i32 | (index.background_merge_pending() as i32) << 1)
+    })
+}
+
+/// Waits for the background merge (blocking; call it off the UI thread).
+/// 0 = finished (or none ran), -1 = it failed (`se_last_error`).
+///
+/// # Safety
+/// `index` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_wait_background_merge(index: *const LineIndex) -> i32 {
+    guard(-1, || {
+        let index = index.as_ref().ok_or("null index")?;
+        index.wait_background_merge().map_err(err)?;
+        Ok(0)
+    })
+}
+
+/// Stops the background merge (a repack at its next check; a plain merge
+/// already running is waited for). Its record stays, so the next open or
+/// start restarts it. 0 = ok, -1 on error.
+///
+/// # Safety
+/// `index` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_stop_background_merge(index: *const LineIndex) -> i32 {
+    guard(-1, || {
+        index.as_ref().ok_or("null index")?.stop_background_merge();
+        Ok(0)
+    })
+}
+
 // ── Writer ──────────────────────────────────────────────────────────────
 
 /// Starts a writer. `heap_bytes` is the total budget (≥15 MB per thread).
@@ -731,6 +815,22 @@ pub unsafe extern "C" fn se_writer_delete(writer: *mut LineWriter, line_id: u64)
     guard(-1, || {
         let line_id = check_id("line_id", line_id)?;
         writer.as_mut().ok_or("null writer")?.delete(line_id);
+        Ok(0)
+    })
+}
+
+/// Queues the deletion of every line of a book (issue #29, a per-book
+/// update): delete the book, add its new lines, then ONE commit (issue #32;
+/// never a commit in between). Lines added after this call are kept. 0 = ok,
+/// -1 on error.
+///
+/// # Safety
+/// `writer` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_writer_delete_book(writer: *mut LineWriter, book_id: u64) -> i32 {
+    guard(-1, || {
+        let book_id = check_id("book_id", book_id)?;
+        writer.as_mut().ok_or("null writer")?.delete_book(book_id).map_err(err)?;
         Ok(0)
     })
 }

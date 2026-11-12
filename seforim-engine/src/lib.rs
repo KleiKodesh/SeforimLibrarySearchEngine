@@ -11,6 +11,7 @@
 //!   every matching line in catalog order, plus a [`SnippetSession`] that locates FtsLib snippets in the texts the host
 //!   fetches, applying the word-distance / order filters.
 
+pub mod background_merge;
 pub mod fm_expand;
 pub mod fm_index;
 pub mod fm_sidecar;

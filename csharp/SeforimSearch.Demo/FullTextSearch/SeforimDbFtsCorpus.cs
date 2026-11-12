@@ -103,6 +103,9 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// book): the order a re-sort (<c>resort</c>) brings an existing index to.</summary>
         public List<long> CatalogBookOrder() => C.CatalogBookOrder();
         public HashSet<long> BaseBookIds() => C.BaseBookIds();
+        public Dictionary<long, long>? BookContentHashes() => C.BookContentHashes();
+        public IEnumerable<(long Id, string Text, long? SectionId)> ReadBookDocumentsWithSection(long bookId, CancellationToken ct = default) =>
+            Guard(C.ReadBookDocumentsWithSection(bookId, ct));
         public long? PositionOfLine(long lineId, Dictionary<long, (long First, long Count)> books) =>
             C.PositionOfLine(lineId, books);
         public List<FtsSnippetText> FetchSnippetTexts(IReadOnlyList<long> lineIds, IReadOnlyCollection<long> shortLineIds) =>
@@ -326,6 +329,40 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             }
         }
 
+        /// <summary>One book's documents as <see cref="ReadDocumentsWithSectionInResultOrder"/> reads
+        /// them (a notes book id reads its source book's notes), for the per-book index update
+        /// (issue #29): the book's lines in reading order, no catalog pass. Not in Core.</summary>
+        public IEnumerable<(long Id, string Text, long? SectionId)> ReadBookDocumentsWithSection(long bookId, CancellationToken ct = default)
+        {
+            if (SeforimDbNoteIds.TryDecodeBook(bookId, out long sourceBookId))
+            {
+                if (!_hasNotes) yield break;
+                using var notes = _connection.CreateCommand();
+                notes.CommandText = SeforimDbSqlStrings.FtsReadBookNotes;
+                notes.Parameters.AddWithValue("@b", sourceBookId);
+                notes.Parameters.AddWithValue("@skip", 0L);
+                using var noteReader = notes.ExecuteReader();
+                while (noteReader.Read())
+                {
+                    ct.ThrowIfCancellationRequested();
+                    long id = SeforimDbNoteIds.EncodeLine(noteReader.GetInt64(0), noteReader.GetInt64(1));
+                    yield return (id, DecodeNoteForSearch(noteReader.IsDBNull(2) ? null : noteReader.GetValue(2), id), null);
+                }
+                yield break;
+            }
+            using var command = _connection.CreateCommand();
+            command.CommandText = SeforimDbSqlStrings.FtsReadBookLinesWithSection(_schema);
+            command.Parameters.AddWithValue("@b", bookId);
+            command.Parameters.AddWithValue("@skip", 0L);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                ct.ThrowIfCancellationRequested();
+                long lineId = reader.GetInt64(0);
+                yield return (lineId, DecodeForSearch(reader, 1, lineId), reader.IsDBNull(2) ? null : (long?)reader.GetInt64(2));
+            }
+        }
+
         public IEnumerable<(long Id, string Text)> ReadDocumentsAfter(long afterId, int limit = 0, CancellationToken ct = default)
         {
             using var command = _connection.CreateCommand();
@@ -448,6 +485,20 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         {
             rank = 0;
             return bookId >= 0 && bookId <= int.MaxValue && treeOrder.TryGetValue((int)bookId, out rank);
+        }
+
+        /// <summary>Each book's <c>book.contentHash</c> (Otzaria's per-book change stamp; a NULL
+        /// reads as 0), for the per-book index update (issue #29). Null when the column is missing
+        /// (a database without it can only be rebuilt whole). Not in Core.</summary>
+        public Dictionary<long, long>? BookContentHashes()
+        {
+            if (!SeforimDbSchema.ColumnExists(_connection, "book", "contentHash")) return null;
+            var hashes = new Dictionary<long, long>();
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT id, contentHash FROM book";
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) hashes[reader.GetInt64(0)] = reader.IsDBNull(1) ? 0 : reader.GetInt64(1);
+            return hashes;
         }
 
         /// <summary>The ids of the books flagged <c>book.isBaseBook</c> (the relevance order puts

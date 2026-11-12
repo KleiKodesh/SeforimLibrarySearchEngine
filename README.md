@@ -769,8 +769,8 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   200 MB, a plain one-segment merge 198 MB (before this fix the re-sort's merge took
   794 MB: whole fast-field columns and the new positions held at once, 16-24 bytes per
   line in the plan, unbounded per-term buffers); time 1.91 min with the sidecar (was
-  1.46-1.77 min). The FM sidecar rebuild after it peaks at 770 MB, the same as a build's
-  sidecar step. Tests: `seforim-engine/src/resort.rs`,
+  1.46-1.77 min). The FM sidecar rebuild after it peaked at 770 MB, the same as a build's
+  sidecar step; since issue #20 it peaks at 123 MB (see FM-index sidecar). Tests: `seforim-engine/src/resort.rs`,
   tantivy `indexer/reorder.rs`, Dart `resortAndClose`.
 - **Index:** create or open; positions optional; add/delete/commit lines
   (`line_id`, `position`, `book_id`, text indexed but not stored; see the
@@ -1184,6 +1184,14 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   an FM-index over the term dictionary, built after the merge into one
   segment (`LineIndex::build_fm_sidecar`, C# `BuildFmSidecar` /
   `MergeSegments`, Dart `buildFmSidecar`), memory-mapped on first use.
+  - Build memory (issue #20): the dictionary is streamed twice (alphabet, then
+    text) instead of held as strings; the suffix array is u32 and sorted per
+    first-code bucket (one bucket's keys in memory at a time); rowids come from
+    the term starts, the BWT is read off the suffix array, the rowid section is
+    packed straight into the output. Same `.fmi` bytes as before. Full library
+    (1.97M terms, SSD copy, peak private bytes): 768 -> 123 MB, under a plain
+    one-segment merge (198 MB); time 0.07-0.09 -> 0.10-0.11 min.
+    Measure with `cargo run --release -p seforim-engine --example fm_sidecar_bench -- <index copy>`.
   - It serves the shapes FtsLib served with it: leading-`*` wildcards of
     the form `*core` and `*core*` (no `?`, core of 2+ letters) and fuzzy
     words. Everything else stays an FST walk.

@@ -99,27 +99,64 @@ pub fn build_cancellable<'a>(
     terms: impl IntoIterator<Item = &'a str>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<u8>, FmBuildError> {
+    let terms: Vec<&str> = terms.into_iter().collect();
+    build_streamed(|| Ok(terms.iter().map(|t| Ok(*t))), cancel)
+}
+
+/// [`build_cancellable`] over a term source read TWICE (once for the alphabet and the
+/// text length, once to write the text) instead of a list of every term held at once
+/// (issue #20: the sidecar build reads the dictionary as a stream, so its peak memory
+/// stays near a plain merge's). `terms` must yield the same terms both times (Err otherwise).
+///
+/// Memory (n = text length, about 7 codes per term): the text (2n bytes), the suffix
+/// array as u32 (4n), the term starts (4 bytes per term), one first-code bucket's sort
+/// keys at a time (16 bytes per suffix of the largest bucket), then the wavelet bits and
+/// the output. Rowids are not stored per position: a row's rowid is found from the term
+/// starts. The bytes are identical to the former all-in-memory build.
+pub fn build_streamed<F, I, S>(
+    mut terms: F,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Vec<u8>, FmBuildError>
+where
+    F: FnMut() -> Result<I, FmBuildError>,
+    I: Iterator<Item = Result<S, FmBuildError>>,
+    S: AsRef<str>,
+{
     let check = || match cancel {
         Some(c) if c.load(std::sync::atomic::Ordering::Relaxed) => Err(FmBuildError(BUILD_CANCELLED.into())),
         _ => Ok(()),
     };
-    let terms: Vec<&str> = terms.into_iter().collect();
 
-    // Alphabet = the distinct chars present, in code-point order (code
-    // order == ordinal for BMP text, as FtsLib's).
+    // Pass 1. Alphabet = the distinct chars present, in code-point order (code
+    // order == ordinal for BMP text, as FtsLib's); the text length.
     let mut present = vec![false; 65536];
     let mut astral: Vec<u32> = Vec::new();
-    for t in &terms {
+    let mut term_count = 0usize;
+    let mut text_len = 2usize;
+    for t in terms()? {
+        let t = t?;
+        let t = t.as_ref();
         if t.is_empty() {
             return Err(FmBuildError("empty term".into()));
         }
+        if term_count % 65536 == 0 {
+            check()?;
+        }
+        term_count += 1;
         for ch in t.chars() {
             let u = ch as u32;
+            text_len += 1;
             if u < 65536 {
                 present[u as usize] = true;
             } else {
                 astral.push(u);
             }
+        }
+        text_len += 1;
+        // keep the astral list short on a dictionary full of them
+        if astral.len() > 1 << 16 {
+            astral.sort_unstable();
+            astral.dedup();
         }
     }
     astral.sort_unstable();
@@ -132,6 +169,7 @@ pub fn build_cancellable<'a>(
             char_of.push(ch as u32);
         }
     }
+    drop(present);
     let first_astral_code = char_of.len();
     char_of.extend_from_slice(&astral);
     if char_of.len() > Code::MAX as usize + 1 {
@@ -139,53 +177,66 @@ pub fn build_cancellable<'a>(
     }
     let wide = !astral.is_empty();
     let sigma = char_of.len();
-
-    check()?;
-    // Text, plus the rowid of the term each position belongs to. A SEP
-    // carries the FOLLOWING term's rowid (never read: every match range
-    // starts at a term character; FtsLib stored 0 there), END carries 0.
-    let mut text_len = 2usize;
-    for t in &terms {
-        text_len += t.chars().count() + 1;
-    }
-    if text_len > i32::MAX as usize {
+    if text_len > i32::MAX as usize || term_count >= u32::MAX as usize {
         return Err(FmBuildError("text too long".into()));
     }
+
+    check()?;
+    // Pass 2. Text, and where each term starts (its SEP). A SEP carries the
+    // FOLLOWING term's rowid (never read: every match range starts at a term
+    // character; FtsLib stored 0 there); the last SEP and END carry 0.
     let n = text_len;
     let mut text = vec![0 as Code; n];
-    let mut rowid_at = vec![0u32; n];
-    let mut max_rowid = 0u32;
+    let mut term_starts: Vec<u32> = Vec::with_capacity(term_count);
     let mut w = 0usize;
-    for (i, t) in terms.iter().enumerate() {
-        let rowid = (i + 1) as u32;
-        max_rowid = max_rowid.max(rowid);
+    let changed = || FmBuildError("the terms changed between the two passes".into());
+    for t in terms()? {
+        let t = t?;
+        if term_starts.len() == term_count {
+            return Err(changed());
+        }
+        if term_starts.len() % 65536 == 0 {
+            check()?;
+        }
+        term_starts.push(w as u32);
         text[w] = SEPARATOR_CODE;
-        rowid_at[w] = rowid;
         w += 1;
-        for ch in t.chars() {
-            rowid_at[w] = rowid;
+        for ch in t.as_ref().chars() {
+            if w >= n - 2 {
+                return Err(changed());
+            }
             let u = ch as u32;
             text[w] = if u < 65536 {
                 code_of[u as usize]
             } else {
-                // present: every astral char of the terms was collected above
-                (first_astral_code + astral.binary_search(&u).unwrap_or(0)) as Code
+                match astral.binary_search(&u) {
+                    Ok(k) => (first_astral_code + k) as Code,
+                    Err(_) => return Err(changed()),
+                }
             };
+            if text[w] == 0 {
+                return Err(changed());
+            }
             w += 1;
         }
     }
+    if term_starts.len() != term_count || w != n - 2 {
+        return Err(changed());
+    }
+    drop(code_of);
+    drop(astral);
     text[w] = SEPARATOR_CODE;
     w += 1;
     text[w] = END_CODE;
-
-    check()?;
-    let suffix_array = build_suffix_array(&text, sort_key_bits(sigma));
-    check()?;
-
-    let mut bwt = vec![0 as Code; n];
-    for (row, &p) in suffix_array.iter().enumerate() {
-        bwt[row] = text[if p == 0 { n - 1 } else { p - 1 }];
-    }
+    let max_rowid = term_count as u32;
+    let last_sep = n - 2;
+    let rowid_of = |p: usize| -> u32 {
+        if p >= last_sep {
+            0
+        } else {
+            term_starts.partition_point(|&s| s as usize <= p) as u32
+        }
+    };
 
     let mut symbol_count = vec![0i64; sigma];
     for &b in &text {
@@ -197,16 +248,22 @@ pub fn build_cancellable<'a>(
     }
 
     check()?;
-    // Huffman-shaped wavelet tree.
+    let suffix_array = build_suffix_array(&text, sort_key_bits(sigma), &c, cancel)?;
+    check()?;
+
+    // Huffman-shaped wavelet tree over the BWT (read off the suffix array, never stored).
     let tree = HuffmanTree::build(&symbol_count);
     let mut node_bits: Vec<BitWriter> = (0..tree.left.len()).map(|_| BitWriter::default()).collect();
-    for &sym in &bwt {
+    for &p in &suffix_array {
+        let p = p as usize;
+        let sym = text[if p == 0 { n - 1 } else { p - 1 }];
         let nodes = &tree.path_nodes[sym as usize];
         let bits = &tree.path_bits[sym as usize];
         for d in 0..nodes.len() {
             node_bits[nodes[d]].append(bits[d]);
         }
     }
+    drop(text);
 
     let rowid_bits = 32 - max_rowid.leading_zeros() as usize;
 
@@ -225,7 +282,7 @@ pub fn build_cancellable<'a>(
     out.extend_from_slice(&MAGIC.to_le_bytes());
     out.extend_from_slice(&(n as u32).to_le_bytes());
     out.extend_from_slice(&(sigma as u32).to_le_bytes());
-    out.extend_from_slice(&(terms.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(term_count as u32).to_le_bytes());
     out.extend_from_slice(&(node_bits.len() as u32).to_le_bytes());
     out.extend_from_slice(&(rowid_bits as u32).to_le_bytes());
     out.extend_from_slice(&bitvector_bytes.to_le_bytes());
@@ -252,12 +309,25 @@ pub fn build_cancellable<'a>(
     for bits in &node_bits {
         write_rank_blocks(&mut out, bits);
     }
+    drop(node_bits);
 
-    let mut packed = BitWriter::default();
+    // Row -> rowid section, bit-packed LSB first straight into the output.
+    let mut acc = 0u64;
+    let mut acc_bits = 0usize;
     for &p in &suffix_array {
-        packed.append_value(rowid_at[p], rowid_bits);
+        if rowid_bits > 0 {
+            acc |= (rowid_of(p as usize) as u64 & ((1u64 << rowid_bits) - 1)) << acc_bits;
+            acc_bits += rowid_bits;
+            while acc_bits >= 8 {
+                out.push(acc as u8);
+                acc >>= 8;
+                acc_bits -= 8;
+            }
+        }
     }
-    out.extend_from_slice(&packed.to_bytes());
+    if acc_bits > 0 {
+        out.push(acc as u8);
+    }
     out.extend_from_slice(&0u64.to_le_bytes()); // padding: the reader decodes with 8-byte loads
     Ok(out)
 }
@@ -311,19 +381,6 @@ impl BitWriter {
         self.count += 1;
     }
 
-    /// Appends the low `bits` bits of `value` (bits ≤ 32).
-    fn append_value(&mut self, value: u32, bits: usize) {
-        self.ensure(self.count + bits as u64);
-        let v = (value as u64) & ((1u64 << bits) - 1);
-        let offset = (self.count & 63) as usize;
-        let w = (self.count >> 6) as usize;
-        self.words[w] |= v << offset;
-        if offset + bits > 64 {
-            self.words[w + 1] |= v >> (64 - offset);
-        }
-        self.count += bits as u64;
-    }
-
     /// `width` bits (1..=64) starting at bit `start`, LSB first.
     fn get_bits(&self, start: u64, width: usize) -> u64 {
         let offset = (start & 63) as usize;
@@ -339,15 +396,6 @@ impl BitWriter {
         } else {
             value & ((1u64 << width) - 1)
         }
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        let len = ((self.count + 7) / 8) as usize;
-        let mut bytes = vec![0u8; len];
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = (self.words.get(i >> 3).copied().unwrap_or(0) >> ((i & 7) * 8)) as u8;
-        }
-        bytes
     }
 }
 
@@ -431,34 +479,40 @@ impl HuffmanTree {
 /// Sorts all suffixes under the "compare up to the first stop, then by
 /// position" order. Terms are short, so a packed 10-code key settles almost
 /// every comparison; equal-key runs are finished with a direct comparison.
-fn build_suffix_array(text: &[Code], key_bits: usize) -> Vec<usize> {
+///
+/// Blockwise (issue #20): the suffixes are first placed by their first code
+/// (`c` = the bucket starts, positions ascending inside a bucket), then each
+/// bucket is sorted on its own with its keys, so only one bucket's keys are in
+/// memory at a time. The first code is the key's top field, so the order is
+/// the one a single sort of every key gives.
+fn build_suffix_array(
+    text: &[Code],
+    key_bits: usize,
+    c: &[u32],
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Vec<u32>, FmBuildError> {
     let codes_per_key = 64 / key_bits;
-    let n = text.len();
-    let mut distance_to_stop = vec![0usize; n]; // codes from i up to and including the first SEP/END
-    for i in (0..n).rev() {
-        distance_to_stop[i] = if text[i] <= SEPARATOR_CODE {
-            1
-        } else {
-            distance_to_stop[i + 1] + 1
-        };
-    }
-
-    let mut keyed: Vec<(u64, usize)> = Vec::with_capacity(n);
-    for i in 0..n {
-        let len = distance_to_stop[i].min(codes_per_key);
-        let mut key = 0u64;
-        for k in 0..len {
-            key |= (text[i + k] as u64) << (key_bits * (codes_per_key - 1 - k));
+    // codes from i up to and including the first SEP/END
+    let distance_to_stop = |i: usize| -> usize {
+        let mut j = i;
+        while text[j] > SEPARATOR_CODE {
+            j += 1;
         }
-        keyed.push((key, i));
+        j - i + 1
+    };
+
+    let mut suffix_array = vec![0u32; text.len()];
+    let mut next: Vec<u32> = c[..c.len() - 1].to_vec();
+    for (i, &code) in text.iter().enumerate() {
+        let slot = &mut next[code as usize];
+        suffix_array[*slot as usize] = i as u32;
+        *slot += 1;
     }
-    keyed.sort_unstable_by_key(|&(k, _)| k);
+    drop(next);
 
-    let mut suffix_array: Vec<usize> = keyed.iter().map(|&(_, i)| i).collect();
-    let keys: Vec<u64> = keyed.iter().map(|&(k, _)| k).collect();
-
-    let tail = |a: &usize, b: &usize| -> std::cmp::Ordering {
-        let (la, lb) = (distance_to_stop[*a], distance_to_stop[*b]);
+    let tail = |a: &u32, b: &u32| -> std::cmp::Ordering {
+        let (a, b) = (*a as usize, *b as usize);
+        let (la, lb) = (distance_to_stop(a), distance_to_stop(b));
         let common = la.min(lb);
         for k in codes_per_key..common {
             match text[a + k].cmp(&text[b + k]) {
@@ -469,28 +523,59 @@ fn build_suffix_array(text: &[Code], key_bits: usize) -> Vec<usize> {
         if la != lb {
             la.cmp(&lb)
         } else {
-            a.cmp(b)
+            a.cmp(&b)
         }
     };
 
-    let mut run_start = 0usize;
-    while run_start < n {
-        let mut run_end = run_start + 1;
-        while run_end < n && keys[run_end] == keys[run_start] {
-            run_end += 1;
+    let mut keyed: Vec<(u64, u32)> = Vec::new();
+    for bucket in 0..c.len() - 1 {
+        let (start, end) = (c[bucket] as usize, c[bucket + 1] as usize);
+        if end - start < 2 {
+            continue;
         }
-        if run_end - run_start > 1 {
-            let stop_inside_key = distance_to_stop[suffix_array[run_start]] <= codes_per_key;
-            let run = &mut suffix_array[run_start..run_end];
-            if stop_inside_key {
-                run.sort_unstable();
-            } else {
-                run.sort_unstable_by(tail);
+        if cancel.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err(FmBuildError(BUILD_CANCELLED.into()));
+        }
+        let bucket_sa = &mut suffix_array[start..end];
+        keyed.clear();
+        keyed.reserve(bucket_sa.len());
+        for &i in bucket_sa.iter() {
+            let i = i as usize;
+            let mut key = 0u64;
+            for k in 0..codes_per_key {
+                let code = text[i + k];
+                key |= (code as u64) << (key_bits * (codes_per_key - 1 - k));
+                if code <= SEPARATOR_CODE {
+                    break;
+                }
             }
+            keyed.push((key, i as u32));
         }
-        run_start = run_end;
+        keyed.sort_unstable_by_key(|&(k, _)| k);
+        for (slot, &(_, i)) in bucket_sa.iter_mut().zip(keyed.iter()) {
+            *slot = i;
+        }
+
+        let mut run_start = 0usize;
+        let len = keyed.len();
+        while run_start < len {
+            let mut run_end = run_start + 1;
+            while run_end < len && keyed[run_end].0 == keyed[run_start].0 {
+                run_end += 1;
+            }
+            if run_end - run_start > 1 {
+                let stop_inside_key = distance_to_stop(bucket_sa[run_start] as usize) <= codes_per_key;
+                let run = &mut bucket_sa[run_start..run_end];
+                if stop_inside_key {
+                    run.sort_unstable();
+                } else {
+                    run.sort_unstable_by(tail);
+                }
+            }
+            run_start = run_end;
+        }
     }
-    suffix_array
+    Ok(suffix_array)
 }
 
 // ── Read ───────────────────────────────────────────────────────────────

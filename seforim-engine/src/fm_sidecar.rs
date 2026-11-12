@@ -158,17 +158,25 @@ pub(crate) fn build_cancellable(
     if sidecar_matches(&path, dict.num_terms()) {
         return Ok(true);
     }
-    let mut forms: Vec<String> = Vec::with_capacity(dict.num_terms());
-    let mut stream = dict.stream()?;
-    while stream.advance() {
-        if forms.len() % 65536 == 0 && cancelled() {
-            return Err(Error::Unsupported(format!("FM sidecar not built: {}", fm_index::BUILD_CANCELLED)));
-        }
-        let term = std::str::from_utf8(stream.key())
-            .map_err(|_| Error::Unsupported("FM sidecar: a dictionary term is not UTF-8".into()))?;
-        forms.push(text_form(term));
+    if cancelled() {
+        return Err(Error::Unsupported(format!("FM sidecar not built: {}", fm_index::BUILD_CANCELLED)));
     }
-    let bytes = fm_index::build_cancellable(forms.iter().map(|s| s.as_str()), cancel)
+    // Issue #20: the dictionary is streamed twice (alphabet pass, text pass) instead of
+    // holding every term form at once, so the build's peak stays near a plain merge's.
+    let forms = || -> std::result::Result<_, fm_index::FmBuildError> {
+        let mut stream = dict.stream().map_err(|e| fm_index::FmBuildError(e.to_string()))?;
+        Ok(std::iter::from_fn(move || {
+            if !stream.advance() {
+                return None;
+            }
+            Some(
+                std::str::from_utf8(stream.key())
+                    .map(text_form)
+                    .map_err(|_| fm_index::FmBuildError("a dictionary term is not UTF-8".into())),
+            )
+        }))
+    };
+    let bytes = fm_index::build_streamed(forms, cancel)
         .map_err(|e| Error::Unsupported(format!("FM sidecar not built: {e}")))?;
 
     // a temp file left by a build that never finished goes first

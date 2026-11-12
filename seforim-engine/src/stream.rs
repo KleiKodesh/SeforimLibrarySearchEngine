@@ -100,18 +100,19 @@ impl Source {
     fn next(&mut self, chunk: usize, cancel: Option<&CancelToken>) -> Result<(Batch, bool)> {
         match self {
             Source::Scorer { child, scorer, alive, max_doc, cross } => {
-                let mut doc = if *max_doc == 0 { TERMINATED } else { scorer.doc() };
-                let mut seen = 0u32;
-                while doc != TERMINATED && child.collected() < chunk {
-                    if alive.as_ref().is_none_or(|a| a.is_alive(doc)) {
-                        child.collect_doc(doc);
-                    }
-                    seen = seen.wrapping_add(1);
-                    if seen % 4096 == 0 {
-                        CancelToken::check(cancel)?;
-                    }
-                    doc = scorer.advance();
-                }
+                let doc = if *max_doc == 0 {
+                    TERMINATED
+                } else {
+                    crate::search::drain_alive(scorer.as_mut(), alive.as_ref(), cancel, |doc, alive| {
+                        if child.collected() >= chunk {
+                            return std::ops::ControlFlow::Break(());
+                        }
+                        if alive {
+                            child.collect_doc(doc);
+                        }
+                        std::ops::ControlFlow::Continue(())
+                    })?
+                };
                 if doc == TERMINATED {
                     *max_doc = 0;
                 }

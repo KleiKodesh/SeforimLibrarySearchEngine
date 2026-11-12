@@ -35,6 +35,33 @@ use crate::{Error, Result};
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken(Arc<std::sync::atomic::AtomicBool>);
 
+/// Walks `scorer` from its current doc to the end, calling `step(doc,
+/// alive)` for every doc (alive = not deleted: `for_each_no_score` and a
+/// raw scorer do not skip deleted docs) and checking `cancel` every 4096
+/// docs. `step` returning `Break` stops before consuming that doc. Returns
+/// the doc it stopped at (`TERMINATED` when spent). The one alive-checked
+/// drain every hand-walked scorer goes through.
+pub(crate) fn drain_alive(
+    scorer: &mut dyn tantivy::DocSet,
+    alive: Option<&tantivy::fastfield::AliveBitSet>,
+    cancel: Option<&CancelToken>,
+    mut step: impl FnMut(DocId, bool) -> std::ops::ControlFlow<()>,
+) -> Result<DocId> {
+    let mut doc = scorer.doc();
+    let mut seen = 0u32;
+    while doc != tantivy::TERMINATED {
+        if step(doc, alive.is_none_or(|a| a.is_alive(doc))).is_break() {
+            break;
+        }
+        seen = seen.wrapping_add(1);
+        if seen % 4096 == 0 {
+            CancelToken::check(cancel)?;
+        }
+        doc = scorer.advance();
+    }
+    Ok(doc)
+}
+
 impl CancelToken {
     /// A token that is not cancelled.
     pub fn new() -> CancelToken {
@@ -1205,25 +1232,21 @@ impl SnippetSession {
 
     /// Hits [`try_locate_lines`](Self::try_locate_lines) located from the
     /// text on a positions index (their positions could not be used).
+    #[doc(hidden)]
     pub fn positioned_fallbacks(&self) -> usize {
         self.positions.as_ref().map_or(0, |p| p.fallbacks.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// True when [`try_locate_lines`](Self::try_locate_lines) reads the
     /// matched words from the index positions.
+    #[doc(hidden)]
     pub fn locates_from_positions(&self) -> bool {
         self.positions.is_some() && self.line.is_none() && !self.matchers.is_empty()
     }
 
     /// Whether each text passes (the same test as [`locate`](Self::locate)
     /// returning Some), across all cores; the term table is not touched.
-    pub fn passes_many(&mut self, texts: &[&str]) -> Result<Vec<bool>> {
-        let items: Vec<HitText<'_>> = texts.iter().map(|&t| (t, None)).collect();
-        self.passes_pairs(&items)
-    }
-
-    /// [`passes_many`](Self::passes_many) for hits given with their next
-    /// line's text when they have one.
+    /// Each hit comes with its next line's text when it has one.
     pub fn passes_pairs(&mut self, texts: &[(&str, Option<&str>)]) -> Result<Vec<bool>> {
         if let Some(plan) = self.line.clone() {
             return self.run_many(texts, |_, _, _, t| crate::line_search::line_passes(&plan, t.0));
@@ -3003,22 +3026,15 @@ impl LineIndex {
                 // Cancellable or resumed: walk the scorer (checking the
                 // token every 4096 docs), seeking to `start`.
                 let mut scorer = weight.scorer(segment, 1.0)?;
-                let alive = segment.alive_bitset();
-                let mut doc = scorer.doc();
-                if doc < start {
-                    doc = scorer.seek(start);
+                if scorer.doc() < start {
+                    scorer.seek(start);
                 }
-                let mut seen = 0u32;
-                while doc != tantivy::TERMINATED {
-                    if alive.is_none_or(|a| a.is_alive(doc)) {
+                drain_alive(scorer.as_mut(), segment.alive_bitset(), cancel.as_ref(), |doc, alive| {
+                    if alive {
                         child.collect(doc, 0.0);
                     }
-                    seen = seen.wrapping_add(1);
-                    if seen % 4096 == 0 && cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
-                        return Err(Error::Cancelled);
-                    }
-                    doc = scorer.advance();
-                }
+                    std::ops::ControlFlow::Continue(())
+                })?;
                 keys.extend(child.take_docs().into_iter().map(|doc| (ord as u32, doc)));
                 hits.extend(child.harvest());
                 continue;

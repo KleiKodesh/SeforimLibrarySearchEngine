@@ -70,20 +70,13 @@ pub(crate) fn docs_of(weight: &dyn Weight, searcher: &Searcher, cancel: Option<&
     for segment in searcher.segment_readers() {
         check(cancel)?;
         let mut scorer = weight.scorer(segment, 1.0)?;
-        let alive = segment.alive_bitset();
         let mut docs = Vec::new();
-        let mut doc = scorer.doc();
-        let mut seen = 0u32;
-        while doc != TERMINATED {
-            if alive.is_none_or(|a| a.is_alive(doc)) {
+        crate::search::drain_alive(scorer.as_mut(), segment.alive_bitset(), cancel, |doc, alive| {
+            if alive {
                 docs.push(doc);
             }
-            seen = seen.wrapping_add(1);
-            if seen % 4096 == 0 {
-                check(cancel)?;
-            }
-            doc = scorer.advance();
-        }
+            std::ops::ControlFlow::Continue(())
+        })?;
         out.push(docs);
     }
     Ok(out)

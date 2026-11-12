@@ -42,12 +42,12 @@ use std::collections::{HashMap, HashSet};
 
 use hebrew_fts::{PreparedQueryGroups, Proximity, SnippetWindowLocator};
 use tantivy::columnar::Column;
-use tantivy::postings::Postings;
 use tantivy::query::Weight;
 use tantivy::schema::IndexRecordOption;
 use tantivy::{DocId, DocSet, Searcher, Term, TERMINATED};
 
 use crate::index::{LineIndex, LINE_FLAG_LEADING_MARKER, LINE_FLAG_NO_CROSS, LINE_FLAG_TRAILING_MARKER};
+use crate::positioned::{DocKey, PositionSource, NONE};
 use crate::search::{CancelToken, PlacedHit};
 use crate::section_scope::{SectionColumns, SectionKey};
 use crate::{Error, Result};
@@ -103,6 +103,7 @@ pub(crate) struct CrossInput<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct CrossIndex {
     pub text: tantivy::schema::Field,
+    pub line_id: tantivy::schema::Field,
     pub first: tantivy::schema::Field,
     pub last: tantivy::schema::Field,
     pub flags: tantivy::schema::Field,
@@ -130,7 +131,7 @@ impl CrossIndex {
         if index.test_only_text_decision.load(std::sync::atomic::Ordering::Relaxed) {
             decide = false;
         }
-        Ok(CrossIndex { text: index.fields.text, first, last, flags, positions: index.options.positions, decide })
+        Ok(CrossIndex { text: index.fields.text, line_id: index.fields.line_id, first, last, flags, positions: index.options.positions, decide })
     }
 }
 
@@ -617,56 +618,28 @@ fn verify_positions(
     locator: &mut SnippetWindowLocator,
     cancel: Option<&CancelToken>,
 ) -> Result<Vec<Pair>> {
-    let field = ix.text;
-    // every term of the way of matching once, with its ordinal
-    let mut terms: Vec<(&str, u32)> = Vec::new();
-    let mut seen = HashSet::new();
-    for t in m.terms.iter().flatten() {
-        if seen.insert(t.as_str()) {
-            if let Some(p) = m.prepared.get(t) {
-                terms.push((t.as_str(), p.ordinal as u32));
-            }
-        }
-    }
-    let mut occurrences: HashMap<(u32, DocId), Vec<(usize, u32)>> = HashMap::new();
-    let mut buffer = Vec::new();
-    for (ord, segment) in searcher.segment_readers().iter().enumerate() {
-        let mut docs: Vec<DocId> = pairs
-            .iter()
-            .flat_map(|p| [p.left, p.right])
-            .filter(|d| d.0 == ord as u32)
-            .map(|d| d.1)
-            .collect();
-        if docs.is_empty() {
-            continue;
-        }
-        docs.sort_unstable();
-        docs.dedup();
-        let inverted = segment.inverted_index(field)?;
-        for &(t, ordinal) in &terms {
-            let Some(info) = inverted.get_term_info(&Term::from_field_text(field, t))? else { continue };
-            let mut postings = inverted.read_postings_from_terminfo(&info, IndexRecordOption::WithFreqsAndPositions)?;
-            let mut i = 0;
-            while i < docs.len() {
-                let target = docs[i];
-                let at = if postings.doc() < target { postings.seek(target) } else { postings.doc() };
-                if at == TERMINATED {
-                    break;
-                }
-                if at == target {
-                    postings.positions(&mut buffer);
-                    occurrences
-                        .entry((ord as u32, target))
-                        .or_default()
-                        .extend(buffer.iter().map(|&p| (p as usize, ordinal)));
-                    i += 1;
-                } else {
-                    i += docs[i..].partition_point(|&d| d < at);
-                }
-            }
-        }
-        check(cancel)?;
-    }
+    // the pairs' docs, read through the in-line decision's own position
+    // reader (issue #21): its term ids map to this matcher's ordinals
+    let mut keys: Vec<DocKey> = pairs.iter().flat_map(|p| [p.left, p.right]).map(|d| (d.0, d.1)).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    check(cancel)?;
+    let mut source = PositionSource::new(searcher.clone(), ix.text, ix.line_id, std::iter::once(m.prepared), std::iter::empty());
+    let wanted: Vec<Option<DocKey>> = keys.iter().copied().map(Some).collect();
+    let read = source.occurrences(&wanted)?;
+    check(cancel)?;
+    let to_ordinal = &source.matcher_maps[0];
+    let occurrences: HashMap<(u32, DocId), Vec<(usize, u32)>> = keys
+        .into_iter()
+        .zip(read)
+        .map(|(k, occ)| {
+            let occ = occ
+                .into_iter()
+                .filter_map(|(p, id)| Some(to_ordinal[id as usize]).filter(|&o| o != NONE).map(|o| (p as usize, o)))
+                .collect();
+            (k, occ)
+        })
+        .collect();
     let mut passed = Vec::new();
     let mut joined: Vec<(usize, u32)> = Vec::new();
     let mut tokens: Vec<(u32, u32)> = Vec::new();

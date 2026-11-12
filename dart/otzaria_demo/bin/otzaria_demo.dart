@@ -127,8 +127,23 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
       dir, IndexOptions(positions: !o.containsKey('no-positions'), keepMarks: o.containsKey('keep-marks')));
   final w = index.openWriter(); // auto mode (issue #19)
   var position = 0;
-  // lines go to the engine in batches (one FFI call per 1000 lines)
+  // lines go to the engine in batches (one FFI call per 1000 lines), bounded by
+  // bytes too (issue #20): a batch is sent at 1000 lines or 16 MB of text
   final batch = <LineDocument>[];
+  var batchBytes = 0, peakBatchLines = 0, peakBatchBytes = 0;
+  final addWatch = Stopwatch(); // time in the engine's add (the rest is the DB read)
+  final mem = _StageMemory();
+  final stageWatch = Stopwatch()..start();
+  void flush() {
+    if (batch.length > peakBatchLines) peakBatchLines = batch.length;
+    if (batchBytes > peakBatchBytes) peakBatchBytes = batchBytes;
+    addWatch.start();
+    w.addAll(batch);
+    addWatch.stop();
+    batch.clear();
+    batchBytes = 0;
+    mem.sample();
+  }
   // this feeding thread (DB reads) in the OS background mode too; commits,
   // the final merge and the FM sidecar leave it by themselves
   runInBackgroundPriority(() {
@@ -146,14 +161,12 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
               // Otzaria's rule: a heading interrupts the text (no cross-line phrase)
               sectionId: line.tocEntryId == 0 ? null : line.tocEntryId,
               noCross: line.text.startsWith('<h') || isVirtualId(line.id))); // a footnote stands alone (issue #13)
-          if (batch.length == 1000) {
-            w.addAll(batch);
-            batch.clear();
-          }
+          batchBytes += 2 * line.text.length + 64;
+          if (batch.length == 1000 || batchBytes >= 16000000) flush();
           if (position % 100000 == 0) stdout.writeln('  $position lines, ${sw.elapsed.inSeconds}s');
         }
       }
-      w.addAll(batch);
+      flush();
       w.commit('{"lines":$position,"db":"${db.fingerprint()}","notes":${db.hasNotes ? 1 : 0}}');
     } catch (_) {
       w.rollback();
@@ -162,12 +175,23 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
       w.close();
     }
   });
+  final indexingMs = stageWatch.elapsedMilliseconds;
+  stdout.writeln('  stage: indexing: ${_ms(indexingMs)} (DB read + commit ${_ms(indexingMs - addWatch.elapsedMilliseconds)}, '
+      'engine add ${_ms(addWatch.elapsedMilliseconds)})');
+  stdout.writeln('  stage memory: indexing: ${mem.take()}');
+  stdout.writeln('  read queue (batch cap 1,000 lines / 16 MB, chunk cap ${SeforimDb.bookLinesChunk} lines / '
+      '${SeforimDb.bookLinesChunkBytes ~/ 1000000} MB): peak batch $peakBatchLines lines / '
+      '${(peakBatchBytes / 1e6).toStringAsFixed(1)} MB; synchronous feed, no queue waits');
   // One segment (the walks and their caps run per segment), then the
   // FM-index sidecar for leading-* wildcards and fuzzy words.
+  stageWatch.reset();
   index.openWriter().mergeAndClose();
+  stdout.writeln('  stage: merge into one segment: ${_ms(stageWatch.elapsedMilliseconds)}');
+  stdout.writeln('  stage memory: merge into one segment: ${mem.take()}');
   final fmWatch = Stopwatch()..start();
   try {
     final built = index.buildFmSidecar();
+    stdout.writeln('  stage memory: FM-index sidecar: ${mem.take()}');
     final fmi = Directory(dir).listSync().whereType<File>().where((f) => f.path.endsWith('.fmi'))
         .fold<int>(0, (n, f) => n + f.lengthSync());
     stdout.writeln(built
@@ -177,9 +201,45 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
     stderr.writeln('FM sidecar FAILED: $e (the index is complete; leading-* and fuzzy use the walk)');
     rethrow;
   }
+  stdout.writeln('process peak RSS: ${(ProcessInfo.maxRss / 1e6).toStringAsFixed(1)} MB');
   stdout.writeln('Indexed $position lines into $dir in ${sw.elapsed.inMilliseconds} ms; '
       'payload ${index.info().payload}');
   index.close();
+}
+
+String _ms(int ms) => ms < 1000 ? '$ms ms' : '${(ms / 60000).toStringAsFixed(2)} min';
+
+/// Peak process memory of one build stage (issue #20). The OS keeps only a
+/// lifetime peak (`ProcessInfo.maxRss`: Windows PeakWorkingSetSize, Linux
+/// ru_maxrss), so a stage's peak is the RSS sampled after every engine batch,
+/// raised to the lifetime peak when that grew during the stage (then the stage
+/// set it: exact). A merge or FM sidecar build is one native call: its peak is
+/// exact when it set a new lifetime peak, else only its start/end are seen.
+class _StageMemory {
+  _StageMemory() {
+    _restart();
+  }
+  late int _startRss, _startPeak, _max;
+  void _restart() {
+    _startRss = ProcessInfo.currentRss;
+    _startPeak = ProcessInfo.maxRss;
+    _max = _startRss;
+  }
+
+  void sample() {
+    final r = ProcessInfo.currentRss;
+    if (r > _max) _max = r;
+  }
+
+  String take() {
+    sample();
+    final peak = ProcessInfo.maxRss;
+    var p = _max;
+    if (peak > _startPeak && peak > p) p = peak;
+    final d = p - _startRss;
+    _restart();
+    return 'peak ${(p / 1e6).toStringAsFixed(1)} MB (${d >= 0 ? '+' : ''}${(d / 1e6).toStringAsFixed(1)} MB over the stage start)';
+  }
 }
 
 /// Issue #13: a hit on a notes line names its source.

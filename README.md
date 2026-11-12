@@ -190,6 +190,17 @@ SeforimSearch.Demo build  [--db path] [--index dir] [--max-lines N] [--no-positi
 SeforimSearch.Demo search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] <query>
 ```
 
+Build report (issue #20): both demos print each stage's time AND its peak process memory
+(`stage memory: <stage>: peak X MB (+Y MB over the stage start)`). The OS keeps only a lifetime
+peak (Windows `PeakWorkingSetSize`, Linux `VmHWM` / `ru_maxrss`), so the stage peak is the working
+set sampled during the stage (C#: every 50 ms on a timer thread; Dart: after every engine batch),
+raised to the lifetime peak when the stage set it. Lines read from seforim.db wait in a queue
+bounded by line count AND text bytes, so a book of huge lines cannot balloon memory: C# = a reader
+thread + bounded queue (4,096 lines / 64 MB; `ReadQueueMaxLines` / `ReadQueueMaxBytes`; one larger
+line passes alone), its peaks and both sides' waits printed (`read queue ...`); Dart = synchronous
+feed, DB chunks capped at 2,000 lines / 32 MB and engine batches at 1,000 lines / 16 MB, read and
+add time printed. `specs_report.py` carries the stage peaks into FTS-SPECS's build table.
+
 Release profile (workspace `Cargo.toml`): fat LTO, `codegen-units = 1`, `strip = "symbols"`.
 Measured win-x64: `seforim_search_native.dll` 8.92 MB -> 8.35 MB, locate_bench / find_all_bench
 same or faster (find_all one word best 24.1 -> 21.3 ms); release build ~7.4 -> ~13.5 min from clean.

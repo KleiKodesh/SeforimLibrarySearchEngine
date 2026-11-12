@@ -243,7 +243,7 @@ publish_results() {
   local f b
   for f in "$OUT_DIR"/logs/build-{pos,nopos,marks,ftslib,otzaria}.log; do
     [ -f "$f" ] || continue
-    grep -E '^[[:space:]]*(stage: |index size: |build: |EXIT )|^[[:space:]]+\.[[:alnum:]_]+[[:space:]]+[0-9.]+ MB' "$f" > "$RESULTS_DIR/logs/$(basename "$f")"
+    grep -E '^[[:space:]]*(stage: |stage memory: |read queue |process peak |index size: |build: |EXIT )|^[[:space:]]+\.[[:alnum:]_]+[[:space:]]+[0-9.]+ MB' "$f" > "$RESULTS_DIR/logs/$(basename "$f")"
   done
   for f in "$OUT_DIR"/logs/parity-*-compare.log; do
     [ -f "$f" ] || continue

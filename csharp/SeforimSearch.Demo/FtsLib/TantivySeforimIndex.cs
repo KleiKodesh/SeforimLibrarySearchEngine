@@ -558,9 +558,20 @@ namespace FtsLib.Fts5
         /// <param name="indexOptions">Applies to a from-scratch build only.</param>
         public void BuildLines(Action<long, long>? onProgress = null, CancellationToken ct = default,
                                IndexOptions? indexOptions = null, int linesPerCommit = 20000,
-                               long heapBytes = 0, long maxLines = 0, Action<string, TimeSpan>? onStage = null)
+                               long heapBytes = 0, long maxLines = 0, Action<string, TimeSpan>? onStage = null,
+                               Action<string, StageMemory>? onStageMemory = null)
         {
             _onStage = onStage;
+            _onStageMemory = onStageMemory;
+            using var sampler = onStageMemory != null ? new StageMemorySampler() : null;
+            _sampler = sampler;
+            try { BuildLinesCore(onProgress, ct, indexOptions, linesPerCommit, heapBytes, maxLines); }
+            finally { _sampler = null; }
+        }
+
+        private void BuildLinesCore(Action<long, long>? onProgress, CancellationToken ct, IndexOptions? indexOptions,
+                                    int linesPerCommit, long heapBytes, long maxLines)
+        {
             string fingerprint = SeforimSearch.Demo.SeforimDb.SeforimDbContentFingerprint.Compute(_seforimDbPath, IndexFormatVersion);
             var state = ReadBuildState();
             if (state != null && state.Fingerprint == fingerprint && state.Complete)
@@ -582,6 +593,7 @@ namespace FtsLib.Fts5
             try
             {
                 var indexing = System.Diagnostics.Stopwatch.StartNew();
+                _sampler?.Restart();
                 RunBuild(state!, resume, onProgress, ct, linesPerCommit, heapBytes, maxLines, indexing);
             }
             catch (IndexNoLongerMatchesCorpusException)
@@ -591,6 +603,7 @@ namespace FtsLib.Fts5
                 using (SeforimIndex.Create(_indexPath, indexOptions)) { }
                 using var c = _openCorpus();
                 var fresh = new BuildState { TotalLines = c.CountDocuments(), Fingerprint = fingerprint };
+                _sampler?.Restart();
                 RunBuild(fresh, false, onProgress, ct, linesPerCommit, heapBytes, maxLines,
                          System.Diagnostics.Stopwatch.StartNew());
             }
@@ -598,10 +611,22 @@ namespace FtsLib.Fts5
 
         /// <summary>Build stage reporter (stage name, duration); null = silent.</summary>
         private Action<string, TimeSpan>? _onStage;
+        /// <summary>Build stage memory reporter (issue #20); null = not sampled.</summary>
+        private Action<string, StageMemory>? _onStageMemory;
+        private StageMemorySampler? _sampler;
+
+        /// <summary>Read-queue line cap of a build (issue #20): lines read from seforim.db
+        /// waiting for the indexing thread.</summary>
+        public int ReadQueueMaxLines { get; set; } = 4096;
+        /// <summary>Read-queue byte cap (UTF-16 text bytes); one larger line still passes alone.</summary>
+        public long ReadQueueMaxBytes { get; set; } = 64_000_000;
+        /// <summary>The last build's read queue: peaks and waits (null before a build).</summary>
+        public string? LastReadQueueReport { get; private set; }
 
         private void Stage(string name, System.Diagnostics.Stopwatch sw)
         {
             _onStage?.Invoke(name, sw.Elapsed);
+            if (_sampler != null) _onStageMemory?.Invoke(name, _sampler.Take());
             sw.Restart();
         }
 
@@ -614,16 +639,54 @@ namespace FtsLib.Fts5
             // this feeding thread (corpus reads) runs in the OS background mode too; the
             // engine leaves it for commits, the final merge and the FM sidecar by itself
             using var background = BackgroundPriority.Enter();
-            using var corpus = _openCorpus();
 
             // Resume re-reads the feed from LinesDone-1: its first line must be the last
             // committed one, or the corpus changed under the index.
             long skip = resume ? state.LinesDone - 1 : 0;
+
+            // Issue #20: a reader thread reads seforim.db into a queue bounded by lines AND bytes,
+            // this thread feeds the writer from it (DB read + decode overlap tokenizing). The
+            // queue's peaks and both sides' waits go into the build report.
+            var queue = new BoundedLineQueue<(long Id, string Text, long BookId, long? SectionId)>(ReadQueueMaxLines, ReadQueueMaxBytes);
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var reader = new Thread(() =>
+            {
+                try
+                {
+                    using var readerBackground = BackgroundPriority.Enter();
+                    using var corpus = _openCorpus();
+                    foreach (var d in corpus.ReadDocumentsWithSectionInResultOrder(skip, stop.Token))
+                        if (!queue.Add(d, 2L * (d.Text?.Length ?? 0) + 64)) break;
+                    queue.Complete();
+                }
+                catch (OperationCanceledException) when (stop.IsCancellationRequested) { queue.Complete(); }
+                catch (Exception e) { queue.Complete(e); }
+            }) { IsBackground = true, Name = "seforim.db build reader" };
+            reader.Start();
+            try
+            {
+                FeedFromQueue(queue, writer, state, resume, onProgress, ct, linesPerCommit, maxLines, stage);
+            }
+            finally
+            {
+                stop.Cancel();
+                queue.Complete();
+                reader.Join();
+                LastReadQueueReport = queue.ToString();
+            }
+        }
+
+        private void FeedFromQueue(BoundedLineQueue<(long Id, string Text, long BookId, long? SectionId)> queue,
+                                   SeforimIndexWriter writer, BuildState state, bool resume,
+                                   Action<long, long>? onProgress, CancellationToken ct, int linesPerCommit,
+                                   long maxLines, System.Diagnostics.Stopwatch stage)
+        {
             bool verifyFirst = resume, sawFirst = false, capped = false;
             int sinceCommit = 0;
-
-            foreach (var (id, text, bookId, sectionId) in corpus.ReadDocumentsWithSectionInResultOrder(skip, ct))
+            while (queue.TryTake(out var doc))
             {
+                ct.ThrowIfCancellationRequested();
+                var (id, text, bookId, sectionId) = doc;
                 if (verifyFirst)
                 {
                     verifyFirst = false;
@@ -644,6 +707,7 @@ namespace FtsLib.Fts5
                     onProgress?.Invoke(state.LinesDone, state.TotalLines);
                 }
             }
+            ct.ThrowIfCancellationRequested();
             if (resume && !sawFirst)
                 throw new IndexNoLongerMatchesCorpusException($"the corpus has fewer than {state.LinesDone} lines");
 

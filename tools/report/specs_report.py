@@ -100,9 +100,12 @@ def build(log):
     s = open(p, encoding="utf-8", errors="replace").read()
     st = {m.group(1).split("(")[0].strip(): float(m.group(2)) * 1000
           for m in re.finditer(r"stage: ([^:]+): ([\d.]+)s", s)}
+    # issue #20: peak working set per stage (C# demo build report); absent in older logs
+    mem = {m.group(1).strip(): float(m.group(2))
+           for m in re.finditer(r"stage memory: ([^:]+): peak ([\d.]+) MB", s)}
     size = re.search(r"index size: ([\d.]+) MB", s)
     files = re.findall(r"^\s+(\.\w+)\s+([\d.]+) MB", s, re.M)
-    return {"stages": st, "total": sum(st.values()), "size": float(size.group(1)) if size else None,
+    return {"stages": st, "mem": mem, "total": sum(st.values()), "size": float(size.group(1)) if size else None,
             "files": [(f, float(m)) for f, m in files if float(m) > 0]}
 
 
@@ -234,17 +237,31 @@ def parity_summary():
     if not PAR_RUN:
         return "not run in this output dir"
     return ", ".join(f"{s_} {a or 'n/a'} / {b or 'n/a'}" for s_, _, a, b in PAR_RUN) + " (positions / no positions)"
-md.append("| Build | Indexing | Merge | FM sidecar | Total | Size |\n|---|---|---|---|---|---|")
+md.append("| Build | Indexing | Merge | FM sidecar | Total | Size | Peak memory (indexing / merge / FM) |\n"
+          "|---|---|---|---|---|---|---|")
+
+
+def peak_mem(b):
+    m = b.get("mem") or {}
+    g = lambda k: next((v for kk, v in m.items() if kk.startswith(k)), None)
+    vals = [g("indexing"), g("merge"), g("FM")]
+    if all(v is None for v in vals):
+        return "not measured (next full build)"
+    return " / ".join("n/a" if v is None else f"{v:,.0f} MB" for v in vals)
+
+
 for name, b in bl:
     if not b:
-        md.append(f"| {name} | n/a | n/a | n/a | n/a | n/a |")
+        md.append(f"| {name} | n/a | n/a | n/a | n/a | n/a | n/a |")
         continue
     st = b["stages"]
     g = lambda k: next((v for kk, v in st.items() if kk.startswith(k)), None)
-    md.append(f"| {name} | {t(g('indexing'))} | {t(g('merge'))} | {t(g('FM'))} | {t(b['total'])} | {b['size']:,.1f} MB |")
+    md.append(f"| {name} | {t(g('indexing'))} | {t(g('merge'))} | {t(g('FM'))} | {t(b['total'])} | {b['size']:,.1f} MB | {peak_mem(b)} |")
 for label, tm, mb, measured in REF_BUILDS:
     if measured:
-        md.append(f"| {label} | n/a | n/a | n/a | {tm} | {mb} |")
+        md.append(f"| {label} | n/a | n/a | n/a | {tm} | {mb} | n/a |")
+md.append("\nPeak memory = the process's peak working set during each build stage (issue #20: sampled every "
+          "50 ms, raised to the OS lifetime peak when the stage set it).\n")
 _ref = [f"{label.replace('(', '').replace(')', '')} {tm} / {mb}" for label, tm, mb, measured in REF_BUILDS if not measured]
 md.append("\nReference builds measured earlier: " + "; ".join(_ref) + " (not merged to one segment).\n" if _ref
           else "\nOtzaria's index is not merged to one segment.\n")

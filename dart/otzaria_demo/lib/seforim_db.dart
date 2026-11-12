@@ -444,6 +444,12 @@ class SeforimDb {
   /// Lines per [bookLines] chunk.
   static const bookLinesChunk = 2000;
 
+  /// Text bytes (UTF-16, 2 per char) per [bookLines] chunk (issue #20): a
+  /// chunk stops at this many decoded bytes even before [bookLinesChunk]
+  /// lines (at least one line), so a book of huge lines cannot balloon the
+  /// feed; the next query's LIMIT shrinks to what fit.
+  static const bookLinesChunkBytes = 32000000;
+
   /// One book's lines in reading order.
   ///
   /// Read in chunks (keyset on `lineIndex, id`), each one fully read before
@@ -457,6 +463,7 @@ class SeforimDb {
       return;
     }
     var lastIndex = -(1 << 62), lastId = -(1 << 62);
+    var limit = bookLinesChunk;
     while (true) {
       // the section: `line_toc` (the authoritative map) when the DB has it
       final hasLineToc =
@@ -466,15 +473,21 @@ class SeforimDb {
       final rows = _select(
           'SELECT l.id, l.lineIndex, $toc, $_contentCol FROM line l$_contentJoin$tocJoin'
           ' WHERE l.bookId = ? AND (l.lineIndex > ? OR (l.lineIndex = ? AND l.id > ?))'
-          ' ORDER BY l.lineIndex, l.id LIMIT $bookLinesChunk',
+          ' ORDER BY l.lineIndex, l.id LIMIT $limit',
           [bookId, lastIndex, lastIndex, lastId]);
-      final chunk = [
-        for (final r in rows)
-          DbLine(r.columnAt(0) as int, bookId, r.columnAt(1) as int, r.columnAt(2) as int,
-              lineText(r.columnAt(0) as int, r.columnAt(3))),
-      ];
+      final chunk = <DbLine>[];
+      var bytes = 0;
+      for (final r in rows) {
+        final line = DbLine(r.columnAt(0) as int, bookId, r.columnAt(1) as int, r.columnAt(2) as int,
+            lineText(r.columnAt(0) as int, r.columnAt(3)));
+        chunk.add(line);
+        bytes += 2 * line.text.length + 64;
+        if (bytes >= bookLinesChunkBytes) break; // the rest is read again by the next query
+      }
+      final full = chunk.length < rows.length; // stopped by the byte budget
       yield* chunk;
-      if (chunk.length < bookLinesChunk) return;
+      if (!full && rows.length < limit) return;
+      limit = full ? chunk.length : bookLinesChunk;
       lastIndex = chunk.last.lineIndex;
       lastId = chunk.last.id;
     }
@@ -485,22 +498,28 @@ class SeforimDb {
   Iterable<DbLine> _noteLines(int bookId, int src) sync* {
     if (!hasNotes) return;
     var a = -(1 << 62), b = -(1 << 62), c = -(1 << 62);
+    var limit = bookLinesChunk;
     while (true) {
       final rows = _select(
           'SELECT l.lineIndex, l.id, n.noteIndex, n.body FROM line_note n JOIN line l ON l.id = n.lineId'
           ' WHERE l.bookId = ? AND (l.lineIndex, l.id, n.noteIndex) > (?, ?, ?)'
-          ' ORDER BY l.lineIndex, l.id, n.noteIndex LIMIT $bookLinesChunk',
+          ' ORDER BY l.lineIndex, l.id, n.noteIndex LIMIT $limit',
           [src, a, b, c]);
       final chunk = <DbLine>[];
+      var bytes = 0;
       for (final r in rows) {
         a = r.columnAt(0) as int;
         b = r.columnAt(1) as int;
         c = r.columnAt(2) as int;
         final id = noteLineId(b, c);
         chunk.add(DbLine(id, bookId, a, 0, lineText(id, r.columnAt(3))));
+        bytes += 2 * chunk.last.text.length + 64;
+        if (bytes >= bookLinesChunkBytes) break; // byte budget (issue #20), as bookLines
       }
+      final full = chunk.length < rows.length;
       yield* chunk;
-      if (chunk.length < bookLinesChunk) return;
+      if (!full && rows.length < limit) return;
+      limit = full ? chunk.length : bookLinesChunk;
     }
   }
 

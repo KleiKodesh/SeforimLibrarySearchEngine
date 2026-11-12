@@ -73,7 +73,14 @@ namespace SeforimSearch.Demo
             {
                 stages.Add((name, t));
                 Console.Error.WriteLine($"  stage: {name}: {t.TotalSeconds:F1}s");
-            });
+            }, onStageMemory: (name, mem) =>
+                // issue #20: peak working set during the stage (sampled every 50 ms, raised to the
+                // OS lifetime peak when the stage set it) and its rise over the stage's start
+                Console.Error.WriteLine($"  stage memory: {name.Split('(')[0].Trim()}: {mem}"));
+            if (engine.Index.LastReadQueueReport != null)
+                Console.Error.WriteLine("  " + engine.Index.LastReadQueueReport);
+            using (var self = Process.GetCurrentProcess())
+                Console.Error.WriteLine($"process peak working set: {self.PeakWorkingSet64 / 1e6:F1} MB");
             var state = engine.Index.ReadBuildState();
             Console.Error.WriteLine($"build: {state?.LinesDone:N0} lines, complete={state?.Complete} in {sw.Elapsed.TotalSeconds:F1}s");
             string? dir = Option(args, "--index");

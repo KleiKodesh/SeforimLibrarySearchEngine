@@ -491,4 +491,38 @@ void main() {
     idx.close();
     dir.deleteSync(recursive: true);
   });
+  test('resortAndClose: books move, every hit kept, cancel leaves the index', () {
+    final dir = Directory.systemTemp.createTempSync('se_dart_resort_');
+    final idx = SeforimIndex.create(dir.path);
+    final w = idx.openWriter(heapBytes: 30000000, threads: 1);
+    for (var p = 0; p < 30; p++) {
+      w.add(LineDocument(lineId: 100 + p, position: p, bookId: 1 + p ~/ 10, text: 'alpha line$p'));
+    }
+    w.commit('x');
+    w.close();
+    List<PlacedHit> all() {
+      final s = idx.search(SearchOptions('alpha'));
+      final h = s.hits(0, s.hitCount);
+      s.close();
+      return h;
+    }
+
+    final before = all();
+    final cancel = SearchCancelToken()..cancel();
+    expect(() => idx.openWriter(heapBytes: 30000000, threads: 1).resortAndClose([3, 1, 2], cancel: cancel),
+        throwsA(isA<SearchCancelledException>()));
+    expect(all().map((h) => h.position).toList(), before.map((h) => h.position).toList());
+    final progress = ResortProgressCell();
+    final lines = idx.openWriter(heapBytes: 30000000, threads: 1).resortAndClose([3, 1, 2], progress: progress);
+    expect(lines, 30);
+    expect(progress.read().stage, ResortStage.done);
+    final after = all();
+    expect(after.map((h) => h.bookId).toList(), [for (final b in [3, 1, 2]) for (var i = 0; i < 10; i++) b]);
+    expect(after.map((h) => h.position).toList(), [for (var i = 0; i < 30; i++) i]);
+    expect((after.map((h) => h.lineId).toList()..sort()), before.map((h) => h.lineId).toList());
+    expect(() => idx.openWriter(heapBytes: 30000000, threads: 1).resortAndClose([3, 1, 3]),
+        throwsA(isA<SeforimEngineException>()));
+    idx.close();
+    dir.deleteSync(recursive: true);
+  });
 }

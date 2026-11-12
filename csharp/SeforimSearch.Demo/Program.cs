@@ -16,6 +16,8 @@ namespace SeforimSearch.Demo
     ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] [--regex] [--order catalog|relevance|generation] [--cancel-after MS] query...
     ///   load   [--db path] [--index dir] --queries file [--searchers N] [--rounds R] [--commit-every MS] [--update-lines K] [--update-from P]
     ///          (issue #31: N concurrent searches while a writer commits K re-indexed lines every MS ms; see LoadCommand)
+    ///   resort [--db path] [--index dir] [--simulate-move-tenth]
+    ///          (re-sort the index into the DB's current catalog order without re-indexing; see ResortCommand)
     /// The seforim.db path defaults to KitveiHakodesh's resolution order
     /// (registry choice, then Otzaria, then Zayit).
     /// </summary>
@@ -47,6 +49,7 @@ namespace SeforimSearch.Demo
             if (command == "dump") return Dump(engine, args);
             if (command == "count") return Count(engine, args);
             if (command == "load") return LoadCommand.Run(engine, args);
+            if (command == "resort") return ResortCommand.Run(engine, db, index, args);
             Console.Error.WriteLine("unknown command " + command);
             return 2;
         }

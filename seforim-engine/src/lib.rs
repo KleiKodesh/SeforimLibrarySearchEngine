@@ -21,6 +21,7 @@ pub mod line_search;
 pub mod options;
 pub mod pools;
 pub mod relevance;
+pub mod resort;
 pub mod resources;
 pub(crate) mod section_scope;
 pub(crate) mod cross_line;
@@ -39,6 +40,7 @@ pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter, LINE_FLAG_NO_CROSS
 pub use line_search::LineRegexStatus;
 pub use options::{ExcludeOptions, PhraseOptions, ProximityBase, SearchOptions, WordMatchSpec, WordOptions};
 pub use fm_sidecar::NOTICE_FM_SIDECAR_UNUSABLE;
+pub use resort::{ResortProgressFn, ResortStage};
 pub use relevance::{ResultsOrder, NOTICE_RELEVANCE_NEEDS_POSITIONS};
 pub use search::{
     CancelToken, ExcludeSpec, GroupSpec, HitCounts, PlacedHit, ProximitySpec, SearchInfo,

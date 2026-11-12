@@ -388,6 +388,24 @@ is clean, and CHANGELOG.md has the entry.
    reads once per batch: lowering it flushes the segments above it (the
    buffer is released, as Elasticsearch's IndexingMemoryController forcing a
    flush). Public, for any thread of the application.
+7. **Reordering merge** (`indexer/reorder.rs`, `merger.rs`, the postings / store /
+   fast-field merge plugins; issue #29 follow-up).
+   - *What:* `IndexWriter::merge_reordered(segment_ids, plan, control)` merges segments
+     into one segment whose docs are in the order a caller's plan gives (any permutation
+     of the alive docs), and can replace the values of `u64` fast fields on the way (the
+     sort field renumbered, so an index with `sort_by_field` stays sorted; a plan against
+     the sort field is refused). `ReorderControl` cancels it (the merge then fails and
+     the index keeps its segments) and reports progress (plan, postings terms, store, fast
+     fields). Background priority when the writer has `low_priority_threads`.
+   - *Why:* a catalog order change (books moving in the tree) re-sorts the whole index
+     without re-indexing: one merge instead of a full build (see "Re-sort into a new
+     catalog order" below).
+   - *How:* a new mapping type, `Reordered`: upstream's sorted merge assumes the new ids
+     of one segment increase with its old ones (a k-way merge of postings, a sequential
+     store read). For `Reordered` the postings of each term are buffered (docs with their
+     positions), sorted by new doc id and written; the store reads each doc by address;
+     the fast fields are written column by column in the new order with the replaced
+     values (numeric and bool fast fields). Other merges are unchanged.
 
 Also small: `get_match_term_infos` honours the cap and the sink, and
 `RegexPhraseWeight` is reachable crate-internally so SpanQuery can reuse its
@@ -654,6 +672,32 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   payload as the host's pending/done record (e.g. the last finished book) to resume.
   The engine has no book-level API for it. Tested in
   `seforim-engine/tests/book_update_atomicity.rs`.
+- **Re-sort into a new catalog order** (optional; a build never needs it): when books
+  move in the catalog tree, `LineWriter::resort_and_close(book_order, cancel, progress)`
+  (C ABI `se_writer_resort_and_close` with `se_resort_progress_new` / `_get` / `_free`;
+  C# `SeforimIndexWriter.ResortAndClose` / `ResortAndCloseAsync`, Dart
+  `IndexWriter.resortAndClose` + `ResortProgressCell`; demo `resort
+  [--simulate-move-tenth]`) brings an existing index to the new order without
+  re-indexing. The host passes every indexed book id in the new order (books without
+  lines may appear; indexed books it does not list go last, in their old order; a book
+  listed twice is an error). Each book
+  keeps its lines in their order and spacing and the books are packed from position 0,
+  so when the old positions were the host's dense catalog numbering the new ones are
+  what a fresh build in the new order gives. ONE reordering merge (tantivy item 7)
+  writes every line in the new order into one segment with `position` rewritten: the
+  index stays catalog-ordered (no sort at search time), the publish is atomic (searches
+  see the old order until the new segment is complete), the order stamp changes (a
+  resume from a page of the old order fails with `StaleResume`, issue #12), the old
+  segment's files and sidecar are removed (issue #29) and the FM sidecar is rebuilt.
+  Cancelling before the publish leaves the old index (`Cancelled`); progress stages:
+  plan, postings (terms), store, per-line fields, publish, FM sidecar, done. Background
+  priority when the writer has it (issue #19). The commit payload is kept: a host that
+  records its catalog in the payload commits the new record afterwards. Peak disk: the
+  old and the new segment together (about twice the index). Full DB (7.9M lines, index
+  with positions 1.76 GB, SSD): 2.56 min (plan 263 ms, postings 1.9 min, per-line fields + store 0.3 min, FM sidecar
+  0.1 min; one tenth of the books moved), peak working set 2,582 MB, peak disk 3,434 MB (old +
+  new segment); a plain one-segment merge on the same SSD takes 1.23 min with its sidecar. Tests: `seforim-engine/src/resort.rs`,
+  tantivy `indexer/reorder.rs`, Dart `resortAndClose`.
 - **Index:** create or open; positions optional; add/delete/commit lines
   (`line_id`, `position`, `book_id`, text indexed but not stored; see the
   bare-minimum rule above) with a host payload (resume watermark,

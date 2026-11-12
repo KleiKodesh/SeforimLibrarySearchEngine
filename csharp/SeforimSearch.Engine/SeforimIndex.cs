@@ -290,6 +290,40 @@ namespace SeforimSearch.Engine
         public void Dispose() => _handle.Dispose();
     }
 
+    /// <summary>What a re-sort (<see cref="SeforimIndexWriter.ResortAndClose"/>) is doing.</summary>
+    public enum ResortStage
+    {
+        /// <summary>Not started yet.</summary>
+        NotStarted = 0,
+        /// <summary>Reading the lines' books and positions, building the new order.</summary>
+        Plan = 1,
+        /// <summary>Writing the postings (Done / Total terms).</summary>
+        Postings = 2,
+        /// <summary>Writing the doc store.</summary>
+        Store = 3,
+        /// <summary>Writing the per-line fields (position rewritten).</summary>
+        FastFields = 4,
+        /// <summary>Publishing the new segment, removing the old one.</summary>
+        Publish = 5,
+        /// <summary>Rebuilding the FM-index sidecar.</summary>
+        FmSidecar = 6,
+        /// <summary>Finished (Done = lines).</summary>
+        Done = 7,
+    }
+
+    /// <summary>A re-sort progress report.</summary>
+    public readonly struct ResortProgress
+    {
+        /// <summary>A report.</summary>
+        public ResortProgress(ResortStage stage, long done, long total) { Stage = stage; Done = done; Total = total; }
+        /// <summary>The stage.</summary>
+        public ResortStage Stage { get; }
+        /// <summary>Work done in the stage.</summary>
+        public long Done { get; }
+        /// <summary>The stage's total work (an upper bound for postings).</summary>
+        public long Total { get; }
+    }
+
     /// <summary>Adds, deletes and commits lines. Not thread-safe.</summary>
     public sealed unsafe class SeforimIndexWriter : IDisposable
     {
@@ -334,6 +368,65 @@ namespace SeforimSearch.Engine
         /// <summary>Commits pending adds and deletes (keeping the last payload), merges
         /// all segments into one (for a shipped, read-mostly index) and closes the writer.</summary>
         public void MergeAndClose() => Interop.Check(NativeMethods.se_writer_merge_and_close(_handle.Detach()));
+
+        /// <summary>
+        /// Re-sorts the index into a new catalog order and closes the writer (optional; a
+        /// build never needs it). <paramref name="bookOrder"/> = every indexed book id in the
+        /// new catalog order (books without lines may appear; indexed books not listed go
+        /// last in their old order; a book listed twice throws). Each book keeps its lines in their order and spacing; books
+        /// are packed from position 0 in the new order. One reordering merge, published
+        /// atomically (a resume from a page of the old order then fails as stale); the FM
+        /// sidecar is rebuilt. Cancelling <paramref name="ct"/> before the publish leaves the
+        /// old index and throws <see cref="OperationCanceledException"/>.
+        /// <paramref name="progress"/> gets a report about every 250 ms. Blocking (see
+        /// <see cref="ResortAndCloseAsync"/>); runs at background priority when the writer
+        /// does. Disk: about twice the index size at the peak. Returns the number of lines.
+        /// A null or negative book id, or <paramref name="ct"/> cancelled before the call, throws
+        /// without starting and leaves the writer open.
+        /// </summary>
+        public long ResortAndClose(IReadOnlyList<long> bookOrder, IProgress<ResortProgress>? progress = null,
+                                   CancellationToken ct = default)
+        {
+            if (bookOrder == null) throw new ArgumentNullException(nameof(bookOrder));
+            ct.ThrowIfCancellationRequested();
+            var ids = new ulong[bookOrder.Count];
+            for (int i = 0; i < ids.Length; i++) ids[i] = checked((ulong)bookOrder[i]);
+            using var token = NativeMethods.se_cancel_token_new();
+            using var registration = ct.Register(s => NativeMethods.se_cancel_token_cancel(((CancelTokenHandle)s!).DangerousGetHandle()), token);
+            IntPtr cell = NativeMethods.se_resort_progress_new();
+            Timer? timer = null;
+            try
+            {
+                if (progress != null)
+                    timer = new Timer(_ => Report(cell, progress), null, 250, 250);
+                long lines;
+                fixed (ulong* p = ids)
+                    lines = NativeMethods.se_writer_resort_and_close(_handle.Detach(), p, (UIntPtr)ids.Length, token, cell);
+                if (lines < 0) throw Interop.Fail(Interop.LastError());
+                return lines;
+            }
+            finally
+            {
+                if (timer != null)
+                {
+                    using var stopped = new ManualResetEvent(false);
+                    if (timer.Dispose(stopped)) stopped.WaitOne();
+                    if (progress != null) Report(cell, progress);
+                }
+                NativeMethods.se_resort_progress_free(cell);
+            }
+        }
+
+        /// <summary><see cref="ResortAndClose"/> on the thread pool.</summary>
+        public System.Threading.Tasks.Task<long> ResortAndCloseAsync(IReadOnlyList<long> bookOrder,
+            IProgress<ResortProgress>? progress = null, CancellationToken ct = default) =>
+            System.Threading.Tasks.Task.Run(() => ResortAndClose(bookOrder, progress, ct));
+
+        private static void Report(IntPtr cell, IProgress<ResortProgress> progress)
+        {
+            if (NativeMethods.se_resort_progress_get(cell, out uint stage, out ulong done, out ulong total) == 0)
+                progress.Report(new ResortProgress((ResortStage)stage, (long)done, (long)total));
+        }
 
         /// <summary>Closes the writer, discarding anything uncommitted.</summary>
         public void Dispose() => _handle.Dispose();

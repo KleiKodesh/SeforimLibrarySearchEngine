@@ -98,6 +98,10 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             Guard(C.FetchPlacedDocuments(ids));
         public Dictionary<long, FtsDocumentPlacement> FetchPlacements(IReadOnlyList<long> ids) => C.FetchPlacements(ids);
         public Dictionary<long, (long First, long Count)> BookPositionRanges() => C.BookPositionRanges();
+
+        /// <summary>The book ids in the index order (catalog order, each notes book after its
+        /// book): the order a re-sort (<c>resort</c>) brings an existing index to.</summary>
+        public List<long> CatalogBookOrder() => C.CatalogBookOrder();
         public HashSet<long> BaseBookIds() => C.BaseBookIds();
         public long? PositionOfLine(long lineId, Dictionary<long, (long First, long Count)> books) =>
             C.PositionOfLine(lineId, books);
@@ -391,6 +395,12 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// <see cref="BookPositionRanges"/>, so the two can never disagree. (Core 277de7a9.)
         /// </summary>
         private (List<long> BookOrder, Dictionary<long, long> LineCounts) BooksInResultOrder()
+            => BooksInResultOrderCore();
+
+        /// <summary>The book ids in the index order (see <see cref="SeforimDbFtsCorpus.CatalogBookOrder"/>).</summary>
+        public List<long> CatalogBookOrder() => BooksInResultOrderCore().BookOrder;
+
+        private (List<long> BookOrder, Dictionary<long, long> LineCounts) BooksInResultOrderCore()
         {
             var treeOrder = SeforimDbBookTreeOrder.Load(_connection);
 

@@ -125,6 +125,19 @@ namespace SeforimSearch.Engine.Native
         public static extern int se_writer_merge_and_close(IntPtr writer);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_resort_progress_new();
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_resort_progress_get(IntPtr progress, out uint stage, out ulong done, out ulong total);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void se_resort_progress_free(IntPtr progress);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern long se_writer_resort_and_close(IntPtr writer, ulong* bookIds, UIntPtr count,
+                                                             CancelTokenHandle token, IntPtr progress);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern void se_writer_close(IntPtr writer);
 
         // ── Search ──

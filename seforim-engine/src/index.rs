@@ -727,6 +727,119 @@ impl LineWriter {
         crate::fm_sidecar::remove_leftover_temps(&self.dir);
     }
 
+    /// Re-sorts the index into a new catalog order and CLOSES the writer
+    /// (optional; a build never needs it). `book_order` = every indexed book
+    /// id in the new catalog order (books with no lines may appear; indexed
+    /// books it does not list go last, in their old order; a book listed
+    /// twice is an error).
+    /// Each book keeps its lines in their old order and spacing; the books
+    /// are packed in the new order from position 0 (see [`crate::resort`]).
+    ///
+    /// Pending adds and deletes are committed first (keeping the payload).
+    /// Then ONE reordering merge writes every line in the new order into a
+    /// single segment with `position` rewritten, so the index stays
+    /// catalog-ordered (no sort at search time). It publishes atomically:
+    /// searches see the old order until the new segment is complete, then
+    /// the new one; the order stamp changes, so a resume from a page of the
+    /// old order fails with `StaleResume`. The old segment's files and
+    /// sidecar are removed and the FM-index sidecar is rebuilt.
+    ///
+    /// `cancel` stops it before the new segment is published
+    /// ([`crate::Error::Cancelled`]; the index keeps its old order and files); once
+    /// published only the sidecar rebuild remains (not cancellable; the
+    /// automatic repair also covers it). `progress` is called from the merge
+    /// thread. Runs at background priority when the writer does
+    /// ([`LineIndex::writer_with`] low_priority, [`LineIndex::writer_auto`]).
+    /// Disk: the old and the new segment exist together until the publish
+    /// (about twice the index size at the peak).
+    pub fn resort_and_close(
+        mut self,
+        book_order: &[u64],
+        cancel: Option<crate::CancelToken>,
+        progress: Option<crate::resort::ResortProgressFn>,
+    ) -> Result<u64> {
+        use crate::resort::ResortStage;
+        let report = |stage: ResortStage, done: u64, total: u64| {
+            if let Some(p) = &progress {
+                p(stage, done, total);
+            }
+        };
+        crate::search::CancelToken::check(cancel.as_ref())?;
+        let payload = self.writer.index().load_metas()?.payload;
+        self.commit(payload.as_deref())?;
+        self.writer.set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
+        let flag = cancel.clone().unwrap_or_default();
+        let book_order: std::sync::Arc<Vec<u64>> = std::sync::Arc::new(book_order.to_vec());
+        let plan_error: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+        let mut attempt = 0;
+        let lines = loop {
+            let ids = self.writer.index().searchable_segment_ids()?;
+            if ids.is_empty() {
+                break 0;
+            }
+            let order = book_order.clone();
+            let failed = plan_error.clone();
+            let plan: tantivy::indexer::ReorderPlanFn = Box::new(move |readers| {
+                crate::resort::plan(readers, &order).map_err(|e| {
+                    *failed.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
+                    tantivy::TantivyError::InvalidArgument(e.to_string())
+                })
+            });
+            let mut control = tantivy::indexer::ReorderControl::new().with_cancel_flag(flag.flag());
+            if let Some(p) = progress.clone() {
+                control = control.on_progress(move |stage, done, total| p(stage.into(), done, total));
+            }
+            match self.writer.merge_reordered(&ids, plan, control).wait() {
+                Ok(meta) => break meta.map_or(0, |m| m.num_docs() as u64),
+                Err(_) if flag.is_cancelled() => {
+                    self.reader.after_write();
+                    self.collect_garbage();
+                    return Err(crate::Error::Cancelled);
+                }
+                // the host's order is not usable (the plan said why), or the
+                // plan broke tantivy's checks: no retry
+                Err(e) if plan_error.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+                    || e.to_string().contains("reorder plan") =>
+                {
+                    let m = plan_error.lock().unwrap_or_else(|p| p.into_inner()).take();
+                    return Err(crate::Error::Unsupported(m.unwrap_or_else(|| e.to_string())));
+                }
+                // a background merge that was already running finished first
+                // (its segments are gone): let it land, retry on the new list
+                Err(e) if attempt < 20 && e.to_string().contains("not all uncommitted or committed") => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                Err(e) => {
+                    // the failed merge's partial files go now, not at the next writer open
+                    self.reader.after_write();
+                    self.collect_garbage();
+                    return Err(e.into());
+                }
+            }
+        };
+        report(ResortStage::Publish, 0, 1);
+        self.reader.after_write();
+        self.collect_garbage();
+        let reader = self.reader.clone();
+        let (fm, dir, text) = (self.fm.clone(), self.dir.clone(), self.fields.text);
+        let waited = self.writer.wait_merging_threads();
+        reader.after_write();
+        waited?;
+        report(ResortStage::Publish, 1, 1);
+        report(ResortStage::FmSidecar, 0, 1);
+        {
+            // the single-threaded tail: normal priority (as build_fm_sidecar)
+            let _normal = tantivy::indexer::NormalPrioritySection::enter();
+            fm.clear();
+            crate::fm_sidecar::build(&reader.searcher(), text, &dir)?;
+            fm.clear();
+        }
+        report(ResortStage::FmSidecar, 1, 1);
+        report(ResortStage::Done, lines, lines);
+        Ok(lines)
+    }
+
     /// Merges all segments into one (for a shipped, read-mostly index) and
     /// waits for it.
     ///

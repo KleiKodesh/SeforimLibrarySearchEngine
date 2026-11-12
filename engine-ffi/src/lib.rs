@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 7;
+pub const SE_ABI_VERSION: u32 = 8;
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -794,6 +794,119 @@ pub unsafe extern "C" fn se_writer_merge_and_close(writer: *mut LineWriter) -> i
     guard(-1, || {
         writer.merge_all().map_err(err)?;
         Ok(0)
+    })
+}
+
+/// Progress of a re-sort (`se_writer_resort_and_close`), read by the host
+/// from any thread while the re-sort runs.
+#[derive(Default)]
+pub struct ResortProgress {
+    stage: std::sync::atomic::AtomicU32,
+    done: std::sync::atomic::AtomicU64,
+    total: std::sync::atomic::AtomicU64,
+}
+
+/// A new progress object for `se_writer_resort_and_close`. Free with
+/// `se_resort_progress_free` after the re-sort returned.
+#[no_mangle]
+pub extern "C" fn se_resort_progress_new() -> *mut ResortProgress {
+    Box::into_raw(Box::default())
+}
+
+/// Reads a re-sort's progress (any thread): `stage` = 0 not started,
+/// 1 plan, 2 postings (`done` / `total` terms), 3 store, 4 per-line fields,
+/// 5 publish, 6 FM sidecar, 7 done (`done` = lines). Returns 0, or -1 for a
+/// null pointer.
+///
+/// # Safety
+/// `progress` must be live; the out pointers valid or null.
+#[no_mangle]
+pub unsafe extern "C" fn se_resort_progress_get(
+    progress: *const ResortProgress,
+    stage: *mut u32,
+    done: *mut u64,
+    total: *mut u64,
+) -> i32 {
+    use std::sync::atomic::Ordering;
+    let Some(p) = progress.as_ref() else { return -1 };
+    if !stage.is_null() {
+        *stage = p.stage.load(Ordering::Acquire);
+    }
+    if !done.is_null() {
+        *done = p.done.load(Ordering::Relaxed);
+    }
+    if !total.is_null() {
+        *total = p.total.load(Ordering::Relaxed);
+    }
+    0
+}
+
+/// Frees a progress object.
+///
+/// # Safety
+/// `progress` must come from `se_resort_progress_new`, not be freed twice,
+/// and no re-sort may still be using it.
+#[no_mangle]
+pub unsafe extern "C" fn se_resort_progress_free(progress: *mut ResortProgress) {
+    if !progress.is_null() {
+        drop(Box::from_raw(progress));
+    }
+}
+
+/// Re-sorts the index into a new catalog order and CLOSES the writer (it
+/// must not be used or closed afterwards; optional, a build never needs
+/// it). `book_ids` = every indexed book id in the new catalog order
+/// (`count` ids; books without lines may appear; indexed books not listed
+/// go last in their old order; a book listed twice is an error). Each book keeps its lines in their order
+/// and spacing; books are packed from position 0 in the new order. One
+/// reordering merge, published atomically (the order stamp changes, so a
+/// resume from an old page fails as stale); the FM sidecar is rebuilt.
+/// `token` (null = not cancellable) stops it before the publish, leaving
+/// the old index (`se_last_error_cancelled() == 1`); `progress` (null =
+/// none) is updated as it runs. Runs at background priority when the writer
+/// does. Blocking: call it off the UI thread. Returns the number of lines,
+/// or -1 on error (`se_last_error`).
+///
+/// # Safety
+/// `writer` must be live; `book_ids` valid for `count` u64 (or null with
+/// count 0); `token` and `progress` live or null for the whole call.
+#[no_mangle]
+pub unsafe extern "C" fn se_writer_resort_and_close(
+    writer: *mut LineWriter,
+    book_ids: *const u64,
+    count: usize,
+    token: *const CancelToken,
+    progress: *const ResortProgress,
+) -> i64 {
+    if writer.is_null() {
+        set_error("null writer");
+        return -1;
+    }
+    let writer = Box::from_raw(writer);
+    guard(-1, || {
+        let order: &[u64] = if count == 0 {
+            &[]
+        } else if book_ids.is_null() {
+            return Err("null book_ids".to_string());
+        } else {
+            std::slice::from_raw_parts(book_ids, count)
+        };
+        let cancel = token.as_ref().cloned();
+        // the host keeps `progress` alive for the call; the callback runs
+        // only during it (the merge thread is joined before returning)
+        let cell = progress as usize;
+        let report: Option<seforim_engine::ResortProgressFn> = (!progress.is_null()).then(|| {
+            let f: seforim_engine::ResortProgressFn = std::sync::Arc::new(move |stage, done, total| {
+                use std::sync::atomic::Ordering;
+                let p = &*(cell as *const ResortProgress);
+                p.done.store(done, Ordering::Relaxed);
+                p.total.store(total, Ordering::Relaxed);
+                p.stage.store(stage as u32, Ordering::Release);
+            });
+            f
+        });
+        let lines = writer.resort_and_close(order, cancel, report).map_err(err)?;
+        Ok(lines as i64)
     })
 }
 

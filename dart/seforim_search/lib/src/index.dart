@@ -47,6 +47,45 @@ final class SearchCancelToken implements Finalizable {
   static void cancelAt(int address) => SeforimNative.instance.cancelTokenCancel(Pointer.fromAddress(address));
 }
 
+/// What a re-sort ([IndexWriter.resortAndClose]) is doing.
+enum ResortStage { notStarted, plan, postings, store, fastFields, publish, fmSidecar, done }
+
+/// A re-sort progress report: [done] of [total] in [stage] (terms while
+/// writing postings, an upper bound; lines when done).
+final class ResortProgress {
+  const ResortProgress(this.stage, this.done, this.total);
+  final ResortStage stage;
+  final int done;
+  final int total;
+}
+
+/// Shared progress of a re-sort, readable from any isolate while it runs.
+final class ResortProgressCell implements Finalizable {
+  ResortProgressCell() : handle = SeforimNative.instance.resortProgressNew() {
+    SeforimNative.instance.resortProgressFinalizer.attach(this, handle);
+  }
+
+  /// The native object (kept alive by this object).
+  final Pointer<Void> handle;
+
+  /// The native address, for [readAt] on another isolate while this object
+  /// is alive.
+  int get address => handle.address;
+
+  /// The current progress.
+  ResortProgress read() => readAt(address);
+
+  /// Reads the cell at [address] (from [ResortProgressCell.address]).
+  static ResortProgress readAt(int address) => using((a) {
+        final stage = a<Uint32>();
+        final done = a<Uint64>();
+        final total = a<Uint64>();
+        SeforimNative.instance.resortProgressGet(Pointer.fromAddress(address), stage, done, total);
+        final s = stage.value < ResortStage.values.length ? ResortStage.values[stage.value] : ResortStage.notStarted;
+        return ResortProgress(s, done.value, total.value);
+      });
+}
+
 /// A line index on disk. Searches may run concurrently on separate isolates
 /// only through separate [SeforimIndex.open] calls; one writer at a time.
 ///
@@ -329,6 +368,32 @@ final class IndexWriter implements Finalizable {
     _n.writerCloseFinalizer.detach(this);
     _handle = nullptr; // native side frees it whatever the outcome
     _n.checkStatus(_n.writerMergeAndClose(h));
+  }
+
+  /// Re-sorts the index into a new catalog order and closes the writer
+  /// (optional; a build never needs it). [bookOrder] = every indexed book id
+  /// in the new catalog order (books without lines may appear; indexed books
+  /// not listed go last in their old order; a book listed twice throws). Each book keeps its lines in
+  /// their order and spacing; books are packed from position 0 in the new
+  /// order. One reordering merge, published atomically (a resume from a page
+  /// of the old order then fails as stale); the FM sidecar is rebuilt.
+  /// [cancel] stops it before the publish, leaving the old index (throws
+  /// [SearchCancelledException]); [progress] is updated as it runs (read it
+  /// from another isolate through [ResortProgressCell.address]). Blocking:
+  /// run it on a worker isolate. Background priority when the writer has it.
+  /// Disk: about twice the index size at the peak. Returns the line count.
+  int resortAndClose(List<int> bookOrder, {SearchCancelToken? cancel, ResortProgressCell? progress}) {
+    final h = _h;
+    _n.writerCloseFinalizer.detach(this);
+    _handle = nullptr; // native side frees it whatever the outcome
+    return using((a) {
+      final ids = a<Uint64>(bookOrder.isEmpty ? 1 : bookOrder.length);
+      ids.asTypedList(bookOrder.length).setAll(0, bookOrder);
+      final lines = _n.writerResortAndClose(
+          h, ids, bookOrder.length, cancel?.handle ?? nullptr, progress?.handle ?? nullptr);
+      if (lines < 0) throw _n.error();
+      return lines;
+    });
   }
 
   /// Closes the writer, discarding anything uncommitted.

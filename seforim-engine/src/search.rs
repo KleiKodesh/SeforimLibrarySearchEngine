@@ -51,6 +51,11 @@ impl CancelToken {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The shared flag (for a tantivy operation that takes one).
+    pub(crate) fn flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.0.clone()
+    }
+
     pub(crate) fn check(token: Option<&CancelToken>) -> Result<()> {
         if token.is_some_and(|t| t.is_cancelled()) {
             Err(Error::Cancelled)

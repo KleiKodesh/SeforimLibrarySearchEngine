@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 7;
+const int seforimAbiVersion = 8;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -150,6 +150,18 @@ final class SeforimNative {
             'se_writer_rollback'),
         writerMergeAndClose = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
             'se_writer_merge_and_close'),
+        writerResortAndClose = lib.lookupFunction<
+            Int64 Function(Pointer<Void>, Pointer<Uint64>, Size, Pointer<Void>, Pointer<Void>),
+            int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Void>, Pointer<Void>)>(
+            'se_writer_resort_and_close'),
+        resortProgressNew =
+            lib.lookupFunction<Pointer<Void> Function(), Pointer<Void> Function()>('se_resort_progress_new'),
+        resortProgressGet = lib.lookupFunction<
+            Int32 Function(Pointer<Void>, Pointer<Uint32>, Pointer<Uint64>, Pointer<Uint64>),
+            int Function(Pointer<Void>, Pointer<Uint32>, Pointer<Uint64>, Pointer<Uint64>)>(
+            'se_resort_progress_get'),
+        resortProgressFinalizer =
+            NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_resort_progress_free').cast()),
         search = lib.lookupFunction<Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, Size),
             Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int)>('se_search'),
         searchHitCount = lib.lookupFunction<Uint64 Function(Pointer<Void>), int Function(Pointer<Void>)>(
@@ -251,6 +263,10 @@ final class SeforimNative {
   final int Function(Pointer<Void>, Pointer<Uint8>, int) writerCommit;
   final int Function(Pointer<Void>) writerRollback;
   final int Function(Pointer<Void>) writerMergeAndClose;
+  final int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Void>, Pointer<Void>) writerResortAndClose;
+  final Pointer<Void> Function() resortProgressNew;
+  final int Function(Pointer<Void>, Pointer<Uint32>, Pointer<Uint64>, Pointer<Uint64>) resortProgressGet;
+  final NativeFinalizer resortProgressFinalizer;
   final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int) search;
   final int Function(Pointer<Void>) searchHitCount;
   final int Function(Pointer<Void>, int, int, Pointer<Uint64>) searchCopyHits;

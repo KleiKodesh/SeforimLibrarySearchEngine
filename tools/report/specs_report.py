@@ -468,7 +468,7 @@ claude_block = "\n".join([
     f"Specs section: rerun it whenever the engine, index format or a full-DB run changes. Index formats: "
     f"ours `{INDEX_FORMAT}`, FtsLib `{FTSLIB_FORMAT}`. Features: FtsLib syntax + parity, per-word Otzaria "
     f"options as FST walks (cap per request, default 2000, global across segments), proximity / word match, vocalized walks (plain, wildcard and fuzzy words), user regex "
-    f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, non-blocking package APIs, hits decided from positions + streamed (word-tightest window), resume after position, "
+    f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, re-sort into a new catalog order (one merge), non-blocking package APIs, hits decided from positions + streamed (word-tightest window), resume after position, "
     f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, positions snippets, FM sidecar, all-matches locate + find in an open text, "
     f"morphology forms from the host (lexical tier, unmarked forms).",
     "Builds: " + "; ".join(l.strip("| ").replace(" | ", " ") for l in build_lines()) + ".",

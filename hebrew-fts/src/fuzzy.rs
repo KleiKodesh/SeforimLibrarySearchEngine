@@ -16,12 +16,11 @@ use std::sync::{Arc, OnceLock};
 pub use levenshtein_automata::Distance;
 use levenshtein_automata::{LevenshteinAutomatonBuilder, DFA};
 use tantivy::query::{
-    AutomatonWeight, EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight,
+    EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight,
 };
 use tantivy::schema::Field;
 use tantivy_fst::Automaton;
 
-use crate::marks::MarkFree;
 use crate::walk::DEFAULT_MAX_EXPANDED_TERMS;
 
 /// A Levenshtein DFA as a tantivy automaton. With `transparent_quotes` the
@@ -235,27 +234,23 @@ impl HebrewFuzzyQuery {
         crate::chars::strip_term_marks(&self.word).into_owned()
     }
 
-    fn configure<A>(&self, mut weight: AutomatonWeight<A>, dfa: Arc<LevenshteinDfa>, segments: Option<&[tantivy::SegmentReader]>) -> AutomatonWeight<A>
-    where
-        A: Automaton + Send + Sync + 'static,
-        A::State: Clone,
-    {
-        if let Some(sink) = &self.matched_terms_sink {
-            weight.set_matched_terms_sink(sink.clone());
+    /// The walk plan: the shared weight setup of every walk (sink, cap,
+    /// pinned exact forms, cap across segments, zero-width chars, the
+    /// mark-free wrap), ranked closest first by the edit distance.
+    fn plan<'a>(&'a self, dfa: &Arc<LevenshteinDfa>, segments: Option<&'a [tantivy::SegmentReader]>) -> crate::marks::WeightPlan<'a> {
+        let dfa = dfa.clone();
+        crate::marks::WeightPlan {
+            field: self.field,
+            sink: self.matched_terms_sink.as_ref(),
+            cap: Some(self.max_expansions),
+            segments,
+            pinned: crate::marks::exact_forms(&self.mark_free_word()),
+            marked_terms: self.marked_terms,
+            mark_free: self.marked_terms,
+            rank: Some(Arc::new(move |key: &[u8]| match dfa.distance(key) {
+                Distance::Exact(d) | Distance::AtLeast(d) => d as u32,
+            })),
         }
-        if self.max_expansions > 0 {
-            weight.set_max_expansions(self.max_expansions);
-            weight.set_pinned_terms(crate::marks::exact_forms(&self.mark_free_word()));
-            if let Some(segments) = segments {
-                weight.set_cap_across_segments(segments);
-            }
-        }
-        weight.set_zero_width_chars(crate::marks::zero_width_chars(self.marked_terms));
-        // Closest first: the edit distance of the matched term.
-        weight.set_expansion_rank(Arc::new(move |key: &[u8]| match dfa.distance(key) {
-            Distance::Exact(d) | Distance::AtLeast(d) => d as u32,
-        }));
-        weight
     }
 
     /// This query as a slot of a [`SpanQuery`](tantivy::query::SpanQuery):
@@ -266,22 +261,14 @@ impl HebrewFuzzyQuery {
         searcher: &tantivy::Searcher,
     ) -> tantivy::Result<Arc<dyn SpanTermSource>> {
         let dfa = Arc::new(self.automaton());
-        Ok(if self.marked_terms {
-            Arc::new(self.configure(AutomatonWeight::<MarkFree<SharedDfa>>::new(self.field, MarkFree::new(SharedDfa(dfa.clone()))), dfa, Some(searcher.segment_readers())))
-        } else {
-            Arc::new(self.configure(AutomatonWeight::<LevenshteinDfa>::new(self.field, dfa.clone()), dfa, Some(searcher.segment_readers())))
-        })
+        Ok(self.plan(&dfa, Some(searcher.segment_readers())).span(SharedDfa(dfa.clone())))
     }
 }
 
 impl Query for HebrewFuzzyQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
         let dfa = Arc::new(self.automaton());
-        Ok(if self.marked_terms {
-            Box::new(self.configure(AutomatonWeight::<MarkFree<SharedDfa>>::new(self.field, MarkFree::new(SharedDfa(dfa.clone()))), dfa, enable_scoring.searcher().map(|s| s.segment_readers())))
-        } else {
-            Box::new(self.configure(AutomatonWeight::<LevenshteinDfa>::new(self.field, dfa.clone()), dfa, enable_scoring.searcher().map(|s| s.segment_readers())))
-        })
+        Ok(self.plan(&dfa, enable_scoring.searcher().map(|s| s.segment_readers())).boxed(SharedDfa(dfa.clone())))
     }
 }
 

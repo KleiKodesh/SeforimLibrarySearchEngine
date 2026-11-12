@@ -92,6 +92,7 @@ impl HebrewGrammarQuery {
             pinned: crate::marks::exact_forms(&self.word),
             marked_terms: self.marked_terms,
             mark_free: self.marked_terms,
+            rank: None,
         }
     }
 

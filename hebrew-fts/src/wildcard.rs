@@ -478,6 +478,7 @@ impl HebrewWildcardQuery {
             marked_terms: self.marked_terms,
             // a vocalized pattern reads the marks itself
             mark_free: self.marked_terms && !self.pattern.free_marks,
+            rank: None,
         }
     }
 

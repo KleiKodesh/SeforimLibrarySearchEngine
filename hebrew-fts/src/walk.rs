@@ -505,14 +505,6 @@ fn value(c: Config) -> u32 {
     c as u32
 }
 
-/// Otzaria `AFFIX_LETTER` (`hebrew_query.rs`), the single-byte part: a
-/// geresh / gershayim in the index form (`'`, `"`). An any-letter window
-/// adds only these and Hebrew letters ([`is_affix_tail`]): never a Latin
-/// letter, a digit or another script.
-#[inline]
-fn is_affix_quote(b: u8) -> bool {
-    b == b'\'' || b == b'"'
-}
 /// Lead byte of a UTF-8 Hebrew letter (U+05D0..U+05EA = 0xD7 0x90..0xAA,
 /// U+05F0..U+05F2 = 0xD7 0xB0..0xB2).
 const HEBREW_LEAD: u8 = 0xD7;
@@ -908,7 +900,9 @@ impl HebrewWalkAutomaton {
                     },
                 );
                 if count < max {
-                    if is_affix_quote(byte) {
+                    // Otzaria `AFFIX_LETTER`, single-byte part: a geresh / gershayim in
+                    // the index form; an any-letter window adds only these and Hebrew letters
+                    if crate::chars::is_term_quote_byte(byte) {
                         self.close_into(pack(t, PEND_NONE, count + 1), out);
                     } else if byte == HEBREW_LEAD {
                         self.close_into(pack(t, PEND_LETTER, count), out);
@@ -1104,6 +1098,7 @@ impl HebrewWalkQuery {
             pinned: crate::marks::exact_forms(&self.word),
             marked_terms: self.options.marked_terms,
             mark_free,
+            rank: None,
         }
     }
 

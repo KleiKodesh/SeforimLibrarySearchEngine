@@ -62,6 +62,9 @@ pub(crate) struct WeightPlan<'a> {
     /// Wrap the automaton in [`MarkFree`] (a mark-free automaton over a
     /// dictionary that keeps marks).
     pub mark_free: bool,
+    /// Which terms are best under the cap (lowest first, e.g. a fuzzy
+    /// term's edit distance); None = shortest first.
+    pub rank: Option<tantivy::query::ExpansionRank>,
 }
 
 /// The exact typed form of `word` and its quote-free twin, as pinned terms
@@ -93,6 +96,9 @@ impl WeightPlan<'_> {
             }
         }
         weight.set_zero_width_chars(zero_width_chars(self.marked_terms));
+        if let Some(rank) = &self.rank {
+            weight.set_expansion_rank(rank.clone());
+        }
         weight
     }
 

@@ -287,8 +287,6 @@ pub struct SnippetWindowLocator {
     break_token: Option<usize>,
     /// UTF-16 offset of the break (the joining `\n`) in the joined text.
     break_utf16: usize,
-    /// Synthetic tokens for [`proximity_across_positions`](Self::proximity_across_positions).
-    synthetic: Vec<TextToken>,
     /// After [`tokenize_positioned`](Self::tokenize_positioned): each
     /// token's term id in the caller's term list (or `NO_TERM`), read off
     /// the index positions instead of hashing the token. The locate calls
@@ -343,7 +341,6 @@ impl SnippetWindowLocator {
             proximity: ProximityScratch::default(),
             break_token: None,
             break_utf16: 0,
-            synthetic: Vec::new(),
             token_terms: Vec::new(),
             positioned: false,
             word: String::new(),
@@ -683,38 +680,6 @@ impl SnippetWindowLocator {
     /// None after [`tokenize`](Self::tokenize).
     pub fn break_utf16(&self) -> Option<usize> {
         self.break_token.map(|_| self.break_utf16)
-    }
-
-    /// Otzaria's proximity checked on index positions across a line break:
-    /// `occurrences` are `(position, term ordinal of prepared)` of the two
-    /// lines joined (the next line's positions shifted by the first line's
-    /// word count, `break_position`). True when a match crosses the break,
-    /// with the same window rules [`locate_proximity_tokenized`](Self::locate_proximity_tokenized)
-    /// applies to a text joined by [`tokenize_pair`](Self::tokenize_pair):
-    /// the index positions ARE the locator's tokens (same scanner), so both
-    /// index flavours agree.
-    pub fn proximity_across_positions(
-        &mut self,
-        prepared: &PreparedQueryGroups,
-        proximity: &Proximity,
-        occurrences: &mut Vec<(usize, u32)>,
-        break_position: usize,
-    ) -> bool {
-        occurrences.sort_unstable();
-        occurrences.dedup();
-        let SnippetWindowLocator { ordinals, proximity: scratch, synthetic, .. } = self;
-        synthetic.clear();
-        synthetic.extend(occurrences.iter().map(|&(p, _)| TextToken::at_position(p)));
-        ordinals.clear();
-        ordinals.extend(occurrences.iter().map(|&(_, o)| o));
-        let split = occurrences.partition_point(|&(p, _)| p < break_position);
-        let found = match proximity {
-            Proximity::Ordered { gaps } => ordered_window(synthetic, ordinals, prepared, gaps, Some(split), scratch, true),
-            Proximity::AnyOrder { max_span } => {
-                any_order_window(synthetic, ordinals, prepared, *max_span as usize, Some(split), scratch, true)
-            }
-        };
-        found.is_some()
     }
 
     /// [`locate`](Self::locate) over the text last passed to

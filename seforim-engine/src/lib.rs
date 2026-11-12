@@ -1780,6 +1780,27 @@ mod tests {
     }
 
     #[test]
+    fn cross_line_vocalized_skips_unmarked_lines() {
+        // vocalized mode (match_nikud) over a keep-marks index: only lines
+        // carrying a mark take part. The slot union reaches unmarked lines
+        // (0, 4) before and after the marked postings (2, 3), so the marked
+        // filter is asked docs behind its postings: it must not seek back.
+        const A: &str = "\u{05D0}\u{05D1}";
+        const A_V: &str = "\u{05D0}\u{05B8}\u{05D1}";
+        const B: &str = "\u{05D2}\u{05D3}";
+        const B_V: &str = "\u{05D2}\u{05B4}\u{05D3}";
+        const C: &str = "\u{05D4}\u{05D5}";
+        let texts: Vec<String> = vec![A.into(), B.into(), A_V.into(), B_V.into(), A.into(), C.into()];
+        let docs: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| xline(i as u64, 1, t, None, false)).collect();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: true }, &docs);
+            let o = SearchOptions { query: format!("{A} {B}"), match_nikud: true, cross_line: true, ..Default::default() };
+            assert_eq!(passing(&index, &o, &texts), vec![(2, true)], "positions={positions}");
+        }
+    }
+
+    #[test]
     fn cross_line_every_split_both_flavours() {
         // 0: F A | 1: B C F   (split after A)
         // 2: F A B | 3: C F   (split after B)

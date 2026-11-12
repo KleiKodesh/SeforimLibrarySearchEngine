@@ -783,13 +783,6 @@ impl SnippetWindowLocator {
         }
         *last_window = Some((tokens[i_left].position, tokens[i_right].position));
 
-        let (snap_start, snap_end, s_idx, e_idx) =
-            expand_window(tokens, raw_len, i_left, i_right, *context_words);
-
-        // Visible words actually inside the window: lets the host detect a
-        // "short" snippet for free (it may then re-locate over a longer text).
-        let window_words = e_idx - s_idx + 1;
-
         // WordDistance = extra words between matched slots (0 = all
         // consecutive). original_group_count overrides so skipped wildcards
         // still count as a slot.
@@ -800,24 +793,7 @@ impl SnippetWindowLocator {
         } else {
             all_groups
         };
-        // Marks: the tokens of full occurrences (issue #4). Without a
-        // distance every term token in the snippet is in a covering window
-        // (crossing the break too, when the best one does), so only a
-        // distance narrows them; partial matching marks every term.
         let max_span = max_word_distance.saturating_add(denominator - 1);
-        let masked = !partial
-            && (max_word_distance != usize::MAX || ordered_best.is_some())
-            && occurrence_marks(
-                tokens,
-                ordinals,
-                prepared,
-                &if ordered_best.is_some() { MarkRule::OrderedCover { max_span } } else { MarkRule::Cover { max_span } },
-                (s_idx, e_idx),
-                (i_left, i_right),
-                brk,
-                marks,
-            );
-        collect_mark_ranges(tokens, ordinals, snap_start, snap_end, mark_ranges, masked.then_some((&marks.mask[..], s_idx)));
         // Words between the ends, by position (a paired reading's second
         // reading shares its first reading's position).
         let word_dist = (tokens[i_right].position - tokens[i_left].position).saturating_sub(denominator - 1);
@@ -853,6 +829,31 @@ impl SnippetWindowLocator {
                 mark_ranges,
             };
         }
+
+        let (snap_start, snap_end, s_idx, e_idx) =
+            expand_window(tokens, raw_len, i_left, i_right, *context_words);
+
+        // Visible words actually inside the window: lets the host detect a
+        // "short" snippet for free (it may then re-locate over a longer text).
+        let window_words = e_idx - s_idx + 1;
+
+        // Marks: the tokens of full occurrences (issue #4). Without a
+        // distance every term token in the snippet is in a covering window
+        // (crossing the break too, when the best one does), so only a
+        // distance narrows them; partial matching marks every term.
+        let masked = !partial
+            && (max_word_distance != usize::MAX || ordered_best.is_some())
+            && occurrence_marks(
+                tokens,
+                ordinals,
+                prepared,
+                &if ordered_best.is_some() { MarkRule::OrderedCover { max_span } } else { MarkRule::Cover { max_span } },
+                (s_idx, e_idx),
+                (i_left, i_right),
+                brk,
+                marks,
+            );
+        collect_mark_ranges(tokens, ordinals, snap_start, snap_end, mark_ranges, masked.then_some((&marks.mask[..], s_idx)));
 
         SnippetDescriptor {
             is_match,
@@ -937,12 +938,13 @@ impl SnippetWindowLocator {
             return SnippetDescriptor::NO_MATCH;
         };
         *last_window = Some((tokens[i_left].position, tokens[i_right].position));
+        // Marks: only the tokens of full occurrences (issue #4).
+        let rule = match proximity {
+            Proximity::Ordered { gaps } => MarkRule::Ordered(gaps),
+            Proximity::AnyOrder { max_span } => MarkRule::AnyOrder(*max_span as usize),
+        };
         if *match_mode == MatchMode::AllMatches {
             // every full occurrence in the text (issue #4 rule, whole text)
-            let rule = match proximity {
-                Proximity::Ordered { gaps } => MarkRule::Ordered(gaps),
-                Proximity::AnyOrder { max_span } => MarkRule::AnyOrder(*max_span as usize),
-            };
             let last = tokens.len() - 1;
             let masked = occurrence_marks(tokens, ordinals, prepared, &rule, (0, last), (i_left, i_right), brk, marks);
             collect_mark_ranges(tokens, ordinals, 0, raw_len, mark_ranges, masked.then_some((&marks.mask[..], 0)));
@@ -960,11 +962,6 @@ impl SnippetWindowLocator {
         }
         let (snap_start, snap_end, s_idx, e_idx) =
             expand_window(tokens, raw_len, i_left, i_right, *context_words);
-        // Marks: only the tokens of full occurrences inside the snippet (issue #4).
-        let rule = match proximity {
-            Proximity::Ordered { gaps } => MarkRule::Ordered(gaps),
-            Proximity::AnyOrder { max_span } => MarkRule::AnyOrder(*max_span as usize),
-        };
         let masked = occurrence_marks(tokens, ordinals, prepared, &rule, (s_idx, e_idx), (i_left, i_right), brk, marks);
         collect_mark_ranges(tokens, ordinals, snap_start, snap_end, mark_ranges, masked.then_some((&marks.mask[..], s_idx)));
         SnippetDescriptor {

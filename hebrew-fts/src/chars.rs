@@ -164,13 +164,6 @@ pub fn is_indexable_len(bytes: usize) -> bool {
     bytes < MAX_TERM_BYTES
 }
 
-/// Nikud + cantillation (U+0591..U+05C7) except the separator marks paseq
-/// (U+05C0), sof pasuq (U+05C3), nun hafukha (U+05C6).
-#[inline(always)]
-pub fn is_strippable_mark(c: char) -> bool {
-    ('\u{0591}'..='\u{05C7}').contains(&c) && c != '\u{05C0}' && c != '\u{05C3}' && c != '\u{05C6}'
-}
-
 /// Otzaria `is_taam_mark` (vocalized search classes): every attached mark
 /// that is not nikud ([`is_nikud`]): the cantillation marks U+0591..U+05AF,
 /// meteg U+05BD and the upper / lower dots U+05C4 / U+05C5.
@@ -417,12 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn strippable_marks() {
-        assert!(is_strippable_mark('\u{0591}'));
-        assert!(is_strippable_mark('\u{05C7}'));
-        assert!(!is_strippable_mark('\u{05C0}'));
-        assert!(!is_strippable_mark('\u{05C3}'));
-        assert!(!is_strippable_mark('\u{05C6}'));
+    fn maqaf_is_not_a_mark() {
         assert!(!is_attached_mark('\u{05BE}'));
     }
 }

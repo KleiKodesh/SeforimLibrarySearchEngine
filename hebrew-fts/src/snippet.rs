@@ -1015,17 +1015,6 @@ impl SnippetWindowLocator {
         }
     }
 
-    /// Convenience for one-off literal-term locates (each term occurrence is
-    /// its own AND slot). Prepares per call.
-    pub fn locate_literal<T: AsRef<str>>(
-        &mut self,
-        raw_html: &str,
-        query_terms: &[T],
-    ) -> SnippetDescriptor<'_> {
-        let prepared = PreparedQueryGroups::from_literal_terms(query_terms);
-        self.locate(raw_html, &prepared, false, 0)
-    }
-
     /// The per-side context this locator expands by.
     pub fn context_words(&self) -> usize {
         self.context_words

@@ -40,6 +40,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use crate::chars::is_term_quote;
 
 use tantivy::query::{
     EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight,
@@ -217,10 +218,6 @@ enum Typo {
     Full,
 }
 
-fn is_quote_char(c: char) -> bool {
-    matches!(c, '\'' | '"')
-}
-
 /// Letters of a form, marks not counted (Otzaria `base_len`).
 fn form_letters(form: &str) -> usize {
     form.chars()
@@ -251,7 +248,7 @@ fn base_form_of_final(c: char) -> Option<char> {
 /// not ending in ה or ת (whose past forms change shape).
 fn takes_verb_suffixes(form: &str, letters: usize) -> bool {
     (3..=4).contains(&letters)
-        && !form.contains(is_quote_char)
+        && !form.contains(is_term_quote)
         && last_letter(form).is_some_and(|(_, c)| c != 'ה' && c != 'ת')
 }
 
@@ -266,7 +263,7 @@ fn tagged_forms(form: &str, options: &WalkOptions, window: bool, out: &mut Vec<(
     let Some((at, last)) = last_letter(form) else {
         return;
     };
-    let long_enough = form.contains(is_quote_char) || letters >= MIN_GRAM_ROOT_LETTERS;
+    let long_enough = form.contains(is_term_quote) || letters >= MIN_GRAM_ROOT_LETTERS;
     let prefixable = if long_enough { CORE_PREFIXABLE } else { 0 };
     let gram = options.grammar_suffixes && long_enough;
     let gram_tags = if gram {

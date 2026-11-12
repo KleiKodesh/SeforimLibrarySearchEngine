@@ -1,0 +1,123 @@
+# Full-DB correctness run on GitHub Actions (manual): index builds (both flavours + FtsLib +
+# Otzaria), the FtsLib parity sets, the Otzaria hit-count comparison and the cross-line +
+# sameSection verification, all through tools/bench/run-all.sh. Speed benchmarks are NOT run
+# here: times printed by this workflow come from shared runners and are not representative.
+# Result: one artifact `fullrun-report` (logs, parity diffs, hit counts, verification,
+# build reports, regenerated specs, summary.json). Fetch: gh run download <run id> -n fullrun-report
+name: fullrun
+
+on:
+  workflow_dispatch:
+    inputs:
+      db_tag:
+        description: Otzaria/SeforimLibrary release tag of seforim.db
+        default: v37-20261105163520
+      parity_sets:
+        description: FtsLib parity sets
+        default: diff10 large words rules ketiv
+
+env:
+  OUT: C:/bench
+  PYTHONUTF8: "1"
+
+jobs:
+  db:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: C:/bench/data/seforim-schema7.db.zst
+          key: seforim-db-${{ inputs.db_tag }}
+      - name: download seforim.db
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          printf 'OUT_DIR=/c/bench\nDB_TAG=%s\n' "${{ inputs.db_tag }}" > tools/bench/bench.local.env
+          tools/bench/run-all.sh --steps db
+          rm -f /c/bench/data/seforim.db
+
+  parity:
+    needs: db
+    runs-on: windows-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - name: KitveiHakodesh (FtsLib) checkout
+        uses: actions/checkout@v4
+        with:
+          repository: KleiKodesh/KleiKodeshProject
+          path: kkp
+          sparse-checkout: KitveiHakodesh
+      - uses: ./.github/actions/fullrun-setup
+        with: { db_tag: "${{ inputs.db_tag }}" }
+      - name: run (db, tools, indexes pos/nopos/ftslib, parity)
+        shell: bash
+        run: |
+          cat >> tools/bench/bench.local.env <<EOF
+          KITVEI_DIR=$(cygpath -u "$GITHUB_WORKSPACE")/kkp/KitveiHakodesh
+          TOOLS="engine demo ftslibdump"
+          INDEXES="pos nopos ftslib"
+          PARITY_SETS="${{ inputs.parity_sets }}"
+          PARITY_STRICT=1
+          EOF
+          tools/bench/run-all.sh --steps detect,db,build-tools,build-indexes,parity
+      - if: always()
+        uses: ./.github/actions/fullrun-upload
+        with: { name: part-parity }
+
+  otzaria:
+    needs: db
+    runs-on: windows-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: ./.github/actions/fullrun-setup
+        with: { db_tag: "${{ inputs.db_tag }}" }
+      - name: run (db, tools, indexes pos/otzaria, Otzaria counts, hit counts, cross-line + sameSection)
+        shell: bash
+        run: |
+          cat >> tools/bench/bench.local.env <<EOF
+          TOOLS="engine demo otzaria"
+          INDEXES="pos otzaria"
+          SPEED_ENGINES="otz"
+          RUNS=1
+          EOF
+          tools/bench/run-all.sh --steps detect,db,build-tools,build-indexes,speed,hitcount,verify-xl
+      - if: always()
+        uses: ./.github/actions/fullrun-upload
+        with: { name: part-otzaria }
+
+  report:
+    needs: [parity, otzaria]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: part-*, path: parts }
+      - name: merge, regenerate specs, summarise
+        shell: bash
+        run: |
+          set -o pipefail; rc=0
+          mkdir -p out/logs results
+          for p in parts/*/; do cp -r "$p"/. out/; done
+          printf 'OUT_DIR=%s\nRESULTS_DIR=%s\n' "$PWD/out" "$PWD/results" > tools/bench/bench.local.env
+          tools/bench/run-all.sh --steps report 2>&1 | tee out/logs/report-step.log || true
+          mkdir -p out/specs && cp FTS-SPECS-AND-COMPARISONS.md README.md out/specs/ && cp -r results out/specs/bench-results
+          python3 -I -X utf8 tools/bench/ci_summary.py out out/summary.json out/summary.md || rc=1
+          printf '\nJobs: parity %s, otzaria %s\n' "${{ needs.parity.result }}" "${{ needs.otzaria.result }}" >> out/summary.md
+          cat out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          [ "${{ needs.parity.result }}" = success ] && [ "${{ needs.otzaria.result }}" = success ] || rc=1
+          exit $rc
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fullrun-report
+          path: out

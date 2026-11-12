@@ -1,0 +1,23 @@
+name: fullrun-setup
+description: Toolchains, cargo cache, the cached seforim.db archive and bench.local.env for fullrun.yml
+inputs:
+  db_tag: { required: true, description: Otzaria/SeforimLibrary release tag }
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with: { python-version: "3.14" }
+    - uses: actions/setup-dotnet@v4
+      with: { dotnet-version: "10.0.x" }
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          . -> target
+          tools/bench/otzaria-driver -> target
+    - uses: actions/cache/restore@v4
+      with:
+        path: C:/bench/data/seforim-schema7.db.zst
+        key: seforim-db-${{ inputs.db_tag }}
+        fail-on-cache-miss: true
+    - shell: bash
+      run: printf 'OUT_DIR=/c/bench\nDB_TAG=%s\n' "${{ inputs.db_tag }}" > tools/bench/bench.local.env

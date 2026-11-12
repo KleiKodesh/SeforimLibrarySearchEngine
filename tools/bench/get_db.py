@@ -1,6 +1,7 @@
 """Find seforim.db on this machine, or download it from Otzaria's official release.
 
-usage: python3 -I tools/bench/get_db.py <data dir> [--db PATH] [--find-only]
+usage: python3 -I tools/bench/get_db.py <data dir> [--db PATH] [--find-only] [--tag RELEASE_TAG]
+--tag pins the release (e.g. v37-20261105163520; CI does); default = the latest.
 Prints the resolved path on the LAST stdout line. Exit 0 = found/downloaded, 1 = not found.
 
 Search order: --db, then the defaults per OS (Otzaria app data dir + /books/seforim.db,
@@ -115,7 +116,8 @@ def main():
         print("seforim.db not found in: " + "; ".join(str(p) for p in paths))
         return 1
     print("seforim.db not found locally; downloading Otzaria's latest release", flush=True)
-    rel = get_json(API)
+    tag = a[a.index("--tag") + 1] if "--tag" in a and a.index("--tag") + 1 < len(a) else ""
+    rel = get_json(API.replace("/latest", f"/tags/{tag}") if tag else API)
     assets = {x["name"]: x for x in rel.get("assets", [])}
     dst = data / "seforim.db"
     for name in NAMES:

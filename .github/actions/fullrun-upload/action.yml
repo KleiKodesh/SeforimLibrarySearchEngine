@@ -1,0 +1,19 @@
+name: fullrun-upload
+description: Upload a fullrun job's OUT_DIR results (logs, diffs, reports), without indexes, DB or dumps
+inputs:
+  name: { required: true, description: artifact name }
+runs:
+  using: composite
+  steps:
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        include-hidden-files: true
+        if-no-files-found: warn
+        path: |
+          C:/bench
+          !C:/bench/indexes
+          !C:/bench/data
+          !C:/bench/parity/*-fts
+          !C:/bench/parity/*-pos
+          !C:/bench/parity/*-nopos

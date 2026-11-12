@@ -26,6 +26,10 @@ Background: [README.md](README.md) (what is tested and why). Repo rules: `CLAUDE
 9. `--steps report`. It first publishes the run's small result files into `bench-results/` (`RESULTS_DIR`); the generator then writes the machine (`OUT_DIR/machine.txt`: OS, CPU, cores, RAM, disk), the FtsLib / Otzaria build rows (from `logs/build-ftslib.log`, `logs/build-otzaria.log`; reference numbers only when a log is missing) and the parity table (from the compare logs) into FTS-SPECS-AND-COMPARISONS.md; check them.
 10. Results now on the current index format: set `MEASURED_FTSLIB` and drop the rerun items from `STALE` in `tools/report/specs_report.py`, rerun `--steps report`. Commit `bench-results/`, FTS-SPECS-AND-COMPARISONS.md, README.md, CLAUDE.md (+ hitcount-classes.json if changed) and push.
 
+## GitHub Actions (correctness only)
+
+`gh workflow run fullrun.yml [-f db_tag=<SeforimLibrary tag>] [-f parity_sets="..."]` runs steps db, build-tools, build-indexes, parity (`PARITY_STRICT=1`), Otzaria counts (`SPEED_ENGINES=otz RUNS=1`), hitcount and verify-xl on windows runners (jobs `db`, `parity`, `otzaria`, `report`), configured through `bench.local.env` (`TOOLS`, `INDEXES`, `SPEED_ENGINES`, `PARITY_STRICT`, `DB_TAG`). No speed numbers: runner times are not representative. Fetch the result with `gh run download <run id> -n fullrun-report` (logs with exit codes, `parity/*-diffs.json`, `otz-hitcount.json`, `verify-xl.json`, `specs/`, `summary.json`, `summary.md`). Its results are not published into `bench-results/` automatically.
+
 Recovery: rerun the same command; finished units are skipped (`OUT_DIR/.done/`). `--force` redoes all requested units; delete one marker to redo one unit. An index is rebuilt automatically when its format string changed.
 
 ## Slowness analysis (when ours is slower than FtsLib or Otzaria on any query or stage)

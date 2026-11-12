@@ -1775,6 +1775,8 @@ stay available):
 
 Full comparison on any machine (index builds, parity, speed, Otzaria hit counts, report) with one command: [tools/bench/README.md](tools/bench/README.md) (`tools/bench/run-all.sh`). Its small result files are committed in [bench-results/](bench-results/README.md); `python -I -X utf8 tools/report/specs_report.py` (no argument) regenerates the specs docs from them.
 
+On GitHub Actions: the manual workflow [fullrun](.github/workflows/fullrun.yml) (`gh workflow run fullrun.yml`) runs the full-DB correctness checks through `run-all.sh`: seforim.db from a pinned Otzaria release (input `db_tag`, cached), our positions / no-positions, FtsLib and Otzaria index builds, the FtsLib parity sets (fail on a regression: no positions any difference, positions hit set and order), the Otzaria hit-count comparison and the full-DB cross-line + sameSection check (`tools/bench/verify_xl_ss.py`). Speed stays local; times the workflow prints are not representative. One artifact `fullrun-report` holds every log, every parity diff in full, the hit-count table, the verification output, the build reports, the regenerated specs and `summary.json`: `gh run download <run id> -n fullrun-report`.
+
 - `SeforimSearch.Demo build` prints progress, then each stage's time
   (indexing, merge into one segment, FM-index sidecar), the total, and the
   index size in total and per file type.

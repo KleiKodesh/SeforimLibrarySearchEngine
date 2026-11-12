@@ -10,12 +10,14 @@
 #   bootstrap      install missing prerequisites (brew on macOS, apt/dnf on Linux, winget on Windows)
 #   db             find seforim.db or download it (get_db.py)
 #   build-tools    native engine (cargo), C# demo, FtsLibDump, Otzaria driver
-#   build-indexes  ours pos, nopos, keep_marks; FtsLib; Otzaria (sequential, one at a time)
+#   build-indexes  ours pos, nopos, keep_marks; FtsLib; Otzaria (sequential; INDEXES picks)
 #   parity         FtsLib parity sets (FtsLibDump dump vs demo dump, compare.py)
 #   speed          every engine on every speed set, median of RUNS after a warm-up, sequential
 #   load           load mode (issue #31): LOAD_SEARCHERS concurrent searches on a COPY of the
 #                  positions index while a writer commits small updates (search_report.py --load)
 #   hitcount       Otzaria hit-count comparison (needs the Otzaria speed runs)
+#   verify-xl      full-DB check of cross-line + sameSection against an independent recount
+#                  (verify_xl_ss.py; not in the default STEPS)
 #   report         FTS-SPECS-AND-COMPARISONS.md + README/CLAUDE.md Specs blocks
 # Resume-safe: a finished unit leaves $OUT_DIR/.done/<unit>; it is skipped next time
 # unless --force (an index is also rebuilt when its recorded format changed).
@@ -35,7 +37,7 @@ while [ $# -gt 0 ]; do
     --out) ARG_OUT="$2"; shift 2;;
     --force) FORCE=1; shift;;
     --dry-run) DRY=1; shift;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0;;
     *) echo "unknown argument: $1"; exit 2;;
   esac
 done
@@ -162,16 +164,20 @@ resolve_db() {
 step_db() {
   if [ $DRY = 1 ]; then echo "  [plan] db: find seforim.db (--db, Otzaria/Zayit defaults, $OUT_DIR/data) or download it"; return; fi
   mkdir -p "$LOGS"
-  "$PY" -I "$(wp "$HERE/get_db.py")" "$(wp "$OUT_DIR/data")" --db "$DB_PATH" 2>&1 | tee "$LOGS/db.log"
+  "$PY" -I "$(wp "$HERE/get_db.py")" "$(wp "$OUT_DIR/data")" --db "$DB_PATH" --tag "${DB_TAG:-}" 2>&1 | tee "$LOGS/db.log"
   [ ${PIPESTATUS[0]} = 0 ] || { echo "seforim.db: not available (see $LOGS/db.log)"; exit 1; }
 }
 
+inlist() { case " $2 " in *" $1 "*) return 0;; esac; return 1; }
 step_build_tools() {
-  run cargo-engine build-cargo-engine cargo build --release -p engine-ffi
-  if [ $PLAT = windows ]; then run dotnet-demo build-dotnet-demo dotnet build csharp/SeforimSearch.Demo -c Release
-  else run dotnet-demo build-dotnet-demo dotnet build csharp/SeforimSearch.Demo -c Release -f net10.0 -p:PlatformTarget=AnyCPU; fi
-  run dotnet-ftslibdump build-dotnet-ftslibdump dotnet build tools/parity/FtsLibDump -c Release "-p:KitveiHakodeshDir=$(wp "$KITVEI_DIR")"
-  run cargo-otzaria build-cargo-otzaria cargo build --release --manifest-path "$(wp "$HERE/otzaria-driver/Cargo.toml")"
+  inlist engine "$TOOLS" && run cargo-engine build-cargo-engine cargo build --release -p engine-ffi
+  if inlist demo "$TOOLS"; then
+    if [ $PLAT = windows ]; then run dotnet-demo build-dotnet-demo dotnet build csharp/SeforimSearch.Demo -c Release
+    else run dotnet-demo build-dotnet-demo dotnet build csharp/SeforimSearch.Demo -c Release -f net10.0 -p:PlatformTarget=AnyCPU; fi
+  fi
+  inlist ftslibdump "$TOOLS" && run dotnet-ftslibdump build-dotnet-ftslibdump dotnet build tools/parity/FtsLibDump -c Release "-p:KitveiHakodeshDir=$(wp "$KITVEI_DIR")"
+  inlist otzaria "$TOOLS" && run cargo-otzaria build-cargo-otzaria cargo build --release --manifest-path "$(wp "$HERE/otzaria-driver/Cargo.toml")"
+  return 0
 }
 
 build_index() { # name dir format cmd...
@@ -183,11 +189,12 @@ build_index() { # name dir format cmd...
 
 step_build_indexes() {
   resolve_db
-  build_index pos "$IDX_POS" "$FMT_OURS" "$DEMO" build --db "$DB" --index "$(wp "$IDX_POS")"
-  build_index nopos "$IDX_NOPOS" "$FMT_OURS" "$DEMO" build --db "$DB" --index "$(wp "$IDX_NOPOS")" --no-positions
-  build_index marks "$IDX_MARKS" "$FMT_OURS" "$DEMO" build --db "$DB" --index "$(wp "$IDX_MARKS")" --keep-marks
-  build_index ftslib "$IDX_FTSLIB" "$FMT_FTS" "$FTS" build "$DB" "$(wp "$IDX_FTSLIB")"
-  build_index otzaria "$IDX_OTZARIA" "$FMT_OTZ" "$OTZ" build "$DB" "$(wp "$IDX_OTZARIA")"
+  inlist pos "$INDEXES" && build_index pos "$IDX_POS" "$FMT_OURS" "$DEMO" build --db "$DB" --index "$(wp "$IDX_POS")"
+  inlist nopos "$INDEXES" && build_index nopos "$IDX_NOPOS" "$FMT_OURS" "$DEMO" build --db "$DB" --index "$(wp "$IDX_NOPOS")" --no-positions
+  inlist marks "$INDEXES" && build_index marks "$IDX_MARKS" "$FMT_OURS" "$DEMO" build --db "$DB" --index "$(wp "$IDX_MARKS")" --keep-marks
+  inlist ftslib "$INDEXES" && build_index ftslib "$IDX_FTSLIB" "$FMT_FTS" "$FTS" build "$DB" "$(wp "$IDX_FTSLIB")"
+  inlist otzaria "$INDEXES" && build_index otzaria "$IDX_OTZARIA" "$FMT_OTZ" "$OTZ" build "$DB" "$(wp "$IDX_OTZARIA")"
+  return 0
 }
 
 qfile() { echo "tools/parity/queries-$1.txt"; }
@@ -206,7 +213,10 @@ step_parity() {
         local fl="${f%%:*}" ix="${f#*:}" o="$OUT_DIR/parity/$s-${f%%:*}"
         [ $DRY = 0 ] && rm -rf "$o" && mkdir -p "$o"
         run "parity-$s-$fl" "parity-$s-$fl-dump" "$DEMO" dump --db "$DB" --index "$(wp "$ix")" --queries "$Q" --out "$(wp "$o")" --max-hits "$PARITY_MAX_HITS" $K || { ok=0; continue; }
-        run "parity-$s-$fl-compare" "parity-$s-$fl-compare" "$PY" -I -X utf8 tools/parity/compare.py "$(wp "$ref")" "$(wp "$o")" || ok=0
+        # PARITY_STRICT=1 fails the unit on a regression: no positions = FtsLib's path, so any
+        # difference; positions = hit set and order only (word-tightest window, issue #21).
+        local st=""; [ "${PARITY_STRICT:-0}" = 1 ] && { [ $fl = pos ] && st="--strict hits" || st="--strict all"; }
+        run "parity-$s-$fl-compare" "parity-$s-$fl-compare" "$PY" -I -X utf8 tools/parity/compare.py "$(wp "$ref")" "$(wp "$o")" --diff-out "$(wp "$OUT_DIR/parity/$s-$fl-diffs.json")" $st || ok=0
       done
       [ $DRY = 0 ] && [ $ok = 1 ] && mark "parity-$s"
     else echo "parity $s: done (skipped)"; fi
@@ -217,10 +227,10 @@ step_speed() {
   resolve_db
   for s in $SPEED_SETS; do
     local Q; Q="$(qfile "$s")"
-    done_ok "speed-$s-otz" || { run "speed-$s-otz" "sb-$s-otz" "$PY" -I "$(wp "$HERE/otz_report.py")" "$OTZ" "$DB" "$(wp "$IDX_OTZARIA")" "$Q" "$(wp "$OUT_DIR/sb-$s-otz")" "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-otz"; }
-    done_ok "speed-$s-pos" || { run "speed-$s-pos" "sb-$s-pos" "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_POS")" "$Q" "$(wp "$OUT_DIR/sb-$s-pos")" --db "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-pos"; }
-    done_ok "speed-$s-nopos" || { run "speed-$s-nopos" "sb-$s-nopos" "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_NOPOS")" "$Q" "$(wp "$OUT_DIR/sb-$s-nopos")" --db "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-nopos"; }
-    done_ok "speed-$s-fts" || { run "speed-$s-fts" "sb-$s-fts" "$PY" -I tools/report/search_report.py "$FTS" "$(wp "$IDX_FTSLIB")" "$Q" "$(wp "$OUT_DIR/sb-$s-fts")" --ftslib "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-fts"; }
+    inlist otz "$SPEED_ENGINES" && { done_ok "speed-$s-otz" || { run "speed-$s-otz" "sb-$s-otz" "$PY" -I "$(wp "$HERE/otz_report.py")" "$OTZ" "$DB" "$(wp "$IDX_OTZARIA")" "$Q" "$(wp "$OUT_DIR/sb-$s-otz")" "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-otz"; }; }
+    inlist pos "$SPEED_ENGINES" && { done_ok "speed-$s-pos" || { run "speed-$s-pos" "sb-$s-pos" "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_POS")" "$Q" "$(wp "$OUT_DIR/sb-$s-pos")" --db "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-pos"; }; }
+    inlist nopos "$SPEED_ENGINES" && { done_ok "speed-$s-nopos" || { run "speed-$s-nopos" "sb-$s-nopos" "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_NOPOS")" "$Q" "$(wp "$OUT_DIR/sb-$s-nopos")" --db "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-nopos"; }; }
+    inlist fts "$SPEED_ENGINES" && { done_ok "speed-$s-fts" || { run "speed-$s-fts" "sb-$s-fts" "$PY" -I tools/report/search_report.py "$FTS" "$(wp "$IDX_FTSLIB")" "$Q" "$(wp "$OUT_DIR/sb-$s-fts")" --ftslib "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-fts"; }; }
   done
 }
 
@@ -233,6 +243,12 @@ step_load() {
 step_hitcount() {
   done_ok hitcount && { echo "hitcount: done (skipped)"; return; }
   run hitcount hitcount "$PY" -I -X utf8 "$(wp "$HERE/hitcount.py")" "$(wp "$NATIVE")" "$(wp "$IDX_POS")" "$(wp "$OUT_DIR")" && [ $DRY = 0 ] && mark hitcount
+}
+
+step_verify_xl() {
+  resolve_db
+  done_ok verify-xl && { echo "verify-xl: done (skipped)"; return; }
+  run verify-xl verify-xl "$PY" -I -X utf8 "$(wp "$HERE/verify_xl_ss.py")" "$(wp "$NATIVE")" "$(wp "$IDX_POS")" "$(wp "$DB")" "$(wp "$OUT_DIR/verify-xl.json")" && [ $DRY = 0 ] && mark verify-xl
 }
 
 publish_results() {
@@ -280,6 +296,7 @@ has parity && step_parity
 has speed && step_speed
 has load && step_load
 has hitcount && step_hitcount
+has verify-xl && step_verify_xl
 has report && step_report
 if [ ${#FAILED[@]} -gt 0 ]; then
   echo "== FAILED:"; printf '  %s\n' "${FAILED[@]}"; exit 1

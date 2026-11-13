@@ -80,7 +80,10 @@ def main(lib, index, dbp, outp):
         tag = f"{st} q{n} ({len(w)} words)"
         # ---- sameSection
         ss, _, ms = search(d, ix, {"query": q, "same_section": True})
-        per = [set(h[1] for h in search(d, ix, {"query": x})[0]) for x in w]
+        # a word of MAX_TERM_BYTES (128) bytes or more is dropped from the query (not indexed),
+        # so it places no sameSection constraint: leave it out of the recount
+        kept = [x for x in w if len(x.encode("utf-8")) < 128] or w
+        per = [set(h[1] for h in search(d, ix, {"query": x})[0]) for x in kept]
         inline = set(h[1] for h in search(d, ix, {"query": q})[0])
         union = set().union(*per)
         info = line_info(db, list(union))

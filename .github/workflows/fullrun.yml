@@ -54,6 +54,9 @@ jobs:
           repository: KleiKodesh/KleiKodeshProject
           path: kkp
           sparse-checkout: KitveiHakodesh
+      - name: KitveiHakodesh submodules Core needs (FastDocView + its SeekableDeflate, TextEncodingDetection)
+        shell: bash
+        run: git -C kkp submodule update --init --recursive KitveiHakodesh/FastDocView
       - uses: ./.github/actions/fullrun-setup
         with: { db_tag: "${{ inputs.db_tag }}" }
       - name: run (db, tools, indexes pos/nopos/ftslib, parity)
@@ -116,6 +119,14 @@ jobs:
           cat out/summary.md >> "$GITHUB_STEP_SUMMARY"
           [ "${{ needs.parity.result }}" = success ] && [ "${{ needs.otzaria.result }}" = success ] || rc=1
           exit $rc
+      - name: print key results into the log (artifact downloads may be blocked)
+        if: always()
+        shell: bash
+        run: |
+          show() { for f in "$@"; do [ -f "$f" ] || continue; echo "===== $f"; sed 's/[^ -~]/?/g' "$f" | head -n 400 || true; done; }
+          show out/summary.md out/logs/parity-*-compare.log out/logs/hitcount.log out/logs/verify-xl.log
+          for f in out/logs/build-*.log; do echo "===== $f"; grep -E 'stage: |index size: |build: |EXIT |^ +\.[a-z]+ +[0-9.]+ MB' "$f" | sed 's/[^ -~]/?/g' || true; done
+          ls out/logs 2>/dev/null | sed 's/[^ -~]/?/g' || true
       - if: always()
         uses: actions/upload-artifact@v4
         with:

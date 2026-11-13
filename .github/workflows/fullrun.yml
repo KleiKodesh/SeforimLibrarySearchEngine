@@ -70,6 +70,12 @@ jobs:
           PARITY_STRICT=1
           EOF
           tools/bench/run-all.sh --steps detect,db,build-tools,build-indexes,parity
+      - name: explain the positions-flavour parity differences (line by line, into the log)
+        if: always()
+        shell: bash
+        run: |
+          [ -d C:/bench/parity ] || exit 0
+          python -I -X utf8 tools/parity/explain_pos_diffs.py target/release/seforim_search_native.dll             C:/bench/indexes/ours-pos C:/bench/indexes/ours-nopos C:/bench/data/seforim.db C:/bench/parity 5             2>&1 | tee C:/bench/logs/explain-pos-diffs.log
       - if: always()
         uses: ./.github/actions/fullrun-upload
         with: { name: part-parity }
@@ -124,7 +130,7 @@ jobs:
         shell: bash
         run: |
           show() { for f in "$@"; do [ -f "$f" ] || continue; echo "===== $f"; sed 's/[^ -~]/?/g' "$f" | head -n 400 || true; done; }
-          show out/summary.md out/logs/parity-*-compare.log out/logs/hitcount.log out/logs/verify-xl.log
+          show out/summary.md out/logs/parity-*-compare.log out/logs/hitcount.log out/logs/verify-xl.log out/logs/explain-pos-diffs.log
           for f in out/logs/build-*.log; do echo "===== $f"; grep -E 'stage: |index size: |build: |EXIT |^ +\.[a-z]+ +[0-9.]+ MB' "$f" | sed 's/[^ -~]/?/g' || true; done
           ls out/logs 2>/dev/null | sed 's/[^ -~]/?/g' || true
       - if: always()

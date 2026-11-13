@@ -109,7 +109,8 @@ def main(lib, index, out, db=None):
                 c, why = "unclassified", "not analysed yet"
             rows.append(dict(n=n, query=q, dist=(f"(distance {r['dist']})" if r["dist"] != "-" else ""), mode=r.get("mode", ""),
                              otz=r["hits"], ours=h, ours_books=hb, **{"class": c}, reason=why))
-            print(f"{st} q{n}: otz {r['hits']} ours {h} diff {diff:+}{'' if hb is None else f' books-only {hb} diff {hb - r['hits']:+}'} ({(time.perf_counter() - t0) * 1000:.0f} ms)", flush=True)
+            bo = "" if hb is None else " books-only %d diff %+d" % (hb, hb - r["hits"])
+            print(f"{st} q{n}: otz {r['hits']} ours {h} diff {diff:+}{bo} ({(time.perf_counter() - t0) * 1000:.0f} ms)", flush=True)
         (out / "hc" / f"ours-{st}.json").write_text(json.dumps(ours), encoding="utf-8")
         res["sets"][st] = rows
     (out / "otz-hitcount.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -133,6 +133,9 @@ jobs:
           show out/summary.md out/logs/parity-*-compare.log out/logs/hitcount.log out/logs/verify-xl.log out/logs/explain-pos-diffs.log
           for f in out/logs/build-*.log; do echo "===== $f"; grep -E 'stage: |index size: |build: |EXIT |^ +\.[a-z]+ +[0-9.]+ MB' "$f" | sed 's/[^ -~]/?/g' || true; done
           ls out/logs 2>/dev/null | sed 's/[^ -~]/?/g' || true
+          # the published bench-results/ as base64 tar.gz, for hosts that cannot download the artifact:
+          # copy the lines between the markers, strip the timestamps, `base64 -d | tar xz`
+          echo "BENCH-RESULTS-B64-BEGIN"; tar czf - -C out/specs bench-results | base64 -w 0 | fold -w 4000 || true; echo; echo "BENCH-RESULTS-B64-END"
       - if: always()
         uses: actions/upload-artifact@v4
         with:

@@ -24,7 +24,21 @@ def load(lib):
     d.se_search_hit_count.restype = C.c_uint64; d.se_search_hit_count.argtypes = [C.c_void_p]
     d.se_last_error.restype = C.c_char_p
     d.se_search_close.argtypes = [C.c_void_p]
+    d.se_reduce_paired_readings.restype = C.POINTER(C.c_uint8)
+    d.se_reduce_paired_readings.argtypes = [C.c_char_p, C.c_size_t, C.POINTER(C.c_size_t)]
+    d.se_bytes_free.argtypes = [C.POINTER(C.c_uint8), C.c_size_t]
     return d
+
+
+def reduce_paired(d, q):
+    """The engine numbers typed words after a paired reading `(X) [Y]` keeps only Y
+    (as Otzaria): per-pair gaps are given for the reduced query."""
+    b = q.encode(); n = C.c_size_t()
+    p = d.se_reduce_paired_readings(b, len(b), C.byref(n))
+    if not p:
+        return q
+    out = C.string_at(p, n.value).decode("utf-8"); d.se_bytes_free(p, n.value)
+    return out
 
 
 def translate(q, d):  # mirrors otz_report.translate
@@ -60,14 +74,15 @@ def main(lib, index, out):
             if r.get("hits") is None:
                 continue
             n = r["n"]; q, _, d = qs[n].partition("\t")
-            req = translate(q, d.strip())
+            req = translate(reduce_paired(dll, q), d.strip())
             if req is None:
                 continue
             js = json.dumps(req, ensure_ascii=False).encode()
             t0 = time.perf_counter()
             s = dll.se_search(ix, js, len(js))
             if not s:
-                print(f"{st} q{n}: error", flush=True); continue
+                e = dll.se_last_error() or b""
+                print(f"{st} q{n}: error: " + e.decode("utf-8", "replace").encode("ascii", "replace").decode(), flush=True); continue
             h = dll.se_search_hit_count(s); dll.se_search_close(s)
             ours[n] = h
             diff = h - r["hits"]

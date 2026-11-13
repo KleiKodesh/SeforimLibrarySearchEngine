@@ -167,7 +167,7 @@ mod module_path {
 /// paired reading `(X) [Y]` (ketiv and qere) in `query` becomes ` Y `, as the
 /// engine's query parser does. A host that numbers the query's words itself
 /// (per-word options, per-pair spacing) runs it first, so its words are the
-/// engine's. Free the result with `se_string_free`; null on error.
+/// engine's. Free the result (`ptr + out_len`) with `se_bytes_free`; null on error.
 ///
 /// # Safety
 /// `query` must be valid for `len` bytes.

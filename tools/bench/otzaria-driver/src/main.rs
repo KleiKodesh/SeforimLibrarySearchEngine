@@ -1,4 +1,4 @@
-//! Headless driver for Otzaria's search engine (crate `search_engine`, v5.0.0), for
+//! Headless driver for Otzaria's search engine (crate `search_engine`, commit 5babbce = 7.0.1 + 38), for
 //! benchmarking it against SeforimdbSerachEngine on the same seforim.db.
 //! See README.md for the commands and every port/assumption.
 
@@ -448,12 +448,12 @@ fn search(db_path: &str, index_dir: &str, rest: &[String]) -> Res<()> {
     let t = Instant::now();
     let page: SearchPageResult = match mode.as_str() {
         "exact" => engine.search_and_count_exact(
-            query.clone(), vec![], limit, 0, ResultsOrder::Catalogue, false, false, None,
+            query.clone(), vec![], limit, 0, ResultsOrder::Catalogue, false, false, None, None,
         ),
         "fuzzy" => engine.search_and_count_fuzzy(
             query.clone(), vec![], limit, 0,
             if distance_set { distance as u8 } else { 1 },
-            ResultsOrder::Catalogue, false, false, None,
+            ResultsOrder::Catalogue, false, false, None, None,
         ),
         "advanced" => engine.search_and_count_advanced(
             query.clone(),
@@ -483,7 +483,8 @@ fn search(db_path: &str, index_dir: &str, rest: &[String]) -> Res<()> {
                 _ => None,
             },
             match_count,
-            None,
+            None, // any_order
+            None, // cancel_request_id
         ),
         o => return Err(format!("bad --mode {o}")),
     }

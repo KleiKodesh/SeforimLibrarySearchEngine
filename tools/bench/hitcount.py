@@ -1,6 +1,9 @@
-"""Hit-count comparison ours vs Otzaria v5.0.0 (same queries, equivalent options).
+"""Hit-count comparison ours vs Otzaria (search_engine 5babbce) (same queries, equivalent options).
 
-usage: python3 -I -X utf8 tools/bench/hitcount.py <native lib> <ours pos index> <results dir>
+usage: python3 -I -X utf8 tools/bench/hitcount.py <native lib> <ours pos index> <results dir> [seforim.db]
+With seforim.db, each row also counts ours over the real books only (`books` = every book id of
+the DB): the schema-7 footnotes are indexed as virtual notes books (issue #13), which Otzaria does
+not index. A row whose difference is only those notes is classified "notes" automatically.
 Reads <results dir>/sb-<set>-otz/search-report.json (otz_report.py), runs ours through the
 native library (C ABI, Otzaria-mode options: one word plain; several words ordered
 proximity with gaps = the distance (1000 when none) and cross_line; `w~k` fuzzy with
@@ -9,7 +12,7 @@ ignore_quotes), writes <results dir>/hc/ours-<set>.json and <results dir>/otz-hi
 classification from hitcount-classes.json when present, else "unclassified".
 ASCII output only.
 """
-import ctypes as C, json, sys, time
+import ctypes as C, json, sqlite3, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -53,12 +56,16 @@ def translate(q, d):  # mirrors otz_report.translate
     return {"query": q, "proximity": {"mode": "ordered", "gaps": [gap] * (len(w) - 1)}, "cross_line": True}
 
 
-def main(lib, index, out):
+def main(lib, index, out, db=None):
     out = Path(out); (out / "hc").mkdir(parents=True, exist_ok=True)
     dll = load(lib)
     ix = dll.se_index_open(index.encode(), len(index.encode()))
     if not ix:
         raise SystemExit("index open failed: " + dll.se_last_error().decode("utf-8", "replace").encode("ascii", "replace").decode())
+    books = None
+    if db:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        books = [r[0] for r in con.execute("SELECT id FROM book")]
     cls = json.loads((HERE / "hitcount-classes.json").read_text(encoding="utf-8"))
     res = {"method": cls["method"], "notes": cls["notes"], "sets": {}}
     for st in SETS:
@@ -86,10 +93,23 @@ def main(lib, index, out):
             h = dll.se_search_hit_count(s); dll.se_search_close(s)
             ours[n] = h
             diff = h - r["hits"]
-            c, why = ("equal", "same count") if diff == 0 else tuple(cls["classes"].get(f"{st}:{n}", ("unclassified", "not analysed yet")))
+            hb = None
+            if books is not None:
+                jb = json.dumps(dict(req, books=books), ensure_ascii=False).encode()
+                sb = dll.se_search(ix, jb, len(jb))
+                if sb:
+                    hb = dll.se_search_hit_count(sb); dll.se_search_close(sb)
+            if diff == 0:
+                c, why = "equal", "same count"
+            elif hb == r["hits"]:
+                c, why = "notes", "only footnote lines (virtual notes books, issue #13; Otzaria does not index them)"
+            elif f"{st}:{n}" in cls["classes"]:
+                c, why = tuple(cls["classes"][f"{st}:{n}"])
+            else:
+                c, why = "unclassified", "not analysed yet"
             rows.append(dict(n=n, query=q, dist=(f"(distance {r['dist']})" if r["dist"] != "-" else ""), mode=r.get("mode", ""),
-                             otz=r["hits"], ours=h, **{"class": c}, reason=why))
-            print(f"{st} q{n}: otz {r['hits']} ours {h} diff {diff:+} ({(time.perf_counter() - t0) * 1000:.0f} ms)", flush=True)
+                             otz=r["hits"], ours=h, ours_books=hb, **{"class": c}, reason=why))
+            print(f"{st} q{n}: otz {r['hits']} ours {h} diff {diff:+}{'' if hb is None else f' books-only {hb} diff {hb - r['hits']:+}'} ({(time.perf_counter() - t0) * 1000:.0f} ms)", flush=True)
         (out / "hc" / f"ours-{st}.json").write_text(json.dumps(ours), encoding="utf-8")
         res["sets"][st] = rows
     (out / "otz-hitcount.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -97,4 +117,4 @@ def main(lib, index, out):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:5])

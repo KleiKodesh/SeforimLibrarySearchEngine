@@ -23,7 +23,7 @@ An AI agent follows [AGENT-RUNBOOK.md](AGENT-RUNBOOK.md).
 | ours, no positions | same engine; distance/order checked on the line text by the locator | same |
 | ours, keep marks | positions index that keeps nikud/te'amim (vocalized walks); build only | same |
 | FtsLib | KitveiHakodesh's FtsLib (SQLite FTS5, `detail=none`) through Core's own searcher (`tools/parity/FtsLibDump`) | sibling checkout `../KleiKodeshProject` (current code), `SeforimDbFtsIndexer.IndexFormatVersion` (fts10) |
-| Otzaria | `otzaria_search_engine` v5.0.0, unmodified, through `tools/bench/otzaria-driver` (cargo git dependency, tag v5.0.0) | Otzaria's own tantivy index |
+| Otzaria | `otzaria_search_engine` commit 5babbce (7.0.1 + 38, the Otzaria app pin), unmodified, through `tools/bench/otzaria-driver` (cargo git dependency, `rev`) | Otzaria's own tantivy index |
 
 Feature specs and the latest numbers: [FTS-SPECS-AND-COMPARISONS.md](../../FTS-SPECS-AND-COMPARISONS.md).
 

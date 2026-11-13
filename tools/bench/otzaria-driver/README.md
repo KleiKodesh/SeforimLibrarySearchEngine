@@ -1,6 +1,6 @@
 # otzaria-driver
 
-Headless driver for Otzaria's search engine (`search_engine` 5.0.0, tag v5.0.0, at
+Headless driver for Otzaria's search engine (`search_engine` 7.0.1 + 38, commit 5babbce = the Otzaria app pin, at
 git dependency in `Cargo.toml`, unmodified) to benchmark it against SeforimdbSerachEngine on
 the same `seforim.db`.
 
@@ -34,15 +34,15 @@ stderr (one engine call, so both numbers are the same call), then one JSONL line
 `{"book": <id from file_path id:N>, "segment": N, "title", "reference", "text": <snippet html>}`.
 `segment` = 0-based row position by `lineIndex` within the book (TextStorage::LibraryDb).
 
-## API used (verified in the v5.0.0 source)
+## API used (verified in the 5babbce source; index schema 11, a v5.0.0 index (schema 7) must be rebuilt)
 
-- `configure_line_source(db_path: String) -> Result<()>` — src/api/search_engine.rs:3354
-- `SearchEngine::new(path: &str) -> Self` (panics on open failure) — :4842
-- `add_library_books(&self, Vec<LibraryBookInput>, &IndexingCancellationToken) -> Result<Vec<LibraryBookResult>>` — :8495; types src/api/library_indexing.rs:12-113
-- `open_index_writer(&mut self)` — :8508; `commit(&mut self)` — :8814; `optimize(&mut self)` — :9189
-- `set_book_order(&self, Vec<BookOrderEntry>) -> Result<u64>` — :8844 (struct :284)
-- `search_and_count_exact` — :9662; `search_and_count_advanced` — :10205; `search_and_count_fuzzy` — :10841
-- `split_query_words(query: String) -> Vec<String>` — :3554 (what the app's splitQueryWords calls)
+- `configure_line_source(db_path: String) -> Result<()>` — src/api/search_engine.rs:3505
+- `SearchEngine::new(path: &str) -> Self` (panics on open failure) — :5082
+- `add_library_books(&self, Vec<LibraryBookInput>, &IndexingCancellationToken) -> Result<Vec<LibraryBookResult>>` — :9399; types src/api/library_indexing.rs:12-135
+- `open_index_writer(&mut self)` — :9413; `commit(&mut self)` — :9845; `optimize(&mut self)` — :10270
+- `set_book_order(&self, Vec<BookOrderEntry>) -> Result<u64>` — :9879
+- `search_and_count_exact` — :10811; `search_and_count_advanced` — :11446; `search_and_count_fuzzy` — :12095 (each now ends with `cancel_request_id: Option<u32>`, passed None)
+- `split_query_words(query: String) -> Vec<String>` — :3731 (what the app's splitQueryWords calls)
 - option keys: src/hebrew_query.rs:48-80 (pass the Hebrew key strings to `--options`)
 
 ## Ports and assumptions

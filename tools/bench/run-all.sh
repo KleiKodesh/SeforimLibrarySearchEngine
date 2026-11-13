@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-command benchmark: ours (positions / no positions / keep marks) vs FtsLib vs
-# Otzaria v5.0.0 on the full seforim.db. macOS, Linux, Windows (Git Bash).
+# Otzaria (otzaria_search_engine 5babbce) on the full seforim.db. macOS, Linux, Windows (Git Bash).
 # See tools/bench/README.md and tools/bench/AGENT-RUNBOOK.md.
 #
 #   tools/bench/run-all.sh [--steps a,b,...] [--db PATH] [--out DIR] [--force] [--dry-run]
@@ -78,7 +78,7 @@ OTZ="$HERE/otzaria-driver/target/release/otzaria-driver$EXE_SUF"
 
 FMT_OURS="$(grep -o 'IndexFormatVersion = "[a-z0-9]*"' csharp/SeforimSearch.Demo/FtsLib/TantivySeforimIndex.cs | cut -d'"' -f2)"
 FMT_FTS="$(grep -o 'IndexFormatVersion = "[a-z0-9]*"' "$KITVEI_DIR/CSharpBackend/KitveiHakodesh.Core/SeforimDbFullTextSearch/SeforimDbFtsIndexer.cs" 2>/dev/null | cut -d'"' -f2)"
-FMT_OTZ="otzaria-v5.0.0"
+FMT_OTZ="otzaria-5babbce"
 
 has() { case ",$STEPS," in *",$1,"*) return 0;; esac; return 1; }
 done_ok() { [ $FORCE = 0 ] && [ -f "$DONE/$1" ] && [ "$(cat "$DONE/$1")" = "${2:-ok}" ]; }
@@ -241,8 +241,9 @@ step_load() {
 }
 
 step_hitcount() {
+  resolve_db
   done_ok hitcount && { echo "hitcount: done (skipped)"; return; }
-  run hitcount hitcount "$PY" -I -X utf8 "$(wp "$HERE/hitcount.py")" "$(wp "$NATIVE")" "$(wp "$IDX_POS")" "$(wp "$OUT_DIR")" && [ $DRY = 0 ] && mark hitcount
+  run hitcount hitcount "$PY" -I -X utf8 "$(wp "$HERE/hitcount.py")" "$(wp "$NATIVE")" "$(wp "$IDX_POS")" "$(wp "$OUT_DIR")" "$(wp "$DB")" && [ $DRY = 0 ] && mark hitcount
 }
 
 step_verify_xl() {

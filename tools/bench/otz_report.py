@@ -1,4 +1,4 @@
-"""Otzaria v5.0.0 engine search timing over a parity query file, written in the
+"""Otzaria (search_engine 5babbce) engine search timing over a parity query file, written in the
 search-report.json shape so tools/report/compare_report.py can chart it.
 usage: python -I otz_report.py <driver exe> <db> <index> <queries.txt> <out dir> [runs]
 Translation (FtsLib syntax -> Otzaria):
@@ -87,7 +87,7 @@ def main(exe, db, index, queries, out, runs="3"):
                          first_ms=med(fst), total_ms=med(tot), process_ms=med(wall), single_run=single))
         print(f"[{n + 1}/{len(lines)}] {args[1]} exit {code} hits {hits} total {med(tot)} ms first {med(fst)} ms", flush=True)
     (out / "search-report.json").write_text(json.dumps(
-        {"engine": "Otzaria search_engine v5.0.0", "index": index, "rows": rows}, ensure_ascii=False, indent=1),
+        {"engine": "Otzaria search_engine 5babbce", "index": index, "rows": rows}, ensure_ascii=False, indent=1),
         encoding="utf-8")
     bad = [r["n"] for r in rows if r["exit"]]
     print(f"done, failed: {bad}", flush=True)

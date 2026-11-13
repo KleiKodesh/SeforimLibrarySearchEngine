@@ -46,10 +46,12 @@ jobs:
         shell: bash
         run: |
           mkdir out
-          read built rel < <(python -I -c "import sys; sys.path.insert(0,'tools/release'); from targets import *; print(built_file('${{ matrix.name }}'), release_file('${{ matrix.name }}'))" | tr -d '')
+          read built rel < <(python -I -c "import sys; sys.path.insert(0,'tools/release'); from targets import *; print(built_file('${{ matrix.name }}'), release_file('${{ matrix.name }}'))" | tr -d '\r')
           cp "target/${{ matrix.triple }}/release/$built" "out/$rel"
       - uses: actions/upload-artifact@v4
-        with: { name: native-${{ matrix.name }}, path: out/* }
+        with:
+          name: native-${{ matrix.name }}
+          path: out/*
 
   mobile:
     needs: check
@@ -91,7 +93,9 @@ jobs:
           fi
           cp "target/${{ matrix.triple }}/release/$built" "out/$rel"
       - uses: actions/upload-artifact@v4
-        with: { name: native-${{ matrix.name }}, path: out/* }
+        with:
+          name: native-${{ matrix.name }}
+          path: out/*
 
   release:
     needs: [desktop, mobile]

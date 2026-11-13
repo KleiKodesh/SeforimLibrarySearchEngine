@@ -214,8 +214,8 @@ step_parity() {
         [ $DRY = 0 ] && rm -rf "$o" && mkdir -p "$o"
         run "parity-$s-$fl" "parity-$s-$fl-dump" "$DEMO" dump --db "$DB" --index "$(wp "$ix")" --queries "$Q" --out "$(wp "$o")" --max-hits "$PARITY_MAX_HITS" $K || { ok=0; continue; }
         # PARITY_STRICT=1 fails the unit on a regression: no positions = FtsLib's path, so any
-        # difference; positions = hit set and order only (word-tightest window, issue #21).
-        local st=""; [ "${PARITY_STRICT:-0}" = 1 ] && { [ $fl = pos ] && st="--strict hits" || st="--strict all"; }
+        # difference; positions = compare.py's positions rule (word-tightest window, issue #21).
+        local st=""; [ "${PARITY_STRICT:-0}" = 1 ] && { [ $fl = pos ] && st="--strict positions --max-hits $PARITY_MAX_HITS" || st="--strict all"; }
         run "parity-$s-$fl-compare" "parity-$s-$fl-compare" "$PY" -I -X utf8 tools/parity/compare.py "$(wp "$ref")" "$(wp "$o")" --diff-out "$(wp "$OUT_DIR/parity/$s-$fl-diffs.json")" $st || ok=0
       done
       [ $DRY = 0 ] && [ $ok = 1 ] && mark "parity-$s"

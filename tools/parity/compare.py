@@ -1,12 +1,17 @@
 """Compare two parity dumps (FtsLib vs tantivy) query by query.
 
-Usage: python compare.py <ftslib out dir> <tantivy out dir> [--diff-out FILE.json] [--strict hits|all]
+Usage: python compare.py <ftslib out dir> <tantivy out dir> [--diff-out FILE.json] [--strict hits|positions|all] [--max-hits N]
 
 --diff-out writes every difference in full (per query: hits only on one side, the order
 divergence, and every common hit whose fields differ, both values). --strict sets the exit
 code: 1 when a query differs in its hit set / order (hits) or in anything (all). The
 positions flavour uses hits: its snippet window is the word-tightest one, a named deviation
-(issue #21), so window / mark / distance differences are expected there.
+(issue #21), so window / mark / distance differences are expected there. positions = the full-DB check of
+that flavour: a query without a word distance must keep the hit set and order; one with a
+distance may only ADD hits (the hit is decided on the word-tightest window, where FtsLib checks
+the distance on its fewest-UTF-16 window only and so drops a line that has a closer pair), keep
+the common hits in order, and lose hits only at a capped tail (both sides the same count, as
+many lost as added, at the dump's --max-hits cap).
 
 For each query reports: hit counts, the first divergence in hit order (line
 id), and per-field mismatches over the hits both sides returned (word
@@ -30,11 +35,12 @@ def load(path):
     return header, hits
 
 
-def main(a_dir, b_dir, diff_out=None, strict=None):
+def main(a_dir, b_dir, diff_out=None, strict=None, max_hits=None):
     a_dir, b_dir = Path(a_dir), Path(b_dir)
     files = sorted(a_dir.glob("*.jsonl"), key=lambda p: int(p.stem))
     total_ok = 0
     hits_bad = 0
+    pos_bad = []
     diffs = []
     for fa in files:
         fb = b_dir / fa.name
@@ -42,6 +48,7 @@ def main(a_dir, b_dir, diff_out=None, strict=None):
         if not fb.exists():
             print(f"#{fa.stem} {ha['query']!r}: missing on tantivy side")
             hits_bad += 1
+            pos_bad.append(int(fa.stem))
             diffs.append({"n": int(fa.stem), "query": ha["query"], "missing_on_tantivy": True})
             continue
         _, b = load(fb)
@@ -71,6 +78,15 @@ def main(a_dir, b_dir, diff_out=None, strict=None):
         status = "SAME" if same else "DIFF"
         if order_a != order_b:
             hits_bad += 1
+            dist = ha.get("distance")
+            no_dist = dist is None or dist >= 2147483647
+            sb_, sa_ = set(order_b), set(order_a)
+            common_order = [l for l in order_a if l in sb_] == [l for l in order_b if l in sa_]
+            # FtsLib's lost hits must all sit at its tail (pushed out by the cap)
+            capped_swap = (len(a) == len(b) and max_hits is not None and len(a) >= max_hits and only_a == only_b
+                           and all(l not in sb_ for l in order_a[len(order_a) - only_a:]))
+            if no_dist or not common_order or (only_a and not capped_swap):
+                pos_bad.append(int(fa.stem))
         if not same:
             sa, sb = set(order_a), set(order_b)
             diffs.append({"n": int(fa.stem), "query": ha["query"], "distance": ha.get("distance"),
@@ -97,10 +113,16 @@ def main(a_dir, b_dir, diff_out=None, strict=None):
         return 1
     if strict == "hits" and hits_bad:
         return 1
+    if strict == "positions":
+        print(f"positions rule (no distance: same hits; distance: hits only added, issue #21): "
+              f"{'ok' if not pos_bad else 'FAILED on ' + ', '.join(f'#{n}' for n in pos_bad)}")
+        if pos_bad:
+            return 1
     return 0
 
 
 if __name__ == "__main__":
     a = sys.argv[1:]
     opt = lambda k: a[a.index(k) + 1] if k in a else None
-    sys.exit(main(a[0], a[1], opt("--diff-out"), opt("--strict")))
+    sys.exit(main(a[0], a[1], opt("--diff-out"), opt("--strict"),
+                  int(opt("--max-hits")) if opt("--max-hits") else None))

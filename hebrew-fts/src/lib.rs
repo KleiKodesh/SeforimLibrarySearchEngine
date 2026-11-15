@@ -13,6 +13,7 @@
 //! Still to port: query parser + expanders, snippet window locator, searcher.
 
 pub mod chars;
+pub mod divine_names;
 pub mod exact_terms;
 pub mod ftslib_ketiv;
 pub mod fuzzy;

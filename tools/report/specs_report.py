@@ -23,6 +23,8 @@ FTSLIB_FORMAT = "fts13"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVe
 MEASURED_FTSLIB = "fts13"     # FtsLib format of the runs in the results dir (= FTSLIB_FORMAT once rerun)
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
 STALE = [
+    "Divine-name placeholder spellings (issue #39, both engines, default): queries holding a spelling of the "
+    "name now also find its other spellings; the parity sets and the Otzaria hit-count comparison need a rerun.",
     "Search speed and the first-page profile were measured on `tantivy9` / FtsLib `fts8` on the dev machine "
     "and need a rerun (the 2026-11-13 full-DB run on CI covered index builds, parity and the Otzaria hit counts only). The keep-marks build was not rebuilt (its row is the old dev-machine `tantivy9` number).",
     "Hit-count comparison (Otzaria 5babbce, run 2026-11-13): most rows are not classified yet; Otzaria 5babbce "
@@ -156,6 +158,7 @@ md.append(f"""## Engines compared
 | Otzaria word options (grammar/advanced/Aramaic prefixes+suffixes, ktiv, part of word, typo modes, quotes) | done |
 | Ketiv rule sets: Otzaria's or FtsLib's KetivExpander (`ktiv_rules`) | done |
 | One search options object, per-word options (negative words too), alternatives, acronyms | done |
+| Divine-name placeholder spellings (issue #39): a word in the full spelling or a placeholder (letters 2 and 4 replaced, up to two prefixes) also finds the other spellings, always on, every literal word and quoted phrase (both engines) | done; unit tests; parity rerun pending |
 | Otzaria proximity (per-pair gaps, any order), word match (all/any/most/at least N) | done |
 | Otzaria tokenizer rules (one-letter words, digits, joiners, geresh, paired readings, 128-byte limit) in both engines | done |
 | Vocalized matching (nikud / te'amim) as a walk on a keep-marks index (plain, wildcard and fuzzy words) | done |
@@ -174,7 +177,7 @@ md.append(f"""## Engines compared
 | Fuzzy: a swap of two adjacent letters is one edit (Otzaria; FtsLib changed too) | done |
 | Quoted phrases (Otzaria's rule, both engines): a whole-query phrase is literal and may cross a line (ours); a phrase among words is required in the line; in lexical fuzzy mode each quoted word keeps its slot (fuzzy, forms), in order, at most 1 word between | done; unit tests; FtsLib per line only |
 | Snippets from index positions (`locate_lines`, per-batch cost rule) | done |
-| Morphology (Otzaria's MagicDictionary over lexical.db) as host lexicon: Dart package `LexicalDb` + expansion step (opt-in per word), dictionary forms as `lexical_forms` (lexical tier in relevance), blacklisted forms searched but not marked (`unmarked_alternatives` / `unmarked_lexical_forms`), per-word cap | done (Dart package host); unit tests + real lexical.db smoke test |
+| Morphology (Otzaria's MagicDictionary) as host lexicon: dictionary forms as `lexical_forms` (lexical tier in relevance), blacklisted forms searched but not marked (`unmarked_alternatives` / `unmarked_lexical_forms`), per-word cap | done (Dart demo host); unit tests |
 | Negative query defaults to the positive proximity (Otzaria's negativeDistance; `proximity_base` under a custom spacing) | done |
 | Semantic search (issue #18): vector sidecar beside the index (usearch HNSW, i8, static in the native library; f16 full vectors), host-supplied vectors keyed by line id, per-book updates, book filter (exact scan under a threshold, else filtered HNSW), oversample + rescore, cancellation; hybrid = every lexical hit fused with the semantic top k (Otzaria weighted fusion by query type, or RRF) | built; synthetic-vector unit tests; embedding model not chosen, no real vectors |
 """)
@@ -481,7 +484,7 @@ claude_block = "\n".join([
     f"ours `{INDEX_FORMAT}`, FtsLib `{FTSLIB_FORMAT}`. Features: FtsLib syntax + parity, per-word Otzaria "
     f"options as FST walks (cap per request, default 2000, global across segments), proximity / word match, vocalized walks (plain, wildcard and fuzzy words), user regex "
     f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, re-sort into a new catalog order (one merge), per-book updates + background merge (restart on open), non-blocking package APIs, hits decided from positions + streamed (word-tightest window, word-level descriptors finished for display), resume after position, "
-    f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, positions snippets, FM sidecar, all-matches locate + find in an open text, "
+    f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, divine-name placeholder spellings, positions snippets, FM sidecar, all-matches locate + find in an open text, "
     f"morphology forms from the host (lexical tier, unmarked forms), semantic search + hybrid fusion over host-supplied vectors (usearch HNSW sidecar, model not chosen).",
     "Builds: " + "; ".join(l.strip("| ").replace(" | ", " ") for l in build_lines()) + ".",
     ("Parity with FtsLib: " + "no positions: every set identical (" + ", ".join(x[0] for x in PAR_RUN) + "); positions: same hits on queries without a distance, on distance queries only added hits (decided on the word-tightest window, where FtsLib checks only its fewest-UTF-16 window; issue #21) and snippet windows differ" + "."

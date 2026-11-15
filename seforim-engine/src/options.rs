@@ -672,7 +672,17 @@ fn phrases(list: &[PhraseOptions], keep_marks: bool) -> Vec<Vec<GroupSpec>> {
 fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
     let ignore_quotes = o.ignore_quotes;
     match term {
-        QueryTerm::Word(word) => GroupSpec::Word { word, options: o },
+        QueryTerm::Word(word) => {
+            // the divine name in its other spellings (issue #39, always on):
+            // the word's options but no ktiv variants (FtsLib adds the
+            // ketiv variants of the typed word only), ORed in the slot
+            let name_options = WalkOptionsSpec { ktiv_male_haser: false, ..o };
+            let names: Vec<GroupSpec> = hebrew_fts::divine_names::divine_name_alternatives(&word)
+                .into_iter()
+                .map(|word| GroupSpec::Word { word, options: name_options })
+                .collect();
+            with_variants(GroupSpec::Word { word, options: o }, names)
+        }
         QueryTerm::Unindexed(word) => GroupSpec::Unindexed { word },
         QueryTerm::Wildcard(pattern) => {
             let pattern = required_marks_form(&pattern, o.match_nikud, o.match_teamim);

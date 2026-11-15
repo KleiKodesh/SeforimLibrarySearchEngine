@@ -3,26 +3,20 @@ import 'dart:collection';
 import 'package:sqlite3/sqlite3.dart';
 
 import 'lexicon_text.dart' show normalizeLexiconWord;
-import '../models.dart' show SearchOptions, WordOptions;
-import 'lexical_blacklist.dart';
+import 'magic_blacklist.dart';
 
-/// Otzaria's lexical search expansion: a port of its `MagicDictionary`
-/// (otzaria_search_engine 5babbce, unchanged since 0d7a33f;
+/// Port of Otzaria's `MagicDictionary` (otzaria_search_engine 0d7a33f,
 /// `rust/src/magic/{mod,dictionary,normalize,blacklist}.rs`): morphological
 /// forms of a query word from the offline-built `lexical.db` (tables `base`,
 /// `surface`, `variant`, `surface_variant`), read-only.
 ///
-/// Otzaria ships lexical.db next to seforim.db (its databases folder) and
-/// loads it when present; with it loaded, its approximate (fuzzy) search adds
-/// every word's forms (up to 32) to the word's slot. Host-side on purpose:
-/// lexical.db is an app asset, so SQLite stays out of the engine. The forms
-/// reach the engine as [WordOptions.lexicalForms]; Otzaria searches every
-/// form but highlights only those outside the hallucination blacklist, so
-/// the blacklisted ones go as [WordOptions.unmarkedLexicalForms] (see
-/// [formsFor], [expand]). Otzaria's downloader stays app code: this class
-/// takes a path.
-class LexicalDb {
-  LexicalDb._(this._db);
+/// Host-side on purpose: lexical.db is an Otzaria app asset, not engine
+/// logic. The forms reach the engine as word alternatives: Otzaria searches
+/// every form but highlights only those outside the hallucination blacklist,
+/// so the blacklisted ones go as `unmarkedAlternatives` (see [formsFor]).
+/// Otzaria's downloader stays app code: this class takes a path.
+class MagicDictionary {
+  MagicDictionary._(this._db);
 
   /// Otzaria `MAX_LEXICAL_FORMS`: forms per query word.
   static const maxLexicalForms = 32;
@@ -54,11 +48,11 @@ class LexicalDb {
 
   /// Opens [path] read-only; throws when it is not a lexical.db (Otzaria's
   /// `MagicDictionary::open`: every statement must prepare).
-  static LexicalDb open(String path) {
+  static MagicDictionary open(String path) {
     final db = sqlite3.open(path, mode: OpenMode.readOnly);
     try {
       db.execute('PRAGMA query_only = ON;');
-      final dict = LexicalDb._(db);
+      final dict = MagicDictionary._(db);
       for (final sql in [
         _baseByValueSql,
         _baseBySurfaceSql,
@@ -78,7 +72,7 @@ class LexicalDb {
 
   /// [open], or null when the file is missing or not a lexical.db (Otzaria's
   /// `set_magic_dictionary_path` returning false: no dictionary, no forms).
-  static LexicalDb? tryOpen(String path) {
+  static MagicDictionary? tryOpen(String path) {
     try {
       return open(path);
     } catch (_) {
@@ -115,48 +109,6 @@ class LexicalDb {
       marked: [for (final f in recall) if (highlight.contains(f)) f],
       unmarked: [for (final f in recall) if (!highlight.contains(f)) f],
     );
-  }
-
-  /// Otzaria `MAX_LEXICAL_PHRASE_TERMS_PER_TOKEN`: the terms one word of a
-  /// lexical fuzzy phrase may hold (the word, its quote-free spelling, its
-  /// forms, then edit-distance matches).
-  static const maxPhraseTermsPerWord = 256;
-
-  /// The expansion cap of a lexical fuzzy phrase word [word] with [forms]:
-  /// what Otzaria's 256-term budget leaves for its edit-distance matches
-  /// (at least 1).
-  static int phraseCap(String word, ({List<String> marked, List<String> unmarked}) forms) {
-    final t = indexToken(word);
-    final taken = {t, t.replaceAll(RegExp('[\'"]'), ''), ...forms.marked, ...forms.unmarked};
-    final left = maxPhraseTermsPerWord - taken.length;
-    return left > 0 ? left : 1;
-  }
-
-  /// The lexical expansion step: fills the word options of every word index
-  /// in [words] (index -> the word as typed, without `~N`) of [options] with
-  /// its dictionary forms, and sets [SearchOptions.lexicalFuzzy]. Opt-in per
-  /// word: the host passes the words that take forms; Otzaria's mapping is
-  /// every word of an approximate (fuzzy) search while lexical.db is loaded,
-  /// none in its exact or advanced modes. A wildcard word takes no forms.
-  /// [phraseWords]: the words of
-  /// a lexical fuzzy phrase (the whole query quoted, or a quoted part),
-  /// which get Otzaria's 256-term budget as their expansion cap.
-  void expand(SearchOptions options, Map<int, String> words, {Set<int> phraseWords = const {}}) {
-    options.lexicalFuzzy = true;
-    words.forEach((i, word) {
-      final wildcard = word.contains('*') || word.contains('?');
-      final forms = wildcard ? (marked: <String>[], unmarked: <String>[]) : formsFor(word);
-      final phrase = phraseWords.contains(i);
-      if (forms.marked.isEmpty && forms.unmarked.isEmpty && !phrase) return;
-      final w = options.words[i] ??= WordOptions();
-      for (final f in forms.marked) {
-        if (!w.lexicalForms.contains(f)) w.lexicalForms.add(f);
-      }
-      for (final f in forms.unmarked) {
-        if (!w.unmarkedLexicalForms.contains(f)) w.unmarkedLexicalForms.add(f);
-      }
-      if (phrase) w.maxExpandedTerms = phraseCap(word, forms);
-    });
   }
 
   List<String> _collect(String token, int cap, bool applyBlacklist) {
@@ -300,13 +252,13 @@ class _Picked {
   final Set<String> seen = {};
 
   int get room {
-    final r = LexicalDb.maxLexicalForms - seen.length;
+    final r = MagicDictionary.maxLexicalForms - seen.length;
     return r < 0 ? 0 : r;
   }
 
   /// Takes [form] into [terms] while under [cap]; true once [terms] is full.
   bool offer(List<String> terms, String form, int cap) {
-    if (terms.length < cap && hebrewLetterCount(form) >= LexicalDb._minFormLetters) {
+    if (terms.length < cap && hebrewLetterCount(form) >= MagicDictionary._minFormLetters) {
       final term = toIndexTerm(form);
       if (term != null && seen.add(term)) terms.add(term);
     }

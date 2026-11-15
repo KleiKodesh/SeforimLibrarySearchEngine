@@ -5,9 +5,11 @@ import 'package:otzaria_demo/otzaria_query.dart';
 import 'package:otzaria_demo/seforim_db.dart';
 import 'package:otzaria_demo/note_ids.dart';
 import 'package:otzaria_demo/acronym_lexicon.dart';
+import 'package:otzaria_demo/magic_dictionary.dart';
 import 'package:otzaria_demo/facets.dart';
 import 'package:otzaria_demo/grouping.dart';
 import 'package:otzaria_demo/snippet_texts.dart';
+import 'package:otzaria_demo/translation_lexicon.dart';
 import 'package:seforim_search/seforim_search.dart';
 
 const _usage = '''
@@ -360,7 +362,7 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
     negativeAlternativeWords: negAlts,
     acronymLexicon: o['acronyms'] == null ? null : AcronymLexicon.load(o['acronyms']!),
     translations: o['dictionary'] == null ? null : TranslationLexicon.load(o['dictionary']!),
-    magicDictionary: o['lexical'] == null ? null : LexicalDb.open(o['lexical']!),
+    magicDictionary: o['lexical'] == null ? null : MagicDictionary.open(o['lexical']!),
     negativeScope: switch (o['exclude-scope'] ?? 'distance') {
       'paragraph' => NegativeScope.sameParagraph,
       'section' => NegativeScope.sameSection,

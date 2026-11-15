@@ -1,10 +1,11 @@
 import 'dart:io';
 
-import 'package:seforim_search/seforim_search.dart';
+import 'package:otzaria_demo/magic_dictionary.dart';
+import 'package:otzaria_demo/otzaria_query.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:test/test.dart';
 
-// Otzaria's lexical search expansion (MagicDictionary over lexical.db), on a tiny
+// Issue #10: Otzaria's MagicDictionary as host lexicon code, on a tiny
 // synthetic lexical.db (Otzaria's own dictionary.rs fixture, in part).
 const schema = '''
 CREATE TABLE base (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL UNIQUE);
@@ -28,7 +29,7 @@ const haRambam = 'ה$rambam', haRambamG = 'הרמב״ם';
 const shuv = 'שוב', tashuv = 'תשוב', tav = 'ת\'';
 
 late Directory dir;
-late LexicalDb dict;
+late MagicDictionary dict;
 
 void main() {
   setUpAll(() {
@@ -53,7 +54,7 @@ void main() {
     base.close();
     surface.close();
     db.close();
-    dict = LexicalDb.open(path);
+    dict = MagicDictionary.open(path);
   });
   tearDownAll(() {
     dict.close();
@@ -61,7 +62,7 @@ void main() {
   });
 
   test('a non-database or missing file opens nothing', () {
-    expect(LexicalDb.tryOpen('${dir.path}/missing.db'), isNull);
+    expect(MagicDictionary.tryOpen('${dir.path}/missing.db'), isNull);
   });
 
   test('a surface token reaches its family as index terms', () {
@@ -93,42 +94,57 @@ void main() {
     expect(f.unmarked, [ken, veken]);
   });
 
-  test('expand fills the chosen words, unmarked when blacklisted', () {
-    final o = SearchOptions('$halachti~1 $lachtoch~1 $shuv~1 x*~1');
-    dict.expand(o, {0: halachti, 1: lachtoch, 3: 'x*'});
-    expect(o.lexicalFuzzy, isTrue);
+  test('fuzzy mode feeds the forms as lexical forms, unmarked when blacklisted', () {
+    OtzariaSearch s(String q, SearchMode mode) =>
+        OtzariaSearch(query: q, mode: mode, magicDictionary: dict, distance: 2);
+    var o = s(halachti, SearchMode.fuzzy).toOptions();
+    var w = o.words[0]!;
+    expect(w.lexicalForms, [hlkFinal, holechFinal]); // exact words, no ~N
+    expect(w.unmarkedLexicalForms, isEmpty);
+    expect(w.alternatives, isEmpty);
+    expect(w.maxExpandedTerms, isNull);
+    expect(o.toJson()['lexical_fuzzy'], true);
+    w = s(lachtoch, SearchMode.fuzzy).toOptions().words[0]!;
+    expect(w.lexicalForms, isEmpty);
+    expect(w.unmarkedLexicalForms, [ken, veken]);
+    // only the fuzzy mode, as Otzaria
+    expect(s(halachti, SearchMode.advanced).toOptions().words[0], isNull);
+    expect(s(halachti, SearchMode.exact).toOptions().words[0], isNull);
+    expect(s(halachti, SearchMode.advanced).toOptions().toJson()['lexical_fuzzy'], isNull);
+    // Otzaria's fuzzy query has no distance: words anywhere
+    expect(s('$halachti $shuv', SearchMode.fuzzy).toOptions().proximity, isNull);
+    // a maqaf joins two index tokens: each is looked up on its own
+    o = s('$halachti־$shuv', SearchMode.fuzzy).toOptions();
+    expect(o.query, '$halachti~1 $shuv~1');
     expect(o.words[0]!.lexicalForms, [hlkFinal, holechFinal]);
-    expect(o.words[0]!.unmarkedLexicalForms, isEmpty);
-    expect(o.words[0]!.maxExpandedTerms, isNull);
-    expect(o.words[1]!.lexicalForms, isEmpty);
-    expect(o.words[1]!.unmarkedLexicalForms, [ken, veken]);
-    expect(o.words.containsKey(2), isFalse); // not chosen: opt-in per word
-    expect(o.words.containsKey(3), isFalse); // a wildcard takes no forms
-    final j = o.toJson();
-    expect(j['lexical_fuzzy'], true);
-  });
-
-  test('expand keeps the word options already set and adds the phrase budget', () {
-    final o = SearchOptions('$halachti~1 $shuv~1', words: {0: WordOptions(ignoreQuotes: true, lexicalForms: [hlkFinal])});
-    dict.expand(o, {0: halachti, 1: shuv}, phraseWords: {0, 1});
-    expect(o.words[0]!.ignoreQuotes, isTrue);
-    expect(o.words[0]!.lexicalForms, [hlkFinal, holechFinal]); // no duplicate
-    expect(o.words[0]!.maxExpandedTerms, LexicalDb.maxPhraseTermsPerWord - 3);
     expect(o.words[1]!.lexicalForms, [tashuv]);
-    expect(o.words[1]!.maxExpandedTerms, LexicalDb.maxPhraseTermsPerWord - 2);
+    // the whole query quoted: Otzaria's lexical fuzzy phrase, every word
+    // fuzzy with its forms, in order within 1 word, 256 terms per word
+    o = s('"$halachti $lachtoch"', SearchMode.fuzzy).toOptions();
+    expect(o.query, '$halachti~1 $lachtoch~1');
+    expect(o.words[0]!.lexicalForms, [hlkFinal, holechFinal]);
+    expect(o.words[0]!.maxExpandedTerms, 256 - 3);
+    expect(o.words[1]!.unmarkedLexicalForms, [ken, veken]);
+    expect(o.words[1]!.maxExpandedTerms, 256 - 3);
+    expect(o.proximity!.toJson(), {'mode': 'ordered', 'gaps': [1]});
+    // a quoted part of a longer query: Otzaria's lexical fuzzy phrase in the
+    // engine, each word with its forms and the 256-term budget
+    o = s('"$halachti $lachtoch" $shuv', SearchMode.fuzzy).toOptions();
+    expect(o.query, '"$halachti~1 $lachtoch~1" $shuv~1');
+    expect(o.words[0]!.lexicalForms, [hlkFinal, holechFinal]);
+    expect(o.words[0]!.maxExpandedTerms, 256 - 3);
+    expect(o.words[1]!.unmarkedLexicalForms, [ken, veken]);
+    expect(o.words[2]!.lexicalForms, [tashuv]);
+    expect(o.words[2]!.maxExpandedTerms, isNull);
+    expect(o.proximity, isNull);
+    // without a dictionary the fuzzy query ignores quotes, as Otzaria's
+    o = OtzariaSearch(query: '"$halachti $holech"', mode: SearchMode.fuzzy).toOptions();
+    expect(o.query, '$halachti~1 $holech~1');
+    expect(o.proximity, isNull);
   });
 
-  // The real lexical.db, when Otzaria is installed here (skipped otherwise).
-  final real = '${Platform.environment['APPDATA'] ?? ''}/otzaria/books/lexical.db';
-  test('the real lexical.db opens and expands a common word', () {
-    final db = LexicalDb.open(real);
-    try {
-      final forms = db.recallForms(halachti);
-      expect(forms, isNotEmpty);
-      expect(forms.length, lessThanOrEqualTo(LexicalDb.maxLexicalForms));
-      expect(forms.toSet().length, forms.length);
-    } finally {
-      db.close();
-    }
-  }, skip: File(real).existsSync() ? false : 'no lexical.db at $real');
+  test("the negative query's default is Otzaria's distance and any order", () {
+    final o = OtzariaSearch(query: '$halachti $shuv', distance: 3, anyOrder: true, customSpacing: {0: 5}).toOptions();
+    expect(o.toJson()['proximity_base'], {'distance': 3, 'any_order': true});
+  });
 }

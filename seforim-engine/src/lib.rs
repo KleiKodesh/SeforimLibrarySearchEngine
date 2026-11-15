@@ -700,6 +700,53 @@ mod tests {
         assert_eq!(r.hits.len(), 7);
     }
 
+    /// Issue #39: a word in one spelling of the divine name (full, or the
+    /// U+05E7 / U+05D3 placeholders, up to two prefixes) also finds and
+    /// marks the other spellings, always (no option), plain words and quoted
+    /// phrases, on both index flavours.
+    #[test]
+    fn divine_name_spellings_match_each_other() {
+        let full = "\u{05D9}\u{05D4}\u{05D5}\u{05D4}";
+        let qof = "\u{05D9}\u{05E7}\u{05D5}\u{05E7}";
+        let dalet = "\u{05D9}\u{05D3}\u{05D5}\u{05D3}";
+        let ab = "\u{05D0}\u{05D1}";
+        let texts = [
+            format!("{ab} {full}"),                         // 1
+            format!("{ab} {qof}"),                          // 2
+            format!("{ab} \u{05D5}{dalet}"),                // 3: with a prefix
+            format!("{qof} {ab}"),                          // 4: out of phrase order
+            format!("{ab} \u{05D9}\u{05E7}\u{05D5}\u{05D3}"), // 5: mixed, no name
+        ];
+        let docs: Vec<LineDoc> =
+            texts.iter().enumerate().map(|(i, t)| line(i as u64 + 1, i as u64, 1, t)).collect();
+        for positions in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = build(dir.path(), IndexOptions { positions, keep_marks: false }, &docs);
+            let run = |q: String| -> Vec<(u64, Vec<String>)> {
+                let mut r = index.search_options(&SearchOptions { query: q, ..Default::default() }).unwrap();
+                let hits = r.hits.clone();
+                hits.into_iter()
+                    .filter_map(|h| {
+                        let s = r.session.locate(&texts[h.line_id as usize - 1])?;
+                        let terms = r.session.all_terms().to_vec();
+                        Some((h.line_id, s.marks.chunks(3).map(|m| terms[m[2] as usize].clone()).collect()))
+                    })
+                    .collect()
+            };
+            let ids = |v: &[(u64, Vec<String>)]| v.iter().map(|x| x.0).collect::<Vec<_>>();
+            for q in [full, qof, dalet] {
+                let r = run(q.to_string());
+                assert_eq!(ids(&r), [1, 2, 4], "positions={positions}");
+                assert_eq!(r[0].1, vec![full.to_string()]);
+                assert_eq!(r[1].1, vec![qof.to_string()]);
+            }
+            // a prefixed query word maps with its prefix
+            assert_eq!(ids(&run(format!("\u{05D5}{full}"))), [3], "positions={positions}");
+            // a quoted phrase follows too, in order
+            assert_eq!(ids(&run(format!("\"{ab} {dalet}\""))), [1, 2], "positions={positions}");
+        }
+    }
+
     /// Options are per word: a negative word takes the global word options
     /// as its default and has its own overrides, alternatives and phrase
     /// alternatives, on both index flavours.

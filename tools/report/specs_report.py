@@ -173,6 +173,7 @@ md.append(f"""## Engines compared
 | Otzaria tokenizer rules (one-letter words, digits, joiners, geresh, paired readings, 128-byte limit) in both engines | done |
 | Vocalized matching (nikud / te'amim) as a walk on a keep-marks index (plain, wildcard and fuzzy words) | done |
 | Exact totals + per-book counts, cancellation, pull streaming | done |
+| Substring find (FtsLib `FindSubstringCandidates`, issue G-K1): `substring` query (every term containing each fragment, FM sidecar, no budget), `position_ranges` filter, `decline_over_cap`; C# Core-shaped coordinator (build, progress, reset, DB change, one-shot / streamed / lines search, related forms) | done; unit tests + selftest; parity on fixtures only |
 | Per-book updates by seforim.db `contentHash` (delete by book, crash-safe pending record) + background full merge / repack at low priority, restarted on open (issue #29) | built; unit tests; full-DB not measured |
 | Hits decided from positions during the search, streamed in batches (issue #21): exact totals with no text, word-tightest window | done |
 | Non-blocking search in the packages (Dart worker isolate `SearchWorker`, also serving the index writer (#38), C# `SearchAsync` / `IAsyncEnumerable` batches) | done |
@@ -495,7 +496,7 @@ claude_block = "\n".join([
     f"ours `{INDEX_FORMAT}`, FtsLib `{FTSLIB_FORMAT}`. Features: FtsLib syntax + parity, per-word Otzaria "
     f"options as FST walks (cap per request, default 2000, global across segments), proximity / word match, vocalized walks (plain, wildcard and fuzzy words), user regex "
     f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, re-sort into a new catalog order (one merge), per-book updates + background merge (restart on open), non-blocking package APIs, hits decided from positions + streamed (word-tightest window, word-level descriptors finished for display), resume after position, "
-    f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, divine-name placeholder spellings, positions snippets, FM sidecar, all-matches locate + find in an open text, "
+    f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, divine-name placeholder spellings, positions snippets, FM sidecar, all-matches locate + find in an open text, substring find over position ranges (decline over the cap), "
     f"morphology forms from the host (lexical tier, unmarked forms), semantic search + hybrid fusion over host-supplied vectors (usearch HNSW sidecar, several chunks per line, Otzaria `.oxv` import, Meivin query model in the hosts).",
     "Builds: " + "; ".join(l.strip("| ").replace(" | ", " ") for l in build_lines()) + ".",
     ("Parity with FtsLib: " + "no positions: every set identical (" + ", ".join(x[0] for x in PAR_RUN) + "); positions: same hits on queries without a distance, on distance queries only added hits (decided on the word-tightest window, where FtsLib checks only its fewest-UTF-16 window; issue #21) and snippet windows differ" + "."

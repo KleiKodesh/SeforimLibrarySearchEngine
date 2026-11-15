@@ -303,6 +303,7 @@ fn roots(g: &GroupSpec, out: &mut Vec<String>) {
         | GroupSpec::Unindexed { word } => out.push(word.clone()),
         // a user regex's pattern is no typed form: its terms all fall in the last tier
         GroupSpec::Wildcard { pattern, .. } | GroupSpec::Regex { pattern } => out.push(pattern.clone()),
+        GroupSpec::Substring { fragment } => out.push(fragment.clone()),
         GroupSpec::Any { alternatives } => alternatives.iter().for_each(|a| roots(a, out)),
         GroupSpec::Unmarked { group } | GroupSpec::Capped { group, .. } => roots(group, out),
         // a dictionary form is no typed word

@@ -299,3 +299,56 @@ mod tests {
         assert_eq!(fm_wildcard_shape("*רש\"י", true), Some(("רשי".into(), true)));
     }
 }
+
+/// FtsLib `FindSubstringCandidates`' fragment group (issue G-K1): EVERY
+/// dictionary term containing `fragment` at any place, of any length, read
+/// off the sidecar with no affix budget (`FmIndex.FindRowIds(fragment,
+/// false)`). The sidecar's text is quote- and mark-free, so the fragment is
+/// searched in that form. FtsLib counts distinct terms against the cap; on
+/// an index that keeps marks a term's mark-free form is the one counted
+/// (FtsLib's terms carry no marks). Over `cap`: the terms the walk's cap
+/// keeps and `true` (the caller declines or flags truncation); with
+/// `decline` no term is returned once the count is over.
+pub fn expand_substring(
+    fm: &FmIndex,
+    dict: &TermDictionary,
+    fragment: &str,
+    cap: usize,
+    marked_terms: bool,
+    decline: bool,
+    cancel: Option<&CancelToken>,
+) -> Result<(Vec<Vec<u8>>, bool)> {
+    let core = text_form(fragment);
+    if core.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let rows = fm.find_row_ids(&core, false);
+    // FtsLib declines on the COUNT, before a single term is read: the rows
+    // are distinct terms (on a marks-keeping index several may share one
+    // mark-free form, so they are read and counted).
+    if decline && !marked_terms && rows.len() > cap {
+        return Ok((Vec::new(), true));
+    }
+    let mut buf = Vec::new();
+    let mut kept: Vec<(u32, Vec<u8>)> = Vec::with_capacity(rows.len().min(cap.saturating_add(1)));
+    let mut counted: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut over = false;
+    for (i, rowid) in rows.into_iter().enumerate() {
+        check_cancel(i, cancel)?;
+        if !term_of(dict, rowid, &mut buf)? {
+            continue;
+        }
+        let key = if marked_terms { strip_mark_bytes(&buf).into_owned() } else { buf.clone() };
+        counted.insert(key);
+        kept.push((0, buf.clone()));
+        if counted.len() > cap {
+            over = true;
+        }
+    }
+    if !over {
+        kept.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+        return Ok((kept.into_iter().map(|(_, t)| t).collect(), false));
+    }
+    let (terms, _) = cap_like_the_walk(dict, kept, cap, marked_terms, &[])?;
+    Ok((terms, true))
+}

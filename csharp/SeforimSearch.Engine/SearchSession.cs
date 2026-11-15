@@ -405,7 +405,8 @@ namespace SeforimSearch.Engine
             var notices = new List<string>();
             foreach (var n in (List<object?>)o["notices"]!) notices.Add((string)n!);
             return new SearchInfo(notices, (bool)o["truncated"]!,
-                o.TryGetValue("order_stamp", out var stamp) ? (string?)stamp ?? "" : "");
+                o.TryGetValue("order_stamp", out var stamp) ? (string?)stamp ?? "" : "",
+                o.TryGetValue("declined", out var declined) && declined is bool d && d);
         }
 
         // -- User regex, Otzaria's Line kind --
@@ -543,12 +544,19 @@ namespace SeforimSearch.Engine
         /// slower). Rebuild it with <see cref="SeforimIndex.BuildFmSidecar"/>.</summary>
         public const string FmSidecarUnusable = "fm_sidecar_unusable";
 
-        public SearchInfo(IReadOnlyList<string> notices, bool truncated, string orderStamp = "")
+        public SearchInfo(IReadOnlyList<string> notices, bool truncated, string orderStamp = "", bool declined = false)
         {
             Notices = notices;
             Truncated = truncated;
             OrderStamp = orderStamp;
+            Declined = declined;
         }
+
+        /// <summary>The index could not answer exactly and gave no hit (issue G-K1):
+        /// <see cref="SearchOptions.DeclineOverCap"/> with a word over its cap, or a
+        /// <see cref="SearchOptions.Substring"/> word with no indexable term or no FM sidecar.
+        /// The host reads the lines itself.</summary>
+        public bool Declined { get; }
 
         /// <summary>The identity of the catalog order the hits' positions belong to (the
         /// index snapshot searched). Pass it as <see cref="SearchOptions.ResumeStamp"/> with

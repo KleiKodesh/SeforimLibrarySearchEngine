@@ -154,6 +154,20 @@ pub struct SearchOptions {
     /// Otzaria's negativeDistance defaults to its distance and its negative
     /// custom spacing to none. None: taken from `proximity`.
     pub proximity_base: Option<ProximityBase>,
+    /// Filtered search by catalog position: inclusive `[first, last]`
+    /// ranges (see `SearchRequest::position_ranges`). None = every position.
+    pub position_ranges: Option<Vec<(u64, u64)>>,
+    /// Decline instead of truncating (see `SearchRequest::decline_over_cap`).
+    pub decline_over_cap: bool,
+    /// FtsLib's substring query (`FindSubstringCandidates`, issue G-K1):
+    /// every whitespace word of `query` is cut into terms by the indexer's
+    /// own tokenizer and each term becomes one slot of EVERY dictionary term
+    /// containing it (no affix budget); all slots required, in any order and
+    /// distance, on one line. A word with no indexable term declines the
+    /// search. The word options, distance, order, negative query, phrase
+    /// alternatives and user regex do not apply. The hits are a superset:
+    /// the host confirms the exact substring on the text.
+    pub substring: bool,
 }
 
 impl Default for SearchOptions {
@@ -201,6 +215,9 @@ impl Default for SearchOptions {
             max_expanded_terms: hebrew_fts::DEFAULT_MAX_EXPANDED_TERMS,
             lexical_fuzzy: false,
             proximity_base: None,
+            position_ranges: None,
+            decline_over_cap: false,
+            substring: false,
         }
     }
 }
@@ -340,6 +357,39 @@ impl SearchOptions {
     /// vocalized when the global flags are on (Otzaria passes the global
     /// flags to both builds).
     pub fn to_request(&self, keep_marks: bool) -> Result<SearchRequest> {
+        // FtsLib's substring query: one slot per indexer term of every word.
+        if self.substring {
+            let _ = keep_marks; // a fragment's marks are stripped (the sidecar's text is mark-free)
+            let mut groups = Vec::new();
+            for word in self.query.split_whitespace() {
+                let mut fragments = Vec::new();
+                hebrew_fts::scanner::scan(word, |term, span| {
+                    if hebrew_fts::chars::is_indexable_len(span.term_bytes) {
+                        fragments.push(term.to_string());
+                    }
+                });
+                if fragments.is_empty() {
+                    // no indexable term: the search is declined (FtsLib's null)
+                    fragments.push(String::new());
+                }
+                groups.extend(fragments.into_iter().map(|fragment| GroupSpec::Substring { fragment }));
+            }
+            if groups.is_empty() {
+                groups.push(GroupSpec::Substring { fragment: String::new() });
+            }
+            return Ok(SearchRequest {
+                groups,
+                context_words: self.context_words,
+                books: self.books.clone(),
+                position_ranges: self.position_ranges.clone(),
+                decline_over_cap: self.decline_over_cap,
+                word_windows: self.word_windows,
+                after_position: self.after_position,
+                resume_stamp: self.resume_stamp.clone(),
+                max_expanded_terms: self.max_expanded_terms,
+                ..Default::default()
+            });
+        }
         // A user regex `/.../` (Otzaria): the whole query is the regex, on
         // its own: no word options, negative query, distance or grouping.
         // One word = a term set; several = an adjacent ordered phrase. An
@@ -353,6 +403,8 @@ impl SearchOptions {
                         context_words: self.context_words,
                         proximity: (n > 1).then(|| ProximitySpec::Ordered { gaps: vec![0; n - 1] }),
                         books: self.books.clone(),
+                        position_ranges: self.position_ranges.clone(),
+                        decline_over_cap: self.decline_over_cap,
                         order: self.order,
                         book_generations: self.book_generations.clone(),
                         base_books: self.base_books.clone(),
@@ -373,6 +425,7 @@ impl SearchOptions {
                             line_regex: Some(self.query.clone()),
                             context_words: self.context_words,
                             books: self.books.clone(),
+                            position_ranges: self.position_ranges.clone(),
                             after_position: self.after_position,
                             resume_stamp: self.resume_stamp.clone(),
                         max_expanded_terms: self.max_expanded_terms,
@@ -567,6 +620,8 @@ impl SearchOptions {
             required_phrase_gaps: Vec::new(),
             proximity: None,
             books: self.books.clone(),
+            position_ranges: self.position_ranges.clone(),
+            decline_over_cap: self.decline_over_cap,
             order: self.order,
             book_generations: self.book_generations.clone(),
             base_books: self.base_books.clone(),

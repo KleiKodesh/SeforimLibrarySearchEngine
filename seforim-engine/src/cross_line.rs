@@ -85,7 +85,7 @@ pub(crate) struct CrossInput<'a> {
     /// check left).
     pub inline: &'a [PlacedHit],
     pub inline_exact: bool,
-    pub books: Option<&'a HashSet<u64>>,
+    pub books: Option<&'a crate::search::HitScope>,
     /// The query-level negative query (lines it finds are dropped).
     pub negative: Option<&'a dyn Weight>,
     /// Sections the negative query's section scope dropped.
@@ -543,7 +543,7 @@ fn pairs(
         {
             continue;
         }
-        if input.books.is_some_and(|b| !b.contains(&book)) {
+        if input.books.is_some_and(|b| !b.admits(book, position)) {
             continue;
         }
         if let (Some(drop), Some(sections)) = (input.drop_sections, &lc.sections) {

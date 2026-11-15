@@ -145,6 +145,14 @@ pub enum GroupSpec {
     /// regex walked over the dictionary, quote transparent, capped shortest
     /// first. `pattern` is a word of [`hebrew_fts::UserRegex`].
     Regex { pattern: String },
+    /// FtsLib's substring fragment (`FindSubstringCandidates`, issue G-K1):
+    /// EVERY dictionary term containing `fragment` at any place, with no
+    /// affix budget, read off the FM sidecar (quotes and marks ignored, as
+    /// the sidecar's text). An empty fragment (a word with no indexable
+    /// term) or an index without a usable sidecar cannot be answered: the
+    /// search is declined ([`SearchResult::declined`]). Over the cap: the
+    /// truncated flag, or a decline with `decline_over_cap`.
+    Substring { fragment: String },
     /// One slot satisfied by any of its alternatives (FtsLib `a | b`).
     /// Alternatives that cannot search (empty word, rejected wildcard) are
     /// dropped; if none remain, the slot is skipped.
@@ -409,6 +417,24 @@ pub struct SearchRequest {
     /// applies to the main query, the phrase alternatives and the negative
     /// query alike.
     pub books: Option<Vec<u64>>,
+    /// Filtered search by catalog position (issue G-K1, FtsLib's
+    /// `FindSubstringCandidates` ranges): only lines whose `position` lies
+    /// in one of these inclusive `[first, last]` ranges come back (an empty
+    /// list = no hits). None = every position. Checked with the book filter
+    /// (both must admit a line), per doc against the `position` fast column,
+    /// so it applies to every way of matching alike. Ranges may overlap and
+    /// come in any order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_ranges: Option<Vec<(u64, u64)>>,
+    /// Decline instead of truncating (issue G-K1, FtsLib's
+    /// `FindSubstringCandidates` null): when any word's expansion exceeds
+    /// its cap, the search returns no hit and [`SearchResult::declined`]
+    /// instead of the capped (truncated) hits, so the host answers by
+    /// reading the lines itself. A substring word that cannot be answered
+    /// from the index (no indexable fragment, no FM sidecar) declines too,
+    /// whatever this flag. Off (default): capped hits + the truncated flag.
+    #[serde(default)]
+    pub decline_over_cap: bool,
     /// The order of the hits: catalog (default, costs nothing), Otzaria's
     /// relevance, or Otzaria's generation order (see `relevance`).
     pub order: ResultsOrder,
@@ -499,6 +525,8 @@ impl Default for SearchRequest {
             required_phrases: Vec::new(),
             required_phrase_gaps: Vec::new(),
             books: None,
+            position_ranges: None,
+            decline_over_cap: false,
             order: ResultsOrder::Catalog,
             book_generations: Vec::new(),
             base_books: Vec::new(),
@@ -1457,6 +1485,8 @@ pub struct SearchResult {
     notices: Vec<String>,
     /// A walk hit its expansion cap (see [`truncated`](Self::truncated)).
     truncated: bool,
+    /// The search was declined (see [`declined`](Self::declined)).
+    declined: bool,
     /// A user regex of Otzaria's `Line` kind (see `crate::line_search`).
     pub(crate) line: Option<crate::line_search::LineRun>,
     /// See [`SearchInfo::order_stamp`].
@@ -1476,6 +1506,9 @@ pub struct SearchInfo {
     pub notices: Vec<String>,
     /// See [`SearchResult::truncated`].
     pub truncated: bool,
+    /// See [`SearchResult::declined`].
+    #[serde(default)]
+    pub declined: bool,
     /// The identity of the catalog order the hits' positions belong to
     /// (the index snapshot searched: its segments and their deletes). Pass
     /// it back as `resume_stamp` with `after_position` to resume safely
@@ -1515,6 +1548,7 @@ impl SearchResult {
             scores: None,
             notices: Vec::new(),
             truncated: false,
+            declined: false,
             line: None,
             order_stamp: String::new(),
             stream: None,
@@ -1620,6 +1654,23 @@ impl SearchResult {
         self
     }
 
+    /// A declined search: no hit, [`declined`](Self::declined) set.
+    fn declined_with(session: SnippetSession, notices: Vec<String>) -> SearchResult {
+        let mut r = SearchResult::new(Vec::new(), session).with_notices(notices);
+        r.declined = true;
+        r.truncated = true;
+        r
+    }
+
+    /// True when the index could not answer this search exactly and gave no
+    /// hit (issue G-K1, FtsLib `FindSubstringCandidates` returning null):
+    /// with `decline_over_cap` a word's expansion exceeded its cap; or a
+    /// substring word had no indexable fragment, or the index has no usable
+    /// FM sidecar. The host answers by reading the lines itself.
+    pub fn declined(&self) -> bool {
+        self.declined
+    }
+
     fn with_truncated(mut self, truncated: bool) -> SearchResult {
         self.truncated = truncated;
         self
@@ -1660,7 +1711,7 @@ impl SearchResult {
 
     /// How the search was served (the C ABI's `se_search_info`).
     pub fn info(&self) -> SearchInfo {
-        SearchInfo { notices: self.notices.clone(), truncated: self.truncated(), order_stamp: self.order_stamp.clone() }
+        SearchInfo { notices: self.notices.clone(), truncated: self.truncated(), declined: self.declined, order_stamp: self.order_stamp.clone() }
     }
 
     /// The relevance score of each hit (aligned with `hits`), when the
@@ -1754,11 +1805,63 @@ impl SearchResult {
     }
 }
 
+// ── Hit scope: the book filter and the position ranges ───────────────
+
+/// Which lines a search may return: the book filter (`books`) and the
+/// catalog-position ranges (`position_ranges`) together. One check per
+/// doc, shared by the collector, the cross-line pass and the line regex.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HitScope {
+    books: Option<std::collections::HashSet<u64>>,
+    /// Sorted by start, overlapping ranges merged.
+    ranges: Option<Vec<(u64, u64)>>,
+}
+
+impl HitScope {
+    /// The scope of `request`; None when it restricts nothing.
+    pub(crate) fn of(request: &SearchRequest) -> Option<Arc<HitScope>> {
+        Self::new(request.books.as_deref(), request.position_ranges.as_deref())
+    }
+
+    pub(crate) fn new(books: Option<&[u64]>, ranges: Option<&[(u64, u64)]>) -> Option<Arc<HitScope>> {
+        if books.is_none() && ranges.is_none() {
+            return None;
+        }
+        let ranges = ranges.map(|r| {
+            let mut v: Vec<(u64, u64)> = r.iter().copied().filter(|(a, b)| a <= b).collect();
+            v.sort_unstable();
+            let mut merged: Vec<(u64, u64)> = Vec::with_capacity(v.len());
+            for (a, b) in v {
+                match merged.last_mut() {
+                    Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
+                    _ => merged.push((a, b)),
+                }
+            }
+            merged
+        });
+        Some(Arc::new(HitScope { books: books.map(|b| b.iter().copied().collect()), ranges }))
+    }
+
+    /// True when a line of `book_id` at `position` is in scope.
+    pub(crate) fn admits(&self, book_id: u64, position: u64) -> bool {
+        if self.books.as_ref().is_some_and(|b| !b.contains(&book_id)) {
+            return false;
+        }
+        match &self.ranges {
+            None => true,
+            Some(r) => {
+                let i = r.partition_point(|&(first, _)| first <= position);
+                i > 0 && r[i - 1].1 >= position
+            }
+        }
+    }
+}
+
 // ── Collector: every matching doc with its placement, from fast fields ───
 
 pub(crate) struct PlacedCollector {
-    /// Book filter (see `SearchRequest::books`).
-    pub(crate) books: Option<Arc<std::collections::HashSet<u64>>>,
+    /// Book filter and position ranges (see [`HitScope`]).
+    pub(crate) scope: Option<Arc<HitScope>>,
     /// Sections the negative query's section scope dropped.
     pub(crate) drop_sections: Option<Arc<std::collections::HashSet<SectionKey>>>,
     /// Keep each hit's doc id (relevance order scores them after the search).
@@ -1769,7 +1872,7 @@ pub(crate) struct PlacedCollector {
 
 pub(crate) struct PlacedSegmentCollector {
     columns: [Column<u64>; 3],
-    books: Option<Arc<std::collections::HashSet<u64>>>,
+    scope: Option<Arc<HitScope>>,
     drop_sections: Option<(Arc<std::collections::HashSet<SectionKey>>, SectionColumns)>,
     out: Vec<PlacedHit>,
     /// Relevance order only: each kept hit's doc id (aligned with `out`).
@@ -1793,7 +1896,7 @@ impl Collector for PlacedCollector {
                 ff.u64("line_id")?,
                 ff.u64("book_id")?,
             ],
-            books: self.books.clone(),
+            scope: self.scope.clone(),
             drop_sections: match &self.drop_sections {
                 Some(d) => Some((d.clone(), SectionColumns::open(segment).map_err(|e| match e {
                     Error::Tantivy(t) => t,
@@ -1826,7 +1929,7 @@ impl SegmentCollector for PlacedSegmentCollector {
             return;
         }
         let book_id = get(&self.columns[2]);
-        if self.books.as_ref().is_some_and(|b| !b.contains(&book_id)) {
+        if self.scope.as_ref().is_some_and(|s| !s.admits(book_id, position)) {
             return;
         }
         if let Some((drop, sections)) = &self.drop_sections {
@@ -1896,6 +1999,9 @@ struct Walk<'a> {
     cap: usize,
     /// Checked while an FM expansion verifies its candidates.
     cancel: Option<&'a CancelToken>,
+    /// `SearchRequest::decline_over_cap`: an expansion over its cap may stop
+    /// reading terms (the search is declined anyway).
+    decline: bool,
 }
 
 /// The search's FM sidecar, looked up on first use (issue #30): a search
@@ -1987,7 +2093,7 @@ impl LineIndex {
                 q.set_max_expansions(walk.cap);
                 Some(q.span_slot(searcher)?)
             }
-            GroupSpec::Unindexed { .. } => None,
+            GroupSpec::Unindexed { .. } | GroupSpec::Substring { .. } => None,
             GroupSpec::Regex { pattern } => {
                 let mut q = HebrewRegexQuery::new(field, pattern).map_err(|e| Error::Unsupported(e.to_string()))?;
                 q.set_marked_terms(self.options.keep_marks);
@@ -2132,7 +2238,7 @@ impl LineIndex {
                 q.set_max_expansions(walk.cap);
                 Some(Box::new(q))
             }
-            GroupSpec::Unindexed { .. } => None,
+            GroupSpec::Unindexed { .. } | GroupSpec::Substring { .. } => None,
             GroupSpec::Regex { pattern } => {
                 let mut q =
                     HebrewRegexQuery::new(self.fields.text, pattern).map_err(|e| Error::Unsupported(e.to_string()))?;
@@ -2355,8 +2461,47 @@ impl LineIndex {
                 };
                 Ok(Some(terms))
             }
+            GroupSpec::Substring { fragment } => {
+                // checked by `substring_declined` before any slot is built
+                let Some(fm) = walk.fm.get()? else { return Ok(Some((Vec::new(), true))) };
+                let inverted = dict()?;
+                Ok(Some(fm_expand::expand_substring(
+                    fm,
+                    inverted.terms(),
+                    fragment,
+                    cap,
+                    self.options.keep_marks,
+                    walk.decline,
+                    walk.cancel,
+                )?))
+            }
             _ => Ok(None),
         }
+    }
+
+    /// True when a substring slot of `request` cannot be answered from the
+    /// index (FtsLib's null): a word with no indexable fragment, or no
+    /// usable FM sidecar.
+    fn substring_declined(&self, request: &SearchRequest, fm: &FmSlot<'_>) -> Result<bool> {
+        fn walk(g: &GroupSpec, out: &mut Vec<String>) {
+            match g {
+                GroupSpec::Substring { fragment } => out.push(fragment.clone()),
+                GroupSpec::Any { alternatives } => alternatives.iter().for_each(|a| walk(a, out)),
+                GroupSpec::Unmarked { group } | GroupSpec::Lexical { group } | GroupSpec::Capped { group, .. } => {
+                    walk(group, out)
+                }
+                _ => {}
+            }
+        }
+        let mut fragments = Vec::new();
+        request.groups.iter().for_each(|g| walk(g, &mut fragments));
+        if fragments.is_empty() {
+            return Ok(false);
+        }
+        if fragments.iter().any(|f| crate::fm_sidecar::text_form(f).is_empty()) {
+            return Ok(true);
+        }
+        Ok(fm.get()?.is_none())
     }
 
     /// Runs a search given as [`SearchOptions`] (the public API): the query
@@ -2535,7 +2680,15 @@ impl LineIndex {
 
         let searcher = self.reader.searcher();
         let fm = FmSlot { index: self, searcher: &searcher, cancel: cancel.as_ref(), found: Default::default() };
-        let walk = Walk { fm: &fm, cap: request.max_expanded_terms, cancel: cancel.as_ref() };
+        let walk = Walk { fm: &fm, cap: request.max_expanded_terms, cancel: cancel.as_ref(), decline: request.decline_over_cap };
+        if self.substring_declined(request, &fm)? {
+            let notices = if fm.unusable() {
+                vec![crate::fm_sidecar::NOTICE_FM_SIDECAR_UNUSABLE.to_string()]
+            } else {
+                Vec::new()
+            };
+            return Ok(SearchResult::declined_with(session, notices));
+        }
         let mut sinks = Vec::new();
         let mut relevance = request.order == ResultsOrder::Relevance;
         // The request groups the main sinks belong to, when not all of them
@@ -2642,6 +2795,11 @@ impl LineIndex {
         // Every sink of this search (main query, phrase alternatives, negative
         // query): the result is truncated when any walk hit its cap.
         let mut watched: Vec<MatchedTermsSink> = sinks.clone();
+        // Decline over the cap (issue G-K1): an expansion answered while the
+        // slots were built (the FM sidecar's) declines before any doc is read.
+        if request.decline_over_cap && watched.iter().any(|s| s.is_truncated()) {
+            return Ok(SearchResult::declined_with(session, Vec::new()));
+        }
         // Phrase alternatives (Otzaria's acronym expansions): each an
         // adjacent, ordered, all-words phrase, ORed with the main query.
         let mut alternatives: Vec<(Vec<MatchedTermsSink>, Box<dyn Query>)> = Vec::new();
@@ -2935,6 +3093,9 @@ impl LineIndex {
             // a phrase that cannot match: no hit can carry it
             let Some(q) = q else {
                 let truncated = watched.iter().chain(&sinks).any(|s| s.is_truncated());
+                if request.decline_over_cap && truncated {
+                    return Ok(SearchResult::declined_with(session, with_fm_notice(notices)));
+                }
                 return Ok(SearchResult::new(Vec::new(), session).with_notices(with_fm_notice(notices)).with_truncated(truncated));
             };
             watched.extend(sinks.iter().cloned());
@@ -2975,10 +3136,9 @@ impl LineIndex {
         let mut hits = Vec::new();
         // Relevance order only: each hit's (segment, doc), aligned with `hits`.
         let mut keys: Vec<(u32, DocId)> = Vec::new();
-        let books: Option<Arc<std::collections::HashSet<u64>>> =
-            request.books.as_ref().map(|b| Arc::new(b.iter().copied().collect()));
+        let books: Option<Arc<HitScope>> = HitScope::of(request);
         let collector = PlacedCollector {
-            books: books.clone(),
+            scope: books.clone(),
             drop_sections: drop_sections.clone(),
             // relevance scores the docs; positions locate the snippets from them
             keep_docs: relevance || self.options.positions,
@@ -3066,6 +3226,9 @@ impl LineIndex {
         }
         // The walks ran inside scorer creation: their caps are known now.
         let truncated = watched.iter().any(|s| s.is_truncated());
+        if request.decline_over_cap && truncated {
+            return Ok(SearchResult::declined_with(session, with_fm_notice(notices)));
+        }
         for (sinks, max_word_distance, require_ordered, proximity) in text_negatives {
             let negative_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
             // a word with no indexed form can never be present: no exclusion

@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 13; // 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 14; // 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -1788,7 +1788,10 @@ pub unsafe extern "C" fn se_search_counts(search: *const SearchResult) -> *mut c
     })
 }
 
-/// How the search was served, as JSON: `{"notices":["..."],"truncated":false}`.
+/// How the search was served, as JSON:
+/// `{"notices":["..."],"truncated":false,"declined":false,"order_stamp":"..."}`.
+/// `declined`: the index could not answer exactly and gave no hit (options
+/// `decline_over_cap` / `substring`, issue G-K1); the host reads the lines itself.
 /// `notices` are not errors: `"relevance_needs_positions"` = relevance order
 /// was asked for a phrase / proximity / multi-word fuzzy query on an index
 /// without positions, so the hits are in catalog order; `"fm_sidecar_unusable"` =

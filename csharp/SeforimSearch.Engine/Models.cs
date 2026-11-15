@@ -649,6 +649,19 @@ namespace SeforimSearch.Engine
         public ExcludeOptions? Exclude { get; set; }
         /// <summary>Filtered search: only these book ids. Null = every book.</summary>
         public List<long>? Books { get; set; }
+        /// <summary>Filtered search by catalog position (issue G-K1, FtsLib's
+        /// <c>FindSubstringCandidates</c> ranges): inclusive (First, Last) ranges, any order,
+        /// overlaps allowed; an empty list = no hits. Null = every position. Combined with
+        /// <see cref="Books"/>.</summary>
+        public List<(long First, long Last)>? PositionRanges { get; set; }
+        /// <summary>Decline instead of truncating: a word over its expansion cap gives no hit
+        /// and <see cref="SearchInfo.Declined"/> (FtsLib's null), so the host scans itself.</summary>
+        public bool DeclineOverCap { get; set; }
+        /// <summary>FtsLib's substring query (<c>FindSubstringCandidates</c>): every word is
+        /// cut into the indexer's terms, each matching EVERY term containing it (no affix
+        /// budget), all on one line. A superset: the host confirms the substring on the text.
+        /// Word options, distance and order do not apply.</summary>
+        public bool Substring { get; set; }
         /// <summary>Whole phrases ORed with the query (Otzaria's acronym expansion).</summary>
         public List<PhraseOptions> PhraseAlternatives { get; } = new List<PhraseOptions>();
         /// <summary>Otzaria's user regex: a query wrapped in /.../ is a regex. Off (the
@@ -751,6 +764,21 @@ namespace SeforimSearch.Engine
                 }
                 sb.Append(']');
             }
+            if (PositionRanges != null)
+            {
+                sb.Append(",\"position_ranges\":[");
+                for (int i = 0; i < PositionRanges.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    if (PositionRanges[i].First < 0 || PositionRanges[i].Last < 0)
+                        throw new ArgumentOutOfRangeException(nameof(PositionRanges));
+                    sb.Append('[').Append(PositionRanges[i].First.ToString(inv)).Append(',')
+                      .Append(PositionRanges[i].Last.ToString(inv)).Append(']');
+                }
+                sb.Append(']');
+            }
+            if (DeclineOverCap) sb.Append(",\"decline_over_cap\":true");
+            if (Substring) sb.Append(",\"substring\":true");
             if (PhraseAlternatives.Count > 0)
             {
                 sb.Append(",\"phrase_alternatives\":[");

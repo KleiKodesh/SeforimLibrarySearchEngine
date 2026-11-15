@@ -151,7 +151,7 @@ pub(crate) struct CrossRun {
     pub searcher: tantivy::Searcher,
     /// Each way of matching: its slots' terms, its matcher, its rule.
     pub ways: Vec<(Vec<Vec<String>>, Matcher, CrossRule)>,
-    pub books: Option<Arc<HashSet<u64>>>,
+    pub books: Option<Arc<crate::search::HitScope>>,
     pub negative: Option<Box<dyn tantivy::query::Weight>>,
     pub drop_sections: Option<Arc<HashSet<SectionKey>>>,
     pub marked: Option<tantivy::schema::Field>,

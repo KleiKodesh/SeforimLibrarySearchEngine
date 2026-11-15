@@ -439,7 +439,7 @@ class LineRegexStatus {
 
 /// How a search was served ([SearchSession.info]).
 class SearchInfo {
-  const SearchInfo(this.notices, {this.truncated = false, this.orderStamp = ''});
+  const SearchInfo(this.notices, {this.truncated = false, this.declined = false, this.orderStamp = ''});
 
   /// Notice: relevance order was asked for a phrase / proximity / multi-word
   /// fuzzy query on an index without positions; the hits are in catalog order.
@@ -457,13 +457,19 @@ class SearchInfo {
   /// (2000 per segment): terms beyond it were not searched.
   final bool truncated;
 
+  /// The index could not answer exactly and gave no hit (issue G-K1):
+  /// [SearchOptions.declineOverCap] with a word over its cap, or a
+  /// [SearchOptions.substring] word with no indexable term / no FM sidecar.
+  /// The host reads the lines itself.
+  final bool declined;
+
   /// The identity of the catalog order the hits' positions belong to (the
   /// index snapshot searched). Pass it as [SearchOptions.resumeStamp] with
   /// [SearchOptions.afterPosition] to resume safely (issue #12).
   final String orderStamp;
 
   static SearchInfo fromJson(Map<String, dynamic> j) => SearchInfo((j['notices'] as List).cast<String>(),
-      truncated: j['truncated'] as bool, orderStamp: (j['order_stamp'] as String?) ?? '');
+      truncated: j['truncated'] as bool, declined: (j['declined'] as bool?) ?? false, orderStamp: (j['order_stamp'] as String?) ?? '');
 }
 
 /// What a session's locate calls return for a passing hit (issues #14 / #23;

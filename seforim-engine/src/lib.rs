@@ -17,6 +17,8 @@ pub mod fm_index;
 pub mod fm_sidecar;
 #[cfg(test)]
 mod fm_equivalence_tests;
+#[cfg(test)]
+mod substring_tests;
 pub mod index;
 pub mod line_search;
 pub mod options;

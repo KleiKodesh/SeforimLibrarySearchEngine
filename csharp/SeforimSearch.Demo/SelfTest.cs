@@ -16,7 +16,7 @@ namespace SeforimSearch.Demo
     /// abandoned enumerator, concurrent rent, reopen on file change) and an end-to-end build +
     /// search through the FtsLib facade. Exit code 0 = all passed.
     /// </summary>
-    internal static class SelfTest
+    internal static partial class SelfTest
     {
         private const int LinesPerBook = 1500;
 
@@ -48,6 +48,9 @@ namespace SeforimSearch.Demo
                 ("per-book update (issue #29): changed / grown / removed books, crash mid-update, background merge", BookUpdates),
                 ("semantic search (issue #18): vectors, semantic-only, book filter, hybrid fusion, cancel", Semantic),
                 ("Otzaria vectors (issue #18): .oxv info, import by line ids, chunks, hybrid", OxvImport),
+                ("substring find (issue G-K1): FtsLib FindSubstringCandidates order, ranges, decline", SubstringFind),
+                ("coordinator (Core drop-in): build, progress, status, search, lines, reset, DB change", CoordinatorLifecycle),
+                ("related forms (Core's '+' / '=' rewrite): artifact lookup, markers", RelatedForms),
             };
             int failed = 0;
             foreach (var (name, body) in tests)

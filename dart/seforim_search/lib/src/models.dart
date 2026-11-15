@@ -615,6 +615,9 @@ class SearchOptions {
     this.maxExpandedTerms,
     this.lexicalFuzzy = false,
     this.proximityBase,
+    this.positionRanges,
+    this.declineOverCap = false,
+    this.substring = false,
   })  : words = words ?? {},
         phraseAlternatives = phraseAlternatives ?? [],
         bookGenerations = bookGenerations ?? {},
@@ -720,6 +723,21 @@ class SearchOptions {
   /// Filtered search: only these book ids. Null = every book.
   List<int>? books;
 
+  /// Filtered search by catalog position (issue G-K1): inclusive
+  /// `(first, last)` ranges, any order, overlaps allowed; an empty list = no
+  /// hits. Null = every position. Combined with [books].
+  List<(int, int)>? positionRanges;
+
+  /// Decline instead of truncating: a word over its expansion cap gives no
+  /// hit and [SearchInfo.declined] (FtsLib's null), so the host scans.
+  bool declineOverCap;
+
+  /// FtsLib's substring query (`FindSubstringCandidates`): every word is cut
+  /// into the indexer's terms, each matching EVERY term containing it (no
+  /// affix budget), all on one line. A superset: the host confirms the
+  /// substring on the text. Word options, distance and order do not apply.
+  bool substring;
+
   /// Whole phrases ORed with the query (Otzaria's acronym expansion).
   final List<PhraseOptions> phraseAlternatives;
 
@@ -761,6 +779,9 @@ class SearchOptions {
         if (proximity != null) 'proximity': proximity!.toJson(),
         if (exclude != null) 'exclude': exclude!.toJson(),
         if (books != null) 'books': books,
+        if (positionRanges != null) 'position_ranges': [for (final r in positionRanges!) [r.$1, r.$2]],
+        if (declineOverCap) 'decline_over_cap': true,
+        if (substring) 'substring': true,
         if (phraseAlternatives.isNotEmpty) 'phrase_alternatives': [for (final p in phraseAlternatives) p.toJson()],
         if (order != ResultsOrder.catalog) 'order': order.name,
         if (bookGenerations.isNotEmpty)

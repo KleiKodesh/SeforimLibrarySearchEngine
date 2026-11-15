@@ -41,7 +41,7 @@
 //! `done` compares the lines fed with the index's lines in scope: a host
 //! whose DB differs from its index also stops at the end of its own stream.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use hebrew_fts::line_regex::{Fragment, LinePlan, LineView, CLAUSE_MAX_TERMS, CLAUSE_POSTINGS_CAP, MAX_LINE_HITS};
@@ -83,7 +83,7 @@ pub(crate) struct LineRun {
     fed: u64,
     matched: Vec<PlacedHit>,
     pub(crate) truncated: bool,
-    books: Option<HashSet<u64>>,
+    books: Option<Arc<crate::search::HitScope>>,
     /// Resume: lines at or before this position are out of scope.
     after: Option<u64>,
     cancel: Option<CancelToken>,
@@ -128,7 +128,7 @@ impl LineRun {
         for (hit, ranges) in lines.iter().zip(found.iter_mut()) {
             // a line outside the book filter, or at or before the resume
             // position, is out of scope: not counted as fed
-            if self.books.as_ref().is_some_and(|b| !b.contains(&hit.book_id))
+            if self.books.as_ref().is_some_and(|b| !b.admits(hit.book_id, hit.position))
                 || self.after.is_some_and(|a| hit.position <= a)
             {
                 ranges.clear();
@@ -285,7 +285,7 @@ impl LineIndex {
     ) -> Result<SearchResult> {
         let plan = Arc::new(hebrew_fts::user_regex::parse_line(pattern).map_err(|e| Error::Unsupported(e.to_string()))?);
         let searcher = self.reader.searcher();
-        let books: Option<HashSet<u64>> = request.books.as_ref().map(|b| b.iter().copied().collect());
+        let books = crate::search::HitScope::of(request);
         let candidates = if self.options.keep_marks {
             None
         } else {
@@ -295,7 +295,7 @@ impl LineIndex {
         let (hits, full_scan, scope_lines) = match candidates {
             Some(query) => {
                 let collector = PlacedCollector {
-                    books: books.clone().map(Arc::new),
+                    scope: books.clone(),
                     drop_sections: None,
                     keep_docs: false,
                     after: request.after_position,
@@ -307,7 +307,7 @@ impl LineIndex {
                 let n = hits.len() as u64;
                 (hits, false, n)
             }
-            None => (Vec::new(), true, scope_line_count(&searcher, books.as_ref(), request.after_position)?),
+            None => (Vec::new(), true, scope_line_count(&searcher, books.as_deref(), request.after_position)?),
         };
         let session =
             SnippetSession::for_line(plan.clone(), request.context_words, self.options.keep_marks, cancel.clone());
@@ -433,7 +433,7 @@ fn long_word_lines(searcher: &Searcher) -> Result<Option<DocSetQuery>> {
 
 /// Live lines in scope (the book filter, or every line; past the resume
 /// position `after`, when set).
-fn scope_line_count(searcher: &Searcher, books: Option<&HashSet<u64>>, after: Option<u64>) -> Result<u64> {
+fn scope_line_count(searcher: &Searcher, books: Option<&crate::search::HitScope>, after: Option<u64>) -> Result<u64> {
     if books.is_none() && after.is_none() {
         return Ok(searcher.num_docs());
     }
@@ -443,9 +443,10 @@ fn scope_line_count(searcher: &Searcher, books: Option<&HashSet<u64>>, after: Op
         let position_column = segment.fast_fields().u64("position")?;
         let alive = segment.alive_bitset();
         for doc in 0..segment.max_doc() {
+            let position = position_column.first(doc).unwrap_or(0);
             if alive.is_none_or(|a| a.is_alive(doc))
-                && books.is_none_or(|books| book_column.first(doc).is_some_and(|b| books.contains(&b)))
-                && after.is_none_or(|a| position_column.first(doc).is_some_and(|p| p > a))
+                && books.is_none_or(|s| s.admits(book_column.first(doc).unwrap_or(0), position))
+                && after.is_none_or(|a| position > a)
             {
                 n += 1;
             }
@@ -712,7 +713,7 @@ mod tests {
                 (0..lines.len()).filter(|&i| super::line_passes(&plan, &lines[i])).map(|i| 100 + i as u64).collect();
             let Some(query) = index.line_candidates(&plan, &searcher, None).unwrap() else { continue };
             narrowed += 1;
-            let collector = crate::search::PlacedCollector { books: None, drop_sections: None, keep_docs: false, after: None };
+            let collector = crate::search::PlacedCollector { scope: None, drop_sections: None, keep_docs: false, after: None };
             let mut candidates: Vec<u64> = searcher.search(query.as_ref(), &collector).unwrap().iter().map(|h| h.line_id).collect();
             candidates.sort_unstable();
             let verified: Vec<u64> =

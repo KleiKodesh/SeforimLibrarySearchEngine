@@ -127,6 +127,10 @@ namespace FtsLib.Fts5
         /// <summary>Expansion cap per query word, one cap across all segments (null: 2000,
         /// FtsLib's; 0: uncapped). Whether it was hit: SearchInfo.Truncated.</summary>
         public int? MaxExpandedTerms { get; set; }
+
+        /// <summary>Each hit's snippet (FtsLib's SnippetMatchMode, issue #14): the best window
+        /// (default) or the whole line with every full occurrence marked.</summary>
+        public FtsLib.Snippets.SnippetMatchMode MatchMode { get; set; }
     }
 
     /// <summary>
@@ -193,7 +197,8 @@ namespace FtsLib.Fts5
             // (issue #21): keep the window as a word-level descriptor, so no text is read here;
             // the page finishes it with the text of the rows it shows.
             bool positions = Engine().GetInfo().Positions;
-            request.WordWindows = positions;
+            // (every match of the whole line is marked on its text: no word-level window then)
+            request.WordWindows = positions && options.MatchMode == FtsLib.Snippets.SnippetMatchMode.BestWindow;
             // Resume (FtsLib's afterPosition: rowid > position, 0 = from the start). FtsLib's
             // positions start at 1 and the engine's at 0 (same order), so FtsLib's position p
             // is the engine's p - 1; the engine bounds the hits while collecting.
@@ -205,6 +210,8 @@ namespace FtsLib.Fts5
             // prepared state. The native session is freed when the last result holding
             // it is collected (SafeHandle).
             var session = new SearchSessionRef(Engine().Search(request)); // no ct: the session outlives the enumeration (FtsLib-shaped locates never throw)
+            if (options.MatchMode != FtsLib.Snippets.SnippetMatchMode.BestWindow)
+                session.Session.MatchMode = (SeforimSearch.Engine.SnippetMatchMode)(int)options.MatchMode;
             using var corpus = _openCorpus();
             batchSizeAt ??= _ => 256;
 

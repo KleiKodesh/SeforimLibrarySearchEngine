@@ -382,6 +382,9 @@ mod tests {
             format!("{{\"groups\":[{}],\"exclude\":{{\"groups\":[{},{}],\"max_word_distance\":1}}}}", wp(1), w(2), w(3)),
             format!("{{\"groups\":[{}],\"phrase_alternatives\":[[{},{}]]}}", w(5), w(2), w(3)),
             format!("{{\"groups\":[{},{}],\"gaps\":[2],\"require_ordered\":true}}", w(0), w(4)),
+            // in order with a paired reading's two readings (shape `(w) [w]`)
+            format!("{{\"groups\":[{},{}],\"require_ordered\":true,\"max_word_distance\":0}}", w(1), w(3)),
+            format!("{{\"groups\":[{},{},{}],\"require_ordered\":true}}", w(3), w(1), w(5)),
             format!("{{\"groups\":[{},{},{}],\"max_word_distance\":0}}", w(2), w(0), w(1)),
         ];
         // a short context (the scan stops sooner) and a long one
@@ -549,15 +552,20 @@ mod tests {
         };
         let ((_d1, pos), (_d2, flat)) = (build(true), build(false));
         let mut checked = 0;
-        let distance: Vec<String> =
-            requests().into_iter().filter(|r| r.contains("max_word_distance") && !r.contains("\"gaps\"")).collect();
-        // (in order is left out: a paired reading's two readings share one
-        // position and never chain in order on the positions, a known
-        // difference from the text rule, issue #21)
+        // distance, in order and gaps requests; a paired reading's two
+        // readings share one word slot and chain in order in neither flavour
+        let distance: Vec<String> = requests()
+            .into_iter()
+            .filter(|r| r.contains("max_word_distance") || r.contains("require_ordered") || r.contains("\"gaps\""))
+            .collect();
         for json in distance {
             let request: SearchRequest = serde_json::from_str(&json).unwrap();
             let got: Vec<u64> = pos.search(&request).unwrap().hits.iter().map(|h| h.line_id).collect();
-            let mut c = flat.search(&request).unwrap();
+            // per-pair spacing (`gaps`) needs positions: no flat flavour
+            let Ok(mut c) = flat.search(&request) else {
+                assert!(json.contains("\"gaps\":["), "{}", json.escape_unicode());
+                continue;
+            };
             let candidates: Vec<u64> = c.hits.iter().map(|h| h.line_id).collect();
             let want: Vec<u64> =
                 candidates.into_iter().filter(|&id| c.session.locate_pair(text_of(id), None).is_some()).collect();

@@ -23,6 +23,9 @@ FTSLIB_FORMAT = "fts13"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVe
 MEASURED_FTSLIB = "fts13"     # FtsLib format of the runs in the results dir (= FTSLIB_FORMAT once rerun)
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
 STALE = [
+    "In order: a paired reading's two readings (one position) no longer chain on an index without "
+    "positions or in FtsLib (as with positions and Otzaria): the parity sets with in-order queries "
+    "need a rerun (both engines changed together).",
     "Divine-name placeholder spellings (issue #39, both engines, default): queries holding a spelling of the "
     "name now also find its other spellings; the parity sets and the Otzaria hit-count comparison need a rerun.",
     "Search speed and the first-page profile were measured on `tantivy9` / FtsLib `fts8` on the dev machine "

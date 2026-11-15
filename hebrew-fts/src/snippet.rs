@@ -1399,14 +1399,15 @@ fn any_order_window_on<'g>(
 const FREE: usize = usize::MAX;
 
 /// FtsLib in order: the tightest (i_left, i_right, char span) window holding
-/// one token per group in query order (by token index, a token in one slot),
-/// the earliest on a tie. Per group the latest chain start so far; a chain
-/// ending at a token of the last group starts there. Cross-line (`brk`): the
-/// chain starts on the first line and ends on the next. None without one.
-/// `word` (the word rule, see [`span_of`]): the slots also follow in
-/// strictly increasing positions, so the two readings of a paired reading
-/// (one position) never chain: the rule reads positions only, the same on
-/// the text and on the index positions.
+/// one token per group in query order, the slots in strictly increasing
+/// positions (a token in one slot), the earliest on a tie. The two readings
+/// of a paired reading share one position (one word slot) and never chain,
+/// in both flavours and as Otzaria's positions: the rule reads positions
+/// only, the same on the text and on the index positions. Per group the
+/// latest chain start so far; a chain ending at a token of the last group
+/// starts there. Cross-line (`brk`): the chain starts on the first line and
+/// ends on the next. None without one. `word` only picks the span measure
+/// (see [`span_of`]).
 #[inline(never)]
 fn ordered_cover_window(
     tokens: &[TextToken],
@@ -1428,8 +1429,10 @@ fn ordered_cover_window(
         if ordinals[t] == NO_TERM {
             continue;
         }
-        if word && tokens[t].position != at {
-            // a new position: the previous one's starts take effect
+        if tokens[t].position != at {
+            // a new position: the previous one's starts take effect (a
+            // paired reading's readings share one word slot and never
+            // chain in order, in both flavours, as Otzaria's positions)
             for p in pending.chunks_exact(2) {
                 let (g, v) = (p[0], p[1]);
                 if last[g] == FREE || v > last[g] {
@@ -1459,10 +1462,8 @@ fn ordered_cover_window(
                         best = Some((v, t, span));
                     }
                 }
-            } else if word {
+            } else {
                 pending.extend([g, v]);
-            } else if last[g] == FREE || v > last[g] {
-                last[g] = v;
             }
         }
     }
@@ -1883,32 +1884,47 @@ fn ordered_cover_marks(
     ends.resize(k * w, FREE);
     last.clear();
     last.resize(k, FREE);
-    for t in s..=e {
-        // slots read the previous group's state before this token
-        // updates it (a token fills one slot of a chain)
-        for &g in groups_of(t).iter() {
-            let v = if g == 0 { if brk.is_none_or(|b| t < b) { t } else { FREE } } else { last[g - 1] };
-            starts[g * w + t - s] = v;
-        }
-        for &g in groups_of(t).iter() {
-            let v = starts[g * w + t - s];
-            if v != FREE && (last[g] == FREE || v > last[g]) {
-                last[g] = v;
+    // Slots read the previous group's state before the tokens of one
+    // position update it: a token fills one slot of a chain, and a paired
+    // reading's readings (one word slot, one position) never chain.
+    let mut t = s;
+    while t <= e {
+        let run_end = (t..=e).find(|&u| pos(u) != pos(t)).unwrap_or(e + 1);
+        for u in t..run_end {
+            for &g in groups_of(u).iter() {
+                let v = if g == 0 { if brk.is_none_or(|b| u < b) { u } else { FREE } } else { last[g - 1] };
+                starts[g * w + u - s] = v;
             }
         }
+        for u in t..run_end {
+            for &g in groups_of(u).iter() {
+                let v = starts[g * w + u - s];
+                if v != FREE && (last[g] == FREE || v > last[g]) {
+                    last[g] = v;
+                }
+            }
+        }
+        t = run_end;
     }
     last.fill(FREE);
-    for t in (s..=e).rev() {
-        for &g in groups_of(t).iter() {
-            let v = if g == k - 1 { if brk.is_none_or(|b| t >= b) { t } else { FREE } } else { last[g + 1] };
-            ends[g * w + t - s] = v;
-        }
-        for &g in groups_of(t).iter() {
-            let v = ends[g * w + t - s];
-            if v != FREE && (last[g] == FREE || v < last[g]) {
-                last[g] = v;
+    let mut t = e + 1;
+    while t > s {
+        let run_start = (s..t).rev().find(|&u| pos(u) != pos(t - 1)).map_or(s, |u| u + 1);
+        for u in run_start..t {
+            for &g in groups_of(u).iter() {
+                let v = if g == k - 1 { if brk.is_none_or(|b| u >= b) { u } else { FREE } } else { last[g + 1] };
+                ends[g * w + u - s] = v;
             }
         }
+        for u in run_start..t {
+            for &g in groups_of(u).iter() {
+                let v = ends[g * w + u - s];
+                if v != FREE && (last[g] == FREE || v < last[g]) {
+                    last[g] = v;
+                }
+            }
+        }
+        t = run_start;
     }
     for t in s..=e {
         mask[t - s] = groups_of(t).iter().any(|&g| {
@@ -2098,6 +2114,26 @@ mod tests {
         assert!(prox_lines(text, &[&["\u{05D0}\u{05D1}"], &["\u{05D6}\u{05D7}"]], &ordered).is_none());
         let window = Proximity::AnyOrder { max_span: 1 };
         assert!(prox_lines(text, &[&["\u{05D6}\u{05D7}"], &["\u{05D4}\u{05D5}"]], &window).is_some());
+    }
+
+    #[test]
+    fn paired_readings_never_chain_in_order() {
+        // (X) [Y]: one word slot, so X then Y is no ordered pair, on the
+        // text (char span) and under the word rule alike; a real next word is.
+        let (x, y, z) = ("\u{05D2}\u{05D3}", "\u{05D4}\u{05D5}", "\u{05D6}\u{05D7}");
+        let text = format!("\u{05D0}\u{05D1} ({x}) [{y}] {z}");
+        for word in [false, true] {
+            let mut loc = SnippetWindowLocator::new(0);
+            loc.set_word_span(word);
+            let p = PreparedQueryGroups::from_groups(&[vec![x], vec![y]]);
+            assert!(!loc.locate(&text, &p, true, 0).is_match, "word {word}");
+            assert!(loc.locate(&text, &p, false, 0).is_match, "word {word}");
+            let p = PreparedQueryGroups::from_groups(&[vec![x], vec![y], vec![z]]);
+            assert!(!loc.locate(&text, &p, true, 0).is_match, "word {word}");
+            let p = PreparedQueryGroups::from_groups(&[vec![y], vec![z]]);
+            let d = loc.locate(&text, &p, true, 0);
+            assert!(d.is_match && d.word_distance == 0, "word {word}");
+        }
     }
 
     #[test]

@@ -716,6 +716,9 @@ mod tests {
             format!("{ab} \u{05D5}{dalet}"),                // 3: with a prefix
             format!("{qof} {ab}"),                          // 4: out of phrase order
             format!("{ab} \u{05D9}\u{05E7}\u{05D5}\u{05D3}"), // 5: mixed, no name
+            format!("{ab} \u{05D9}\u{05D9}"),                 // 6: double yod
+            format!("{ab} \u{05D0}\u{05DC}\u{05E7}\u{05D9}\u{05DD}"), // 7: Elohim placeholder
+            format!("{ab} \u{05D4}\u{05D9}\u{05D9}"),         // 8: he + double yod, another word
         ];
         let docs: Vec<LineDoc> =
             texts.iter().enumerate().map(|(i, t)| line(i as u64 + 1, i as u64, 1, t)).collect();
@@ -736,14 +739,16 @@ mod tests {
             let ids = |v: &[(u64, Vec<String>)]| v.iter().map(|x| x.0).collect::<Vec<_>>();
             for q in [full, qof, dalet] {
                 let r = run(q.to_string());
-                assert_eq!(ids(&r), [1, 2, 4], "positions={positions}");
+                assert_eq!(ids(&r), [1, 2, 4, 6], "positions={positions}");
                 assert_eq!(r[0].1, vec![full.to_string()]);
                 assert_eq!(r[1].1, vec![qof.to_string()]);
             }
+            // Elohim with he finds the qof placeholder
+            assert_eq!(ids(&run("\u{05D0}\u{05DC}\u{05D4}\u{05D9}\u{05DD}".to_string())), [7], "positions={positions}");
             // a prefixed query word maps with its prefix
             assert_eq!(ids(&run(format!("\u{05D5}{full}"))), [3], "positions={positions}");
             // a quoted phrase follows too, in order
-            assert_eq!(ids(&run(format!("\"{ab} {dalet}\""))), [1, 2], "positions={positions}");
+            assert_eq!(ids(&run(format!("\"{ab} {dalet}\""))), [1, 2, 6], "positions={positions}");
         }
     }
 

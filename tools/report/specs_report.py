@@ -161,7 +161,7 @@ md.append(f"""## Engines compared
 | Otzaria word options (grammar/advanced/Aramaic prefixes+suffixes, ktiv, part of word, typo modes, quotes) | done |
 | Ketiv rule sets: Otzaria's or FtsLib's KetivExpander (`ktiv_rules`) | done |
 | One search options object, per-word options (negative words too), alternatives, acronyms | done |
-| Divine-name placeholder spellings (issue #39): a word in the full spelling or a placeholder (letters 2 and 4 replaced, up to two prefixes) also finds the other spellings, always on, every literal word and quoted phrase (both engines) | done; unit tests; parity rerun pending |
+| Divine-name placeholder spellings (issue #39): a word in one spelling of the tetragrammaton (full, U+05E7 / U+05D3 placeholders, double yod) or of Elohim (U+05E7 for U+05D4) also finds the other spellings, up to two prefixes, other-word prefix pairs excluded, always on, every literal word and quoted phrase (both engines) | done; unit tests; parity rerun pending |
 | Otzaria proximity (per-pair gaps, any order), word match (all/any/most/at least N) | done |
 | Otzaria tokenizer rules (one-letter words, digits, joiners, geresh, paired readings, 128-byte limit) in both engines | done |
 | Vocalized matching (nikud / te'amim) as a walk on a keep-marks index (plain, wildcard and fuzzy words) | done |

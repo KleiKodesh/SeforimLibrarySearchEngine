@@ -239,12 +239,12 @@ seforim.db knowledge). Hits carry no TOC entry; the host reads it by line id.
   every walk reads them zero-width (`MarkFree`) unless match_nikud / match_teamim
   require typed marks; the cap groups mark-free forms. Vocalized mode filters to lines
   carrying a mark (`marked` field), as Otzaria's textVocalized. Old exact-marks mode gone.
-- **Divine-name spellings are one class, always on** (user, issue #39): a literal query word
-  in the full tetragrammaton or a placeholder (U+05E7 / U+05D3 in places 2 and 4, up to two
-  prefixes) also searches the other two (hebrew-fts `divine_names.rs` = FtsLib `DivineNames.cs`,
-  query-side, no index change; alternatives get no ktiv, as FtsLib). DB survey: these forms are rare
-  (~700 real); the frequent placeholders are Elohim with U+05E7 for U+05D4 (~127k) and letter+geresh
-  forms (ambiguous with numerals): extending the table is a user decision. Dashed forms are two words.
+- **Divine-name spellings, always on** (user, issue #39): a literal query word in one spelling
+  also searches the others of its class (hebrew-fts `divine_names.rs` = FtsLib `DivineNames.cs`,
+  query-side, no index change, no ktiv on the alternatives). Classes (user-approved from the
+  seforim.db survey): tetragrammaton (full, U+05E7 / U+05D3 placeholders, double yod) and Elohim
+  with U+05E7 for U+05D4 (fixed suffix list). Excluded other words: U+05E9 + U+05D3 form,
+  U+05D4 / U+05DB + double yod. Not built (ambiguous): U+05E7 U+05DC, letter+geresh, dashed forms.
 - FtsLib wildcard budgets: anchor ≥2, ≤4 `?`, leading `*` ≤3, trailing/internal ≤4,
   both ≤7. Cap 2000, shortest first, then doc count.
 

@@ -446,15 +446,17 @@ final class IndexWriter implements Finalizable {
   /// from another isolate through [ResortProgressCell.address]). Blocking:
   /// run it on a worker isolate. Background priority when the writer has it.
   /// Disk: about twice the index size at the peak. Returns the line count.
-  int resortAndClose(List<int> bookOrder, {SearchCancelToken? cancel, ResortProgressCell? progress}) {
+  int resortAndClose(List<int> bookOrder, {SearchCancelToken? cancel, ResortProgressCell? progress}) =>
+      _resortAndClose(bookOrder, cancel?.handle ?? nullptr, progress?.handle ?? nullptr);
+
+  int _resortAndClose(List<int> bookOrder, Pointer<Void> cancel, Pointer<Void> progress) {
     final h = _h;
     _n.writerCloseFinalizer.detach(this);
     _handle = nullptr; // native side frees it whatever the outcome
     return using((a) {
       final ids = a<Uint64>(bookOrder.isEmpty ? 1 : bookOrder.length);
       ids.asTypedList(bookOrder.length).setAll(0, bookOrder);
-      final lines = _n.writerResortAndClose(
-          h, ids, bookOrder.length, cancel?.handle ?? nullptr, progress?.handle ?? nullptr);
+      final lines = _n.writerResortAndClose(h, ids, bookOrder.length, cancel, progress);
       if (lines < 0) throw _n.error();
       return lines;
     });
@@ -468,3 +470,10 @@ final class IndexWriter implements Finalizable {
     _handle = nullptr;
   }
 }
+
+/// [IndexWriter.resortAndClose] with the cancel token and progress cell
+/// given by their native addresses (0 = none): the [SearchWorker] uses it,
+/// the caller's isolate keeping both objects alive. Not exported.
+int writerResortAndCloseAt(IndexWriter writer, List<int> bookOrder, int cancelAddress, int progressAddress) =>
+    writer._resortAndClose(bookOrder, cancelAddress == 0 ? nullptr : Pointer.fromAddress(cancelAddress),
+        progressAddress == 0 ? nullptr : Pointer.fromAddress(progressAddress));

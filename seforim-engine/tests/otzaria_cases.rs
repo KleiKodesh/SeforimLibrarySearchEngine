@@ -903,3 +903,40 @@ fn typo_overflow_rank_is_one_cap_across_segments() {
         assert_eq!(many, one, "typed={typed}");
     }
 }
+
+/// Otzaria 7.0.1 `build_word_regex`: the typo edits run over every
+/// candidate, the user's alternative words included. Here an alternative
+/// is its own walk with the word's options, so it takes the edits too.
+#[test]
+fn alternative_words_take_the_typo_edits() {
+    let query = format!("\u{05E1}\u{05E4}\u{05E8}\u{05D9}\u{05DD} {DQL}");
+    let mut with_alt = SearchOptions {
+        query: query.clone(),
+        spelling_errors: true,
+        ..Default::default()
+    };
+    // edits of the alternative: a substitution (line 1), a deletion (line 2)
+    with_alt.words.insert(
+        0,
+        WordOptions {
+            alternatives: vec![LLBVT.into()],
+            ..Default::default()
+        },
+    );
+    let without = SearchOptions {
+        query,
+        spelling_errors: true,
+        ..Default::default()
+    };
+    for positions in [true, false] {
+        assert_eq!(
+            matches_options(PALM, positions, &with_alt),
+            vec![1, 2],
+            "positions={positions}"
+        );
+        assert!(
+            matches_options(PALM, positions, &without).is_empty(),
+            "positions={positions}"
+        );
+    }
+}

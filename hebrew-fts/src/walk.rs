@@ -6,7 +6,9 @@
 //! prefixes/suffixes, incl. Aramaic) or a counted any-letter run (advanced /
 //! part-of-word). Core variants come from the enabled generators (ktiv
 //! מלא/חסר, Aramaic endings); the typo option adds edit states to the core
-//! phase. The walk visits only branches a candidate shape allows; the index
+//! phase (a lone word, or `TypoMode::FullEdit1`) or, in Otzaria mode, its
+//! sampled list and the 7.0.1 single-letter edit roots as core forms (their
+//! affixes derived from each edited root). The walk visits only branches a candidate shape allows; the index
 //! itself verifies existence.
 //!
 //! Options (per the Otzaria spec):

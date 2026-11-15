@@ -76,8 +76,8 @@ pub enum TypoMode {
     /// sampled list (`generate_typo_variations`: confusions, transpositions,
     /// deletions, insertions of 13 letters; 3 letters: confusions only; cap
     /// 128, 64 in a phrase), composed with the other options, plus from 4
-    /// letters every single-letter edit of the typed form
-    /// (`generate_typo_edits`, see [`Typo::Letters`]).
+    /// letters every single-letter edit of the typed form as its own root
+    /// (`generate_typo_edits`, see [`typo_edit_roots`]).
     #[default]
     Otzaria,
     /// Edit distance 1 for every word of ≥4 letters in every combination
@@ -218,22 +218,6 @@ enum Typo {
     /// ≥4 letters: edit distance 1 (substitution, deletion, insertion,
     /// adjacent transposition; Otzaria's `FuzzyTermQuery(.., 1, true)`).
     Full,
-    /// ≥4 letters beside other options or in a phrase (Otzaria 7.0.1
-    /// `generate_typo_edits`): one substitution or insertion of a Hebrew
-    /// letter (`typo_letters`: U+05D0..U+05EA, U+05F0..U+05F2), one adjacent
-    /// transposition or one deletion, applied to the typed form only (its
-    /// Aramaic ending swap included, never a ktiv variant: a second edit),
-    /// then through the other options.
-    Letters,
-}
-
-/// A core form a [`Typo::Letters`] edit may change (the typed form).
-const CORE_EDITABLE: u8 = 32;
-
-/// Otzaria `typo_letters`: the letters a 7.0.1 typo edit substitutes or
-/// inserts.
-fn is_typo_letter(c: char) -> bool {
-    matches!(c, '\u{05D0}'..='\u{05EA}' | '\u{05F0}'..='\u{05F2}')
 }
 
 /// Letters of a form, marks not counted (Otzaria `base_len`).
@@ -320,7 +304,7 @@ fn tagged_forms(form: &str, options: &WalkOptions, window: bool, out: &mut Vec<(
 /// Otzaria's order (`build_word_regex` → `word_to_pattern`): typo variants,
 /// each with its Aramaic final-letter swap, each fanned into its כתיב
 /// מלא/חסר variants.
-fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
+fn core_variants(word: &str, options: &WalkOptions, edits: bool) -> BTreeSet<String> {
     // Strip from the query word whatever the walk will treat as transparent:
     // the self-loops then do the matching against the index.
     let word: String = word
@@ -333,19 +317,26 @@ fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
     // matches with free marks (its `vocalized_free_pattern`).
     let stripped = crate::chars::strip_term_marks(&word);
     if stripped.len() != word.len() {
-        let mut set = core_variants(&stripped, options);
-        set.remove(stripped.as_ref());
+        let stripped = stripped.into_owned();
+        let mut set = core_variants(&stripped, options, false);
+        set.remove(&stripped);
         set.insert(word);
+        // 7.0.1 edits of the mark-free base, matched with free marks; no
+        // Aramaic swap (`word_to_pattern_vocalized` has none)
+        if edits && matches!(typo_plan(&stripped, options), TypoPlan::ListAndEdits(_)) {
+            set.extend(typo_edit_roots(&stripped, false));
+        }
         return set;
     }
     let mut set = BTreeSet::new();
     // Otzaria's order: the typo roots first, each through the other options.
-    match typo_plan(&word, options) {
+    let plan = typo_plan(&word, options);
+    match plan {
         TypoPlan::List(cap) | TypoPlan::ListAndEdits(cap) => {
             set.extend(variants::otzaria_typo_variations(&word, cap))
         }
         _ => {
-            set.insert(word);
+            set.insert(word.clone());
         }
     }
     if options.aramaic_suffixes {
@@ -377,7 +368,125 @@ fn core_variants(word: &str, options: &WalkOptions) -> BTreeSet<String> {
                 .collect()
         });
     }
+    // 7.0.1 `typo_edit_branches`: the edits after the other forms, each its
+    // own root through `word_to_pattern` without spelling (so no ktiv
+    // variant), its affixes derived from the edited root itself
+    if edits && matches!(plan, TypoPlan::ListAndEdits(_)) {
+        set.extend(typo_edit_roots(&word, options.aramaic_suffixes));
+    }
     set
+}
+
+/// Otzaria `typo_letters`: the letters a 7.0.1 typo edit substitutes or
+/// inserts (`typo_substitute` / `TYPO_ANY_LETTER`).
+fn typo_letters() -> impl Iterator<Item = char> {
+    ('\u{05D0}'..='\u{05EA}').chain('\u{05F0}'..='\u{05F2}')
+}
+
+/// Otzaria 7.0.1 `generate_typo_edits` of `word` (4+ letters): each letter
+/// substituted by any other Hebrew letter (any letter for a non-letter),
+/// a Hebrew letter inserted at every position, each adjacent pair of
+/// different characters swapped, each character deleted. With `aramaic`,
+/// each edited root also takes its Aramaic ending swap (`word_to_pattern`
+/// applies `aramaic_root_variants` to the root it gets).
+fn typo_edit_roots(word: &str, aramaic: bool) -> BTreeSet<String> {
+    let chars: Vec<char> = word.chars().collect();
+    let n = chars.len();
+    let mut out = BTreeSet::new();
+    let edit = |at: usize, len: usize, with: &[char]| -> String {
+        chars[..at]
+            .iter()
+            .chain(with)
+            .chain(&chars[at + len..])
+            .collect()
+    };
+    // the last character substituted and a letter inserted at the end are
+    // wildcard-ended roots: [`typo_edit_wild_roots`]
+    for i in 0..n.saturating_sub(1) {
+        for l in typo_letters().filter(|&l| l != chars[i]) {
+            out.insert(edit(i, 1, &[l]));
+        }
+    }
+    for i in 0..n {
+        for l in typo_letters() {
+            out.insert(edit(i, 0, &[l]));
+        }
+    }
+    for i in 0..n.saturating_sub(1) {
+        if chars[i] != chars[i + 1] {
+            out.insert(edit(i, 2, &[chars[i + 1], chars[i]]));
+        }
+    }
+    for i in 0..n {
+        let deleted = edit(i, 1, &[]);
+        if !deleted.is_empty() {
+            out.insert(deleted);
+        }
+    }
+    if aramaic {
+        out = variants::expand_set(&out, variants::aramaic_ending_variants);
+    }
+    out
+}
+
+/// The 7.0.1 edits whose last character is Otzaria's typo wildcard (the
+/// last character substituted, `TYPO_OTHER_LETTER`, or a letter inserted at
+/// the end, `TYPO_ANY_LETTER`), spelled out letter by letter. Otzaria's affix
+/// rules read the root's last character, and a wildcard is no letter: no
+/// final-letter base form, no final-he stems, verb suffixes allowed, no
+/// Aramaic ending swap. [`tagged_wild_form`] tags them so.
+fn typo_edit_wild_roots(word: &str) -> BTreeSet<String> {
+    let chars: Vec<char> = word.chars().collect();
+    let mut out = BTreeSet::new();
+    if let Some((&last, head)) = chars.split_last() {
+        for l in typo_letters().filter(|&l| l != last) {
+            out.insert(head.iter().chain([&l]).collect());
+        }
+    }
+    for l in typo_letters() {
+        out.insert(chars.iter().chain([&l]).collect());
+    }
+    out
+}
+
+/// The word the 7.0.1 edits start from ([`core_variants`]' preparation:
+/// quotes stripped under ignore-quotes, the mark-free base), when its
+/// typo plan takes them.
+fn typo_edit_word(word: &str, options: &WalkOptions) -> Option<String> {
+    let word: String = word
+        .chars()
+        .filter(|&c| !(options.ignore_quotes && crate::chars::is_term_quote(c)))
+        .collect();
+    let base = crate::chars::strip_term_marks(&word).into_owned();
+    matches!(typo_plan(&base, options), TypoPlan::ListAndEdits(_)).then_some(base)
+}
+
+/// [`tagged_forms`] for a root ending in Otzaria's typo wildcard: the
+/// last character is no letter, so the root takes the plain arm (Otzaria
+/// `suffix_sides` without a final-letter or final-he rule; verb suffixes
+/// for a 3-4 letter root without quotes, as `takes_verb_suffixes` passes a
+/// wildcard).
+fn tagged_wild_form(form: &str, options: &WalkOptions, window: bool, out: &mut Vec<(String, u8)>) {
+    let letters = form_letters(form);
+    let quoted = form.contains(is_term_quote);
+    let long_enough = quoted || letters >= MIN_GRAM_ROOT_LETTERS;
+    let prefixable = if long_enough { CORE_PREFIXABLE } else { 0 };
+    let gram = options.grammar_suffixes && long_enough;
+    let gram_tags = if gram {
+        CORE_GRAM
+            | if (3..=4).contains(&letters) && !quoted {
+                CORE_VERB
+            } else {
+                0
+            }
+    } else {
+        0
+    };
+    let window_tag = if window { CORE_WINDOW } else { 0 };
+    out.push((
+        form.to_string(),
+        CORE_BARE | window_tag | gram_tags | prefixable,
+    ));
 }
 
 /// How the typo option expands this word.
@@ -387,8 +496,8 @@ enum TypoPlan {
     Automaton(Typo),
     /// Otzaria's sampled list (cap) as core forms of the walk's trie.
     List(usize),
-    /// The sampled list plus the [`Typo::Letters`] edit states (Otzaria
-    /// 7.0.1: a 4+-letter word in a phrase or with other options).
+    /// The sampled list plus the 7.0.1 edit roots ([`typo_edit_roots`]),
+    /// all core forms (a 4+-letter word in a phrase or with other options).
     ListAndEdits(usize),
 }
 
@@ -435,23 +544,6 @@ fn typo_plan(word: &str, options: &WalkOptions) -> TypoPlan {
 }
 
 // ── Composite automaton ──────────────────────────────────────────────────
-
-/// The core forms a [`Typo::Letters`] edit starts from (Otzaria 7.0.1
-/// `typo_edit_branches` -> `word_to_pattern` without spelling): the typed
-/// form and, plain, its Aramaic ending swaps; vocalized, the typed form only
-/// (`word_to_pattern_vocalized` has no swap).
-fn editable_forms(word: &str, options: &WalkOptions) -> BTreeSet<String> {
-    let word: String = word
-        .chars()
-        .filter(|&c| !(options.ignore_quotes && crate::chars::is_term_quote(c)))
-        .collect();
-    let vocalized = crate::chars::strip_term_marks(&word).len() != word.len();
-    if options.aramaic_suffixes && !vocalized {
-        variants::aramaic_ending_variants(&word)
-    } else {
-        BTreeSet::from([word])
-    }
-}
 
 /// NFA configuration, packed: tag(3) | pending-kind(3) | value(32).
 /// Tags: 0 = closed-prefix trie node, 1 = any-prefix letter count,
@@ -617,8 +709,8 @@ impl HebrewWalkAutomaton {
         Self::build(word, options, true)
     }
 
-    /// [`Self::new`]; `edits` false leaves out the [`Typo::Letters`] edit
-    /// states (the overflow rank's middle tier).
+    /// [`Self::new`]; `edits` false leaves out the 7.0.1 edit roots (the
+    /// overflow rank's middle tier).
     fn build(word: &str, options: &WalkOptions, edits: bool) -> HebrewWalkAutomaton {
         let free_marks = word.chars().any(crate::chars::is_term_mark);
         let letters = word.chars().filter(|&c| crate::chars::starts_word(c)).count(); // letters and digits, marks not
@@ -650,7 +742,6 @@ impl HebrewWalkAutomaton {
         let grammar_prefix_max = options.grammar_prefix_max_letters.map(|m| m as usize);
         let typo = match typo_plan(word, options) {
             TypoPlan::Automaton(t) => t,
-            TypoPlan::ListAndEdits(_) if edits => Typo::Letters,
             TypoPlan::Off | TypoPlan::List(_) | TypoPlan::ListAndEdits(_) => Typo::Off,
         };
 
@@ -673,19 +764,13 @@ impl HebrewWalkAutomaton {
         } else {
             (None, None)
         };
-        let editable = if typo == Typo::Letters {
-            editable_forms(word, options)
-        } else {
-            BTreeSet::new()
-        };
         let mut tagged = Vec::new();
-        for form in core_variants(word, options) {
-            let from = tagged.len();
+        for form in core_variants(word, options, edits) {
             tagged_forms(&form, options, any_post > 0, &mut tagged);
-            if editable.contains(&form) {
-                for t in &mut tagged[from..] {
-                    t.1 |= CORE_EDITABLE;
-                }
+        }
+        if let Some(base) = typo_edit_word(word, options).filter(|_| edits) {
+            for form in typo_edit_wild_roots(&base) {
+                tagged_wild_form(&form, options, any_post > 0, &mut tagged);
             }
         }
 
@@ -737,7 +822,7 @@ impl HebrewWalkAutomaton {
             }
             TAG_CORE => {
                 // Typo deletion: skip one character of the core form.
-                if matches!(self.typo, Typo::Full | Typo::Letters) && config & EDITED == 0 {
+                if self.typo == Typo::Full && config & EDITED == 0 {
                     let gate = config & PREFIXED;
                     self.for_each_child_char(value(config), |_, target| {
                         self.close_into(pack(TAG_CORE, PEND_NONE, target) | gate | EDITED, set);
@@ -757,9 +842,6 @@ impl HebrewWalkAutomaton {
                     return;
                 }
                 let flags = self.core_flags(config);
-                if !self.edit_allowed(config, flags) {
-                    return;
-                }
                 if flags & CORE_GRAM != 0 {
                     if flags & CORE_VERB != 0 && self.verb_suffixes.is_some() {
                         self.close_into(pack(TAG_POST_VERB, PEND_NONE, SetAutomaton::ROOT), set);
@@ -798,13 +880,6 @@ impl HebrewWalkAutomaton {
         } else {
             flags
         }
-    }
-
-    /// A [`Typo::Letters`] edit changes the typed form only: an edited path
-    /// must end on a form tagged [`CORE_EDITABLE`].
-    #[inline]
-    fn edit_allowed(&self, config: Config, flags: u8) -> bool {
-        self.typo != Typo::Letters || config & EDITED == 0 || flags & CORE_EDITABLE != 0
     }
 
     /// Calls `f(char_key, node)` for every one- or two-byte character the
@@ -854,19 +929,13 @@ impl HebrewWalkAutomaton {
                     }
                 });
             }
-            Typo::Full | Typo::Letters => {
-                // 7.0.1 edits substitute or insert a Hebrew letter only
-                let letter = self.typo == Typo::Full || key_char(read).is_some_and(is_typo_letter);
-                if letter {
-                    self.close_into(pack(TAG_CORE, PEND_NONE, node) | gate | EDITED, out);
-                }
+            Typo::Full => {
+                self.close_into(pack(TAG_CORE, PEND_NONE, node) | gate | EDITED, out);
                 self.for_each_child_char(node, |k, target| {
                     if k == read {
                         return;
                     }
-                    if letter {
-                        self.close_into(pack(TAG_CORE, PEND_NONE, target) | gate | EDITED, out);
-                    }
+                    self.close_into(pack(TAG_CORE, PEND_NONE, target) | gate | EDITED, out);
                     let mut after = None;
                     self.for_each_child_char(target, |k2, t2| {
                         if k2 == read {
@@ -1042,10 +1111,7 @@ impl HebrewWalkAutomaton {
             // Zero suffix: the word may simply end here (unless it passed a
             // required mark unread without an edit).
             TAG_CORE => {
-                let flags = self.core_flags(config);
-                flags & CORE_BARE != 0
-                    && (config & FREE == 0 || config & EDITED != 0)
-                    && self.edit_allowed(config, flags)
+                self.core_flags(config) & CORE_BARE != 0 && (config & FREE == 0 || config & EDITED != 0)
             }
             TAG_POST => self
                 .suffixes
@@ -1187,27 +1253,40 @@ impl HebrewWalkQuery {
 
     /// Otzaria 7.0.1 (`collect_in_branch_order`): when a typo word's
     /// expansion overflows the cap, the forms the other options match
-    /// without a typo come first (rank 0), then the sampled typo list
-    /// (1), then the single-letter edits (2); within a rank the cap's own
-    /// order. None for any other word (shortest first only).
+    /// without a typo come first (rank 0), then the sampled typo list (1),
+    /// then the single-letter edits (2); within a rank the cap's own order.
+    /// None for any other word (shortest first only).
     fn overflow_rank(&self, mark_free: bool) -> Option<tantivy::query::ExpansionRank> {
         let o = &self.options;
         let typed = required_marks_form(&self.word, o.match_nikud, o.match_teamim);
-        if !matches!(typo_plan(&typed, o), TypoPlan::ListAndEdits(_)) {
+        let plain = crate::chars::strip_term_marks(&typed);
+        if !matches!(typo_plan(&plain, o), TypoPlan::ListAndEdits(_)) {
             return None;
         }
         let quote_free = !o.exact_quotes;
         let exact = QuoteFree::new(
-            HebrewWalkAutomaton::new(&typed, &WalkOptions { spelling_errors: false, ..*o }),
+            HebrewWalkAutomaton::new(
+                &typed,
+                &WalkOptions {
+                    spelling_errors: false,
+                    ..*o
+                },
+            ),
             quote_free,
         );
         let list = QuoteFree::new(HebrewWalkAutomaton::build(&typed, o, false), quote_free);
         type Accepts = Box<dyn Fn(&[u8]) -> bool + Send + Sync>;
         let (exact, list): (Accepts, Accepts) = if mark_free {
-            let (e, l) = (crate::marks::MarkFree::new(exact), crate::marks::MarkFree::new(list));
+            let (e, l) = (
+                crate::marks::MarkFree::new(exact),
+                crate::marks::MarkFree::new(list),
+            );
             (Box::new(move |t| run(&e, t)), Box::new(move |t| run(&l, t)))
         } else {
-            (Box::new(move |t| run(&exact, t)), Box::new(move |t| run(&list, t)))
+            (
+                Box::new(move |t| run(&exact, t)),
+                Box::new(move |t| run(&list, t)),
+            )
         };
         Some(Arc::new(move |key: &[u8]| {
             if exact(key) {
@@ -1283,6 +1362,7 @@ mod tests {
         for o in [
             WalkOptions::default(),
             WalkOptions { ktiv_male_haser: true, aramaic_suffixes: true, ..Default::default() },
+            WalkOptions { spelling_errors: true, phrase_word: true, ..Default::default() },
         ] {
             assert!(matches!(walk("תורה", o).start(), WalkState::Trie(_)), "{o:?}");
         }
@@ -1290,8 +1370,6 @@ mod tests {
             WalkOptions { grammar_prefixes: true, ..Default::default() },
             WalkOptions { ignore_quotes: true, ..Default::default() },
             WalkOptions { spelling_errors: true, ..Default::default() }, // lone word: edit states
-            // a phrase word: the sampled list plus the 7.0.1 letter edits
-            WalkOptions { spelling_errors: true, phrase_word: true, ..Default::default() },
         ] {
             assert!(matches!(walk("תורה", o).start(), WalkState::Nfa(_)), "{o:?}");
         }
@@ -1593,7 +1671,13 @@ mod tests {
     // the scan.
     #[test]
     fn otzaria_typo_with_options_uses_the_sampled_list_and_letter_edits() {
-        let a = walk("ברכה", otz(WalkOptions { grammar_prefixes: true, ..Default::default() }));
+        let a = walk(
+            "ברכה",
+            otz(WalkOptions {
+                grammar_prefixes: true,
+                ..Default::default()
+            }),
+        );
         for v in ["והברקה", "ברכ", "רבכה", "בברכה", "וברכה"] {
             assert!(matches(&a, v), "{v}");
         }
@@ -1606,23 +1690,70 @@ mod tests {
         assert!(!matches(&a, "ברכ1ה"));
         assert!(!matches(&a, "בר1ה"));
         assert!(!matches(&a, "ברזגה"));
-        let a = walk("ברכה", otz(WalkOptions { phrase_word: true, ..Default::default() }));
+        let a = walk(
+            "ברכה",
+            otz(WalkOptions {
+                phrase_word: true,
+                ..Default::default()
+            }),
+        );
         for v in ["ברקה", "ברכגה", "ברזה"] {
             assert!(matches(&a, v), "{v}");
         }
         // the edits start from the typed form, never from a ktiv variant
-        let a = walk("ברכה", otz(WalkOptions { ktiv_male_haser: true, ..Default::default() }));
+        let a = walk(
+            "ברכה",
+            otz(WalkOptions {
+                ktiv_male_haser: true,
+                ..Default::default()
+            }),
+        );
         assert!(matches(&a, "ברזה"));
         assert!(!matches(&a, "בריזה"));
-        // plain, the typed form's Aramaic ending swap is edited too
-        let a = walk("ברכה", otz(WalkOptions { aramaic_suffixes: true, ..Default::default() }));
+        // plain, an edited root takes its own Aramaic ending swap
+        let a = walk(
+            "ברכה",
+            otz(WalkOptions {
+                aramaic_suffixes: true,
+                ..Default::default()
+            }),
+        );
         assert!(matches(&a, "זרכא"));
+        // suffixes are derived from the edited root (Otzaria affix_arms):
+        // a concrete edited root ending in a final letter takes a suffix on
+        // its base form only; an edit of the last character is Otzaria's
+        // wildcard, no letter, so any letter (a final one too) takes it
+        let a = walk(
+            "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
+            otz(WalkOptions {
+                grammar_suffixes: true,
+                ..Default::default()
+            }),
+        );
+        assert!(matches(&a, "\u{05E9}\u{05DC}\u{05D5}\u{05DE}\u{05D5}")); // the typed root, base form + suffix
+        assert!(matches(&a, "\u{05E9}\u{05DC}\u{05DE}\u{05D9}\u{05DD}")); // deletion root, base form + suffix
+        assert!(!matches(&a, "\u{05E9}\u{05DC}\u{05DD}\u{05D9}\u{05DD}")); // its final form takes none
+        assert!(matches(&a, "\u{05E9}\u{05DC}\u{05D5}\u{05E0}\u{05D5}")); // last letter edited + suffix
+        assert!(matches(&a, "\u{05E9}\u{05DC}\u{05D5}\u{05DF}\u{05D5}")); // the wildcard is any letter
+
         // 3 letters: the sampled confusions only
-        let a = walk("שבת", otz(WalkOptions { phrase_word: true, ..Default::default() }));
+        let a = walk(
+            "שבת",
+            otz(WalkOptions {
+                phrase_word: true,
+                ..Default::default()
+            }),
+        );
         assert!(matches(&a, "שבט"));
         assert!(!matches(&a, "שבר"));
         // Otzaria advanced_typo_partial_single_word_finds_document.
-        let a = walk("משה", otz(WalkOptions { part_of_word: true, ..Default::default() }));
+        let a = walk(
+            "משה",
+            otz(WalkOptions {
+                part_of_word: true,
+                ..Default::default()
+            }),
+        );
         assert!(matches(&a, "משה"));
         assert!(matches(&a, "ממשה"));
     }
@@ -1892,6 +2023,43 @@ mod tests {
         assert!(!acc(&q, "\u{05D1}\u{05E8}\u{05E7}\u{05D7}")); // two edits
         // a mark is never an edit: an extra mark on the unedited word is free
         assert!(acc(&q, "\u{05D1}\u{05B0}\u{05E8}\u{05B8}\u{05DB}\u{05D4}"));
+    }
+
+    #[test]
+    fn required_marks_with_phrase_typo_edits() {
+        // Otzaria 7.0.1, a phrase word (and with a prefix option): the typed
+        // form needs its typed mark, a single-letter edit of the mark-free
+        // base matches under any marks
+        let typed = "\u{05D1}\u{05B0}\u{05E8}\u{05DB}\u{05D4}";
+        for extra in [false, true] {
+            let o = WalkOptions {
+                match_nikud: true,
+                spelling_errors: true,
+                phrase_word: true,
+                grammar_prefixes: extra,
+                ..Default::default()
+            };
+            let q = marked(typed, o);
+            assert!(acc(&q, typed));
+            // unedited, mark missing; with prefixes it is a prefix plus the
+            // edit that deletes the first letter (as in Otzaria)
+            assert_eq!(acc(&q, "\u{05D1}\u{05E8}\u{05DB}\u{05D4}"), extra);
+            assert!(acc(&q, "\u{05D1}\u{05E8}\u{05D6}\u{05D4}")); // substitution, no marks
+            assert!(acc(&q, "\u{05D1}\u{05B8}\u{05E8}\u{05D6}\u{05B8}\u{05D4}")); // substitution, other marks
+            assert!(acc(&q, "\u{05D1}\u{05E8}\u{05DB}\u{05D2}\u{05D4}")); // insertion
+            assert!(!acc(&q, "\u{05D1}\u{05E8}\u{05D6}\u{05D2}\u{05D4}")); // two edits
+        }
+        let q = marked(
+            typed,
+            WalkOptions {
+                match_nikud: true,
+                spelling_errors: true,
+                phrase_word: true,
+                grammar_prefixes: true,
+                ..Default::default()
+            },
+        );
+        assert!(acc(&q, "\u{05D5}\u{05B0}\u{05D1}\u{05E8}\u{05D6}\u{05D4}")); // prefix + edit
     }
 
     #[test]

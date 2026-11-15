@@ -558,30 +558,36 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
         (U+05D0..U+05EA, U+05F0..U+05F2) substituted or inserted, an adjacent
         transposition or a deletion, through the other options but never
         from a ktiv variant (a second edit); plain, the Aramaic ending swap
-        of the typed form is edited too. Edit states of the same walk, the
-        edited path accepted only on a form tagged as the typed one.
+        is applied to each edited root (Otzaria's order). Each edited root is
+        a core form of the same walk's trie, so its affixes are derived from
+        the edited root itself, as Otzaria's `word_to_pattern` does (final
+        letter base form, root length, verb suffixes). An edit of the last
+        character (substituted, or a letter inserted at the end) is
+        Otzaria's typo wildcard, no letter: such a root takes no final-letter
+        or final-he rule and no Aramaic swap, verb suffixes are allowed, and
+        any letter (a final one too) may precede a suffix.
         When such a word's expansion overflows the cap, Otzaria's branch
         priority (`collect_ranked`, 653781c) decides: the forms matched
         without a typo first, then the sampled list, then the edits (the
         walk's overflow rank; tantivy walks shortest first and sorts by the
         rank only on overflow, so nothing changes while every match fits).
-        Vocalized, an edited path may pass the typed marks (as the scan).
+        Vocalized, the edits come from the mark-free base and match under
+        any marks (Otzaria's free-mark edit branches), no Aramaic swap.
         FtsLib mode is unchanged (it has no typo option).
       - `full_edit1`: edit distance 1 for every ≥4-letter word in every
         combination; 3 letters only the confusions.
       The edit distance is edit states of the walk automaton's core phase;
-      the sampled list is core forms of the same walk's trie. Either way one
+      the sampled list and the 7.0.1 edit roots are core forms of the same
+      walk's trie. Either way one
       walk per word, shortest-first and capped, with the matched-terms sink.
       Not ported: Otzaria's char budgets (`MAX_PATTERN_CHARS`,
       `MAX_TYPO_EDIT_CHARS`) and the edit-root count cap, which only trim
       regex text it compiles; so its 7.0.1 fixes for options narrowing
       each other (Aramaic prefixes as one lead, ccefc81 / bf684bc) hold
       here by construction (one walk, no text budget), tested with
-      Otzaria's cases. Named deviation: an edited form takes the affix
-      tags of the typed form (Otzaria re-derives them from the edited
-      root, e.g. after editing a final letter).
+      Otzaria's cases.
     - **Plain fast path**: a word whose options only add core forms (none,
-      ktiv, Aramaic endings, the 3-letter typo list) walks the core trie alone, with
+      ktiv, Aramaic endings, the typo list and edit roots) walks the core trie alone, with
       no per-byte option checks.
   - **Length limits are set by the caller** (Otzaria), as plain ints; unset
     means the default:

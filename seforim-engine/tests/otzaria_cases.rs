@@ -638,7 +638,6 @@ fn digit_runs_are_words() {
     }
 }
 
-
 /// Otzaria's option setters by name (its checkbox labels).
 const GRAM_PREFIX: fn(&mut WalkOptionsSpec) = |o| o.grammar_prefixes = true;
 const GRAM_SUFFIX: fn(&mut WalkOptionsSpec) = |o| o.grammar_suffixes = true;
@@ -660,7 +659,10 @@ fn phrase_with(words: &[&str], per_word: &[&[fn(&mut WalkOptionsSpec)]]) -> Sear
             for set in setters.iter() {
                 set(&mut o);
             }
-            GroupSpec::Word { word: (*word).into(), options: o }
+            GroupSpec::Word {
+                word: (*word).into(),
+                options: o,
+            }
         })
         .collect();
     ordered(groups, 0)
@@ -700,8 +702,15 @@ fn aramaic_prefixes_never_drop_matches_of_the_other_options() {
                 let mut with = base.clone();
                 with.push(ARAMAIC_PREFIX);
                 let after = matches(lines, positions, &phrase_with(&words, &[&with, &with]));
-                let lost: Vec<usize> = before.iter().filter(|l| !after.contains(l)).copied().collect();
-                assert!(lost.is_empty(), "query {query:?} base #{b} positions={positions}: lost {lost:?}");
+                let lost: Vec<usize> = before
+                    .iter()
+                    .filter(|l| !after.contains(l))
+                    .copied()
+                    .collect();
+                assert!(
+                    lost.is_empty(),
+                    "query {query:?} base #{b} positions={positions}: lost {lost:?}"
+                );
             }
         }
     }
@@ -722,11 +731,25 @@ fn aramaic_prefixes_never_drop_matches_of_the_other_options() {
 #[test]
 fn phrase_typo_edit_survives_the_other_options() {
     let lines: &[&str] = &[PALM[0]];
-    let extra = [GRAM_PREFIX, GRAM_SUFFIX, KTIV, ARAMAIC_PREFIX, ARAMAIC_SUFFIX, PART];
+    let extra = [
+        GRAM_PREFIX,
+        GRAM_SUFFIX,
+        KTIV,
+        ARAMAIC_PREFIX,
+        ARAMAIC_SUFFIX,
+        PART,
+    ];
     let all = (1u32 << extra.len()) - 1;
-    for mask in (0..extra.len()).map(|i| 1u32 << i).chain([all & !(1 << 5), all]) {
+    for mask in (0..extra.len())
+        .map(|i| 1u32 << i)
+        .chain([all & !(1 << 5), all])
+    {
         let mut word: Vec<fn(&mut WalkOptionsSpec)> = vec![TYPO];
-        word.extend((0..extra.len()).filter(|i| mask >> i & 1 == 1).map(|i| extra[i]));
+        word.extend(
+            (0..extra.len())
+                .filter(|i| mask >> i & 1 == 1)
+                .map(|i| extra[i]),
+        );
         for positions in [true, false] {
             let got = matches(lines, positions, &phrase_with(&[LLBVT, DQL], &[&word, &[]]));
             assert_eq!(got, [1], "mask {mask:#b} positions={positions}");
@@ -744,7 +767,11 @@ fn typo_overflow_keeps_the_exact_option_forms_first() {
     let word = "\u{05DC}\u{05D1}\u{05D5}\u{05EA}";
     let prefixed = "\u{05D5}\u{05DC}\u{05D1}\u{05D5}\u{05EA} \u{05E9}\u{05DC}\u{05D5}\u{05DD}";
     let mut owned: Vec<String> = vec![prefixed.to_string()];
-    let letters = ['\u{05D0}', '\u{05D2}', '\u{05D3}', '\u{05D4}', '\u{05D6}', '\u{05D7}', '\u{05D8}', '\u{05DB}', '\u{05DE}', '\u{05E0}', '\u{05E1}', '\u{05E2}', '\u{05E4}', '\u{05E6}', '\u{05E7}', '\u{05E8}'];
+    let letters = [
+        '\u{05D0}', '\u{05D2}', '\u{05D3}', '\u{05D4}', '\u{05D6}', '\u{05D7}', '\u{05D8}',
+        '\u{05DB}', '\u{05DE}', '\u{05E0}', '\u{05E1}', '\u{05E2}', '\u{05E4}', '\u{05E6}',
+        '\u{05E7}', '\u{05E8}',
+    ];
     let chars: Vec<char> = word.chars().collect();
     for i in 0..chars.len() {
         for &c in &letters {
@@ -756,12 +783,123 @@ fn typo_overflow_keeps_the_exact_option_forms_first() {
     let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
     for positions in [true, false] {
         let req = SearchRequest {
-            groups: vec![wo(word, |o| { o.spelling_errors = true; o.grammar_prefixes = true; })],
+            groups: vec![wo(word, |o| {
+                o.spelling_errors = true;
+                o.grammar_prefixes = true;
+            })],
             max_expanded_terms: 3,
             ..Default::default()
         };
         let got = matches(&lines, positions, &req);
         assert!(got.contains(&1), "positions={positions}: {got:?}");
         assert_eq!(got.len(), 3, "positions={positions}: {got:?}");
+    }
+}
+
+/// Lines for the overflow tests: the typed word with a grammatical prefix
+/// (an exact option form), the typed word itself when `typed`, and many
+/// substitutions of the typed word, shorter than the prefixed form.
+fn overflow_lines(typed: bool) -> Vec<String> {
+    let word = "\u{05DC}\u{05D1}\u{05D5}\u{05EA}";
+    let mut lines = vec![
+        "\u{05D5}\u{05DC}\u{05D1}\u{05D5}\u{05EA} \u{05E9}\u{05DC}\u{05D5}\u{05DD}".to_string(),
+    ];
+    if typed {
+        lines.push(word.to_string());
+    }
+    let letters = [
+        '\u{05D0}', '\u{05D2}', '\u{05D3}', '\u{05D4}', '\u{05D6}', '\u{05D7}', '\u{05D8}',
+        '\u{05DB}', '\u{05DE}', '\u{05E0}', '\u{05E1}', '\u{05E2}', '\u{05E4}', '\u{05E6}',
+        '\u{05E7}', '\u{05E8}',
+    ];
+    let chars: Vec<char> = word.chars().collect();
+    for i in 0..chars.len() {
+        for &c in &letters {
+            let mut edited = chars.clone();
+            edited[i] = c;
+            lines.push(edited.into_iter().collect());
+        }
+    }
+    lines
+}
+
+fn overflow_request(cap: usize) -> SearchRequest {
+    SearchRequest {
+        groups: vec![wo("\u{05DC}\u{05D1}\u{05D5}\u{05EA}", |o| {
+            o.spelling_errors = true;
+            o.grammar_prefixes = true;
+        })],
+        max_expanded_terms: cap,
+        ..Default::default()
+    }
+}
+
+/// Matching lines on an index written in `batches` commits (one segment
+/// each), and the number of segments.
+fn matches_in_segments(lines: &[&str], batches: usize, req: &SearchRequest) -> (Vec<usize>, usize) {
+    let dir = tempfile::tempdir().unwrap();
+    let index = LineIndex::create(
+        dir.path(),
+        IndexOptions {
+            positions: true,
+            keep_marks: false,
+        },
+    )
+    .unwrap();
+    let mut wr = index.writer(30_000_000, 1).unwrap();
+    let per = lines.len().div_ceil(batches);
+    for (i, t) in lines.iter().enumerate() {
+        wr.add(&LineDoc {
+            line_id: i as u64 + 1,
+            position: i as u64,
+            book_id: 1,
+            text: (*t).into(),
+            section_id: None,
+            no_cross: false,
+        })
+        .unwrap();
+        if (i + 1) % per == 0 {
+            wr.commit(None).unwrap();
+        }
+    }
+    wr.commit(None).unwrap();
+    let segments = index.reader().unwrap().searcher().segment_readers().len();
+    let r = index.search(req).unwrap();
+    let mut got: Vec<usize> = r.hits.iter().map(|h| h.line_id as usize).collect();
+    got.sort();
+    (got, segments)
+}
+
+/// The overflow rank with the pinned exact word: the typed word keeps its
+/// pinned slot, the exact option form its rank-0 slot, and the edits get
+/// the rest of the cap.
+#[test]
+fn typo_overflow_rank_keeps_the_pinned_typed_word() {
+    let owned = overflow_lines(true);
+    let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+    for positions in [true, false] {
+        let got = matches(&lines, positions, &overflow_request(3));
+        assert!(
+            got.contains(&1) && got.contains(&2),
+            "positions={positions}: {got:?}"
+        );
+        assert_eq!(got.len(), 3, "positions={positions}: {got:?}");
+    }
+}
+
+/// The overflow rank is one cap across segments: an index split into
+/// several segments keeps exactly the lines one segment keeps.
+#[test]
+fn typo_overflow_rank_is_one_cap_across_segments() {
+    for typed in [false, true] {
+        let owned = overflow_lines(typed);
+        let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let (one, n1) = matches_in_segments(&lines, 1, &overflow_request(3));
+        let (many, n) = matches_in_segments(&lines, 4, &overflow_request(3));
+        assert_eq!(n1, 1);
+        assert!(n > 1, "{n} segments");
+        assert!(one.contains(&1), "{one:?}");
+        assert_eq!(one.len(), 3, "{one:?}");
+        assert_eq!(many, one, "typed={typed}");
     }
 }

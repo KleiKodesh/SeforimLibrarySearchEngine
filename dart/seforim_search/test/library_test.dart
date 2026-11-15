@@ -83,6 +83,13 @@ void main() {
       expect(h.text, startsWith('w3 alpha'));
       expect(h.highlights, [(0, 2)]);
 
+      // load more + limit + counts from the same search
+      final more = await lib.search(SearchOptions('alpha'), pageSize: 2, offset: 3, limit: 4, withCounts: true).toList();
+      expect([for (final p in more) ...p.results].map((h) => h.position), [3, 4, 5, 6]);
+      expect(more.last.complete, isTrue);
+      expect(more.last.counts!.total, 10);
+      expect(more.last.counts!.byBook, {1: 5, 2: 5});
+
       final c = await lib.counts(SearchOptions('alpha'));
       expect(c.exact, isTrue);
       expect(c.total, 10);

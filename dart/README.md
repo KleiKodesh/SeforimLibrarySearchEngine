@@ -80,6 +80,9 @@ await for (final page in lib.search(SearchOptions(query))) {
   // page.results: SearchHit = book title, line index, ref, text, snippet + highlights,
   // short-row context; page.hitCount (total once page.complete)
 }
+// a results page: load more with offset, stop texts at limit, exact counts
+// (total + per book) on the last page, all from ONE search
+lib.search(SearchOptions(query), offset: 50, limit: 50, withCounts: true);
 final counts = await lib.counts(SearchOptions(query)); // exact total + per book
 final inBook = await lib.findInBook(bookId, words);     // every occurrence, by line
 await lib.close();

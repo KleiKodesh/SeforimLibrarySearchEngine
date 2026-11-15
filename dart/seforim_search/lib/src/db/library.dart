@@ -49,12 +49,14 @@ final class SearchHit {
 }
 
 /// One page of [SeforimLibrary.search]: the next ready results and the
-/// search's progress. [hitCount] is the total once [complete].
+/// search's progress. [hitCount] is the total once [complete]; [counts]
+/// (exact total + per book) comes on the last page when asked for.
 final class ResultPage {
-  const ResultPage(this.results, this.hitCount, this.complete);
+  const ResultPage(this.results, this.hitCount, this.complete, [this.counts]);
   final List<SearchHit> results;
   final int hitCount;
   final bool complete;
+  final HitCounts? counts;
 }
 
 /// One line found by [SeforimLibrary.findInBook] with every occurrence in it.
@@ -107,9 +109,13 @@ final class SeforimLibrary {
 
   /// Runs [options] and streams ready pages of [pageSize] results in the
   /// search's order: the first page as soon as it is decided, then on
-  /// demand (a paused listener pauses the search's paging). Cancelling the
-  /// subscription (or [cancel]) stops the search.
-  Stream<ResultPage> search(SearchOptions options, {SearchCancelToken? cancel, int pageSize = 50}) {
+  /// demand (a paused listener pauses the search's paging). [offset] skips
+  /// the first hits (load more); [limit] > 0 stops the results after that
+  /// many. [withCounts]: the last page carries the exact [HitCounts] (the
+  /// same search, run to its end; no texts read past [limit]). Cancelling
+  /// the subscription (or [cancel]) stops the search.
+  Stream<ResultPage> search(SearchOptions options,
+      {SearchCancelToken? cancel, int pageSize = 50, int offset = 0, int limit = 0, bool withCounts = false}) {
     final token = cancel ?? SearchCancelToken();
     AsyncSearchSession? session;
     var stopped = false;
@@ -118,18 +124,25 @@ final class SeforimLibrary {
     Future<void> run() async {
       try {
         final s = session = await worker.searchStreaming(options, cancel: token);
-        var offset = 0;
-        while (!stopped) {
+        var at = offset, sent = 0;
+        var done = false;
+        while (!stopped && (limit <= 0 || sent < limit)) {
           if (out.isPaused) await (resumed = Completer<void>()).future;
           if (stopped) break;
-          if (offset + pageSize > s.hitCount && !s.isComplete) await s.pull(offset + pageSize);
-          final placed = offset < s.hitCount ? await s.hits(offset, pageSize) : const <PlacedHit>[];
-          offset += placed.length;
+          final n = limit > 0 && limit - sent < pageSize ? limit - sent : pageSize;
+          if (at + n > s.hitCount && !s.isComplete) await s.pull(at + n);
+          final placed = at < s.hitCount ? await s.hits(at, n) : const <PlacedHit>[];
+          at += placed.length;
+          sent += placed.length;
           final ready = await _ready(s, placed, options.contextWords);
           if (stopped) break;
-          final complete = s.isComplete && offset >= s.hitCount;
-          out.add(ResultPage(ready, s.hitCount, complete));
-          if (complete || placed.isEmpty) break;
+          done = s.isComplete && at >= s.hitCount;
+          out.add(ResultPage(ready, s.hitCount, done, done && withCounts ? await _exactCounts(s) : null));
+          if (done || placed.isEmpty) break;
+        }
+        if (withCounts && !done && !stopped) {
+          final c = await _exactCounts(s);
+          if (!stopped) out.add(ResultPage(const [], s.hitCount, true, c));
         }
       } catch (e, st) {
         if (!stopped) out.addError(e, st);
@@ -199,25 +212,29 @@ final class SeforimLibrary {
   Future<HitCounts> counts(SearchOptions options, {SearchCancelToken? cancel}) async {
     final s = await worker.searchStreaming(options, cancel: cancel);
     try {
-      while (!s.isComplete) {
-        await s.pull(s.hitCount + 65536);
-      }
-      if (await s.countNeedsText) {
-        for (var offset = 0; offset < s.hitCount; offset += 2048) {
-          final page = await s.hits(offset, 2048);
-          final texts = db.lineTexts({for (final h in page) h.lineId, for (final h in page) ?h.nextLineId});
-          final lines = [for (final h in page) texts[h.lineId] ?? ''];
-          if (page.any((h) => h.nextLineId != null)) {
-            await s.countBatchPairs(lines, [for (final h in page) h.nextLineId == null ? null : texts[h.nextLineId]]);
-          } else {
-            await s.countBatch(lines);
-          }
-        }
-      }
-      return await s.counts();
+      return await _exactCounts(s);
     } finally {
       await s.close();
     }
+  }
+
+  Future<HitCounts> _exactCounts(AsyncSearchSession s) async {
+    while (!s.isComplete) {
+      await s.pull(s.hitCount + 65536);
+    }
+    if (await s.countNeedsText) {
+      for (var offset = 0; offset < s.hitCount; offset += 2048) {
+        final page = await s.hits(offset, 2048);
+        final texts = db.lineTexts({for (final h in page) h.lineId, for (final h in page) ?h.nextLineId});
+        final lines = [for (final h in page) texts[h.lineId] ?? ''];
+        if (page.any((h) => h.nextLineId != null)) {
+          await s.countBatchPairs(lines, [for (final h in page) h.nextLineId == null ? null : texts[h.nextLineId]]);
+        } else {
+          await s.countBatch(lines);
+        }
+      }
+    }
+    return s.counts();
   }
 
   /// Every occurrence of [words] in the book [bookId] (find in an open book),

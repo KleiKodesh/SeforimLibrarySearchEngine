@@ -2232,6 +2232,10 @@ lines) and `semantic-search <index> <query> [--k] [--hybrid]`.
 positions index, imports Otzaria's vector release with `SEFORIM_VECTORS_PROFILE=1` (each
 stage's time on stderr: records + decode, normalize, graph build, graph save, store write),
 prints the peak working set, the sizes (store, graph, zstd) and runs
+`.github/workflows/layouts.yml` (manual) measures single-copy layouts on each vector
+release with `seforim-vectors/examples/layouts.rs`: usearch i8, f16 and i8 rescored with its
+own copy, against Otzaria's codec scanned as Otzaria does (no index; the recall reference):
+build time, size, recall@10, latency.
 `semantic-search --lines a,b,c` (each line's text as a query: own-line rank, recall@k of the
 graph against the exact scan, embed / search latency).
 

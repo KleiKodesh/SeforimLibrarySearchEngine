@@ -556,6 +556,102 @@ impl OxvFile {
         out
     }
 
+    /// Slot count.
+    #[doc(hidden)]
+    pub fn slot_count(&self) -> u32 {
+        self.slots
+    }
+
+    /// Otzaria's search over its own codec (`oxv/scan.rs` + `kernel.rs`): every slot scored
+    /// against `query` in the codec's space (an i8 vector as `s * q.v`, a rot192-i8i4 vector
+    /// against the query rotated once), no index, `threads` threads; the best `k` slots,
+    /// a slot past a line's first window losing `window_penalty`. f32 sums here where
+    /// Otzaria quantizes the query to 16-bit integers (a ~1e-4 difference). Measurement
+    /// tooling (examples/layouts.rs).
+    #[doc(hidden)]
+    pub fn scan_exact(&self, query: &[f32], k: usize, threads: usize, window_penalty: f32) -> Vec<(u32, f32)> {
+        // the query in the codec's space
+        if k == 0 {
+            return Vec::new();
+        }
+        let (head, tail, w, lo_dot): (usize, usize, Vec<f32>, f32) = match &self.codec {
+            Codec::Rot { head, tail, scale, lo, hi, rotation } => {
+                let dim = self.dims;
+                let r: Vec<f32> = rotation.chunks_exact(dim).map(|row| row.iter().zip(query).map(|(a, b)| a * b).sum()).collect();
+                let mut w: Vec<f32> = (0..*head).map(|h| r[h] * scale[h]).collect();
+                let steps: Vec<f32> = (0..*tail).map(|t| r[head + t] * (hi[t] - lo[t]) / 15.0).collect();
+                let lo_dot: f32 = (0..*tail).map(|t| r[head + t] * lo[t]).sum();
+                w.extend_from_slice(&steps);
+                (*head, *tail, w, lo_dot)
+            }
+            Codec::I8SymDim { scales } => (self.dims, 0, query.iter().zip(scales).map(|(q, s)| q * s / 127.0).collect(), 0.0),
+            _ => (self.dims, 0, query.to_vec(), 0.0),
+        };
+        let n = self.codec.bytes_per_vector(self.dims);
+        let is_f32 = matches!(self.codec, Codec::F32);
+        let score = |slot: u32| -> f32 {
+            let bytes = &self.map[self.vectors.start + slot as usize * n..self.vectors.start + (slot as usize + 1) * n];
+            let s = self.scales.as_ref().map_or(1.0, |r| f32_at(&self.map, r.start + slot as usize * 4));
+            let mut acc = 0f32;
+            if is_f32 {
+                for d in 0..self.dims {
+                    acc += w[d] * f32_at(bytes, 4 * d);
+                }
+                return acc;
+            }
+            for h in 0..head {
+                acc += w[h] * f32::from(bytes[h] as i8);
+            }
+            let mut out = acc * s;
+            if tail > 0 {
+                let mut t4 = 0f32;
+                for (j, &b) in bytes[head..].iter().enumerate() {
+                    t4 += w[head + 2 * j] * f32::from(b & 0x0F) + w[head + 2 * j + 1] * f32::from(b >> 4);
+                }
+                out += lo_dot + t4;
+            }
+            out
+        };
+        let threads = threads.max(1);
+        let per = (self.slots as usize).div_ceil(threads);
+        let mut parts: Vec<Vec<(u32, f32)>> = Vec::new();
+        std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..threads)
+                .map(|t| {
+                    let score = &score;
+                    sc.spawn(move || {
+                        let start = (t * per) as u32;
+                        let end = ((t + 1) * per).min(self.slots as usize) as u32;
+                        let mut best: Vec<(u32, f32)> = Vec::with_capacity(k + 1);
+                        let mut floor = f32::NEG_INFINITY;
+                        for slot in start..end {
+                            let mut sc = score(slot);
+                            if self.window(slot) != 0 {
+                                sc -= window_penalty;
+                            }
+                            if best.len() < k || sc > floor {
+                                best.push((slot, sc));
+                                if best.len() > 2 * k + 64 {
+                                    best.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+                                    best.truncate(k);
+                                    floor = best[k - 1].1;
+                                }
+                            }
+                        }
+                        best.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+                        best.truncate(k);
+                        best
+                    })
+                })
+                .collect();
+            parts = hs.into_iter().map(|h| h.join().unwrap()).collect();
+        });
+        let mut all: Vec<(u32, f32)> = parts.into_iter().flatten().collect();
+        all.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        all.truncate(k);
+        all
+    }
+
     /// The decoded (not normalized) vector of `slot`.
     pub fn vector(&self, slot: u32) -> Vec<f32> {
         let n = self.codec.bytes_per_vector(self.dims);

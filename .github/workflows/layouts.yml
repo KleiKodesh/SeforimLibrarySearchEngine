@@ -1,0 +1,42 @@
+# Single-copy vector layouts on GitHub Actions (manual, issue #18): for each Otzaria vector
+# release and layout, seforim-vectors/examples/layouts.rs prints build time, size, recall@10 vs
+# the exact scan of Otzaria's own codec (the reference, searched as Otzaria does) and latency.
+name: layouts
+
+on:
+  workflow_dispatch:
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  # single-copy layouts on the same vectors and queries (user, issue #18): usearch i8 / f16 /
+  # i8 + own rescore vs Otzaria's codec scanned as Otzaria does (the reference), per release
+  layouts:
+    runs-on: windows-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        release: [vectors-qa491-v37-20261105163520, vectors-windows-v37-20261105163520]
+        layout: [i8, f16, i8r]
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
+      - name: runner
+        shell: bash
+        run: nproc; wmic computersystem get TotalPhysicalMemory 2>/dev/null || true
+      - name: download and expand the release
+        shell: bash
+        run: |
+          mkdir -p D:/lay
+          gh release download "${{ matrix.release }}" -R Otzaria/SeforimLibrary -D D:/lay -p "*.oxv.zst"
+          python -I -c "import compression.zstd as z,shutil,glob;f=glob.glob('D:/lay/*.oxv.zst')[0];shutil.copyfileobj(z.open(f,'rb'),open('D:/lay/seg.oxv','wb'),1<<24)"
+          rm -f D:/lay/*.oxv.zst; ls -l D:/lay
+      - name: measure (otz reference + ${{ matrix.layout }})
+        shell: bash
+        run: |
+          cargo run --release -p seforim-vectors --example layouts -- D:/lay/seg.oxv D:/lay/work --n 200 --layouts otz,${{ matrix.layout }} 2>&1 | tee D:/lay/layouts.log

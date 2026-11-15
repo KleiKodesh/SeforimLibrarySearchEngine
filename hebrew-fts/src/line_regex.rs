@@ -14,8 +14,16 @@
 //!   `cleanLineForSearch` plus the index foldings), with a map from every
 //!   view byte to the UTF-16 range of the source it came from, so matches
 //!   come back as UTF-16 ranges into the host's text (for highlighting).
+//! - Line anchors (Otzaria 7.0.0): a pattern that asserts `^` (`\A`) or `$`
+//!   (`\z`) also runs on the line without its leading (trailing) numbering
+//!   (`crate::line_edges::content_range`: `(x) ` / `[x] ` at the start, `{x}`
+//!   at the end), so `^` holds past an enumerator and `$` before a closing
+//!   one; a `[x]` glued to the word is part of it and is not skipped. One
+//!   match per anchor: where the pattern holds past the enumerator, the match
+//!   that needs the anchor at the raw edge is dropped (Otzaria's `find`).
 
 use regex::{Regex, RegexBuilder};
+use regex_automata::{meta::Regex as LineRegex, Input};
 use regex_syntax::hir::{Class, Hir, HirKind, Look, Repetition};
 
 use crate::chars::{fold_presentation_form, is_indexable_len, is_invisible, is_quote, is_transparent, is_word_mark};
@@ -62,10 +70,17 @@ pub struct Fragment {
 /// A compiled line pattern (Otzaria's `LinePlan`).
 #[derive(Debug, Clone)]
 pub struct LinePlan {
-    regex: Regex,
+    regex: LineRegex,
     prefilter: Regex,
     /// Fixed words: every clause (an OR of fragments) holds in every matching line.
     pub clauses: Vec<Vec<Fragment>>,
+    /// The pattern asserts `\A` (`\z`) somewhere: it also holds after a
+    /// leading (before a trailing) enumerator such as `(x) `.
+    starts_line: bool,
+    ends_line: bool,
+    /// Every matching path requires this anchor: no dependency search is needed.
+    requires_start: bool,
+    requires_end: bool,
 }
 
 impl LinePlan {
@@ -91,21 +106,111 @@ impl LinePlan {
                 .build()
                 .map_err(|e| format!("too complex: {e}"))
         };
+        let looks = whole.properties().look_set();
         Ok(LinePlan {
-            regex: build(&source)?,
+            regex: build_line_regex(&source)?,
             prefilter: build(&without_word_looks(&whole).to_string())?,
             clauses: required_clauses(elements),
+            starts_line: looks.contains(Look::Start),
+            ends_line: looks.contains(Look::End),
+            requires_start: whole.properties().look_set_prefix().contains(Look::Start),
+            requires_end: whole.properties().look_set_suffix().contains(Look::End),
+        })
+    }
+
+    /// Otzaria's `LinePlan::edges`: `[0, content start, len, content end]`
+    /// of `view`; the content edges stay at the line's edges unless the
+    /// pattern is anchored there.
+    fn edges(&self, view: &str) -> [usize; 4] {
+        let mut edges = [0, 0, view.len(), view.len()];
+        if self.starts_line || self.ends_line {
+            let content = crate::line_edges::content_range(view);
+            // The index keeps `[x]` glued to a word inside that word's term: skip it only spaced.
+            let (lead, tail) = (&view[..content.start], &view[content.end..]);
+            if self.starts_line && !lead.ends_with(']') {
+                edges[1] = content.start;
+            }
+            if self.ends_line && !tail.starts_with('[') {
+                edges[3] = content.end;
+            }
+        }
+        edges
+    }
+
+    /// Otzaria's `LinePlan::windows`: the parts of `view` the pattern runs
+    /// on: the whole line, and for an anchored pattern also the line without
+    /// its edge enumerators, so `\A` and `\z` hold at either edge.
+    fn windows(edges: [usize; 4]) -> impl Iterator<Item = std::ops::Range<usize>> {
+        [(0, 2), (1, 2), (0, 3), (1, 3)].into_iter().filter_map(move |(s, e)| {
+            let fresh = (s == 0 || edges[1] != edges[0]) && (e == 2 || edges[3] != edges[2]);
+            (fresh && edges[s] < edges[e]).then(|| edges[s]..edges[e])
         })
     }
 
     /// True when the line view holds a non-empty match.
     pub fn is_match(&self, view: &str) -> bool {
-        self.prefilter.is_match(view) && self.regex.find_iter(view).any(|m| !m.is_empty())
+        Self::windows(self.edges(view)).any(|w| {
+            let part = &view[w];
+            self.prefilter.is_match(part) && self.regex.find_iter(part).any(|m| !m.is_empty())
+        })
     }
 
-    /// Byte ranges of the non-empty matches in `view`.
+    /// Byte ranges of the non-empty matches in `view`, without overlaps
+    /// (Otzaria's `LinePlan::find`).
     pub fn find(&self, view: &str) -> Vec<std::ops::Range<usize>> {
-        self.regex.find_iter(view).filter(|m| !m.is_empty()).map(|m| m.range()).collect()
+        use std::ops::Range;
+        let edges = self.edges(view);
+        if edges[0] == edges[1] && edges[2] == edges[3] {
+            return self.regex.find_iter(view).filter(|m| !m.is_empty()).map(|m| m.range()).collect();
+        }
+        // Each match keeps its window, so each anchor can be tested on its
+        // own without changing the text a consuming alternative sees.
+        let mut found: Vec<(Range<usize>, Range<usize>)> = Self::windows(edges)
+            .flat_map(|w| {
+                self.regex
+                    .find_iter(&view[w.clone()])
+                    .filter(|m| !m.is_empty())
+                    .map(move |m| (w.start + m.start()..w.start + m.end(), w.clone()))
+            })
+            .collect();
+        let padded = format!("\n{view}\n");
+        // True when the match `r` found in window `w` needs the anchor on
+        // that side: the same search with only that absolute anchor disabled
+        // (a sentinel line break past the window edge; the span keeps the
+        // match inside the window) does not find it.
+        let depends_on = |r: &Range<usize>, w: &Range<usize>, start: bool| {
+            if (start && self.requires_start) || (!start && self.requires_end) {
+                return true;
+            }
+            let m = if start {
+                self.regex
+                    .find(Input::new(&padded[..w.end + 1]).span(r.start + 1..w.end + 1))
+                    .map(|m| m.start() - 1..m.end() - 1)
+            } else {
+                self.regex
+                    .find(Input::new(&padded[w.start + 1..]).span(r.start - w.start..w.end - w.start))
+                    .map(|m| w.start + m.start()..w.start + m.end())
+            };
+            m.as_ref() != Some(r)
+        };
+        // Prefer the content edge only over matches depending on the SAME anchor.
+        if edges[1] > 0 && found.iter().any(|(r, w)| r.start == edges[1] && depends_on(r, w, true)) {
+            found.retain(|(r, w)| r.start >= edges[1] || !depends_on(r, w, true));
+        }
+        if edges[3] < edges[2] && found.iter().any(|(r, w)| r.end == edges[3] && depends_on(r, w, false)) {
+            found.retain(|(r, w)| r.end <= edges[3] || !depends_on(r, w, false));
+        }
+        // The windows overlap: keep the leftmost, longest match of each place.
+        found.sort_by_key(|(r, _)| (r.start, std::cmp::Reverse(r.end)));
+        let mut end = 0;
+        found.retain(|(r, _)| {
+            let keep = r.start >= end;
+            if keep {
+                end = r.end;
+            }
+            keep
+        });
+        found.into_iter().map(|(range, _)| range).collect()
     }
 
     /// The matches of `source` (a line's text, markup included) as UTF-16
@@ -119,6 +224,23 @@ impl LinePlan {
         view.fill(source, true);
         self.find(&view.text).iter().map(|r| view.source_range(r)).collect()
     }
+}
+
+/// Otzaria's `build_line_regex`: the same meta engine and limits as
+/// `regex::RegexBuilder`, with bounded search inputs exposed so disabling an
+/// anchor cannot let a consuming alternative eat the sentinel.
+fn build_line_regex(source: &str) -> Result<LineRegex, String> {
+    LineRegex::builder()
+        .configure(
+            LineRegex::config()
+                .match_kind(regex_automata::MatchKind::LeftmostFirst)
+                .utf8_empty(true)
+                .nfa_size_limit(Some(LINE_REGEX_SIZE_LIMIT))
+                .hybrid_cache_capacity(LINE_REGEX_SIZE_LIMIT),
+        )
+        .syntax(regex_automata::util::syntax::Config::new().case_insensitive(true).utf8(true))
+        .build(source)
+        .map_err(|e| format!("too complex: {e}"))
 }
 
 fn without_word_looks(hir: &Hir) -> Hir {
@@ -244,7 +366,8 @@ fn required_clauses(elements: &[Hir]) -> Vec<Vec<Fragment>> {
             }
             continue;
         }
-        let bounding = ends_terms(element);
+        // a line anchor is a scanner boundary too (Otzaria 7.0.0)
+        let bounding = ends_terms(element) || matches!(element.kind(), HirKind::Look(Look::Start | Look::End));
         flush(&mut run, left_bounded, bounding, &mut clauses);
         left_bounded = bounding;
         if !bounding {
@@ -493,5 +616,150 @@ mod tests {
         let (s, e) = ranges[0];
         let units: Vec<u16> = src.encode_utf16().collect();
         assert_eq!(String::from_utf16(&units[s as usize..e as usize]).unwrap(), "b</b><br>c\u{05B8}d");
+    }
+
+    // Otzaria 7.0.0 line anchors (otzaria_search_engine 5babbce,
+    // `user_regex_tests.rs`: an_edge_line_anchor_makes_a_line_pattern,
+    // line_anchors_hold_at_the_line_edges_and_past_enumerators,
+    // a_bracket_enumerator_glued_to_the_word_is_part_of_it,
+    // an_end_anchor_preserves_an_independent_start_match,
+    // a_start_anchor_preserves_an_independent_end_match,
+    // a_consuming_alternative_keeps_the_other_anchored_match,
+    // anchored_fragments_keep_their_guaranteed_token_boundary,
+    // suppressing_an_anchor_keeps_an_independent_path_to_the_same_match),
+    // the same words as escapes.
+    const SEFER: &str = "\u{05e1}\u{05e4}\u{05e8}";
+    const SHEMA: &str = "\u{05e9}\u{05de}\u{05e2}";
+    const YISRAEL: &str = "\u{05d9}\u{05e9}\u{05e8}\u{05d0}\u{05dc}";
+    const VY: &str = "\u{05d5}\u{05d9}\u{05d0}\u{05de}\u{05e8}";
+    const EL: &str = "\u{05d0}\u{05dc}\u{05d4}\u{05d9}\u{05dd}";
+    const G: &str = "\u{05d2}";
+    const P: &str = "\u{05e4}";
+    const A: &str = "\u{05d0}";
+
+    fn matches(raw: &str, line: &str) -> Vec<String> {
+        let units: Vec<u16> = line.encode_utf16().collect();
+        parse_line(raw)
+            .unwrap()
+            .match_ranges(line, &mut LineView::default())
+            .iter()
+            .map(|&(s, e)| String::from_utf16(&units[s as usize..e as usize]).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn an_edge_line_anchor_makes_a_line_pattern() {
+        use crate::user_regex::{parse, UserRegexError};
+        for raw in [
+            format!("/^{SEFER}/"),
+            format!("/{SEFER}$/"),
+            format!("/^{SEFER}$/"),
+            format!("/^{SHEMA} {YISRAEL}/"),
+            format!("/^{A}.*/"),
+            format!(r"/^\b{SEFER}\b$/"),
+            format!("/(?m)^{SEFER}/"),
+            format!("/(?mR)^{SEFER}$/"),
+        ] {
+            assert_eq!(classify(&raw), "line", "{}", raw.escape_unicode());
+        }
+        // word boundaries and spaces at the edges are still dropped
+        assert_eq!(classify(&format!(r"/\b{SEFER}\b/")), "word");
+        assert_eq!(classify(&format!(r"/ \b{SHEMA} {YISRAEL}\b /")), "sequence");
+        for raw in ["/^$/", "/^/", "/$/", "/^ $/", r"/^\b$/", "/(?m)^$/"] {
+            assert_eq!(classify(raw), "invalid", "{raw}");
+        }
+        // an anchor that can never hold where it stands makes the pattern invalid
+        for raw in [
+            format!("/${A}/"),
+            format!("/{A}^/"),
+            format!("/^${A}/"),
+            format!("/{A}^$/"),
+            format!("/(?m)${A}/"),
+            format!(r"/ \b${A}/"),
+            format!(r"/{A}^\b /"),
+        ] {
+            assert_eq!(
+                parse(&raw).err(),
+                Some(UserRegexError::Invalid("anchor on the wrong edge".into())),
+                "{}",
+                raw.escape_unicode()
+            );
+        }
+        // an anchor bounds the word next to it, which then narrows as a whole term
+        let frag = |text: &str, start, end| vec![vec![Fragment { text: text.into(), start, end }]];
+        assert_eq!(parse_line(&format!("/^{SHEMA} .*/")).unwrap().clauses, frag(SHEMA, true, true));
+        assert_eq!(parse_line(&format!("/.* {YISRAEL}$/")).unwrap().clauses, frag(YISRAEL, true, true));
+        assert_eq!(parse_line(&format!("/^{SEFER}$/")).unwrap().clauses, frag(SEFER, true, true));
+        assert_eq!(parse_line(&format!("/^{SHEMA}.*/")).unwrap().clauses, frag(SHEMA, true, false));
+        assert_eq!(parse_line(&format!("/{SEFER}$/")).unwrap().clauses, frag(SEFER, false, true));
+        assert!(parse_line(&format!("/^{A}.*/")).unwrap().clauses.is_empty());
+    }
+
+    #[test]
+    fn line_anchors_hold_at_the_line_edges_and_past_enumerators() {
+        let start = format!("/^{VY}/");
+        let start = start.as_str();
+        assert_eq!(matches(start, &format!("{VY} {EL}")), [VY]);
+        assert_eq!(matches(start, &format!("({G}) {VY} {EL}")), [VY]);
+        assert_eq!(matches(start, &format!("[\u{05d9}{A}] {VY} {EL}")), [VY]);
+        assert_eq!(matches(start, &format!("{{{P}}} {VY}")), [VY]);
+        let vocalized = "\u{05d5}\u{05b7}\u{05d9}\u{05b9}\u{05bc}\u{05d0}\u{05de}\u{05b6}\u{05e8}";
+        assert_eq!(matches(start, &format!("<b>({G})</b> {vocalized} {EL}")), [vocalized]);
+        assert!(matches(start, &format!("{A}\u{05d6} {VY} {EL}")).is_empty());
+        assert!(matches(start, &format!("{VY}\u{05d5} {EL}")).is_empty());
+        assert!(matches(start, &format!("(\u{05e9}\u{05dd} \u{05d4}{SEFER}) {VY}")).is_empty());
+        assert_eq!(matches(&format!("/(?m)^{VY}/"), &format!("({G}) {VY}")), [VY]);
+        assert_eq!(matches(&format!(r"/^\({G}\) {VY}/"), &format!("({G}) {VY} {EL}")), [format!("({G}) {VY}")]);
+        // one match per anchor: past the enumerator when the pattern holds there
+        assert_eq!(matches("/^.*/", &format!("({G}) {VY}")), [VY]);
+        assert_eq!(matches(r"/^\S+/", &format!("({G}) {VY} {EL}")), [VY]);
+        assert_eq!(matches(r"/\S+$/", &format!("{VY} {EL} {{{P}}}")), [EL]);
+        assert_eq!(matches(r"/^\S+$/", &format!("({G}) {VY} {{{P}}}")), [VY]);
+        // a match that needs no anchor is kept beside it
+        let line = format!("({G}) {VY} {EL}");
+        assert_eq!(matches(&format!(r"/^\({G}\)|{VY}/"), &line), [format!("({G})"), VY.into()]);
+        assert_eq!(matches(&format!(r"/^\({G}\) {VY}|{VY}/"), &line), [format!("({G}) {VY}")]);
+        assert_eq!(matches(&format!(r"/^{VY}|\({G}\)/"), &line), [format!("({G})"), VY.into()]);
+        let line = format!("{VY} {EL} {{{P}}}");
+        assert_eq!(matches(&format!(r"/{EL}$|\{{{P}\}}/"), &line), [EL.into(), format!("{{{P}}}")]);
+        assert_eq!(matches(&format!("/^{VY} .*/"), &format!("({G}) {VY} {EL}")), [format!("{VY} {EL}")]);
+
+        let end = format!("/{EL}$/");
+        let end = end.as_str();
+        assert_eq!(matches(end, &format!("{VY} {EL}")), [EL]);
+        assert_eq!(matches(end, &format!("{VY} {EL} {{{P}}}")), [EL]);
+        assert_eq!(matches(end, &format!("{VY} {EL} ({A}):")), [EL]);
+        assert!(matches(end, &format!("{EL} {VY}")).is_empty());
+        assert!(matches(end, &format!("{VY} {EL}:")).is_empty());
+        let vayehi_ken = "\u{05d5}\u{05d9}\u{05d4}\u{05d9} \u{05db}\u{05df}";
+        assert_eq!(matches(&format!("/^{vayehi_ken}$/"), &format!("(\u{05d6}) {vayehi_ken} {{{P}}}")), [vayehi_ken]);
+        assert_eq!(matches(&format!("/^{SEFER}$/"), SEFER), [SEFER]);
+        assert!(matches(&format!("/^{SEFER}$/"), &format!("{SEFER} \u{05ea}\u{05d5}\u{05e8}\u{05d4}")).is_empty());
+        // a bracket enumerator glued to the word is part of it
+        assert!(matches(start, &format!("[{A}]{VY} x")).is_empty());
+        assert_eq!(matches(start, &format!("[{A}] {VY} x")), [VY]);
+        assert!(matches(end, &format!("x {EL}[{A}]")).is_empty());
+        assert_eq!(matches(end, &format!("x {EL} [{A}]")), [EL]);
+    }
+
+    #[test]
+    fn an_anchor_keeps_independent_matches() {
+        // an end anchor preserves an independent start match, and the reverse
+        assert_eq!(matches(&format!(r"/^\({G}\)|{EL}$/"), &format!("({G}) {EL}")), [format!("({G})"), EL.into()]);
+        assert_eq!(matches(&format!(r"/^{VY}|\{{{P}\}}$/"), &format!("{VY} {{{P}}}")), [VY.into(), format!("{{{P}}}")]);
+        // a consuming alternative keeps the other anchored match
+        assert_eq!(
+            matches(&format!(r"/\{{{P}\}}$|{EL}\W?/"), &format!("{VY} {EL} {{{P}}}")),
+            [format!("{EL} "), format!("{{{P}}}")]
+        );
+        // suppressing an anchor keeps an independent path to the same match
+        assert_eq!(
+            matches(&format!(r"/^\({G}\)|\({G}\)|^{VY}/"), &format!("({G}) {VY}")),
+            [format!("({G})"), VY.into()]
+        );
+        assert_eq!(
+            matches(&format!(r"/{EL}$|\{{{P}\}}$|\{{{P}\}}/"), &format!("{VY} {EL} {{{P}}}")),
+            [EL.into(), format!("{{{P}}}")]
+        );
     }
 }

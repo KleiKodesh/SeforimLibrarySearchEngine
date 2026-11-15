@@ -582,8 +582,11 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     option, as Otzaria's app does (the Dart demo asks the kind first).
   - Folded like the index text (marks dropped, maqaf/paseq a space, quotes
     ASCII, presentation forms decomposed), parsed case-insensitively in the
-    Rust `regex` dialect, edge anchors and spaces dropped, split on
-    whitespace separators (a space run, `\s`, `\s+`).
+    Rust `regex` dialect, edge word boundaries and spaces dropped, split on
+    whitespace separators (a space run, `\s`, `\s+`). An edge `^` / `$`
+    anchors the LINE (Otzaria 7.0.0, issue #35): the pattern becomes a
+    line pattern (below); an anchor on the wrong edge (`/$a/`, `/a^/`) is
+    invalid.
   - Each word compiles like Otzaria's: classes narrowed to its term
     alphabet (quotes, digits, a-z, Hebrew letters), lazy made greedy,
     bounded repeats above 7 unbounded (a second, aggressive pass when the
@@ -608,7 +611,7 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
     reads the term marks as zero width (`MarkFree`), so the folded pattern
     matches what it matches on the mark-stripped index.
   - Otzaria's `Line` kind (`CrossSpace`: an explicit space class such as
-    `[ ,]`, inner anchors or `\b`, a wildcard-only word in a sequence) is
+    `[ ,]`, an edge `^` / `$`, inner anchors or `\b`, a wildcard-only word in a sequence) is
     matched on each line's TEXT, ported as Otzaria does it
     (`hebrew-fts/src/line_regex.rs`: `LinePlan`, `required_clauses`,
     `LineView`; `seforim-engine/src/line_search.rs`: `candidate_query`,
@@ -624,6 +627,16 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
       other tags vanish, and every entity or bare `&` is a space (Otzaria's
       view drops non-space entities and keeps a bare `&`; that would glue
       words the index keeps apart, so a pattern cannot match a literal `&`).
+    - Line anchors (issue #35, Otzaria 7.0.0 as is): `^` / `$` (also
+      `(?m)`) hold at the line view's edges AND past leading numbering
+      (`(x) ` / `[x] `) or before closing numbering (`{x}`), the edges
+      `line_edges::content_range` finds; a `[x]` glued to the word is part
+      of it and is not skipped. One match per anchor: where the pattern
+      holds past the enumerator, the match needing the raw edge is dropped
+      (matches that need no anchor stay), so the enumerator is not marked.
+      An anchor bounds its edge word, which then narrows as a whole term
+      edge; a pattern with no fixed word of 2+ letters (`/^\S+ \S+$/`)
+      takes the full scan.
     - Candidates from the index (bare-minimum rule: no text in the index):
       the pattern's required fixed words, ANDed rarest first, inside the
       book filter, a guaranteed SUPERSET of the lines the text check

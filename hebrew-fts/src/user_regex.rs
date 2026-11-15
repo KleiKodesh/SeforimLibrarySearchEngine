@@ -10,8 +10,12 @@
 //!   300 chars (Otzaria's `MAX_PATTERN_CHARS`).
 //! - Parsed case-insensitively in the Rust `regex` dialect (classes, `\w`,
 //!   `{m,n}`, alternation, Unicode classes; no lookaround, no
-//!   backreferences). Anchors, empty items and whitespace at the edges are
-//!   dropped; a term pattern is whole-term (implicitly `\A...\z`).
+//!   backreferences). Word boundaries, empty items and whitespace at the
+//!   edges are dropped; a term pattern is whole-term (implicitly `\A...\z`).
+//!   An edge `^` / `$` (Otzaria 7.0.0) anchors the LINE: the pattern becomes
+//!   a line pattern, `^` also holding past leading numbering such as `(x) `
+//!   and `$` before a closing `{x}` (`line_regex`); an anchor on the wrong
+//!   edge (`/$a/`, `/a^/`) is invalid.
 //! - The top level is split on whitespace separators into words. One word =
 //!   Otzaria's `Word` (a term set), several = `Sequence` (an adjacent,
 //!   ordered phrase). Each word compiles as Otzaria's `prepare_term_part`:
@@ -35,7 +39,7 @@ use regex_automata::nfa::thompson::{self, WhichCaptures};
 use regex_automata::util::primitives::StateID;
 use regex_automata::util::start;
 use regex_automata::{Anchored, MatchKind};
-use regex_syntax::hir::{Class, ClassUnicode, ClassUnicodeRange, Hir, HirKind, Repetition};
+use regex_syntax::hir::{Class, ClassUnicode, ClassUnicodeRange, Hir, HirKind, Look, Repetition};
 use tantivy::query::{EnableScoring, MatchedTermsSink, Query, SpanTermSource, Weight};
 use tantivy::schema::Field;
 use tantivy_fst::Automaton;
@@ -153,6 +157,9 @@ pub struct UserRegex {
 /// for the walk: a whole term has one match either way).
 fn strip_captures(hir: Hir) -> Hir {
     match hir.into_kind() {
+        // a multi-line anchor is a plain one: a searched line has no line break
+        HirKind::Look(Look::StartLF | Look::StartCRLF) => Hir::look(Look::Start),
+        HirKind::Look(Look::EndLF | Look::EndCRLF) => Hir::look(Look::End),
         HirKind::Capture(capture) => strip_captures(*capture.sub),
         HirKind::Concat(subs) => Hir::concat(subs.into_iter().map(strip_captures).collect()),
         HirKind::Alternation(subs) => Hir::alternation(subs.into_iter().map(strip_captures).collect()),
@@ -284,8 +291,9 @@ pub fn parse_line(query: &str) -> Result<crate::line_regex::LinePlan, UserRegexE
     crate::line_regex::LinePlan::new(&elements).map_err(UserRegexError::Invalid)
 }
 
-/// Otzaria's `parse` up to the kind: the top-level elements (edge anchors
-/// and separators dropped), the words they split into, and whether the
+/// Otzaria's `parse` up to the kind: the top-level elements (edge
+/// separators, word boundaries and empty items dropped; an edge `^` / `$`
+/// kept, which makes the pattern a line pattern, Otzaria 7.0.0), the words they split into, and whether the
 /// pattern spans a space (the `Line` kind).
 fn split(query: &str) -> Result<(Vec<Hir>, Vec<Hir>, bool), UserRegexError> {
     let trimmed = query.trim();
@@ -313,9 +321,23 @@ fn split(query: &str) -> Result<(Vec<Hir>, Vec<Hir>, bool), UserRegexError> {
             other => UserRegexError::Invalid(format!("syntax: {other}")),
         })?;
     let mut elements = top_elements(strip_captures(hir));
+    // Otzaria 7.0.0: an edge `^` / `$` anchors the line (kept, the pattern
+    // becomes a line pattern); one on the wrong edge can never hold.
+    let (mut line_start, mut line_end) = (false, false);
     loop {
         let edge = |e: &Hir| matches!(e.kind(), HirKind::Look(_) | HirKind::Empty) || is_separator(e);
-        if elements.first().is_some_and(edge) {
+        let is_look = |e: &Hir, want: Look| matches!(e.kind(), HirKind::Look(l) if *l == want);
+        if elements.first().is_some_and(|e| is_look(e, Look::Start)) {
+            line_start = true;
+            elements.remove(0);
+        } else if elements.last().is_some_and(|e| is_look(e, Look::End)) {
+            line_end = true;
+            elements.pop();
+        } else if elements.first().is_some_and(|e| is_look(e, Look::End))
+            || elements.last().is_some_and(|e| is_look(e, Look::Start))
+        {
+            return Err(UserRegexError::Invalid("anchor on the wrong edge".into()));
+        } else if elements.first().is_some_and(edge) {
             elements.remove(0);
         } else if elements.last().is_some_and(edge) {
             elements.pop();
@@ -338,7 +360,16 @@ fn split(query: &str) -> Result<(Vec<Hir>, Vec<Hir>, bool), UserRegexError> {
         }
     }
     let parts: Vec<Hir> = parts.into_iter().map(Hir::concat).collect();
-    let spans_space = inner_looks
+    // An edge `^` or `$` is kept: only a line pattern can tell where a line starts or ends.
+    if line_start {
+        elements.insert(0, Hir::look(Look::Start));
+    }
+    if line_end {
+        elements.push(Hir::look(Look::End));
+    }
+    let spans_space = line_start
+        || line_end
+        || inner_looks
         || parts.iter().any(has_explicit_whitespace)
         || (parts.len() > 1 && parts.iter().any(is_wildcard_word));
     Ok((elements, parts, spans_space))
@@ -737,7 +768,9 @@ mod tests {
     #[test]
     fn kinds() {
         assert_eq!(parse("/ab+c/").unwrap().words.len(), 1);
-        assert_eq!(parse("/^ab c$/").unwrap().words.len(), 2);
+        assert_eq!(parse("/ab c/").unwrap().words.len(), 2);
+        // an edge anchor makes a line pattern (Otzaria 7.0.0)
+        assert_eq!(parse("/^ab c$/").unwrap_err(), UserRegexError::LineKind);
         assert_eq!(parse("/ab  +c/").unwrap().words.len(), 2);
         assert_eq!(parse("/a\\sb/").unwrap().words.len(), 2); // \s separates words (Otzaria)
         assert_eq!(parse("/a[ ,]b/").unwrap_err(), UserRegexError::LineKind);

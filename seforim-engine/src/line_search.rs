@@ -652,6 +652,14 @@ mod tests {
             format!("/\\w+{A} {G}/"),
             format!("/(?:{A}|{D}) {G}/"),
             format!("/^{A} \\w+/"),
+            // edge anchors (issue #35)
+            format!("/^{A}/"),
+            format!("/{G}$/"),
+            format!("/^{A}$/"),
+            format!("/^{A}\\W?/"),
+            format!("/\\W?{G}$/"),
+            format!("/^{A}(?:$|)/"),
+            format!("/^\\({A}\\) {G}/"),
             format!("/ {G}$/"),
             format!("/{A}-{G}, /"),
             format!("/{A}\\s+{G}/"),
@@ -763,5 +771,103 @@ mod tests {
         assert!(pooled > 0);
         let one: Vec<_> = t.iter().map(|x| r.session.locate(x)).collect();
         assert_eq!(format!("{located:?}"), format!("{one:?}"));
+    }
+
+    /// The lines a line-regex search returns (candidates checked on their
+    /// text, or the full scan over every line), and whether it scanned.
+    fn found_lines(index: &LineIndex, texts: &[(u64, &str)], raw: &str) -> (Vec<u64>, bool) {
+        let mut r = index.search_options(&regex(raw)).unwrap();
+        let full_scan = r.line_regex().unwrap().full_scan;
+        let (ids, found) = if full_scan {
+            let lines: Vec<crate::PlacedHit> = (0..texts.len() as u64)
+                .map(|i| crate::PlacedHit { position: i, line_id: 100 + i, book_id: texts[i as usize].0, next_line_id: None })
+                .collect();
+            let all: Vec<&str> = texts.iter().map(|t| t.1).collect();
+            (lines.iter().map(|h| h.line_id).collect::<Vec<_>>(), r.line_scan_batch(&lines, &all).unwrap())
+        } else {
+            let ids: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();
+            let t: Vec<&str> = ids.iter().map(|&id| texts[(id - 100) as usize].1).collect();
+            let found = r.line_match_batch(&t).unwrap();
+            (ids, found)
+        };
+        let ids = ids.into_iter().zip(found).filter(|(_, m)| !m.is_empty()).map(|(id, _)| id).collect();
+        (ids, full_scan)
+    }
+
+    /// Issue #35 (Otzaria 7.0.0 line anchors; its
+    /// anchored_line_patterns_search_and_paint_like_the_book_view,
+    /// a_bracket_enumerator_glued_to_the_word_is_part_of_it and
+    /// anchored_candidate_filter_preserves_transparent_boundaries): an edge
+    /// `^` / `$` anchors the line past its numbering, the search returns what
+    /// the text check says on both index flavours, through the candidates
+    /// or the full scan, and the enumerator is not marked.
+    #[test]
+    fn anchored_line_patterns_on_both_flavours() {
+        const VY: &str = "\u{05d5}\u{05d9}\u{05d0}\u{05de}\u{05e8}";
+        const EL: &str = "\u{05d0}\u{05dc}\u{05d4}\u{05d9}\u{05dd}";
+        const SEFER: &str = "\u{05e1}\u{05e4}\u{05e8}";
+        const TORAH: &str = "\u{05ea}\u{05d5}\u{05e8}\u{05d4}";
+        const BOKER: &str = "\u{05d1}\u{05e7}\u{05e8}";
+        const G: &str = "\u{05d2}";
+        const A: &str = "\u{05d0}";
+        let owned = [
+            format!("({G}) {VY} {EL} \u{05d9}\u{05d4}\u{05d9}"), // 100
+            format!("{VY} \u{05de}\u{05e9}\u{05d4} \u{05d0}\u{05dc}"), // 101
+            format!("{A}\u{05d6} {VY} {EL}"),                    // 102
+            format!("[\u{05d9}{A}] {VY} \u{05d9}\u{05d4}\u{05d5}"), // 103
+            format!("\u{05e2}\u{05e8}\u{05d1} {BOKER} {{\u{05e4}}}"), // 104
+            SEFER.to_string(),                                    // 105
+            format!("{SEFER} {TORAH}"),                           // 106
+            format!("[{A}]{VY} \u{05d6}\u{05d4}"),                // 107
+            format!("{EL}[{A}]"),                                 // 108
+            format!("{EL} [{A}]"),                                // 109
+            format!("{SEFER}.{SEFER}"),                           // 110
+            format!("{SEFER}[{A}]"),                              // 111
+            format!("[{A}]{SEFER}"),                              // 112
+            format!("({A}) {SEFER}"),                             // 113
+            format!("{SEFER} {{\u{05e4}}}"),                      // 114
+            format!("\u{05d4}{SEFER}\u{05d9}\u{05dd}"),           // 115
+        ];
+        let texts: Vec<(u64, &str)> = owned.iter().map(|t| (1, t.as_str())).collect();
+        for positions in [true, false] {
+            let (_d, index) = build(positions, &texts);
+            for (raw, expected, full_scan) in [
+                (format!("/^{VY}/"), vec![100, 101, 103], false),
+                (format!(r"/^\({G}\) {VY}/"), vec![100], false),
+                (format!("/^{SEFER}$/"), vec![105, 113, 114], false),
+                (format!("/{BOKER}$/"), vec![104], false),
+                (format!("/{EL}$/"), vec![102, 109], false),
+                (r"/^\S+ \S+$/".to_string(), vec![103, 104, 106, 107, 109, 113, 114], true),
+                (format!(r"/{VY} \S+/"), vec![100, 101, 102, 103, 107], false),
+            ] {
+                let (ids, scanned) = found_lines(&index, &texts, &raw);
+                assert_eq!((ids, scanned), (expected, full_scan), "{} positions {positions}", raw.escape_unicode());
+            }
+            // the search equals the text check, line by line
+            for raw in [
+                format!("/^{SEFER}/"),
+                format!("/^{SEFER}(?:$|)/"),
+                format!("/{SEFER}$/"),
+                format!("/^{SEFER}$/"),
+                format!(r"/^{SEFER}\W?/"),
+                format!(r"/\W?{SEFER}$/"),
+            ] {
+                let plan = hebrew_fts::user_regex::parse_line(&raw).unwrap();
+                let expected: Vec<u64> = (0..texts.len())
+                    .filter(|&i| super::line_passes(&plan, texts[i].1))
+                    .map(|i| 100 + i as u64)
+                    .collect();
+                assert_eq!(found_lines(&index, &texts, &raw).0, expected, "{}", raw.escape_unicode());
+            }
+            // an optional empty branch changes nothing; the count agrees
+            let mut r = index.search_options(&regex(&format!("/^{SEFER}/"))).unwrap();
+            let t: Vec<&str> = r.hits.iter().map(|h| texts[(h.line_id - 100) as usize].1).collect();
+            r.line_match_batch(&t).unwrap();
+            assert_eq!(r.counts().total as usize, found_lines(&index, &texts, &format!("/^{SEFER}(?:$|)/")).0.len());
+            // the enumerator is not marked: the mark starts at the word
+            let mut r = index.search_options(&regex(&format!("/^{VY}/"))).unwrap();
+            let s = r.session.locate(texts[0].1).unwrap();
+            assert_eq!((s.marks[0], s.marks[1]), (4, 5));
+        }
     }
 }

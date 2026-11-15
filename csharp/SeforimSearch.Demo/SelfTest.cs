@@ -36,7 +36,7 @@ namespace SeforimSearch.Demo
                 ("WAL commit (data_version) reopens on rent", DataVersionReopens),
                 ("codec: dictionary appended via WAL is picked up", CodecReloadsNewDictionary),
                 ("codec: base64 text vs base64 frame, errors name the line", CodecBase64AndErrors),
-                ("end to end: build tantivy16 + search in catalog order", EndToEnd),
+                ("end to end: build tantivy17 + search in catalog order", EndToEnd),
                 ("stream: chunks, resume, Restarted, cancellation (Core's StreamSearch)", Stream),
                 ("async engine API (issue #16): batches = sync hits, cancel, abandon, errors", AsyncEngine),
                 ("async open (issue #34): OpenAsync opens and searches, cancelled before open", AsyncOpen),
@@ -626,7 +626,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             Check(engine.Index.IsBuilt, "built");
             string meta = File.ReadAllText(Path.Combine(index, "meta.json"));
             Check(meta.Contains("sort_by_field") && meta.Contains("\"position\""), "index not sorted by position");
-            Check(FtsLib.Fts5.TantivySeforimIndex.IndexFormatVersion == "tantivy16", "format version");
+            Check(FtsLib.Fts5.TantivySeforimIndex.IndexFormatVersion == "tantivy17", "format version");
 
             // ABI edges: a helper's text output is pointer + length (an embedded NUL
             // survives); ids live in 0..=long.MaxValue, a negative id is rejected

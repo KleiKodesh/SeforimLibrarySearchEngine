@@ -76,39 +76,182 @@ pub(crate) fn is_word_break_tag(name: &[char]) -> bool {
     c0 == 's' && c1 == 'u' && (c2 == 'p' || c2 == 'b') // sup, sub
 }
 
-/// True for a `sup` tag name (open or close; the scanners drop the `/`).
-pub(crate) fn is_sup(name: &[char]) -> bool {
+/// True for a `sup` or `sub` tag name (open or close; the scanners drop the `/`).
+pub(crate) fn is_script_tag(name: &[char]) -> bool {
     let start = usize::from(matches!(name.first(), Some('/')));
     let name = &name[start.min(name.len())..];
-    name.len() == 3 && name.iter().map(|c| c.to_ascii_lowercase()).eq(['s', 'u', 'p'])
+    name.len() == 3
+        && name[0].to_ascii_lowercase() == 's'
+        && name[1].to_ascii_lowercase() == 'u'
+        && matches!(name[2].to_ascii_lowercase(), 'p' | 'b')
 }
 
 fn is_letter_or_mark(c: char) -> bool {
     crate::chars::is_hebrew_letter(c) || crate::chars::is_attached_mark(c)
 }
 
-/// A `<sup>` whose `<` is at byte `lt` and `>` at byte `gt` of `text` is
-/// TRANSPARENT (the word continues through it, like `<b>`) only when its
-/// content up to the next `<` is non-empty, holds only Hebrew letters and
-/// attached marks with at least one mark, that `<` starts `</sup>`, and the
-/// chars right before `<sup` and right after `</sup>` are Hebrew letters or
-/// marks (a vocalized letter set mid-word, e.g. in Tanach). Every other
-/// `<sup>` (a footnote or letter marker) ends the word. Same rule in FtsLib's
+/// A Hebrew letter, or a presentation form that folds to one letter and its marks.
+fn is_script_letter(c: char) -> bool {
+    match crate::chars::fold_presentation_form(c) {
+        Some(folded) => {
+            let mut folded = folded.chars();
+            folded.next().is_some_and(crate::chars::is_hebrew_letter)
+                && folded.all(crate::chars::is_attached_mark)
+        }
+        None => crate::chars::is_hebrew_letter(c),
+    }
+}
+
+/// Zero-width chars (bidi controls, CGJ, U+FB1E) that must not change how a
+/// neighbouring `<sup>` / `<sub>` is classified.
+fn is_script_invisible(c: char) -> bool {
+    crate::chars::is_invisible(c) || crate::chars::is_grapheme_joiner(c) || c == '\u{FB1E}'
+}
+
+/// The tag name of a tag body (text between `<` and `>`): an optional `/`,
+/// then an ASCII alphanumeric run of 1..=10 chars.
+fn script_tag_name(body: &str) -> Option<(bool, &str)> {
+    let (closing, name) = match body.strip_prefix('/') {
+        Some(name) => (true, name),
+        None => (false, body),
+    };
+    let len = name.bytes().take_while(u8::is_ascii_alphanumeric).count();
+    (1..=10).contains(&len).then(|| (closing, &name[..len]))
+}
+
+/// An inline (transparent) tag body: neither a word-break tag nor sup/sub.
+fn is_inline_tag(body: &str) -> bool {
+    match script_tag_name(body) {
+        Some((_, name)) => {
+            let name: Vec<char> = name.chars().collect();
+            !is_word_break_tag(&name)
+        }
+        None => true,
+    }
+}
+
+fn trim_formatting_start(mut s: &str) -> &str {
+    loop {
+        s = s.trim_start_matches(is_script_invisible);
+        let Some(body) = s.strip_prefix('<') else {
+            break;
+        };
+        let Some(gt) = body.find('>') else { break };
+        if !is_inline_tag(&body[..gt]) {
+            break;
+        }
+        s = &body[gt + 1..];
+    }
+    s
+}
+
+fn trim_formatting_end(mut s: &str) -> &str {
+    loop {
+        s = s.trim_end_matches(is_script_invisible);
+        let Some(body) = s.strip_suffix('>') else {
+            break;
+        };
+        let Some(lt) = body.rfind('<') else { break };
+        if body[lt + 1..].contains('>') || !is_inline_tag(&body[lt + 1..]) {
+            break;
+        }
+        s = &body[..lt];
+    }
+    s
+}
+
+fn trim_context_end(mut s: &str) -> &str {
+    loop {
+        let t = trim_formatting_end(s).trim_end_matches(crate::chars::is_word_mark);
+        if t.len() == s.len() {
+            return s;
+        }
+        s = t;
+    }
+}
+
+fn trim_context_start(mut s: &str) -> &str {
+    loop {
+        let t = trim_formatting_start(s).trim_start_matches(crate::chars::is_word_mark);
+        if t.len() == s.len() {
+            return s;
+        }
+        s = t;
+    }
+}
+
+/// The word `footnote-marker` in a tag's attributes (case-insensitive, whole word).
+fn marks_footnote(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    let word = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    lower.match_indices("footnote-marker").any(|(i, f)| {
+        !word(lower.as_bytes()[..i].last()) && !word(lower.as_bytes().get(i + f.len()))
+    })
+}
+
+/// An open `<sup>` / `<sub>` whose `<` is at byte `lt` and `>` at byte `gt`
+/// of `text` is TRANSPARENT (the word continues through it, like `<b>`) when
+/// it sits between letters and wraps a hanging letter (issue #37, Otzaria
+/// engine 5babbce `is_word_internal_script`):
+/// - its attributes do not hold the word `footnote-marker` (always splits);
+/// - before `<` (skipping marks, bidi / CGJ chars and inline tags) is a Hebrew
+///   letter or a presentation form of one;
+/// - its content (inline tags and zero-width chars skipped) is either ONE such
+///   letter with optional marks (no mark required), or Hebrew letters and
+///   marks with at least one mark (issue #2 H58, a vocalized letter run);
+/// - the content ends at the matching close tag (`</sup>` / `</sub>`), and
+///   after it (same skipping) comes a Hebrew letter.
+///
+/// Every other `<sup>` / `<sub>` ends the word. Same rule in FtsLib's
 /// `HtmlBlockTags.IsTransparentSup`.
 pub(crate) fn is_transparent_sup(text: &str, lt: usize, gt: usize) -> bool {
-    if !text[..lt].chars().next_back().is_some_and(is_letter_or_mark) {
+    let body = &text[lt + 1..gt];
+    let Some((false, name)) = script_tag_name(body) else {
+        return false;
+    };
+    if marks_footnote(body) {
         return false;
     }
-    let rest = &text[gt + 1..];
-    let Some(close) = rest.find('<') else { return false };
-    let inner = &rest[..close];
-    if inner.is_empty() || !inner.chars().all(is_letter_or_mark) || !inner.chars().any(crate::chars::is_attached_mark) {
+    if !trim_context_end(&text[..lt])
+        .chars()
+        .next_back()
+        .is_some_and(is_script_letter)
+    {
         return false;
     }
-    let after = &rest[close..];
-    after.len() >= 6
-        && after.as_bytes()[..6].eq_ignore_ascii_case(b"</sup>")
-        && after[6..].chars().next().is_some_and(is_letter_or_mark)
+    let content = trim_formatting_start(&text[gt + 1..]);
+    let mut chars = content.chars();
+    if !chars.next().is_some_and(is_script_letter) {
+        return false;
+    }
+    // one hanging letter (marks optional) ...
+    let mut rest = trim_context_start(chars.as_str());
+    if !rest.starts_with('<') {
+        // ... or a vocalized run of letters and marks (at least one mark)
+        let Some(end) = content.find('<') else {
+            return false;
+        };
+        let run = &content[..end];
+        if !run
+            .chars()
+            .all(|c| is_letter_or_mark(c) || is_script_invisible(c))
+            || !run.chars().any(crate::chars::is_attached_mark)
+        {
+            return false;
+        }
+        rest = trim_context_start(&content[end..]);
+    }
+    let Some(close) = rest.strip_prefix('<') else {
+        return false;
+    };
+    let Some(close_gt) = close.find('>') else {
+        return false;
+    };
+    matches!(script_tag_name(&close[..close_gt]), Some((true, c)) if c.eq_ignore_ascii_case(name))
+        && trim_context_start(&close[close_gt + 1..])
+            .chars()
+            .next()
+            .is_some_and(is_script_letter)
 }
 
 /// Whether the tag `text[lt..=gt]` (`<` at byte `lt`, its first `>` at
@@ -131,7 +274,7 @@ pub(crate) fn tag_breaks_word(text: &str, lt: usize, gt: usize, sup_transparent:
         }
     }
     let name = &name[..len];
-    if is_sup(name) {
+    if is_script_tag(name) {
         if text.as_bytes()[lt + 1] == b'/' {
             !std::mem::take(sup_transparent)
         } else {

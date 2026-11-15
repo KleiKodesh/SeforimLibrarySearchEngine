@@ -462,7 +462,7 @@ pub(crate) fn scan_until(
         if in_tag {
             if c == '>' {
                 let name = &tag_name[..tag_len];
-                let breaks = if html_tags::is_sup(name) {
+                let breaks = if html_tags::is_script_tag(name) {
                     if bytes[tag_lt + 1] == b'/' {
                         !std::mem::take(&mut sup_transparent)
                     } else {
@@ -950,14 +950,36 @@ mod tests {
         assert_same("\u{05D0}<SUP class=\"x\">\u{05D1}\u{05B0}</SUP>\u{05D2}");
         // a digit marker breaks
         assert_eq!(words("\u{05D0}\u{05B8}<sup>1</sup>\u{05D2}").len(), 3);
-        // an unmarked letter marker mid-word breaks
-        assert_eq!(words("\u{05D0}\u{05B8}<sup>\u{05D1}</sup>\u{05D2}").len(), 3);
+        // issue #37: a bare hanging letter mid-word joins (no mark needed), in <sup> or <sub>
+        assert_eq!(words("\u{05D0}\u{05B8}<sup>\u{05D1}</sup>\u{05D2}"), vec!["\u{05D0}\u{05D1}\u{05D2}".to_string()]);
+        assert_eq!(words("\u{05D0}<sub>\u{05D1}</sub>\u{05D2}"), vec!["\u{05D0}\u{05D1}\u{05D2}".to_string()]);
+        // line 3274701's pattern: bare one-letter sups glued between letters, repeated
+        let t37 = "\u{05DE}\u{05E9}<sup>\u{05D4}</sup>\u{05D5} \u{05D0}\u{05D1}<sup>\u{05E8}</sup>\u{05D4}\u{05DD} \u{05D9}<sup>\u{05E6}</sup>\u{05D7}\u{05E7}";
+        assert_eq!(
+            words(t37),
+            vec![
+                "\u{05DE}\u{05E9}\u{05D4}\u{05D5}".to_string(),
+                "\u{05D0}\u{05D1}\u{05E8}\u{05D4}\u{05DD}".into(),
+                "\u{05D9}\u{05E6}\u{05D7}\u{05E7}".into()
+            ]
+        );
+        assert_same(t37);
+        // a footnote-marker always splits, even a bare or marked letter
+        assert_eq!(words("\u{05D0}<sup class=\"footnote-marker\">\u{05D1}</sup>\u{05D2}").len(), 3);
+        assert_eq!(words("\u{05D0}<sup class=\"x footnote-marker\">\u{05D1}\u{05B0}</sup>\u{05D2}").len(), 3);
+        // a presentation form counts as a letter; bidi / CGJ chars around the letter are skipped
+        assert_eq!(words("\u{05D0}<sup>\u{FB31}</sup>\u{05D2}").len(), 1);
+        assert_eq!(words("\u{05D0}\u{200F}<sup>\u{034F}\u{05D1}\u{200E}</sup>\u{202C}\u{05D2}").len(), 1);
+        // two bare letters are a marker
+        assert_eq!(words("\u{05D0}<sup>\u{05D1}\u{05D1}</sup>\u{05D2}").len(), 3);
+        // a mismatched close tag breaks
+        assert_eq!(words("\u{05D0}<sup>\u{05D1}</sub>\u{05D2}").len(), 3);
         // a marker at the word end breaks (nothing Hebrew after </sup>)
         assert_eq!(words("\u{05D0}<sup>\u{05D1}\u{05B0}</sup> \u{05D2}").len(), 3);
         // nothing Hebrew before <sup>
         assert_eq!(words("a<sup>\u{05D1}\u{05B0}</sup>\u{05D2}").len(), 3);
-        // a tag inside the sup breaks
-        assert_eq!(words("\u{05D0}<sup><b>\u{05D1}\u{05B0}</b></sup>\u{05D2}").len(), 3);
+        // an inline tag inside the sup is skipped (issue #37, as Otzaria)
+        assert_eq!(words("\u{05D0}<sup><b>\u{05D1}\u{05B0}</b></sup>\u{05D2}").len(), 1);
         for c in [
             "\u{05D0}\u{05B8}<sup>1</sup>\u{05D2}",
             "\u{05D0}\u{05B8}<sup>\u{05D1}</sup>\u{05D2}",
@@ -965,6 +987,10 @@ mod tests {
             "\u{05D0}<sup>\u{05D1}\u{05B0}</sub>\u{05D2}",
             "\u{05D0}<sup>\u{05D1}\u{05B0}",
             "\u{05D0}</sup>\u{05D1}",
+            "\u{05D0}<sub>\u{05D1}</sub>\u{05D2}",
+            "\u{05D0}<sup class=\"footnote-marker\">\u{05D1}</sup>\u{05D2}",
+            "\u{05D0}<sup><b>\u{05D1}</b></sup>\u{05D2}",
+            "\u{05D0}\u{200F}<sup>\u{034F}\u{05D1}</sup>\u{05D2}",
         ] {
             assert_same(c);
         }

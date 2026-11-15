@@ -49,7 +49,7 @@ fn elements(text: &str) -> (Vec<Elem>, usize) {
         let (b, u, c) = table[i];
         if in_tag {
             if c == '>' {
-                let breaks = if html_tags::is_sup(&tag_name) {
+                let breaks = if html_tags::is_script_tag(&tag_name) {
                     if text[tag_lt + 1..].starts_with('/') {
                         !std::mem::take(&mut sup_transparent)
                     } else {

@@ -18,11 +18,15 @@ _args = [a for i, a in enumerate(sys.argv[1:], 1) if a != "--prefix" and sys.arg
 SP = _args[0] if _args else os.path.join(ROOT, "bench-results")
 P = sys.argv[sys.argv.index("--prefix") + 1] if "--prefix" in sys.argv else ""
 OUT = os.path.join(ROOT, "FTS-SPECS-AND-COMPARISONS.md")
-INDEX_FORMAT = "tantivy16"   # C# TantivySeforimIndex.IndexFormatVersion
-FTSLIB_FORMAT = "fts13"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
+INDEX_FORMAT = "tantivy17"   # C# TantivySeforimIndex.IndexFormatVersion
+FTSLIB_FORMAT = "fts14"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
 MEASURED_FTSLIB = "fts13"     # FtsLib format of the runs in the results dir (= FTSLIB_FORMAT once rerun)
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
 STALE = [
+    "`tantivy17` / `fts14` (issue #37, both engines): a one-letter `<sup>` / `<sub>` between letters is "
+    "transparent without a mark (presentation forms count, bidi / CGJ / inline tags skipped) and a "
+    "`footnote-marker` tag always splits: on the local DB one line changes; both full-DB rebuilds and the "
+    "parity sets need a rerun on the fullrun workflow.",
     "In order: a paired reading's two readings (one position) no longer chain on an index without "
     "positions or in FtsLib (as with positions and Otzaria): the parity sets with in-order queries "
     "need a rerun (both engines changed together).",

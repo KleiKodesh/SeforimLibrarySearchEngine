@@ -849,6 +849,14 @@ pub fn apply(
         params.threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     }
 
+    // SEFORIM_VECTORS_PROFILE=1: the time of each stage on stderr (CI build measurements)
+    let profile = std::env::var_os("SEFORIM_VECTORS_PROFILE").is_some();
+    let clock = std::time::Instant::now();
+    let stage = |name: &str| {
+        if profile {
+            eprintln!("vectors-profile: {name} at {} ms", clock.elapsed().as_millis());
+        }
+    };
     // the new rows, validated and normalized
     let mut new_rows: Vec<(u64, u64, u32, Vec<u16>, Vec<f32>)> = Vec::with_capacity(update.add.len());
     let mut new_chunks = HashSet::with_capacity(update.add.len());
@@ -904,6 +912,7 @@ pub fn apply(
         return Err(Error::Cancelled);
     }
 
+    stage("rows normalized + old rows listed");
     let generation = old.as_ref().map_or(1, |s| s.generation() + 1);
     let old_count = old.as_ref().map_or(0, |s| s.len());
     let removed_before = old.as_ref().map_or(0, |s| s.header.removed_since_rebuild);
@@ -931,6 +940,7 @@ pub fn apply(
             }
             to_add.extend(new_rows.iter().enumerate().map(|(i, r)| (r.1, Source::New(i))));
         }
+        stage(if rebuild { "graph created" } else { "old graph loaded, removals done" });
         index.reserve_capacity_and_threads(index.size() + to_add.len(), params.threads)?;
         let t = f16::table();
         let error: std::sync::Mutex<Option<Error>> = std::sync::Mutex::new(None);
@@ -975,6 +985,7 @@ pub fn apply(
         if cancelled() {
             return Err(Error::Cancelled);
         }
+        stage("graph vectors added");
         let tmp = with_tmp(&graph_file);
         let _ = std::fs::remove_file(&tmp);
         index.save(tmp.to_str().ok_or_else(|| Error::Invalid("non UTF-8 path".into()))?)?;
@@ -988,6 +999,7 @@ pub fn apply(
         return Err(Error::Cancelled);
     }
 
+    stage("graph saved");
     // the .sev, streamed
     let mut books: Vec<(u64, u64, u64)> = Vec::new();
     for (row, &(book, _, _, _)) in rows.iter().enumerate() {
@@ -1087,6 +1099,7 @@ pub fn apply(
         let _ = std::fs::remove_file(&graph_file);
         return Err(e);
     }
+    stage("store (.sev) written");
     drop(old);
     remove_older_generations(dir, generation);
     Ok(ApplyStats {

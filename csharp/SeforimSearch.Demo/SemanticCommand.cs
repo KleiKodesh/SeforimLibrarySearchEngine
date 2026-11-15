@@ -30,7 +30,7 @@ namespace SeforimSearch.Demo
     /// </summary>
     internal static class SemanticCommand
     {
-        private static readonly string[] ValueOptions = { "--db", "--index", "--books", "--max-lines", "--book-ids", "--batch", "--line", "--k", "--model" };
+        private static readonly string[] ValueOptions = { "--db", "--index", "--books", "--max-lines", "--book-ids", "--batch", "--line", "--lines", "--k", "--model" };
 
         private static List<string> Positional(string[] args)
         {
@@ -137,6 +137,7 @@ namespace SeforimSearch.Demo
                               $"records {sum.Records:N0}, vectors {sum.Vectors:N0}, lines {sum.Lines:N0}, out_of_range {sum.OutOfRange:N0}, " +
                               $"duplicates {sum.Duplicates:N0}, generation {sum.Generation}");
             Console.WriteLine($"time: total {Time(total.Elapsed)}, mapping (SQLite) {Time(mapTime.Elapsed)}, import {Time(importTime.Elapsed)}");
+            Console.WriteLine($"peak working set: {System.Diagnostics.Process.GetCurrentProcess().PeakWorkingSet64 / 1048576.0:N0} MB");
             return 0;
 
             static string missingOr(long n) => n.ToString("N0");
@@ -203,6 +204,10 @@ namespace SeforimSearch.Demo
 
         public static int Search(string db, string[] args)
         {
+            // --lines a,b,c: one model load, each line's text as a query, with a recall check of the
+            // graph against the exact scan (CI measurements)
+            string? many = Program.OptionOf(args, "--lines");
+            if (many != null) return SearchMany(db, args, many);
             var pos = Positional(args);
             if (pos.Count < 1) { Console.Error.WriteLine("usage: semantic-search <index dir> [query...] [--line lineId] [--k 10] [--hybrid]"); return 2; }
             string indexDir = pos[0];
@@ -254,6 +259,58 @@ namespace SeforimSearch.Demo
                     Console.WriteLine($"     line {f.LineId,10}  book {f.BookId,6}  fused {f.Fused:F4}  lexical {f.Lexical?.ToString("F4") ?? "-"}  " +
                                       $"semantic {f.Semantic?.ToString("F4") ?? "-"}  {f.Source}");
             }
+            return 0;
+        }
+
+        private static string LineText(string db, long lineId)
+        {
+            using var conn = SqliteConnectionFactory.OpenCorpusRead(db);
+            var schema = SeforimDbSchema.Probe(conn);
+            using var codec = SeforimDbLineContentCodec.Create(conn);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT " + SeforimDbLineContentSql.RawContentExpression(schema, "l") + " FROM line l" +
+                              SeforimDbLineContentSql.ContentJoin(schema, "l") + " WHERE l.id = $id";
+            cmd.Parameters.AddWithValue("$id", lineId);
+            using var r = cmd.ExecuteReader();
+            return r.Read() ? StripTags(codec.DecodeColumn(r, 0, lineId) ?? "") : "";
+        }
+
+        private static int SearchMany(string db, string[] args, string many)
+        {
+            var pos = Positional(args);
+            if (pos.Count < 1) { Console.Error.WriteLine("usage: semantic-search <index dir> --lines a,b,c [--k 10]"); return 2; }
+            int k = int.TryParse(Program.OptionOf(args, "--k"), out int kk) && kk > 0 ? kk : 10;
+            using var embedder = new MeivinEmbedder(Program.OptionOf(args, "--model") ?? DefaultModelDir());
+            using var index = SeforimIndex.Open(pos[0]);
+            int queries = 0, self1 = 0, selfK = 0;
+            double recall = 0, graphMs = 0, exactMs = 0, embedMs = 0;
+            foreach (var part in many.Split(','))
+            {
+                if (!long.TryParse(part.Trim(), out long lineId)) continue;
+                string text = LineText(db, lineId);
+                if (text.Trim().Length == 0) continue;
+                var sw = Stopwatch.StartNew();
+                float[] vector = embedder.Embed(embedder.QueryIds(text));
+                embedMs += sw.Elapsed.TotalMilliseconds;
+                sw.Restart();
+                var graph = index.SemanticSearch(vector, new SemanticOptions { K = k, ExactThreshold = 0 });
+                graphMs += sw.Elapsed.TotalMilliseconds;
+                sw.Restart();
+                var exact = index.SemanticSearch(vector, new SemanticOptions { K = k, ExactThreshold = long.MaxValue });
+                exactMs += sw.Elapsed.TotalMilliseconds;
+                var want = new HashSet<long>(exact.Hits.Select(h => h.LineId));
+                double r = want.Count == 0 ? 1 : graph.Hits.Count(h => want.Contains(h.LineId)) / (double)want.Count;
+                int rank = Array.FindIndex(graph.Hits, h => h.LineId == lineId) + 1;
+                queries++;
+                recall += r;
+                if (rank == 1) self1++;
+                if (rank >= 1) selfK++;
+                Console.WriteLine($"line {lineId,10}: own rank {(rank == 0 ? "-" : rank.ToString())}, top score {(graph.Hits.Length > 0 ? graph.Hits[0].Score : 0):F4}, " +
+                                  $"recall@{k} {r:F2}");
+            }
+            if (queries == 0) { Console.Error.WriteLine("no query lines"); return 2; }
+            Console.WriteLine($"queries {queries}: own line rank 1 in {self1}, in top {k} in {selfK}; mean recall@{k} graph vs exact {recall / queries:F3}; " +
+                              $"mean embed {embedMs / queries:F0} ms, graph search {graphMs / queries:F0} ms, exact scan {exactMs / queries:F0} ms");
             return 0;
         }
 

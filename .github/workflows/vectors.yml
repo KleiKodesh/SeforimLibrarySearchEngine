@@ -1,0 +1,116 @@
+# Full-library semantic vector build on GitHub Actions (manual, issue #18): Otzaria's prebuilt
+# vector release imported into our vector sidecar over a full positions index, with the time of
+# each stage (records + decode, normalize, graph build, graph save, store write), the peak working
+# set, the sizes (store, graph, zstd-compressed) and sanity / recall / latency queries with
+# Otzaria's Meivin query model, all printed into the log. Long runs go here, not on a user PC.
+name: vectors
+
+on:
+  workflow_dispatch:
+    inputs:
+      db_tag:
+        description: Otzaria/SeforimLibrary release tag of seforim.db
+        default: v37-20261105163520
+      vectors_tag:
+        description: Otzaria/SeforimLibrary vector release (family must match the query model)
+        default: vectors-qa491-v37-20261105163520
+      model_tag:
+        description: Otzaria/otzaria-semantic-search model release (query model)
+        default: model-meivin-qa491-int8-v1
+      batch:
+        description: books per import call (one store write each)
+        default: "1000"
+
+env:
+  OUT: C:/bench
+  PYTHONUTF8: "1"
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  db:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: C:/bench/data/seforim-schema7.db.zst
+          key: seforim-db-${{ inputs.db_tag }}
+      - name: download seforim.db
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          printf 'OUT_DIR=/c/bench\nDB_TAG=%s\n' "${{ inputs.db_tag }}" > tools/bench/bench.local.env
+          tools/bench/run-all.sh --steps db
+          rm -f /c/bench/data/seforim.db
+
+  vectors:
+    needs: db
+    runs-on: windows-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: ./.github/actions/fullrun-setup
+        with: { db_tag: "${{ inputs.db_tag }}" }
+      - name: runner
+        shell: bash
+        run: |
+          nproc; wmic computersystem get TotalPhysicalMemory 2>/dev/null || true; df -h /c | tail -1
+      - name: tools + full positions index
+        shell: bash
+        run: |
+          cat >> tools/bench/bench.local.env <<EOF
+          TOOLS="engine demo"
+          INDEXES="pos"
+          EOF
+          tools/bench/run-all.sh --steps detect,db,build-tools,build-indexes
+      - name: download the vector release and the query model
+        shell: bash
+        run: |
+          mkdir -p C:/bench/vectors C:/bench/model
+          t0=$(date +%s)
+          gh release download "${{ inputs.vectors_tag }}" -R Otzaria/SeforimLibrary -D C:/bench/vectors -p "*.oxv.zst" -p "*.manifest.json"
+          echo "vector release download: $(( $(date +%s) - t0 )) s"
+          ls -l C:/bench/vectors
+          gh release download "${{ inputs.model_tag }}" -R Otzaria/otzaria-semantic-search -D C:/bench/model -p query.int8.onnx -p tokenizer.json -p model.json -p INFERENCE_CONTRACT.json
+          ls -l C:/bench/model
+      - name: import (full library, stage times on stderr)
+        shell: bash
+        env: { SEFORIM_VECTORS_PROFILE: "1" }
+        run: |
+          set -o pipefail
+          mkdir -p C:/bench/logs
+          demo=csharp/SeforimSearch.Demo/bin/Release/net10.0/SeforimSearch.Demo.exe
+          zst=$(ls C:/bench/vectors/*.oxv.zst | head -1)
+          t0=$(date +%s)
+          $demo semantic-import C:/bench/indexes/ours-pos "$zst" --db C:/bench/data/seforim.db --batch "${{ inputs.batch }}" 2>&1 | sed 's/[^ -~]/?/g' | tee C:/bench/logs/vectors-import.log
+          echo "import wall time: $(( $(date +%s) - t0 )) s"
+      - name: sizes
+        if: always()
+        shell: bash
+        run: |
+          ls -l C:/bench/indexes/ours-pos/vectors || exit 0
+          du -sb C:/bench/indexes/ours-pos/vectors
+          t0=$(date +%s)
+          python -I -c "import tarfile;t=tarfile.open('C:/bench/vectors-sidecar.tar.zst','w:zst',level=3);t.add('C:/bench/indexes/ours-pos/vectors','vectors',filter=lambda i: None if i.name.endswith('write.lock') else i);t.close()"
+          echo "zstd -3 of the sidecar: $(stat -c %s C:/bench/vectors-sidecar.tar.zst) bytes in $(( $(date +%s) - t0 )) s"
+      - name: sanity, recall and latency queries (Meivin query model)
+        if: always()
+        shell: bash
+        run: |
+          demo=csharp/SeforimSearch.Demo/bin/Release/net10.0/SeforimSearch.Demo.exe
+          lines=$(python -I -c "import sqlite3,random;c=sqlite3.connect('file:C:/bench/data/seforim.db?mode=ro',uri=True);n=c.execute('select max(id) from line').fetchone()[0];random.seed(18);print(','.join(str(random.randint(1,n)) for _ in range(40)))")
+          $demo semantic-search C:/bench/indexes/ours-pos --lines "$lines" --k 10 --db C:/bench/data/seforim.db --model C:/bench/model 2>&1 | sed 's/[^ -~]/?/g' | tee C:/bench/logs/vectors-queries.log
+          for l in $(echo "$lines" | tr ',' ' ' | cut -d' ' -f1-3); do
+            $demo semantic-search C:/bench/indexes/ours-pos --line $l --k 5 --hybrid --db C:/bench/data/seforim.db --model C:/bench/model 2>&1 | sed 's/[^ -~]/?/g'
+          done
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vectors-logs
+          path: C:/bench/logs
+          if-no-files-found: ignore

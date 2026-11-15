@@ -2226,6 +2226,15 @@ lines) and `semantic-search <index> <query> [--k] [--hybrid]`.
 
 `SemanticIndex` extension (`updateVectors`, `vectorInfo`, `semanticSearch`),
 `SearchSession.fuseSemantic`, and the same on `SearchWorker` /
+**Full-library build on CI.** `.github/workflows/vectors.yml` (manual) builds the full
+positions index, imports Otzaria's vector release with `SEFORIM_VECTORS_PROFILE=1` (each
+stage's time on stderr: records + decode, normalize, graph build, graph save, store write),
+prints the peak working set, the sizes (store, graph, zstd) and runs
+`semantic-search --lines a,b,c` (each line's text as a query: own-line rank, recall@k of the
+graph against the exact scan, embed / search latency).
+
+**Hosts.** C#: `SeforimSemantic` (`UpdateVectors`, `GetVectorInfo`,
+`SemanticSearch`, `SearchSession.FuseSemantic`, each with `*Async`). Dart:
 `AsyncSearchSession`. **How a host feeds vectors:** embed every line's text
 (the same text it indexes) with its model, then call the update with
 `(line_id, book_id, float[dims])` per line, in batches (e.g. a book at a

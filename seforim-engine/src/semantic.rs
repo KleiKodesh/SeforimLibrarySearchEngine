@@ -230,7 +230,11 @@ impl LineIndex {
     pub fn import_oxv(&self, path: &std::path::Path, books: &[OxvBookMap], cancel: Option<&CancelToken>) -> Result<OxvImportReport> {
         let file = seforim_vectors::oxv::OxvFile::open(path).map_err(map_err)?;
         let flag = cancel.map(|c| c.flag());
+        let decode = std::time::Instant::now();
         let (update, mut report) = file.update_for(books, flag.as_deref()).map_err(map_err)?;
+        if std::env::var_os("SEFORIM_VECTORS_PROFILE").is_some() {
+            eprintln!("vectors-profile: oxv records + decode {} ms ({} vectors)", decode.elapsed().as_millis(), update.add.len());
+        }
         if !update.add.is_empty() || !update.remove_books.is_empty() {
             let stats = self.update_vectors(file.dims(), &update, cancel)?;
             report.generation = stats.generation;

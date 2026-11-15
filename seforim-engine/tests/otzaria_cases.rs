@@ -133,6 +133,25 @@ const SCOPE: &[&str] = &[
     "מתעסק וגם אינו מתכוין באותה שורה",
 ];
 
+// Otzaria 7.0.1 typo cases (issue #36).
+const PALM: &[&str] = &[
+    "\u{05E4}\u{05D0}\u{05DC}\u{05DE}\u{05D9}\u{05D8}\u{05D5}: \u{05DC}\u{05D1}\u{05D1}\u{05D5}\u{05EA} \u{05D3}\u{05E7}\u{05DC} (hearts of palm)",
+    "\u{05DC}\u{05D1}\u{05D5}\u{05EA} \u{05D3}\u{05E7}\u{05DC}",
+];
+const PALMITO: &str = "\u{05E4}\u{05D0}\u{05DC}\u{05DE}\u{05D9}\u{05D8}\u{05D5}";
+const LLBVT: &str = "\u{05DC}\u{05DC}\u{05D1}\u{05D5}\u{05EA}";
+const DQL: &str = "\u{05D3}\u{05E7}\u{05DC}";
+const SHALOM: &str = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
+
+fn typo(o: &mut WalkOptionsSpec) {
+    o.spelling_errors = true;
+}
+
+fn typo_gram(o: &mut WalkOptionsSpec) {
+    o.spelling_errors = true;
+    o.grammar_prefixes = true;
+}
+
 fn cases() -> Vec<Case> {
     use Expect::*;
     vec![
@@ -173,18 +192,19 @@ fn cases() -> Vec<Case> {
         Case { name: "typo ברכה: full edit distance 1", lines: &["ברכה בראשית", "ברכגה אחר", "תורה צוה"],
             req: || SearchRequest { groups: vec![wo("ברכה", |o| o.spelling_errors = true)], ..Default::default() },
             expect: Exactly(&[1, 2]), positions_only: false },
-        // TypoMode::Otzaria: with another option, Otzaria's sampled list
-        // (no ג insertion); FullEdit1: the full edit distance 1.
-        Case { name: "typo + grammatical prefixes ברכה (Otzaria list)", lines: &["ברכה", "ברכגה", "והברקה", "תורה"],
+        // TypoMode::Otzaria (engine 7.0.1): with another option, the sampled
+        // list plus every single-letter edit of the typed form (the ג
+        // insertion); FullEdit1: the full edit distance 1.
+        Case { name: "typo + grammatical prefixes ברכה (Otzaria 7.0.1)", lines: &["ברכה", "ברכגה", "והברקה", "תורה"],
             req: || SearchRequest { groups: vec![wo("ברכה", |o| { o.spelling_errors = true; o.grammar_prefixes = true; })], ..Default::default() },
-            expect: Exactly(&[1, 3]), positions_only: false },
+            expect: Exactly(&[1, 2, 3]), positions_only: false },
         Case { name: "typo + grammatical prefixes ברכה (FullEdit1)", lines: &["ברכה", "ברכגה", "והברקה", "תורה"],
             req: || SearchRequest { groups: vec![wo("ברכה", |o| { o.spelling_errors = true; o.grammar_prefixes = true; o.typo_mode = TypoModeSpec::FullEdit1; })], ..Default::default() },
             expect: Exactly(&[1, 2, 3]), positions_only: false },
-        // Otzaria: a phrase word takes the sampled list, not the scan.
-        Case { name: "typo in a phrase ברכה בראשית (Otzaria list)", lines: &["ברכגה בראשית", "ברקה בראשית"],
+        // Otzaria 7.0.1: a phrase word takes the sampled list plus the letter edits.
+        Case { name: "typo in a phrase ברכה בראשית (Otzaria 7.0.1)", lines: &["ברכגה בראשית", "ברקה בראשית"],
             req: || SearchRequest { groups: vec![wo("ברכה", |o| o.spelling_errors = true), w("בראשית")], ..Default::default() },
-            expect: Exactly(&[2]), positions_only: false },
+            expect: Exactly(&[1, 2]), positions_only: false },
         // Otzaria advanced_typo_partial_single_word_finds_document.
         Case { name: "typo + part of word משה", lines: &["ויאמר משה אל העם", "ספר בראשית"],
             req: || SearchRequest { groups: vec![wo("משה", |o| { o.spelling_errors = true; o.part_of_word = true; })], ..Default::default() },
@@ -290,6 +310,48 @@ fn cases() -> Vec<Case> {
             req: || SearchRequest { groups: vec![w("רמב\"ם")],
                 phrase_alternatives: vec![vec![w("רבי"), w("משה"), w("בן"), w("מיימון")]], ..Default::default() },
             expect: Exactly(&[1, 2]), positions_only: false },
+        // ---- Otzaria 7.0.1 (otzaria_search_engine 5babbce, issue #36),
+        // search_quality_tests.rs; an Otzaria phrase = ordered, distance 0.
+        // phrase_typo_takes_any_single_letter_edit
+        Case { name: "7.0.1 phrase typo: substitution, first word", lines: PALM,
+            req: || ordered(vec![wo(LLBVT, typo), w(DQL)], 0), expect: Contains(&[1], &[]), positions_only: false },
+        Case { name: "7.0.1 phrase typo: substitution, second word", lines: PALM,
+            req: || ordered(vec![w(PALMITO), wo(LLBVT, typo)], 0), expect: Exactly(&[1]), positions_only: false },
+        Case { name: "7.0.1 phrase typo: insertion", lines: PALM,
+            req: || ordered(vec![wo("\u{05DC}\u{05D1}\u{05D1}\u{05D1}\u{05D5}\u{05EA}", typo), w(DQL)], 0), expect: Contains(&[1], &[]), positions_only: false },
+        Case { name: "7.0.1 phrase typo: deletion", lines: PALM,
+            req: || ordered(vec![wo("\u{05DC}\u{05D1}\u{05D5}\u{05EA}", typo), w(DQL)], 0), expect: Contains(&[1], &[]), positions_only: false },
+        Case { name: "7.0.1 phrase typo: transposition", lines: PALM,
+            req: || ordered(vec![wo("\u{05DC}\u{05D1}\u{05D1}\u{05EA}\u{05D5}", typo), w(DQL)], 0), expect: Contains(&[1], &[]), positions_only: false },
+        Case { name: "7.0.1 phrase typo + grammatical prefixes", lines: PALM,
+            req: || ordered(vec![wo(LLBVT, typo_gram), wo(DQL, typo_gram)], 0), expect: Contains(&[1], &[]), positions_only: false },
+        Case { name: "7.0.1 phrase typo: 3 letters confusions only", lines: PALM,
+            req: || ordered(vec![wo("\u{05DC}\u{05D1}\u{05D1}\u{05D5}\u{05EA}", typo), wo("\u{05D3}\u{05E7}\u{05E8}", typo)], 0), expect: Exactly(&[]), positions_only: false },
+        // phrase_typo_edits_keep_every_sampled_variant
+        Case { name: "7.0.1 phrase typo edits keep the sampled variants", lines: &["\u{05E1}\u{05E4}\u{05E8}\u{05DD} \u{05E9}\u{05DC}\u{05D5}\u{05DD}"],
+            req: || ordered(vec![wo("\u{05E1}\u{05E4}\u{05E8}\u{05D9}\u{05DD}", |o| {
+                o.spelling_errors = true; o.grammar_prefixes = true; o.grammar_suffixes = true; o.aramaic_prefixes = true; o.aramaic_suffixes = true;
+            }), w(SHALOM)], 0), expect: Exactly(&[1]), positions_only: false },
+        // phrase_typo_composes_with_spelling
+        Case { name: "7.0.1 phrase typo composes with ktiv", lines: &["\u{05D1}\u{05D9}\u{05E8}\u{05E7}\u{05D4} \u{05E9}\u{05DC}\u{05D5}\u{05DD}", "\u{05D1}\u{05E8}\u{05D9}\u{05E7}\u{05D4} \u{05E9}\u{05DC}\u{05D5}\u{05DD}", "\u{05D1}\u{05D5}\u{05E8}\u{05E7}\u{05D4} \u{05E9}\u{05DC}\u{05D5}\u{05DD}"],
+            req: || ordered(vec![wo("\u{05D1}\u{05E8}\u{05DB}\u{05D4}", |o| { o.spelling_errors = true; o.ktiv_male_haser = true; }), w(SHALOM)], 0),
+            expect: Exactly(&[1, 2, 3]), positions_only: false },
+        // final_letter_suffix_windows_keep_phrase_typo_results (ccefc81)
+        Case { name: "7.0.1 final letter + suffix window keeps phrase typos", lines: &["\u{05D0}\u{05D1}\u{05E8}\u{05E2}\u{05DD} \u{05E9}\u{05DC}\u{05D5}\u{05DD}", "\u{05D5}\u{05D0}\u{05D1}\u{05E8}\u{05E2}\u{05DD} \u{05E9}\u{05DC}\u{05D5}\u{05DD}", "\u{05D0}\u{05D1}\u{05E8}\u{05D4}\u{05DD} \u{05E9}\u{05DC}\u{05D5}\u{05DD}"],
+            req: || ordered(vec![wo("\u{05D0}\u{05D1}\u{05E8}\u{05D4}\u{05DD}", |o| {
+                o.spelling_errors = true; o.ktiv_male_haser = true; o.advanced_suffixes = true; o.aramaic_prefixes = true;
+            }), w(SHALOM)], 0), expect: Exactly(&[1, 2, 3]), positions_only: false },
+        // hebrew_query.rs aramaic_prefix_composes_with_the_other_options (bf684bc)
+        Case { name: "7.0.1 Aramaic prefixes compose with part of word + grammatical suffixes",
+            lines: &["\u{05D0}\u{05E9}\u{05D1}\u{05EA}\u{05D0}", "\u{05D3}\u{05E9}\u{05D1}\u{05EA}\u{05D5}\u{05EA}", "\u{05D3}\u{05E9}\u{05D1}\u{05EA}\u{05D0}\u{05D9}", "\u{05E9}\u{05D1}\u{05EA}\u{05D5}\u{05EA}\u{05D9}\u{05D4}\u{05DD}"],
+            req: || SearchRequest { groups: vec![wo("\u{05E9}\u{05D1}\u{05EA}", |o| { o.aramaic_prefixes = true; o.part_of_word = true; o.grammar_suffixes = true; })], ..Default::default() },
+            expect: Exactly(&[1, 2, 3, 4]), positions_only: false },
+        Case { name: "7.0.1 Aramaic + grammatical prefixes: no root floor", lines: &["\u{05D3}\u{05D0}\u{05D1}"],
+            req: || SearchRequest { groups: vec![wo("\u{05D0}\u{05D1}", |o| { o.aramaic_prefixes = true; o.grammar_prefixes = true; })], ..Default::default() },
+            expect: Exactly(&[1]), positions_only: false },
+        Case { name: "7.0.1 Aramaic prefixes + suffix window on a short root", lines: &["\u{05D5}\u{05D0}\u{05D1}\u{05D5}\u{05EA}"],
+            req: || SearchRequest { groups: vec![wo("\u{05D0}\u{05D1}", |o| { o.aramaic_prefixes = true; o.grammar_prefixes = true; o.advanced_suffixes = true; })], ..Default::default() },
+            expect: Exactly(&[1]), positions_only: false },
     ]
 }
 
@@ -573,5 +635,133 @@ fn digit_runs_are_words() {
             ..Default::default()
         };
         assert_eq!(matches_options(lines, positions, &ordered), vec![1], "ordered positions={positions}");
+    }
+}
+
+
+/// Otzaria's option setters by name (its checkbox labels).
+const GRAM_PREFIX: fn(&mut WalkOptionsSpec) = |o| o.grammar_prefixes = true;
+const GRAM_SUFFIX: fn(&mut WalkOptionsSpec) = |o| o.grammar_suffixes = true;
+const KTIV: fn(&mut WalkOptionsSpec) = |o| o.ktiv_male_haser = true;
+const PART: fn(&mut WalkOptionsSpec) = |o| o.part_of_word = true;
+const TYPO: fn(&mut WalkOptionsSpec) = |o| o.spelling_errors = true;
+const ARAMAIC_PREFIX: fn(&mut WalkOptionsSpec) = |o| o.aramaic_prefixes = true;
+const ARAMAIC_SUFFIX: fn(&mut WalkOptionsSpec) = |o| o.aramaic_suffixes = true;
+const PREFIX: fn(&mut WalkOptionsSpec) = |o| o.advanced_prefixes = true;
+const SUFFIX: fn(&mut WalkOptionsSpec) = |o| o.advanced_suffixes = true;
+
+/// An Otzaria phrase (ordered, distance 0) with every word under `per_word`.
+fn phrase_with(words: &[&str], per_word: &[&[fn(&mut WalkOptionsSpec)]]) -> SearchRequest {
+    let groups = words
+        .iter()
+        .zip(per_word)
+        .map(|(word, setters)| {
+            let mut o = WalkOptionsSpec::default();
+            for set in setters.iter() {
+                set(&mut o);
+            }
+            GroupSpec::Word { word: (*word).into(), options: o }
+        })
+        .collect();
+    ordered(groups, 0)
+}
+
+fn split(query: &str) -> Vec<&str> {
+    query.split(' ').collect()
+}
+
+/// Otzaria 7.0.1 `aramaic_prefixes_never_drop_matches_of_the_other_options`
+/// (otzaria#3673, bf684bc): adding Aramaic prefixes to any set of the
+/// regular options never drops a match that set found, typo variants of a
+/// phrase word included.
+#[test]
+fn aramaic_prefixes_never_drop_matches_of_the_other_options() {
+    let lines: &[&str] = &[
+        "\u{05DC}\u{05D1}\u{05D1}\u{05D5}\u{05EA} \u{05D3}\u{05E7}\u{05DC}",
+        "\u{05D5}\u{05DC}\u{05D1}\u{05D1}\u{05D5}\u{05EA} \u{05D3}\u{05E7}\u{05DC}",
+        "\u{05D3}\u{05DC}\u{05D1}\u{05D1}\u{05D5}\u{05EA} \u{05D3}\u{05E7}\u{05DC}",
+        "\u{05DC}\u{05D1}\u{05D5}\u{05D5}\u{05EA} \u{05D3}\u{05E7}\u{05DC}",
+        "\u{05DC}\u{05DC}\u{05D1}\u{05D1}\u{05EA} \u{05D3}\u{05E7}\u{05DC}",
+        "\u{05D3}\u{05E7}\u{05DC} \u{05DC}\u{05DC}\u{05D1}\u{05D1}\u{05EA}",
+        "\u{05D3}\u{05E7}\u{05DC} \u{05D3}\u{05DC}\u{05DC}\u{05D1}\u{05D5}\u{05EA}",
+    ];
+    let regular = [GRAM_PREFIX, GRAM_SUFFIX, KTIV, PART, TYPO];
+    let mut bases: Vec<Vec<fn(&mut WalkOptionsSpec)>> = vec![Vec::new(), regular.to_vec()];
+    bases.extend(regular.iter().map(|o| vec![*o]));
+    for query in [
+        "\u{05DC}\u{05D1}\u{05D1}\u{05D5}\u{05EA} \u{05D3}\u{05E7}\u{05DC}",
+        "\u{05DC}\u{05DC}\u{05D1}\u{05D5}\u{05EA} \u{05D3}\u{05E7}\u{05DC}",
+        "\u{05D3}\u{05E7}\u{05DC} \u{05DC}\u{05DC}\u{05D1}\u{05D5}\u{05EA}",
+    ] {
+        let words = split(query);
+        for positions in [true, false] {
+            for (b, base) in bases.iter().enumerate() {
+                let before = matches(lines, positions, &phrase_with(&words, &[base, base]));
+                let mut with = base.clone();
+                with.push(ARAMAIC_PREFIX);
+                let after = matches(lines, positions, &phrase_with(&words, &[&with, &with]));
+                let lost: Vec<usize> = before.iter().filter(|l| !after.contains(l)).copied().collect();
+                assert!(lost.is_empty(), "query {query:?} base #{b} positions={positions}: lost {lost:?}");
+            }
+        }
+    }
+    let mut all = regular.to_vec();
+    all.push(ARAMAIC_PREFIX);
+    let words = split("\u{05DC}\u{05D1}\u{05D1}\u{05D5}\u{05EA} \u{05D3}\u{05E7}\u{05DC}");
+    for positions in [true, false] {
+        let got = matches(lines, positions, &phrase_with(&words, &[&all, &all]));
+        for line in [1, 2, 3] {
+            assert!(got.contains(&line), "line {line} missing from {got:?}");
+        }
+    }
+}
+
+/// Otzaria 7.0.1 `phrase_typo_edit_survives_the_other_options`
+/// (otzaria#3673): a phrase word's single-letter edit survives each option
+/// that composes with typo tolerance, and all of them.
+#[test]
+fn phrase_typo_edit_survives_the_other_options() {
+    let lines: &[&str] = &[PALM[0]];
+    let extra = [GRAM_PREFIX, GRAM_SUFFIX, KTIV, ARAMAIC_PREFIX, ARAMAIC_SUFFIX, PART];
+    let all = (1u32 << extra.len()) - 1;
+    for mask in (0..extra.len()).map(|i| 1u32 << i).chain([all & !(1 << 5), all]) {
+        let mut word: Vec<fn(&mut WalkOptionsSpec)> = vec![TYPO];
+        word.extend((0..extra.len()).filter(|i| mask >> i & 1 == 1).map(|i| extra[i]));
+        for positions in [true, false] {
+            let got = matches(lines, positions, &phrase_with(&[LLBVT, DQL], &[&word, &[]]));
+            assert_eq!(got, [1], "mask {mask:#b} positions={positions}");
+        }
+    }
+}
+
+/// Otzaria 7.0.1 `collect_ranked` (653781c, its test
+/// `phrase_typo_scan_cap_keeps_the_exact_match`): when a typo word's
+/// expansion overflows the cap, the forms the other options match without a
+/// typo keep their slots before the typo edits, though the edits are shorter.
+#[test]
+fn typo_overflow_keeps_the_exact_option_forms_first() {
+    // the typed word with a grammatical prefix, and many shorter edits
+    let word = "\u{05DC}\u{05D1}\u{05D5}\u{05EA}";
+    let prefixed = "\u{05D5}\u{05DC}\u{05D1}\u{05D5}\u{05EA} \u{05E9}\u{05DC}\u{05D5}\u{05DD}";
+    let mut owned: Vec<String> = vec![prefixed.to_string()];
+    let letters = ['\u{05D0}', '\u{05D2}', '\u{05D3}', '\u{05D4}', '\u{05D6}', '\u{05D7}', '\u{05D8}', '\u{05DB}', '\u{05DE}', '\u{05E0}', '\u{05E1}', '\u{05E2}', '\u{05E4}', '\u{05E6}', '\u{05E7}', '\u{05E8}'];
+    let chars: Vec<char> = word.chars().collect();
+    for i in 0..chars.len() {
+        for &c in &letters {
+            let mut edited = chars.clone();
+            edited[i] = c;
+            owned.push(edited.into_iter().collect());
+        }
+    }
+    let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+    for positions in [true, false] {
+        let req = SearchRequest {
+            groups: vec![wo(word, |o| { o.spelling_errors = true; o.grammar_prefixes = true; })],
+            max_expanded_terms: 3,
+            ..Default::default()
+        };
+        let got = matches(&lines, positions, &req);
+        assert!(got.contains(&1), "positions={positions}: {got:?}");
+        assert_eq!(got.len(), 3, "positions={positions}: {got:?}");
     }
 }

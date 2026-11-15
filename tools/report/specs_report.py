@@ -37,6 +37,9 @@ STALE = [
     "occurrence set is within it, not only the tightest window; the positions-flavour distance surplus "
     "(large 4, words 3, rules 3, ketiv 1 queries) is expected to vanish and both flavours' parity sets need a "
     "rerun on the fullrun workflow.",
+    "Typo words in Otzaria mode (issue #36, Otzaria engine 7.0.1): a 4+ letter word in a phrase or with "
+    "other options now also takes every single-letter edit, and an overflowing typo expansion keeps the "
+    "exact option forms first: the Otzaria hit-count rows with typo need a rerun (FtsLib parity unchanged).",
 ]
 # Snippets from index positions vs the text path (median of 15, first 4000 hits, 8 cores).
 SNIPPETS = [
@@ -158,7 +161,7 @@ md.append(f"""## Engines compared
 |---|---|
 | FtsLib query syntax (`* ? % ~N \\|`), results identical to FtsLib | done, parity below |
 | Every option one FST walk per word, shortest first, cap per request (default 2000, 0 = none) across all segments, exact word kept, matched terms returned | done |
-| Otzaria word options (grammar/advanced/Aramaic prefixes+suffixes, ktiv, part of word, typo modes, quotes) | done |
+| Otzaria word options (grammar/advanced/Aramaic prefixes+suffixes, ktiv, part of word, typo modes, quotes); typo as Otzaria engine 7.0.1 (single-letter edits in phrases and beside other options, exact option forms first when a typo expansion overflows; issue #36) | done; Otzaria 7.0.1 cases |
 | Ketiv rule sets: Otzaria's or FtsLib's KetivExpander (`ktiv_rules`) | done |
 | One search options object, per-word options (negative words too), alternatives, acronyms | done |
 | Divine-name placeholder spellings (issue #39): a word in one spelling of the tetragrammaton (full, U+05E7 / U+05D3 placeholders, double yod) or of Elohim (U+05E7 for U+05D4) also finds the other spellings, up to two prefixes, other-word prefix pairs excluded, always on, every literal word and quoted phrase (both engines) | done; unit tests; parity rerun pending |

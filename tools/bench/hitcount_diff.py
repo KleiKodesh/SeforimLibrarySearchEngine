@@ -101,7 +101,7 @@ def main(lib, index, drv, otzix, db, hc, outp, per="8", only=""):
             req = H.translate(H.reduce_paired(d, q), dist.strip())
             if args is None or req is None:
                 continue
-            p = subprocess.run([drv, "search", db, otzix, "--limit", "100000000"] + args, capture_output=True)
+            p = subprocess.run([drv, "search", db, otzix, "--limit", "10000000"] + args, capture_output=True)
             if p.returncode:
                 print(f"== {key}: Otzaria driver exit {p.returncode}: "
                       + p.stderr.decode("utf-8", "replace")[-300:].encode("ascii", "replace").decode(), flush=True)

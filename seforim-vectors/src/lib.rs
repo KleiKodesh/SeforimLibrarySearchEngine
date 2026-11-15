@@ -1,15 +1,20 @@
 //! The vector sidecar of a line index, for semantic search (issue #18).
 //!
-//! The host supplies one vector per line (`line_id`, `book_id`, `f32[dims]`);
-//! the engine never runs a model. A store is a directory (the engine puts it
+//! The host supplies the vectors of each line (`line_id`, `book_id`, chunk,
+//! `f32[dims]`): one per line, or several when its model embeds a long line in
+//! chunks (Otzaria's windows); the engine never runs a model. A line scores as
+//! its best chunk, a chunk past the first (or a vector borrowed from a
+//! neighbour) losing `chunk_penalty` first (Otzaria's window penalty, 0.04);
+//! hits are lines. A store is a directory (the engine puts it
 //! at `<index>/vectors/`) holding generations; each generation is two files:
 //!
 //! - `vectors-<gen>.usearch`: a usearch HNSW graph (cosine, vectors quantized
-//!   to i8), keyed by line id (u64, so the 64-bit virtual note ids fit),
-//!   memory-mapped as a read-only view by searches.
+//!   to i8), keyed by line id (u64, so the 64-bit virtual note ids fit; a
+//!   multi-key index: a line's chunks share its key), memory-mapped as a
+//!   read-only view by searches.
 //! - `vectors-<gen>.sev`: our file, written last (its presence publishes the
 //!   generation): a versioned header, the per-book row ranges (rows sorted by
-//!   book, then line), the line id of each row, a line -> row index, and the
+//!   book, line, chunk), the line id and chunk of each row, a line -> row index, and the
 //!   full-precision vectors as **f16**. f16, not f32: the rows are only read
 //!   to rescore candidates and for the exact filtered scan, where an f16
 //!   cosine is within ~1e-3 of the f32 one (far below the i8 graph's error,
@@ -27,6 +32,7 @@
 
 pub mod f16;
 pub mod fusion;
+pub mod oxv;
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
@@ -39,8 +45,9 @@ use memmap2::Mmap;
 
 const MAGIC: &[u8; 8] = b"SEVECTS\0";
 /// Bump whenever the `.sev` layout changes.
-pub const FORMAT_VERSION: u32 = 1;
-const HEADER_LEN: usize = 128;
+/// 2: several vectors (chunks) per line.
+pub const FORMAT_VERSION: u32 = 2;
+const HEADER_LEN: usize = 256;
 const ALIGN: u64 = 64;
 
 /// Errors of the vector store.
@@ -85,16 +92,38 @@ impl From<cxx::Exception> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// One line's vector, as the host supplies it.
+/// [`VectorRecord::chunk`] bit: the vector is a neighbour's, borrowed by a
+/// short line (Otzaria's alias); penalized like a later chunk.
+pub const CHUNK_BORROWED: u32 = 1 << 31;
+
+/// Otzaria's window penalty (`config/profiles.rs` DEFAULT_WINDOW_PENALTY,
+/// also its alias penalty): taken off a chunk's cosine unless the chunk is
+/// the line's own first one.
+pub const DEFAULT_CHUNK_PENALTY: f32 = 0.04;
+
+/// One vector of a line, as the host supplies it.
 #[derive(Debug, Clone)]
 pub struct VectorRecord {
     pub line_id: u64,
     pub book_id: u64,
+    /// 0: the line's first (or only) vector; 1, 2, ...: its further chunks
+    /// (Otzaria's windows); [`CHUNK_BORROWED`] may be set on top. Unique per
+    /// line; every chunk of a line is in one book.
+    pub chunk: u32,
     pub vector: Vec<f32>,
 }
 
+/// A chunk's penalty under `penalty`: none for a line's own first vector.
+fn chunk_penalty(chunk: u32, penalty: f32) -> f32 {
+    if chunk == 0 {
+        0.0
+    } else {
+        penalty
+    }
+}
+
 /// One write: removals first, then additions. A line id added again replaces
-/// its old vector (and its old book). Follows the per-book index updates
+/// every old vector of it (and its old book). Follows the per-book index updates
 /// (issue #29): an updated book = `remove_books: [b]` + its new lines.
 #[derive(Debug, Clone, Default)]
 pub struct VectorUpdate {
@@ -151,20 +180,27 @@ pub struct SearchParams {
     /// (~10 ms at 768 dims on one core). 0 = never exact unless the graph
     /// came back short.
     pub exact_threshold: usize,
+    /// Taken off the cosine of a chunk past a line's first one (and of a
+    /// borrowed vector) before the line's best chunk is chosen: Otzaria's
+    /// window penalty. Default [`DEFAULT_CHUNK_PENALTY`]; 0 = cosine alone.
+    pub chunk_penalty: f32,
 }
 
 impl SearchParams {
     pub fn new(k: usize) -> SearchParams {
-        SearchParams { k, books: None, oversample: 3.0, exact_threshold: 20_000 }
+        SearchParams { k, books: None, oversample: 3.0, exact_threshold: 20_000, chunk_penalty: DEFAULT_CHUNK_PENALTY }
     }
 }
 
-/// One semantic result: cosine similarity, best first, ties by line id.
+/// One semantic result, a line: the score of its best chunk (cosine minus
+/// that chunk's penalty), best first, ties by line id.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VectorHit {
     pub line_id: u64,
     pub book_id: u64,
     pub score: f32,
+    /// The chunk that scored it.
+    pub chunk: u32,
 }
 
 /// How a search was served.
@@ -172,7 +208,7 @@ pub struct VectorHit {
 pub struct SearchPath {
     /// True: exact scan over the filtered lines; false: HNSW + rescore.
     pub exact: bool,
-    /// Lines the filter allows.
+    /// Vectors (chunks) the filter allows.
     pub allowed: u64,
 }
 
@@ -182,6 +218,7 @@ pub struct SearchPath {
 #[derive(Debug, Clone, Copy)]
 struct Header {
     dims: u64,
+    /// Rows (vectors).
     count: u64,
     books: u64,
     connectivity: u64,
@@ -197,6 +234,9 @@ struct Header {
     /// Graph nodes removed since the graph was last built afresh (all
     /// updates together decide the rebuild, not each one alone).
     removed_since_rebuild: u64,
+    off_chunks: u64,
+    /// Distinct lines.
+    lines: u64,
 }
 
 impl Header {
@@ -219,6 +259,8 @@ impl Header {
             self.file_len,
             self.generation,
             self.removed_since_rebuild,
+            self.off_chunks,
+            self.lines,
         ];
         for (i, v) in fields.iter().enumerate() {
             out[16 + i * 8..24 + i * 8].copy_from_slice(&v.to_le_bytes());
@@ -250,6 +292,8 @@ impl Header {
             file_len: f(11),
             generation: f(12),
             removed_since_rebuild: f(13),
+            off_chunks: f(14),
+            lines: f(15),
         };
         // checked: a damaged file must not overflow into a passing check
         let end = |off: u64, n: u64, size: u64| n.checked_mul(size).and_then(|b| off.checked_add(b));
@@ -260,7 +304,9 @@ impl Header {
             && h.off_books >= HEADER_LEN as u64
             && fits(h.off_books, h.books, 24, h.off_lines)
             && fits(h.off_lines, h.count, 8, h.off_by_line)
-            && fits(h.off_by_line, h.count, 4, h.off_vectors)
+            && fits(h.off_by_line, h.count, 4, h.off_chunks)
+            && fits(h.off_chunks, h.count, 4, h.off_vectors)
+            && h.lines <= h.count
             && h.count.checked_mul(h.dims).is_some_and(|n| fits(h.off_vectors, n, 2, h.file_len))
             && h.off_vectors % 2 == 0;
         if !ok {
@@ -318,7 +364,7 @@ fn index_options(params: &BuildParams) -> usearch::IndexOptions {
         connectivity: params.connectivity,
         expansion_add: params.expansion_add,
         expansion_search: params.expansion_search,
-        multi: false,
+        multi: true,
     }
 }
 
@@ -387,9 +433,14 @@ impl VectorStore {
         self.header.dims as usize
     }
 
-    /// Number of vectors.
+    /// Number of vectors (chunks).
     pub fn len(&self) -> usize {
         self.header.count as usize
+    }
+
+    /// Number of distinct lines.
+    pub fn line_count(&self) -> u64 {
+        self.header.lines
     }
 
     pub fn is_empty(&self) -> bool {
@@ -436,8 +487,13 @@ impl VectorStore {
         u32::from_le_bytes(self.map[at..at + 4].try_into().unwrap()) as u64
     }
 
-    /// The row holding `line_id`.
-    fn row_of(&self, line_id: u64) -> Option<u64> {
+    fn chunk_of(&self, row: u64) -> u32 {
+        let at = (self.header.off_chunks + row * 4) as usize;
+        u32::from_le_bytes(self.map[at..at + 4].try_into().unwrap())
+    }
+
+    /// The rows of `line_id` (contiguous: rows are sorted by book, line, chunk).
+    fn rows_of(&self, line_id: u64) -> Option<std::ops::Range<u64>> {
         let (mut lo, mut hi) = (0u64, self.header.count);
         while lo < hi {
             let mid = (lo + hi) / 2;
@@ -445,10 +501,33 @@ impl VectorStore {
             match self.line_of(row).cmp(&line_id) {
                 Ordering::Less => lo = mid + 1,
                 Ordering::Greater => hi = mid,
-                Ordering::Equal => return Some(row),
+                Ordering::Equal => {
+                    let (mut a, mut b) = (row, row + 1);
+                    while a > 0 && self.line_of(a - 1) == line_id {
+                        a -= 1;
+                    }
+                    while b < self.header.count && self.line_of(b) == line_id {
+                        b += 1;
+                    }
+                    return Some(a..b);
+                }
             }
         }
         None
+    }
+
+    /// The line's score: its best chunk's cosine minus that chunk's penalty
+    /// (Otzaria's representative occurrence), and that chunk.
+    fn line_score(&self, query: &[f32], rows: std::ops::Range<u64>, penalty: f32, t: &[f32]) -> (f32, u32) {
+        let mut best = (f32::NEG_INFINITY, 0u32);
+        for row in rows {
+            let chunk = self.chunk_of(row);
+            let score = f16::dot(query, self.row_vector(row), t) - chunk_penalty(chunk, penalty);
+            if score > best.0 || (score == best.0 && chunk < best.1) {
+                best = (score, chunk);
+            }
+        }
+        best
     }
 
     /// The book slot holding `row`.
@@ -488,25 +567,36 @@ impl VectorStore {
         unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u16, dims) }
     }
 
-    /// The vector stored for `line_id` (f16 widened to f32; normalized).
+    /// The first vector stored for `line_id` (f16 widened to f32; normalized).
     pub fn vector(&self, line_id: u64) -> Option<Vec<f32>> {
-        let row = self.row_of(line_id)?;
-        let t = f16::table();
-        Some(self.row_vector(row).iter().map(|&h| t[h as usize]).collect())
+        self.chunks(line_id).into_iter().next().map(|(_, v)| v)
     }
 
-    /// Line count per book: (book id, lines), ascending by book id.
+    /// Every (chunk, vector) stored for `line_id`, by chunk.
+    pub fn chunks(&self, line_id: u64) -> Vec<(u32, Vec<f32>)> {
+        let t = f16::table();
+        self.rows_of(line_id)
+            .into_iter()
+            .flatten()
+            .map(|row| (self.chunk_of(row), self.row_vector(row).iter().map(|&h| t[h as usize]).collect()))
+            .collect()
+    }
+
+    /// Vector (chunk) count per book: (book id, vectors), ascending by book id.
     pub fn book_counts(&self) -> Vec<(u64, u64)> {
         (0..self.header.books).map(|i| self.book(i)).map(|(b, _, n)| (b, n)).collect()
     }
 
-    /// Every (line id, book id), in row order (book, then line).
+    /// Every (line id, book id) once, in row order (book, then line).
     pub fn lines(&self) -> Vec<(u64, u64)> {
-        let mut out = Vec::with_capacity(self.len());
+        let mut out: Vec<(u64, u64)> = Vec::with_capacity(self.header.lines as usize);
         for i in 0..self.header.books {
             let (book, start, n) = self.book(i);
             for row in start..start + n {
-                out.push((self.line_of(row), book));
+                let line = self.line_of(row);
+                if out.last() != Some(&(line, book)) {
+                    out.push((line, book));
+                }
             }
         }
         out
@@ -550,7 +640,8 @@ impl VectorStore {
             return Err(Error::Cancelled);
         }
         let all = [(0, self.header.count)];
-        let scan = |ranges: &[(u64, u64)]| self.exact(&query, ranges, params.k, cancel);
+        let penalty = params.chunk_penalty;
+        let scan = |ranges: &[(u64, u64)]| self.exact(&query, ranges, params.k, penalty, cancel);
         if allowed as usize <= params.exact_threshold || self.graph.is_none() {
             let hits = scan(ranges.as_deref().unwrap_or(&all))?;
             return Ok((hits, SearchPath { exact: true, allowed }));
@@ -558,25 +649,32 @@ impl VectorStore {
         let graph = self.graph.as_ref().unwrap();
         let want = ((params.k as f64) * (params.oversample.max(1.0) as f64)).ceil() as usize;
         let want = want.max(params.k);
+        // a line's chunks share its key: ask for enough vectors to bring `want` lines
+        let per_line = (self.header.count as f64 / self.header.lines.max(1) as f64).max(1.0);
+        let want = ((want as f64) * per_line).ceil() as usize;
         // efSearch is the store's (set at open; never changed under shared
         // searches); usearch widens it to `want` when `want` is larger
         let matches = match &ranges {
             None => graph.search(&query, want)?,
             Some(r) => graph.filtered_search(&query, want, |key| {
-                self.row_of(key).is_some_and(|row| in_ranges(r, row))
+                self.rows_of(key).is_some_and(|rows| in_ranges(r, rows.start))
             })?,
         };
         if cancelled() {
             return Err(Error::Cancelled);
         }
         let t = f16::table();
-        let mut hits: Vec<VectorHit> = matches
-            .keys
+        let mut keys = matches.keys.clone();
+        keys.sort_unstable();
+        keys.dedup();
+        // every candidate line rescored over ALL its chunks (the graph found it by one)
+        let mut hits: Vec<VectorHit> = keys
             .iter()
             .filter_map(|&line| {
-                let row = self.row_of(line)?;
-                let (book, _, _) = self.book(self.book_slot_of_row(row));
-                Some(VectorHit { line_id: line, book_id: book, score: f16::dot(&query, self.row_vector(row), t) })
+                let rows = self.rows_of(line)?;
+                let (book, _, _) = self.book(self.book_slot_of_row(rows.start));
+                let (score, chunk) = self.line_score(&query, rows, penalty, t);
+                Some(VectorHit { line_id: line, book_id: book, score, chunk })
             })
             .collect();
         // the graph came back short of what the filter allows: exact (Lucene's fallback)
@@ -589,11 +687,21 @@ impl VectorStore {
         Ok((hits, SearchPath { exact: false, allowed }))
     }
 
-    /// Exact top-k over the rows in `ranges`.
-    fn exact(&self, query: &[f32], ranges: &[(u64, u64)], k: usize, cancel: Option<&AtomicBool>) -> Result<Vec<VectorHit>> {
+    /// Exact top-k lines over the rows in `ranges` (whole books, so a line's
+    /// chunks are all inside).
+    fn exact(&self, query: &[f32], ranges: &[(u64, u64)], k: usize, penalty: f32, cancel: Option<&AtomicBool>) -> Result<Vec<VectorHit>> {
         let t = f16::table();
         let mut heap: BinaryHeap<Worst> = BinaryHeap::with_capacity(k + 1);
         let mut seen = 0u64;
+        let push = |hit: VectorHit, heap: &mut BinaryHeap<Worst>| {
+            if heap.len() < k {
+                heap.push(Worst(hit));
+            } else if best_first(&hit, &heap.peek().unwrap().0) == Ordering::Less {
+                heap.pop();
+                heap.push(Worst(hit));
+            }
+        };
+        let mut current: Option<VectorHit> = None;
         for &(start, end) in ranges {
             let mut slot = self.book_slot_of_row(start);
             let (mut book, mut bstart, mut bn) = self.book(slot);
@@ -606,14 +714,29 @@ impl VectorStore {
                 if seen % 4096 == 0 && cancel.is_some_and(|c| c.load(AtomicOrdering::Relaxed)) {
                     return Err(Error::Cancelled);
                 }
-                let hit = VectorHit { line_id: self.line_of(row), book_id: book, score: f16::dot(query, self.row_vector(row), t) };
-                if heap.len() < k {
-                    heap.push(Worst(hit));
-                } else if best_first(&hit, &heap.peek().unwrap().0) == Ordering::Less {
-                    heap.pop();
-                    heap.push(Worst(hit));
+                let chunk = self.chunk_of(row);
+                let hit = VectorHit {
+                    line_id: self.line_of(row),
+                    book_id: book,
+                    score: f16::dot(query, self.row_vector(row), t) - chunk_penalty(chunk, penalty),
+                    chunk,
+                };
+                match &mut current {
+                    Some(c) if c.line_id == hit.line_id => {
+                        if hit.score > c.score {
+                            *c = hit;
+                        }
+                    }
+                    _ => {
+                        if let Some(done) = current.replace(hit) {
+                            push(done, &mut heap);
+                        }
+                    }
                 }
             }
+        }
+        if let Some(done) = current {
+            push(done, &mut heap);
         }
         let mut hits: Vec<VectorHit> = heap.into_iter().map(|w| w.0).collect();
         hits.sort_by(best_first);
@@ -674,7 +797,10 @@ enum Source {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApplyStats {
     pub generation: u64,
+    /// Distinct lines in the new generation.
     pub lines: u64,
+    /// Vectors (chunks) in it.
+    pub vectors: u64,
     pub books: u64,
     pub removed: u64,
     pub added: u64,
@@ -724,42 +850,53 @@ pub fn apply(
     }
 
     // the new rows, validated and normalized
-    let mut new_rows: Vec<(u64, u64, Vec<u16>, Vec<f32>)> = Vec::with_capacity(update.add.len());
-    let mut new_lines = HashSet::with_capacity(update.add.len());
+    let mut new_rows: Vec<(u64, u64, u32, Vec<u16>, Vec<f32>)> = Vec::with_capacity(update.add.len());
+    let mut new_chunks = HashSet::with_capacity(update.add.len());
+    let mut new_lines: std::collections::HashMap<u64, u64> = std::collections::HashMap::with_capacity(update.add.len());
     for r in &update.add {
         if r.vector.len() != params.dims {
             return Err(Error::Invalid(format!("line {} has {} dims, the store {}", r.line_id, r.vector.len(), params.dims)));
         }
-        if !new_lines.insert(r.line_id) {
-            return Err(Error::Invalid(format!("line {} added twice", r.line_id)));
+        if !new_chunks.insert((r.line_id, r.chunk)) {
+            return Err(Error::Invalid(format!("line {} chunk {} added twice", r.line_id, r.chunk)));
+        }
+        if *new_lines.entry(r.line_id).or_insert(r.book_id) != r.book_id {
+            return Err(Error::Invalid(format!("line {} added in two books", r.line_id)));
         }
         let v = normalized(&r.vector).map_err(|_| Error::Invalid(format!("line {}: a zero or non-finite vector", r.line_id)))?;
         let h = v.iter().map(|&x| f16::f32_to_f16(x)).collect();
-        new_rows.push((r.book_id, r.line_id, h, v));
+        new_rows.push((r.book_id, r.line_id, r.chunk, h, v));
     }
+    drop(new_chunks);
     let remove_books: HashSet<u64> = update.remove_books.iter().copied().collect();
     let remove_lines: HashSet<u64> = update.remove_lines.iter().copied().collect();
 
     // the rows kept from the old generation, and the old keys that go
-    let mut rows: Vec<(u64, u64, Source)> = Vec::new();
+    let mut rows: Vec<(u64, u64, u32, Source)> = Vec::new();
     let mut gone: Vec<u64> = Vec::new();
     if let Some(store) = &old {
         for i in 0..store.header.books {
             let (book, start, n) = store.book(i);
             for row in start..start + n {
                 let line = store.line_of(row);
-                if remove_books.contains(&book) || remove_lines.contains(&line) || new_lines.contains(&line) {
+                if remove_books.contains(&book) || remove_lines.contains(&line) || new_lines.contains_key(&line) {
                     gone.push(line);
                 } else {
-                    rows.push((book, line, Source::Old(row)));
+                    rows.push((book, line, store.chunk_of(row), Source::Old(row)));
                 }
             }
         }
     }
-    for (i, (book, line, _, _)) in new_rows.iter().enumerate() {
-        rows.push((*book, *line, Source::New(i)));
+    for (i, (book, line, chunk, _, _)) in new_rows.iter().enumerate() {
+        rows.push((*book, *line, *chunk, Source::New(i)));
     }
-    rows.sort_unstable_by_key(|&(book, line, _)| (book, line));
+    rows.sort_unstable_by_key(|&(book, line, chunk, _)| (book, line, chunk));
+    let line_count = {
+        let mut lines: Vec<u64> = rows.iter().map(|r| r.1).collect();
+        lines.sort_unstable();
+        lines.dedup();
+        lines.len() as u64
+    };
     if rows.len() > u32::MAX as usize {
         return Err(Error::Invalid("more than 4G vectors".into()));
     }
@@ -780,12 +917,16 @@ pub fn apply(
         let index = usearch::Index::new(&options)?;
         let mut to_add: Vec<(u64, Source)> = Vec::new();
         if rebuild {
-            to_add.extend(rows.iter().map(|&(_, line, src)| (line, src)));
+            to_add.extend(rows.iter().map(|&(_, line, _, src)| (line, src)));
         } else {
             let store = old.as_ref().unwrap();
             let gpath = graph_path(dir, store.generation());
             index.load(gpath.to_str().ok_or_else(|| Error::Invalid("non UTF-8 path".into()))?)?;
-            for &line in &gone {
+            // remove() drops every vector of a key (multi-key index)
+            let mut keys = gone.clone();
+            keys.sort_unstable();
+            keys.dedup();
+            for &line in &keys {
                 index.remove(line)?;
             }
             to_add.extend(new_rows.iter().enumerate().map(|(i, r)| (r.1, Source::New(i))));
@@ -808,7 +949,7 @@ pub fn apply(
                         }
                         let (line, src) = to_add[i];
                         let v: &[f32] = match src {
-                            Source::New(j) => &new_rows[j].3,
+                            Source::New(j) => &new_rows[j].4,
                             Source::Old(row) => {
                                 let store = old.as_ref().unwrap();
                                 for (d, &h) in buf.iter_mut().zip(store.row_vector(row)) {
@@ -849,7 +990,7 @@ pub fn apply(
 
     // the .sev, streamed
     let mut books: Vec<(u64, u64, u64)> = Vec::new();
-    for (row, &(book, _, _)) in rows.iter().enumerate() {
+    for (row, &(book, _, _, _)) in rows.iter().enumerate() {
         match books.last_mut() {
             Some(last) if last.0 == book => last.2 += 1,
             _ => books.push((book, row as u64, 1)),
@@ -859,7 +1000,8 @@ pub fn apply(
     let off_books = HEADER_LEN as u64;
     let off_lines = align(off_books + books.len() as u64 * 24);
     let off_by_line = align(off_lines + count * 8);
-    let off_vectors = align(off_by_line + count * 4);
+    let off_chunks = align(off_by_line + count * 4);
+    let off_vectors = align(off_chunks + count * 4);
     let file_len = off_vectors + count * params.dims as u64 * 2;
     let header = Header {
         dims: params.dims as u64,
@@ -876,6 +1018,8 @@ pub fn apply(
         file_len,
         generation,
         removed_since_rebuild,
+        off_chunks,
+        lines: line_count,
     };
     let sev = sev_path(dir, generation);
     let tmp = with_tmp(&sev);
@@ -901,25 +1045,29 @@ pub fn apply(
             put(&mut w, &n.to_le_bytes(), &mut at)?;
         }
         pad(&mut w, &mut at, off_lines)?;
-        for &(_, line, _) in &rows {
+        for &(_, line, _, _) in &rows {
             put(&mut w, &line.to_le_bytes(), &mut at)?;
         }
         pad(&mut w, &mut at, off_by_line)?;
         let mut by_line: Vec<u32> = (0..count as u32).collect();
-        by_line.sort_unstable_by_key(|&r| rows[r as usize].1);
+        by_line.sort_unstable_by_key(|&r| (rows[r as usize].1, rows[r as usize].2));
         for r in by_line {
             put(&mut w, &r.to_le_bytes(), &mut at)?;
         }
         drop(new_lines);
+        pad(&mut w, &mut at, off_chunks)?;
+        for &(_, _, chunk, _) in &rows {
+            put(&mut w, &chunk.to_le_bytes(), &mut at)?;
+        }
         pad(&mut w, &mut at, off_vectors)?;
         let mut bytes = Vec::with_capacity(params.dims * 2);
-        for (i, &(_, _, src)) in rows.iter().enumerate() {
+        for (i, &(_, _, _, src)) in rows.iter().enumerate() {
             if i % 4096 == 0 && cancelled() {
                 return Err(Error::Cancelled);
             }
             let v: &[u16] = match src {
                 Source::Old(row) => old.as_ref().unwrap().row_vector(row),
-                Source::New(j) => &new_rows[j].2,
+                Source::New(j) => &new_rows[j].3,
             };
             bytes.clear();
             for h in v {
@@ -943,7 +1091,8 @@ pub fn apply(
     remove_older_generations(dir, generation);
     Ok(ApplyStats {
         generation,
-        lines: count,
+        lines: line_count,
+        vectors: count,
         books: books.len() as u64,
         removed: gone.len() as u64,
         added: new_rows.len() as u64,

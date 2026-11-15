@@ -3,8 +3,10 @@
 //! vectors + f16 full vectors for the rescore and the exact filtered scan)
 //! and the hybrid fusion of a lexical search with a semantic one.
 //!
-//! The host supplies the vectors (one per line, from its own embedding
-//! model) and the query vector; the engine never runs a model. Three modes:
+//! The host supplies the vectors (one or more per line, from its own
+//! embedding model) and the query vector; the engine never runs a model.
+//! Otzaria's prebuilt vector files (`.oxv`) are imported by
+//! [`LineIndex::import_oxv`], keyed by the host's line ids. Three modes:
 //! - lexical only: the plain search, unchanged (the default);
 //! - semantic only: [`LineIndex::semantic_search`], the top k lines by cosine
 //!   similarity, filtered by books like the lexical search;
@@ -19,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use seforim_vectors::fusion::{self, Fusion, QueryTypeAlphas};
 use seforim_vectors::{BuildParams, SearchParams, ThreadHooks, VectorStore};
 
-pub use seforim_vectors::{ApplyStats, VectorRecord, VectorUpdate};
+pub use seforim_vectors::{ApplyStats, VectorRecord, VectorUpdate, CHUNK_BORROWED, DEFAULT_CHUNK_PENALTY};
+pub use seforim_vectors::oxv::{OxvBookMap, OxvImportReport, OxvInfo};
 
 use crate::search::{CancelToken, SearchResult};
 use crate::{Error, LineIndex, Result};
@@ -53,23 +56,36 @@ pub struct SemanticOptions {
     pub books: Option<Vec<u64>>,
     /// Graph candidates = ceil(k * oversample), rescored with the full vectors.
     pub oversample: f32,
-    /// A filter leaving at most this many lines is an exact scan.
+    /// A filter leaving at most this many vectors is an exact scan.
     pub exact_threshold: usize,
+    /// Taken off a chunk past a line's first one before the line's best
+    /// chunk is chosen (Otzaria's window penalty, default 0.04).
+    pub chunk_penalty: f32,
 }
 
 impl Default for SemanticOptions {
     fn default() -> Self {
         let p = SearchParams::new(10);
-        SemanticOptions { k: p.k, books: None, oversample: p.oversample, exact_threshold: p.exact_threshold }
+        SemanticOptions {
+            k: p.k,
+            books: None,
+            oversample: p.oversample,
+            exact_threshold: p.exact_threshold,
+            chunk_penalty: p.chunk_penalty,
+        }
     }
 }
 
-/// One semantic hit: cosine similarity (-1..1), best first, ties by line id.
+/// One semantic hit, a line: its best chunk's cosine (-1..1) minus that
+/// chunk's penalty, best first, ties by line id.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SemanticHit {
     pub line_id: u64,
     pub book_id: u64,
     pub score: f32,
+    /// The chunk that scored the line (0 = its first vector).
+    #[serde(default)]
+    pub chunk: u32,
 }
 
 /// A semantic search's hits and how it was served.
@@ -78,7 +94,7 @@ pub struct SemanticResult {
     pub hits: Vec<SemanticHit>,
     /// True: exact scan of the filtered lines; false: HNSW + rescore.
     pub exact: bool,
-    /// Lines the filter allows.
+    /// Vectors (chunks) the filter allows.
     pub allowed: u64,
     /// The store generation searched.
     pub generation: u64,
@@ -88,7 +104,10 @@ pub struct SemanticResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VectorInfo {
     pub dims: usize,
+    /// Distinct lines.
     pub lines: u64,
+    /// Vectors (a long line may have several chunks).
+    pub vectors: u64,
     pub books: u64,
     pub generation: u64,
 }
@@ -177,7 +196,8 @@ impl LineIndex {
     pub fn vector_info(&self) -> Result<Option<VectorInfo>> {
         Ok(self.vector_store()?.map(|s| VectorInfo {
             dims: s.dims(),
-            lines: s.len() as u64,
+            lines: s.line_count(),
+            vectors: s.len() as u64,
             books: s.book_counts().len() as u64,
             generation: s.generation(),
         }))
@@ -200,6 +220,24 @@ impl LineIndex {
         Ok(stats)
     }
 
+    /// Imports an Otzaria vector file (`.oxv`, see [`seforim_vectors::oxv`])
+    /// into the sidecar. The HOST maps the file's books to its own: for each
+    /// book name (`id:<bookId>` for a library book) its book id and the line
+    /// ids of its lines in the order the vectors count them (a record's hint
+    /// is the 0-based ordinal). Every chunk of a mapped line is kept (the
+    /// windows of a long line, borrowed vectors of short lines). Each mapped
+    /// book replaces its old vectors (one write per call: batch the books).
+    pub fn import_oxv(&self, path: &std::path::Path, books: &[OxvBookMap], cancel: Option<&CancelToken>) -> Result<OxvImportReport> {
+        let file = seforim_vectors::oxv::OxvFile::open(path).map_err(map_err)?;
+        let flag = cancel.map(|c| c.flag());
+        let (update, mut report) = file.update_for(books, flag.as_deref()).map_err(map_err)?;
+        if !update.add.is_empty() || !update.remove_books.is_empty() {
+            let stats = self.update_vectors(file.dims(), &update, cancel)?;
+            report.generation = stats.generation;
+        }
+        Ok(report)
+    }
+
     /// The top `options.k` lines by cosine similarity to `query` (the
     /// host's query vector, any length > 0 as long as it matches the store).
     /// No store: an empty result.
@@ -210,11 +248,12 @@ impl LineIndex {
             books: options.books.clone(),
             oversample: options.oversample,
             exact_threshold: options.exact_threshold,
+            chunk_penalty: options.chunk_penalty,
         };
         let flag = cancel.map(|c| c.flag());
         let (hits, path) = store.search_with_path(query, &params, flag.as_deref()).map_err(map_err)?;
         Ok(SemanticResult {
-            hits: hits.into_iter().map(|h| SemanticHit { line_id: h.line_id, book_id: h.book_id, score: h.score }).collect(),
+            hits: hits.into_iter().map(|h| SemanticHit { line_id: h.line_id, book_id: h.book_id, score: h.score, chunk: h.chunk }).collect(),
             exact: path.exact,
             allowed: path.allowed,
             generation: store.generation(),
@@ -318,7 +357,7 @@ mod tests {
         assert!(index.semantic_search(&[1.0; 8], &SemanticOptions::default(), None).unwrap().hits.is_empty());
 
         let update = VectorUpdate {
-            add: lines.iter().map(|&(id, book, _)| VectorRecord { line_id: id, book_id: book, vector: vector(id, 8) }).collect(),
+            add: lines.iter().map(|&(id, book, _)| VectorRecord { line_id: id, book_id: book, chunk: 0, vector: vector(id, 8) }).collect(),
             ..Default::default()
         };
         let stats = index.update_vectors(8, &update, None).unwrap();
@@ -362,7 +401,7 @@ mod tests {
         // a book's vectors replaced: the old lines go
         let update = VectorUpdate {
             remove_books: vec![20],
-            add: vec![VectorRecord { line_id: 5, book_id: 20, vector: vector(5, 8) }],
+            add: vec![VectorRecord { line_id: 5, book_id: 20, chunk: 0, vector: vector(5, 8) }],
             ..Default::default()
         };
         index.update_vectors(8, &update, None).unwrap();
@@ -393,7 +432,7 @@ mod tests {
         }
         assert!(index.build_fm_sidecar().unwrap());
         let update = VectorUpdate {
-            add: (1..=200u64).map(|id| VectorRecord { line_id: id, book_id: 1 + (id - 1) % 4, vector: vector(id, 8) }).collect(),
+            add: (1..=200u64).map(|id| VectorRecord { line_id: id, book_id: 1 + (id - 1) % 4, chunk: 0, vector: vector(id, 8) }).collect(),
             ..Default::default()
         };
         index.update_vectors(8, &update, None).unwrap();

@@ -255,7 +255,17 @@ namespace SeforimSearch.Engine.Native
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr se_vectors_update(IndexHandle index, uint dims, ulong* removeBooks, UIntPtr removeBooksCount,
                                                       ulong* removeLines, UIntPtr removeLinesCount, ulong* lineIds, ulong* bookIds,
-                                                      float* vectors, UIntPtr addCount, CancelTokenHandle token);
+                                                      uint* chunks, float* vectors, UIntPtr addCount, CancelTokenHandle token);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern long se_oxv_expand(byte* src, UIntPtr srcLen, byte* dst, UIntPtr dstLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_oxv_info(byte* path, UIntPtr pathLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_vectors_import_oxv(IndexHandle index, byte* path, UIntPtr pathLen, byte* maps, UIntPtr mapsLen,
+                                                          CancelTokenHandle token);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr se_vectors_info(IndexHandle index);

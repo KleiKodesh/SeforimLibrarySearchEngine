@@ -82,4 +82,46 @@ void main() {
     await session.close();
     await worker.close();
   });
+
+  test('Otzaria vector file imported by the host line ids, chunks kept, hybrid (issue #18)', () async {
+    // the fixture Rust writes (seforim-vectors the_hosts_oxv_fixture_is_current)
+    var dir = Directory.current;
+    File? oxv;
+    for (var i = 0; i < 5 && oxv == null; i++) {
+      final f = File('${dir.path}/seforim-vectors/tests/data/synthetic.oxv');
+      if (f.existsSync()) oxv = f;
+      dir = dir.parent;
+    }
+    final info = readOxvInfo(oxv!.path);
+    expect((info.format, info.dims, info.codec, info.libraryReleaseTag), (3, 4, 'f32', 'v1-synthetic'));
+    expect(info.books.map((b) => (b.name, b.records, b.lines)), [('id:5', 3, 2), ('id:7', 1, 1)]);
+
+    final d = Directory.systemTemp.createTempSync('se_dart_oxv_');
+    final index = SeforimIndex.create(d.path);
+    final w = index.openWriter(heapBytes: 30000000, threads: 1);
+    w.add(LineDocument(lineId: 50, position: 0, bookId: 5, text: 'alpha'));
+    w.add(LineDocument(lineId: 51, position: 1, bookId: 5, text: 'beta'));
+    w.commit();
+    w.close();
+    final report = index.importOxv(oxv.path, [
+      const OxvBookMap('id:5', 5, [50, 51]),
+      const OxvBookMap('id:9', 9, [90]),
+    ]);
+    expect((report.booksImported, report.booksUnmapped, report.vectors, report.lines), (1, 1, 3, 2));
+    expect(report.booksNotInFile, ['id:9']);
+    expect(index.vectorInfo()!.vectors, 3);
+    // line 50 is found by its second chunk, penalized 0.04
+    final sem = index.semanticSearch(v([0, 0, 1, 0]), const SemanticOptions(k: 2));
+    expect((sem.hits.first.lineId, sem.hits.first.chunk), (50, 1));
+    expect(sem.hits.first.score, closeTo(0.96, 1e-3));
+    final s = index.search(SearchOptions('alpha', order: ResultsOrder.relevance));
+    expect(s.fuseSemantic('alpha', sem).first.source, 'both');
+    s.close();
+    index.close();
+    final worker = await SearchWorker.spawn(d.path, nativePath: native);
+    final again = await worker.importOxv(oxv.path, [const OxvBookMap('id:5', 5, [50, 51])]);
+    expect(again.vectors, 3);
+    await worker.close();
+    d.deleteSync(recursive: true);
+  });
 }

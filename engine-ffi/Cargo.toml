@@ -14,5 +14,9 @@ doctest = false
 [dependencies]
 seforim-engine = { path = "../seforim-engine" }
 hebrew-fts = { path = "../hebrew-fts" }
+seforim-vectors = { path = "../seforim-vectors" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+zstd = { version = "0.14", default-features = false }

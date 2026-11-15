@@ -36,6 +36,14 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.14" />
     <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+    <!-- Query embedding with Otzaria's Meivin model (semantic-search command, issue #18):
+         the model runs in the host, never in the engine. 1.28.0 = the ONNX Runtime Otzaria's
+         golden vectors were generated with. -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.28.0" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <PackageReference Include="System.Text.Json" Version="10.0.5" />
   </ItemGroup>
 
 </Project>

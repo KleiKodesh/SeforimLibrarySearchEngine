@@ -338,8 +338,10 @@ version = "0.1.0"
 dependencies = [
  "hebrew-fts",
  "seforim-engine",
+ "seforim-vectors",
  "serde",
  "serde_json",
+ "zstd",
 ]
 
 [[package]]
@@ -898,11 +900,14 @@ dependencies = [
 name = "seforim-vectors"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "cxx",
  "fs4",
  "memmap2",
+ "serde",
  "tempfile",
  "usearch",
+ "zstd",
 ]
 
 [[package]]

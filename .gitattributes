@@ -1,2 +1,5 @@
 # Shell scripts run on macOS / Linux: always LF.
 *.sh text eol=lf
+
+# Binary test fixtures.
+*.oxv binary

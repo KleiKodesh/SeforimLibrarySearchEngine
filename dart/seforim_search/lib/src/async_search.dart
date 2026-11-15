@@ -136,6 +136,10 @@ final class SearchWorker {
   /// [SemanticIndex.vectorInfo] on the worker.
   Future<VectorInfo?> vectorInfo() => _call('vectorInfo');
 
+  /// [SemanticIndex.importOxv] on the worker (background priority).
+  Future<OxvImportReport> importOxv(String path, List<OxvBookMap> books, {SearchCancelToken? cancel}) =>
+      _call('importOxv', path, books, cancel?.address);
+
   /// [SeforimIndex.openWriter] on the worker (issue #38): the writer lives
   /// on the worker's isolate and every call is a Future, so a commit, merge
   /// or re-sort never blocks the caller. The worker serves one request at a
@@ -528,6 +532,8 @@ void _workerMain((SendPort, String, String?) args) {
           value = index.updateVectors(b as VectorUpdate, cancelAddress: c as int?);
         case 'vectorInfo':
           value = index.vectorInfo();
+        case 'importOxv':
+          value = index.importOxv(a as String, (b as List).cast<OxvBookMap>(), cancelAddress: c as int?);
         case 'fuseSemantic':
           final (query, semantic, fusion) = b as (String, SemanticResult, FusionOptions);
           value = s().fuseSemantic(query, semantic, fusion);

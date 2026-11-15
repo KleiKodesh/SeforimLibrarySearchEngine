@@ -10,10 +10,18 @@ import 'package:otzaria_demo/facets.dart';
 import 'package:otzaria_demo/grouping.dart';
 import 'package:otzaria_demo/snippet_texts.dart';
 import 'package:otzaria_demo/translation_lexicon.dart';
+import 'package:otzaria_demo/meivin_embedder.dart';
+import 'package:otzaria_demo/semantic_commands.dart';
 import 'package:seforim_search/seforim_search.dart';
 
 const _usage = '''
-otzaria_demo build  [--db path] [--index dir] [--max-lines N] [--keep-marks] [--no-positions]
+otzaria_demo build  [--db path] [--index dir] [--max-lines N] [--max-books N] [--keep-marks] [--no-positions]
+otzaria_demo semantic-import <index dir> <file.oxv | file.oxv.zst> [--books N] [--db path]
+                    Otzaria's vector file mapped onto seforim.db line ids (books named id:N;
+                    --books N = the first N catalog books, as build --max-books N)
+otzaria_demo semantic-search <index dir> <query> [--k 10] [--hybrid] [--ort onnxruntime.dll] [--model dir]
+                    [--query-file utf8.txt] (instead of <query>: shells can mangle Hebrew arguments)
+                    query embedded with Otzaria's Meivin model (default model dir: Otzaria's install)
 otzaria_demo search [--db path] [--index dir] [options] <query>
 otzaria_demo update [--db path] [--index dir] [--wait] [--watch]
                     per-book update by book.contentHash, then the background merge
@@ -57,7 +65,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
     'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'pages', 'context', 'native', 'zstd', 'spacing', 'match',
     'match-count', 'exclude', 'exclude-scope', 'exclude-options', 'dictionary', 'acronyms', 'group', 'group-scan',
-    'order', 'scope', 'lexical',
+    'order', 'scope', 'lexical', 'max-books', 'books', 'k', 'ort', 'model', 'query-file',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -109,6 +117,18 @@ Future<void> main(List<String> args) async {
           stderr.writeln('${db.unreadableLineIds.length} rows unreadable (line ids: $ids'
               '${db.unreadableLineIds.length > 20 ? ', ...' : ''})');
         }
+      case 'semantic-import' when rest.length == 2:
+        semanticImport(db, rest[0], rest[1], booksLimit: _int(o, 'books'));
+      case 'semantic-search' when rest.length >= 2 || (rest.length == 1 && o['query-file'] != null):
+        final model = o['model'] ?? defaultMeivinDir();
+        final ort = o['ort'] ?? Platform.environment['OTZARIA_ONNX_RUNTIME'];
+        if (model == null || ort == null) {
+          stderr.writeln('pass --model (Meivin model folder) and --ort (onnxruntime library)');
+          exit(64);
+        }
+        semanticSearchCommand(db, rest[0],
+            o['query-file'] != null ? File(o['query-file']!).readAsStringSync() : rest.sublist(1).join(' '),
+            modelDir: model, ortLibrary: ort, k: _int(o, 'k') ?? 10, hybrid: o.containsKey('hybrid'));
       default:
         stdout.write(_usage);
         exit(64);
@@ -120,6 +140,7 @@ Future<void> main(List<String> args) async {
 
 void _build(SeforimDb db, String dir, Map<String, String?> o) {
   final maxLines = _int(o, 'max-lines') ?? 0;
+  final maxBooks = _int(o, 'max-books') ?? 0;
   db.checkNoteIds(); // issue #13: fail loudly before any line goes in
   final sw = Stopwatch()..start();
   stdout.writeln('DB: ${db.path} (split=${db.splitContent}, zstd=${db.compressed})');
@@ -144,12 +165,13 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
     batchBytes = 0;
     mem.sample();
   }
+
   // this feeding thread (DB reads) in the OS background mode too; commits,
   // the final merge and the FM sidecar leave it by themselves
   runInBackgroundPriority(() {
     try {
       outer:
-      for (final bookId in db.catalogBookOrder()) {
+      for (final bookId in maxBooks > 0 ? db.catalogBookOrder().take(maxBooks) : db.catalogBookOrder()) {
         for (final line in db.bookLines(bookId)) {
           if (maxLines > 0 && position >= maxLines) break outer;
           batch.add(LineDocument(
@@ -176,7 +198,8 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
     }
   });
   final indexingMs = stageWatch.elapsedMilliseconds;
-  stdout.writeln('  stage: indexing: ${_ms(indexingMs)} (DB read + commit ${_ms(indexingMs - addWatch.elapsedMilliseconds)}, '
+  stdout.writeln(
+      '  stage: indexing: ${_ms(indexingMs)} (DB read + commit ${_ms(indexingMs - addWatch.elapsedMilliseconds)}, '
       'engine add ${_ms(addWatch.elapsedMilliseconds)})');
   stdout.writeln('  stage memory: indexing: ${mem.take()}');
   stdout.writeln('  read queue (batch cap 1,000 lines / 16 MB, chunk cap ${SeforimDb.bookLinesChunk} lines / '
@@ -192,7 +215,10 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
   try {
     final built = index.buildFmSidecar();
     stdout.writeln('  stage memory: FM-index sidecar: ${mem.take()}');
-    final fmi = Directory(dir).listSync().whereType<File>().where((f) => f.path.endsWith('.fmi'))
+    final fmi = Directory(dir)
+        .listSync()
+        .whereType<File>()
+        .where((f) => f.path.endsWith('.fmi'))
         .fold<int>(0, (n, f) => n + f.lengthSync());
     stdout.writeln(built
         ? 'FM sidecar: ${fmWatch.elapsedMilliseconds} ms, ${(fmi / 1e6).toStringAsFixed(1)} MB'
@@ -254,7 +280,8 @@ const _open = '⟦', _close = '⟧';
 /// stripped on its own, so a mark that ends inside a tag cannot swallow
 /// its bracket.
 String _render(String text, Snippet s) {
-  String plain(String t) => t.replaceAll('&nbsp;', ' ').replaceAll(RegExp(r'<[^>]*>?'), ' ').replaceAll(RegExp(r'^[^<]*>'), ' ');
+  String plain(String t) =>
+      t.replaceAll('&nbsp;', ' ').replaceAll(RegExp(r'<[^>]*>?'), ' ').replaceAll(RegExp(r'^[^<]*>'), ' ');
   final b = StringBuffer();
   if (s.leadingEllipsis) b.write('… ');
   var at = s.start;
@@ -277,8 +304,12 @@ String _render(String text, Snippet s) {
 /// the first [words] after, tags stripped, "…" where the context is cut. A side
 /// the window itself already cut (its own "…") gets no context.
 String _withContext(String window, SnippetText text, Snippet s, int words) {
-  List<String> wordsOf(String t) =>
-      t.replaceAll('&nbsp;', ' ').replaceAll(RegExp(r'<[^>]*>?'), ' ').split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+  List<String> wordsOf(String t) => t
+      .replaceAll('&nbsp;', ' ')
+      .replaceAll(RegExp(r'<[^>]*>?'), ' ')
+      .split(RegExp(r'\s+'))
+      .where((w) => w.isNotEmpty)
+      .toList();
   var out = window;
   if (text.before.isNotEmpty && !s.leadingEllipsis) {
     final all = wordsOf(text.before);
@@ -346,7 +377,10 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
   final req = OtzariaSearch(
     query: mainWords.join(' '),
     mode: SearchMode.values.byName(o['mode'] ?? 'advanced'),
-    globalOptions: {for (final e in flagToOption.entries) if (o.containsKey(e.key)) e.value: true},
+    globalOptions: {
+      for (final e in flagToOption.entries)
+        if (o.containsKey(e.key)) e.value: true
+    },
     alternativeWords: alts,
     distance: _int(o, 'distance') ?? 0,
     anyOrder: o.containsKey('any-order'),
@@ -374,9 +408,8 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
     partOfWordMaxLetters: _int(o, 'partial-max'),
     grammarPrefixMaxLetters: _int(o, 'grammar-prefix-max'),
     marksIndex: info.keepMarks,
-    customSpacing: o['spacing'] == null
-        ? null
-        : {for (final (i, g) in o['spacing']!.split(',').indexed) i: int.parse(g.trim())},
+    customSpacing:
+        o['spacing'] == null ? null : {for (final (i, g) in o['spacing']!.split(',').indexed) i: int.parse(g.trim())},
   );
   final request = req.toOptions(contextWords: contextWords);
   final bookFilter = o['book'] == null ? null : db.booksMatching(o['book']!);
@@ -408,8 +441,8 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
       !o.containsKey('count') &&
       !(request.userRegex && SeforimIndex.userRegexKind(request.query) == 'line')) {
     index.close();
-    await _pageAsync(db, dir, o['native'], request, contextWords, titles, limit, offset, _int(o, 'pages') ?? 1,
-        info.positions);
+    await _pageAsync(
+        db, dir, o['native'], request, contextWords, titles, limit, offset, _int(o, 'pages') ?? 1, info.positions);
     return;
   }
   final sw = Stopwatch()..start();
@@ -439,7 +472,10 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
   // row on the page.
   List<String> renderAll(List<(PlacedHit, String, Snippet)> rows) {
     bool isShort(Snippet s) => s.isShort(contextWords) && s.breakAt == null;
-    final context = db.snippetTexts(const [], [for (final r in rows) if (isShort(r.$3)) r.$1.lineId]);
+    final context = db.snippetTexts(const [], [
+      for (final r in rows)
+        if (isShort(r.$3)) r.$1.lineId
+    ]);
     return [
       for (final (h, text, s) in rows)
         isShort(s) && context[h.lineId] != null
@@ -460,7 +496,15 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
   }
 
   // The plain result pages: KitveiHakodesh's snippet model (_showPages).
-  await _showPages(db, titles, info.positions, contextWords, limit, offset, _int(o, 'pages') ?? 1, session.hitCount,
+  await _showPages(
+      db,
+      titles,
+      info.positions,
+      contextWords,
+      limit,
+      offset,
+      _int(o, 'pages') ?? 1,
+      session.hitCount,
       (from, count) async => session.hits(from, count),
       (from, count) async => session.wordWindows(from, count),
       (windows, lineTexts, nextTexts) async => session.finishWindows(windows, lineTexts, nextTexts),
@@ -496,7 +540,15 @@ Future<void> _pageAsync(SeforimDb db, String dir, String? nativePath, SearchOpti
         stderr.writeln('notice: $n');
       }
       if (searchInfo.truncated) stderr.writeln('truncated: a walk hit its expansion cap');
-      await _showPages(db, titles, positions, contextWords, limit, offset, pages, session.hitCount,
+      await _showPages(
+          db,
+          titles,
+          positions,
+          contextWords,
+          limit,
+          offset,
+          pages,
+          session.hitCount,
           (from, count) => session.hits(from, count),
           (from, count) => session.wordWindows(from, count),
           (windows, lineTexts, nextTexts) => session.finishWindows(windows, lineTexts, nextTexts),
@@ -572,7 +624,8 @@ Future<void> _showPages(
         await cache.ensure([for (final h in batch) ...linesOf(h)]);
         String textOf(int id) => cache.textOf((lineId: id, short: false))?.text ?? '';
         final windows = await windowsOf(hitNo, shown.length);
-        final snippets = await finish(windows.length == shown.length ? windows : List.filled(shown.length, WordWindow.none),
+        final snippets = await finish(
+            windows.length == shown.length ? windows : List.filled(shown.length, WordWindow.none),
             [for (final h in shown) textOf(h.lineId)],
             [for (final h in shown) h.nextLineId == null ? null : textOf(h.nextLineId!)]);
         hitNo += shown.length;
@@ -585,7 +638,11 @@ Future<void> _showPages(
       if (batch.isEmpty) break;
       final first = hitNo;
       hitNo += batch.length;
-      final texts = db.lineTexts([...batch.map((h) => h.lineId), for (final h in batch) if (h.nextLineId != null) h.nextLineId!]);
+      final texts = db.lineTexts([
+        ...batch.map((h) => h.lineId),
+        for (final h in batch)
+          if (h.nextLineId != null) h.nextLineId!
+      ]);
       final lineTexts = [for (final h in batch) texts[h.lineId] ?? ''];
       final nextTexts = [for (final h in batch) h.nextLineId == null ? null : texts[h.nextLineId] ?? ''];
       final snippets = await locate(first, batch, lineTexts, nextTexts);
@@ -628,9 +685,8 @@ Future<void> _showPages(
     var n = offset + from;
     for (final (h, s) in shown) {
       final t = cache.textOf(rowOf(h, s)) ?? SnippetText(h.lineId, '', '', '');
-      final text = s.breakAt == null
-          ? t.text
-          : '${t.text}\n${cache.textOf((lineId: h.nextLineId!, short: false))?.text ?? ''}';
+      final text =
+          s.breakAt == null ? t.text : '${t.text}\n${cache.textOf((lineId: h.nextLineId!, short: false))?.text ?? ''}';
       final window = _render(text, s);
       final row = isShort(s) ? _withContext(window, t, s, contextWords) : window;
       stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})'
@@ -647,8 +703,8 @@ Future<void> _showPages(
 /// Otzaria reads the books; positions as the build numbered them). Stops at
 /// the engine's 100,000-line cap. Prints the first results with the matches
 /// in [ ].
-void _lineRegex(SeforimDb db, SearchSession session, LineRegexStatus status, List<int>? books,
-    Map<int, String> titles, int limit, int offset, Stopwatch sw) {
+void _lineRegex(SeforimDb db, SearchSession session, LineRegexStatus status, List<int>? books, Map<int, String> titles,
+    int limit, int offset, Stopwatch sw) {
   final shown = <(int, int, String, List<(int, int)>)>[];
   var found = 0;
   void take(List<PlacedHit> lines, List<String> texts, List<List<(int, int)>> ranges) {
@@ -813,7 +869,8 @@ void _grouped(
   var k = 0;
   for (final (g, h, _, _) in cards) {
     final count = '${g.members.length}${truncated ? '+' : ''}';
-    stdout.writeln('${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})${_noteTag(db, h.lineId, h.bookId)} '
+    stdout.writeln(
+        '${++n}. ${titles[h.bookId] ?? h.bookId} | ${refs[h.lineId] ?? ''}  (line ${h.lineId})${_noteTag(db, h.lineId, h.bookId)} '
         '[$count results]');
     stdout.writeln('   ${rendered[k++]}');
     for (final m in g.members.where((m) => m != h).take(mergedSiblingsCap)) {

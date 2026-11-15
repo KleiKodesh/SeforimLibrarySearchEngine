@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 12; // 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 13; // 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -1965,18 +1965,21 @@ unsafe fn slice_arg<'a, T>(ptr: *const T, len: usize, name: &str) -> Result<&'a 
 /// (`<index>/vectors/`) and publishes a new generation (searches keep the
 /// old one until it is in). Removals first: whole books (`remove_books`,
 /// the per-book update of issue #29), single lines (`remove_lines`); then
-/// `add_count` lines: `line_ids[i]`, `book_ids[i]` and the f32 vector
-/// `vectors[i * dims .. (i + 1) * dims]` (L2-normalized by the engine; a
-/// zero vector is an error). A line id added again replaces its vector.
+/// `add_count` vectors: `line_ids[i]`, `book_ids[i]`, `chunks[i]` (null =
+/// every chunk 0; a long line may have several vectors: 0 its first, 1, 2,
+/// ... further chunks, bit 31 a vector borrowed from a neighbour) and the
+/// f32 vector `vectors[i * dims .. (i + 1) * dims]` (L2-normalized by the
+/// engine; a zero vector is an error). A line id added again replaces all
+/// its vectors. A line scores as its best chunk (`chunk_penalty`).
 /// `dims` must match an existing store. Runs in the OS background mode;
 /// blocking (call from a worker thread or `*_async`). `token` null or live
 /// (cancelled: nothing published). Returns JSON
-/// `{"generation":N,"lines":N,"books":N,"removed":N,"added":N,"rebuilt":bool}`
+/// `{"generation":N,"lines":N,"vectors":N,"books":N,"removed":N,"added":N,"rebuilt":bool}`
 /// (free with `se_string_free`), null on error.
 ///
 /// # Safety
 /// `index` live; every array valid for its count (`vectors` for
-/// `add_count * dims` floats); `token` null or live.
+/// `add_count * dims` floats; `chunks` null or `add_count`); `token` null or live.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn se_vectors_update(
@@ -1988,6 +1991,7 @@ pub unsafe extern "C" fn se_vectors_update(
     remove_lines_count: usize,
     line_ids: *const u64,
     book_ids: *const u64,
+    chunks: *const u32,
     vectors: *const f32,
     add_count: usize,
     token: *const CancelToken,
@@ -1997,6 +2001,7 @@ pub unsafe extern "C" fn se_vectors_update(
         let dims = dims as usize;
         let lines = slice_arg(line_ids, add_count, "line_ids")?;
         let books = slice_arg(book_ids, add_count, "book_ids")?;
+        let chunks = if chunks.is_null() { None } else { Some(slice_arg(chunks, add_count, "chunks")?) };
         let floats = slice_arg(vectors, add_count.checked_mul(dims).ok_or("too many floats")?, "vectors")?;
         let mut update = seforim_engine::semantic::VectorUpdate {
             remove_books: slice_arg(remove_books, remove_books_count, "remove_books")?.to_vec(),
@@ -2007,6 +2012,7 @@ pub unsafe extern "C" fn se_vectors_update(
             update.add.push(seforim_engine::semantic::VectorRecord {
                 line_id: check_id("line_id", lines[i])?,
                 book_id: check_id("book_id", books[i])?,
+                chunk: chunks.map_or(0, |c| c[i]),
                 vector: floats[i * dims..(i + 1) * dims].to_vec(),
             });
         }
@@ -2014,6 +2020,7 @@ pub unsafe extern "C" fn se_vectors_update(
         let json = serde_json::json!({
             "generation": stats.generation,
             "lines": stats.lines,
+            "vectors": stats.vectors,
             "books": stats.books,
             "removed": stats.removed,
             "added": stats.added,
@@ -2023,7 +2030,7 @@ pub unsafe extern "C" fn se_vectors_update(
     })
 }
 
-/// The vector sidecar's size: JSON `{"dims":N,"lines":N,"books":N,"generation":N}`,
+/// The vector sidecar's size: JSON `{"dims":N,"lines":N,"vectors":N,"books":N,"generation":N}`,
 /// or `null` (the JSON literal) when the index has no vectors. Free with
 /// `se_string_free`; a null pointer on error.
 ///
@@ -2108,6 +2115,75 @@ pub unsafe extern "C" fn se_search_fuse_semantic(
             if text.trim().is_empty() { Default::default() } else { serde_json::from_str(text).map_err(err)? };
         let fused = search.fuse_semantic(query, &semantic, &fusion).map_err(err)?;
         Ok(out_string(serde_json::to_string(&fused).map_err(err)?))
+    })
+}
+
+/// Expands Otzaria's downloaded vector file (`.oxv.zst`, zstd) to a plain
+/// `.oxv` at `dst` (via `dst.tmp`). Returns the bytes written, -1 on error.
+///
+/// # Safety
+/// Both paths valid UTF-8 for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn se_oxv_expand(src: *const u8, src_len: usize, dst: *const u8, dst_len: usize) -> i64 {
+    guard(-1, || {
+        let src = str_arg(src, src_len)?;
+        let dst = str_arg(dst, dst_len)?;
+        let n = seforim_vectors::oxv::expand_zst(std::path::Path::new(src), std::path::Path::new(dst)).map_err(err)?;
+        Ok(n as i64)
+    })
+}
+
+/// What an Otzaria vector file (`.oxv`, base segment, formats 2 / 3) holds:
+/// JSON `{"format":N,"kind":"base","dims":N,"codec":"..","library_release_tag":"..",
+/// "from_library_version":N,"to_library_version":N,"slots":N,"extras":N,
+/// "occurrences":N,"books":[{"name":"id:123","records":N,"lines":N}]}`;
+/// `lines` = highest line ordinal + 1, the line count the host's mapping
+/// must cover. Null on error (a delta segment is refused).
+///
+/// # Safety
+/// `path` valid UTF-8 for `path_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn se_oxv_info(path: *const u8, path_len: usize) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let path = str_arg(path, path_len)?;
+        let file = seforim_vectors::oxv::OxvFile::open(std::path::Path::new(path)).map_err(err)?;
+        Ok(out_string(serde_json::to_string(&file.info()).map_err(err)?))
+    })
+}
+
+/// Imports an Otzaria vector file into the index's vector sidecar, keyed by
+/// the HOST's line ids. `maps_json`: `[{"name":"id:123","book_id":123,
+/// "line_ids":[..]}]`, per book of the file the host's book id and the line
+/// id of each 0-based line ordinal (seforim.db rows of the book in
+/// `lineIndex, id` order). Every chunk of a mapped line is imported; each
+/// mapped book's old vectors are replaced; one store write per call (batch
+/// the books). Returns JSON `{"books_imported":N,"books_not_in_file":[..],
+/// "books_unmapped":N,"records":N,"vectors":N,"lines":N,"out_of_range":N,
+/// "duplicates":N,"generation":N}`, null on error. Blocking; `token` null or live.
+///
+/// # Safety
+/// `index` live; strings valid for their lengths; `token` null or live.
+#[no_mangle]
+pub unsafe extern "C" fn se_vectors_import_oxv(
+    index: *const LineIndex,
+    path: *const u8,
+    path_len: usize,
+    maps_json: *const u8,
+    maps_len: usize,
+    token: *const CancelToken,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        let path = str_arg(path, path_len)?;
+        let maps: Vec<seforim_engine::semantic::OxvBookMap> = serde_json::from_str(str_arg(maps_json, maps_len)?).map_err(err)?;
+        for m in &maps {
+            check_id("book_id", m.book_id)?;
+            for &l in &m.line_ids {
+                check_id("line_id", l)?;
+            }
+        }
+        let report = index.import_oxv(std::path::Path::new(path), &maps, token.as_ref()).map_err(err)?;
+        Ok(out_string(serde_json::to_string(&report).map_err(err)?))
     })
 }
 
@@ -2444,7 +2520,7 @@ mod tests {
             let books = [5u64, 5, 6];
             let vectors = [1.0f32, 0.0, 0.0, 0.9, 0.1, 0.0, 0.0, 0.0, 1.0];
             let stats = take(se_vectors_update(
-                index, 3, ptr::null(), 0, ptr::null(), 0, ids.as_ptr(), books.as_ptr(), vectors.as_ptr(), 3, ptr::null(),
+                index, 3, ptr::null(), 0, ptr::null(), 0, ids.as_ptr(), books.as_ptr(), ptr::null(), vectors.as_ptr(), 3, ptr::null(),
             ));
             assert!(stats.contains("\"lines\":3"), "{stats}");
             assert!(take(se_vectors_info(index)).contains("\"dims\":3"));
@@ -2460,7 +2536,7 @@ mod tests {
             assert!(se_last_error_message().contains("dims"));
             // a zero vector is refused at ingest
             let zero = [0.0f32; 3];
-            assert!(se_vectors_update(index, 3, ptr::null(), 0, ptr::null(), 0, ids.as_ptr(), books.as_ptr(), zero.as_ptr(), 1, ptr::null())
+            assert!(se_vectors_update(index, 3, ptr::null(), 0, ptr::null(), 0, ids.as_ptr(), books.as_ptr(), ptr::null(), zero.as_ptr(), 1, ptr::null())
                 .is_null());
 
             // hybrid: the lexical search in relevance order, fused with the semantic hits
@@ -2480,8 +2556,53 @@ mod tests {
 
             // a book removed
             let rm = [5u64];
-            let stats = take(se_vectors_update(index, 3, rm.as_ptr(), 1, ptr::null(), 0, ptr::null(), ptr::null(), ptr::null(), 0, ptr::null()));
+            let stats = take(se_vectors_update(index, 3, rm.as_ptr(), 1, ptr::null(), 0, ptr::null(), ptr::null(), ptr::null(), ptr::null(), 0, ptr::null()));
             assert!(stats.contains("\"lines\":1"), "{stats}");
+
+            // an Otzaria file imported by the host's line ids: chunks kept, the
+            // line scored by its best chunk, then a hybrid search over it
+            let oxv = dir.join("lib.oxv");
+            let unit = |a: usize| {
+                let mut v = vec![0.0f32; 3];
+                v[a] = 1.0;
+                v
+            };
+            seforim_vectors::oxv::write_test_segment(
+                &oxv,
+                3,
+                false,
+                "v1",
+                &[("id:5", vec![(0, 0, unit(1)), (0, 1, unit(2)), (1, 0, unit(0))]), ("id:7", vec![(0, 0, unit(0))])],
+            )
+            .unwrap();
+            let o = oxv.to_string_lossy().into_owned();
+            let info = take(se_oxv_info(o.as_ptr(), o.len()));
+            assert!(info.contains("\"name\":\"id:5\",\"records\":3,\"lines\":2"), "{info}");
+            let maps = r#"[{"name":"id:5","book_id":5,"line_ids":[1,2]}]"#;
+            let report = take(se_vectors_import_oxv(index, o.as_ptr(), o.len(), maps.as_ptr(), maps.len(), ptr::null()));
+            let r: serde_json::Value = serde_json::from_str(&report).unwrap();
+            assert_eq!((r["vectors"].as_u64(), r["lines"].as_u64(), r["books_unmapped"].as_u64()), (Some(3), Some(2), Some(1)), "{report}");
+            assert!(take(se_vectors_info(index)).contains("\"lines\":3,\"vectors\":4"));
+            let q = [0.0f32, 0.0, 1.0];
+            let sem = take(se_semantic_search(index, q.as_ptr(), 3, opts.as_ptr(), opts.len(), ptr::null()));
+            let v: serde_json::Value = serde_json::from_str(&sem).unwrap();
+            // line 3 (its own vector on the query) first, then line 1 by its second chunk, penalized
+            assert_eq!((v["hits"][1]["line_id"].as_u64(), v["hits"][1]["chunk"].as_u64()), (Some(1), Some(1)), "{sem}");
+            assert!((v["hits"][1]["score"].as_f64().unwrap() - 0.96).abs() < 1e-3, "{sem}");
+            let req = r#"{"query":"abc","order":"relevance"}"#;
+            let search = se_search(index, req.as_ptr(), req.len());
+            assert!(!search.is_null(), "{}", se_last_error_message());
+            let query = "abc";
+            let fused = take(se_search_fuse_semantic(search, query.as_ptr(), query.len(), sem.as_ptr(), sem.len(), ptr::null(), 0));
+            let f: serde_json::Value = serde_json::from_str(&fused).unwrap();
+            let one = f.as_array().unwrap().iter().find(|e| e["line_id"] == 1).unwrap();
+            assert_eq!(one["source"], "both", "{fused}");
+            se_search_close(search);
+            let gz = dir.join("lib.oxv.zst");
+            std::fs::write(&gz, zstd::encode_all(&std::fs::read(&oxv).unwrap()[..], 1).unwrap()).unwrap();
+            let (g, x) = (gz.to_string_lossy().into_owned(), dir.join("x.oxv").to_string_lossy().into_owned());
+            assert_eq!(se_oxv_expand(g.as_ptr(), g.len(), x.as_ptr(), x.len()) as u64, std::fs::metadata(&oxv).unwrap().len());
+            assert!(se_oxv_info(g.as_ptr(), g.len()).is_null());
             se_index_close(index);
             let _ = std::fs::remove_dir_all(dir);
         }

@@ -47,6 +47,7 @@ namespace SeforimSearch.Demo
                 ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
                 ("per-book update (issue #29): changed / grown / removed books, crash mid-update, background merge", BookUpdates),
                 ("semantic search (issue #18): vectors, semantic-only, book filter, hybrid fusion, cancel", Semantic),
+                ("Otzaria vectors (issue #18): .oxv info, import by line ids, chunks, hybrid", OxvImport),
             };
             int failed = 0;
             foreach (var (name, body) in tests)
@@ -222,6 +223,43 @@ namespace SeforimSearch.Demo
             var remove = new VectorUpdate { Dims = 3 };
             remove.RemoveBooks.Add(5);
             Check(index.UpdateVectors(remove).Lines == 1, "book removed");
+        }
+
+        /// <summary>The Rust-written fixture seforim-vectors/tests/data/synthetic.oxv: books id:5 (line 0 with
+        /// chunks 0 and 1, line 1) and id:7, 4 dims, f32.</summary>
+        private static void OxvImport(string db, string dir)
+        {
+            string? oxv = null;
+            for (var d0 = new DirectoryInfo(AppContext.BaseDirectory); d0 != null && oxv == null; d0 = d0.Parent)
+            {
+                string f = Path.Combine(d0.FullName, "seforim-vectors", "tests", "data", "synthetic.oxv");
+                if (File.Exists(f)) oxv = f;
+            }
+            Check(oxv != null, "fixture found");
+            var info = SeforimSemantic.ReadOxvInfo(oxv!);
+            Check(info.Format == 3 && info.Dims == 4 && info.Codec == "f32" && info.LibraryReleaseTag == "v1-synthetic", "oxv header");
+            Check(info.Books.Count == 2 && info.Books[0].Name == "id:5" && info.Books[0].Records == 3 && info.Books[0].Lines == 2, "oxv books");
+            string d = Path.Combine(dir, "oxv");
+            using var index = SeforimIndex.Create(d);
+            var w = index.OpenWriter(30_000_000, 1);
+            w.Add(new LineDocument { LineId = 50, Position = 0, BookId = 5, Text = "alpha" });
+            w.Add(new LineDocument { LineId = 51, Position = 1, BookId = 5, Text = "beta" });
+            w.MergeAndClose();
+            var report = index.ImportOxvAsync(oxv!, new[]
+            {
+                new OxvBookMap { Name = "id:5", BookId = 5, LineIds = new long[] { 50, 51 } },
+                new OxvBookMap { Name = "id:9", BookId = 9, LineIds = new long[] { 90 } },
+            }).GetAwaiter().GetResult();
+            Check(report.BooksImported == 1 && report.BooksUnmapped == 1 && report.Vectors == 3 && report.Lines == 2, "import report");
+            Check(report.BooksNotInFile.Count == 1 && report.BooksNotInFile[0] == "id:9", "book not in file");
+            Check(index.GetVectorInfo()!.Vectors == 3 && index.GetVectorInfo()!.Lines == 2, "vectors and lines");
+            var sem = index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }, new SemanticOptions { K = 2 });
+            Check(sem.Hits[0].LineId == 50 && sem.Hits[0].Chunk == 1 && Math.Abs(sem.Hits[0].Score - 0.96f) < 1e-3, "found by its second chunk");
+            using (var s = index.Search(new SearchOptions("alpha") { Order = ResultsOrder.Relevance }))
+                Check(s.FuseSemantic("alpha", sem)[0].Source == "both", "hybrid over imported vectors");
+            var update = new VectorUpdate { Dims = 4 };
+            update.Add.Add(new LineVector { LineId = 51, BookId = 5, Chunk = 2, Vector = new[] { 0f, 0f, 0f, 1f } });
+            Check(index.UpdateVectors(update).Vectors == 3, "a host chunk replaces the line's vectors");
         }
 
         private static void AsyncOpen(string db, string dir)

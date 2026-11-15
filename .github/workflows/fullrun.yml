@@ -1,7 +1,8 @@
 # Full-DB correctness run on GitHub Actions (manual): index builds (both flavours + FtsLib +
 # Otzaria), the FtsLib parity sets, the Otzaria hit-count comparison and the cross-line +
-# sameSection verification, all through tools/bench/run-all.sh. Speed benchmarks are NOT run
-# here: times printed by this workflow come from shared runners and are not representative.
+# sameSection verification, all through tools/bench/run-all.sh. Search speed runs in the parity
+# job for all four engines (ours both flavours, FtsLib, Otzaria) on that one runner, so they compare
+# with each other (user's rule); absolute times are a shared runner's, not a user machine's.
 # Result: one artifact `fullrun-report` (logs, parity diffs, hit counts, verification,
 # build reports, regenerated specs, summary.json). Fetch: gh run download <run id> -n fullrun-report
 name: fullrun
@@ -59,17 +60,19 @@ jobs:
         run: git -C kkp submodule update --init --recursive KitveiHakodesh/FastDocView
       - uses: ./.github/actions/fullrun-setup
         with: { db_tag: "${{ inputs.db_tag }}" }
-      - name: run (db, tools, indexes pos/nopos/ftslib, parity)
+      - name: run (db, tools, indexes pos/nopos/ftslib/otzaria, parity, speed of all four engines on this one machine)
         shell: bash
         run: |
           cat >> tools/bench/bench.local.env <<EOF
           KITVEI_DIR=$(cygpath -u "$GITHUB_WORKSPACE")/kkp/KitveiHakodesh
-          TOOLS="engine demo ftslibdump"
-          INDEXES="pos nopos ftslib"
+          TOOLS="engine demo ftslibdump otzaria"
+          INDEXES="pos nopos ftslib otzaria"
+          SPEED_ENGINES="pos nopos fts otz"
+          RUNS=3
           PARITY_SETS="${{ inputs.parity_sets }}"
           PARITY_STRICT=1
           EOF
-          tools/bench/run-all.sh --steps detect,db,build-tools,build-indexes,parity
+          tools/bench/run-all.sh --steps detect,db,build-tools,build-indexes,parity,speed
       - name: explain the positions-flavour parity differences (line by line, into the log)
         if: always()
         shell: bash

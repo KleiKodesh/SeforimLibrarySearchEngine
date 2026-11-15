@@ -57,6 +57,10 @@ class Lines:
         return self.has_note
 
 
+def code(s):
+    return "".join(c if " " <= c < "" else (f"{ord(c) - 0x5d0:x}." if "א" <= c <= "ת" else "?") for c in s)
+
+
 def features(text):
     if text is None:
         return "no-text"
@@ -107,12 +111,14 @@ def main(lib, index, drv, otzix, db, hc, outp, per="8", only=""):
                       + p.stderr.decode("utf-8", "replace")[-300:].encode("ascii", "replace").decode(), flush=True)
                 continue
             segs = []
+            snip = {}
             for ln in p.stdout.decode("utf-8", "replace").splitlines():
                 try:
                     j = json.loads(ln)
                 except ValueError:
                     continue
                 segs.append((j.get("book"), j.get("segment")))
+                snip[(j.get("book"), j.get("segment"))] = j.get("text") or ""
             ours_raw = ours_hits(d, ix, req)
             parent = lambda x: ((x - R) >> 16) if x >= R else x
             ours = set(parent(x) for x in ours_raw)
@@ -123,13 +129,14 @@ def main(lib, index, drv, otzix, db, hc, outp, per="8", only=""):
                 if ov[best]:
                     offset = best
                 print(f"segment -> lineIndex offset {best} (overlaps {ov})", flush=True)
-            otz, miss = set(), 0
+            otz, miss, otz_text = set(), 0, {}
             for b_, s_ in segs:
                 lid = L.line_id(b_, s_ + (offset or 0)) if s_ is not None else None
                 if lid is None:
                     miss += 1
                 else:
                     otz.add(lid)
+                    otz_text[lid] = snip.get((b_, s_), "")
             real = set(x for x in ours_raw if x < R)
             note_dups = sum(1 for x in ours_raw if x >= R and parent(x) in real)
             oo, zo = sorted(ours - otz), sorted(otz - ours)
@@ -146,6 +153,10 @@ def main(lib, index, drv, otzix, db, hc, outp, per="8", only=""):
                 return " ".join(out)
             print(f"== {key} mode {args[1]}: ours raw {len(ours_raw)} lines {len(ours)} (note hits on a hit line: {note_dups}) "
                   f"otz {len(otz)} (unmapped {miss}) both {len(ours & otz)} ours-only {len(oo)} otz-only {len(zo)}", flush=True)
+            for lid in zo[:3]:
+                # Otzaria's own snippet of an Otzaria-only line, letters as hex offsets from U+05D0
+                # (ASCII only): shows what its search matched
+                print(f"   otz snippet {lid}: {code(otz_text.get(lid, ''))[:600]}", flush=True)
             print(f"   ours-only: {show(oo)}\n   otz-only:  {show(zo, True)}", flush=True)
             de.se_search_close(se)
             res.append(dict(key=key, ours_raw=len(ours_raw), ours_lines=len(ours), note_dups=note_dups, otz=len(otz),

@@ -292,8 +292,9 @@ md.append("")
 
 md.append("## Search speed (every hit read, median of 3 runs after one warm-up)\n")
 md.append("Stages per query: walks + collect (engine), host (text fetch + locate + widening), first batch, total. "
-          "Otzaria runs only the queries it has an equivalent for (no `*`, `?`, `%`, `|`, phrase); its large-set "
-          "timings come from an earlier run on a busier machine, so treat them as indicative.\n")
+          "Otzaria runs only the queries it has an equivalent for (no `*`, `?`, `%`, `|`, phrase). All four "
+          "engines run in one fullrun workflow job on the same GitHub windows runner, so they compare with each "
+          "other; absolute times are the shared runner's, not a user machine's.\n")
 for set_, title in SETS:
     data = [(name, load(set_, pat)) for name, pat in ENGINES]
     md.append(f"### {title}\n")

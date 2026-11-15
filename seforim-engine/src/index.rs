@@ -467,6 +467,23 @@ impl LineIndex {
         self.reader.reload()
     }
 
+    /// Drops every rebuildable cache without closing the index (issue #40,
+    /// Otzaria's `releaseMemory`): the FM sidecar mapping, the compiled
+    /// user-regex words, the line-search flag cache, the vector store mapping,
+    /// and the reader's segment readers (a fresh snapshot replaces the shared
+    /// one). Each is reopened lazily by the next call that needs it. Safe
+    /// while searches run: a running search keeps its own `Arc`s (sidecar,
+    /// store, searcher), so a mapping is released only when its last holder
+    /// ends. Sessions stay open. The regex and line-search caches are
+    /// process-wide: other open indexes rebuild them lazily too.
+    pub fn release_memory(&self) -> Result<()> {
+        self.fm.clear();
+        self.vectors.release();
+        hebrew_fts::user_regex::clear_cache();
+        crate::line_search::clear_cache();
+        self.reader.reload()
+    }
+
     /// The text field.
     pub fn text_field(&self) -> Field {
         self.fields.text

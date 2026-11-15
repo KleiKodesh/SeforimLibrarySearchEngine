@@ -205,6 +205,13 @@ namespace SeforimSearch.Demo
                 Check(fused.Any(f => f.LineId == 1 && f.Source == "semantic" && f.Position == null), "semantic side");
                 var rrf = s.FuseSemantic("delta", sem, new FusionOptions { Strategy = FusionStrategy.Rrf });
                 Check(rrf.Length == 3, "rrf");
+                // issue #40: release the caches with this session open; it and new searches go on
+                index.ReleaseMemory();
+                Check(s.GetHits(0, 10).Length == 1, "session after ReleaseMemory");
+                using (var again = index.Search(new SearchOptions("delta")))
+                    Check(again.HitCount == 1, "search after ReleaseMemory");
+                var sem2 = index.SemanticSearch(new[] { 1f, 0f, 0f }, new SemanticOptions { K = 2 });
+                Check(sem2.Hits.Length == 2 && sem2.Hits[0].LineId == 1, "semantic after ReleaseMemory (store reopened)");
             }
             using (var cts = new CancellationTokenSource())
             {

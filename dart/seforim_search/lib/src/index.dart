@@ -209,6 +209,16 @@ final class SeforimIndex implements Finalizable {
     if (_n.indexReload(handle) != 0) throw _n.error();
   }
 
+  /// Drops the index's rebuildable caches without closing it (issue #40):
+  /// the FM sidecar mapping, compiled user-regex words, the line-search
+  /// cache, the vector store mapping and the reader's segment readers, each
+  /// reopened lazily by the next search. Safe while searches run (they keep
+  /// what they hold); open sessions stay valid. Call it when idle or under
+  /// memory pressure.
+  void releaseMemory() {
+    if (_n.indexReleaseMemory(handle) != 0) throw _n.error();
+  }
+
   /// Starts the background full merge after an update (issue #29): its own
   /// thread at background priority merges every segment into one and
   /// rebuilds the FM sidecar; searches go on and switch to the merged

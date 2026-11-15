@@ -385,14 +385,23 @@ impl LineIndex {
 /// walk for another clause not worth its time (the host verifies them).
 const FEW_CANDIDATES: u64 = 10_000;
 
+type Flagged = std::collections::HashMap<tantivy::index::SegmentId, Arc<Vec<tantivy::DocId>>>;
+static FLAGGED: std::sync::OnceLock<std::sync::Mutex<Flagged>> = std::sync::OnceLock::new();
+
+/// Drops the per-segment flagged-line cache (issue #40): the next line
+/// search reads the flags again; a search running now keeps its `Arc`s.
+pub(crate) fn clear_cache() {
+    if let Some(cache) = FLAGGED.get() {
+        *cache.lock().unwrap_or_else(|e| e.into_inner()) = Flagged::new();
+    }
+}
+
 /// The live lines flagged [`LINE_FLAG_LONG_WORD`] (None: none, or an index
 /// without line flags). Such a word is not a term, so no candidate clause
 /// can name it, and the line pattern may still match it on the text.
 fn long_word_lines(searcher: &Searcher) -> Result<Option<DocSetQuery>> {
     // A segment's flags never change: its flagged docs are read once and
     // kept (a few lines per segment); deletes are applied per search.
-    type Flagged = std::collections::HashMap<tantivy::index::SegmentId, Arc<Vec<tantivy::DocId>>>;
-    static FLAGGED: std::sync::OnceLock<std::sync::Mutex<Flagged>> = std::sync::OnceLock::new();
     let cache = FLAGGED.get_or_init(Default::default);
     let mut docs: Vec<Vec<tantivy::DocId>> = Vec::with_capacity(searcher.segment_readers().len());
     let mut any = false;

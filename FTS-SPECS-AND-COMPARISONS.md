@@ -45,7 +45,8 @@ From `machine.txt` (run-all.sh detect, written by the report step).
 | Exact totals + per-book counts, cancellation, pull streaming | done |
 | Per-book updates by seforim.db `contentHash` (delete by book, crash-safe pending record) + background full merge / repack at low priority, restarted on open (issue #29) | built; unit tests; full-DB not measured |
 | Hits decided from positions during the search, streamed in batches (issue #21): exact totals with no text, word-tightest window | done |
-| Non-blocking search in the packages (Dart worker isolate `SearchWorker`, C# `SearchAsync` / `IAsyncEnumerable` batches) | done |
+| Non-blocking search in the packages (Dart worker isolate `SearchWorker`, also serving the index writer (#38), C# `SearchAsync` / `IAsyncEnumerable` batches) | done |
+| Release rebuildable caches without closing the index (`releaseMemory`, #40) | done |
 | Packaging (issue #17): C ABI version check at load (`se_abi_version`), Dart Native Assets hook (SHA-256 pinned prebuilt download / cargo / local file), NuGet RIDs win/linux/osx x64+arm64, release workflow + sync check | done |
 | Resume after a catalog position (FtsLib's `afterPosition`; C# demo `PositionOfLine`, Core's `StreamSearch` with `Restarted`) | done |
 | User regex `/.../` (word, sequence, line kinds) | done |

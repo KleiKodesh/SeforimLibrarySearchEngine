@@ -35,6 +35,14 @@ pub struct VectorCache {
     write: Mutex<()>,
 }
 
+impl VectorCache {
+    /// Drops the open store (issue #40): its mapping is released when the
+    /// last search holding it ends; the next call reopens it.
+    pub(crate) fn release(&self) {
+        *self.store.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
 /// A semantic search request (JSON at the C ABI).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -364,5 +372,74 @@ mod tests {
         assert_eq!(ids, vec![1, 2, 5]);
         // wrong dims refused
         assert!(index.update_vectors(4, &VectorUpdate::default(), None).is_err());
+    }
+
+    /// Issue #40: release_memory drops the caches (sidecar, store, regex,
+    /// line search, reader) and everything reopens lazily with the same
+    /// answers, also while searches run on other threads.
+    #[test]
+    fn release_memory_keeps_answers_and_is_safe_mid_search() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index = std::sync::Arc::new(LineIndex::create(tmp.path(), IndexOptions::default()).unwrap());
+        {
+            let mut w = index.writer(50_000_000, 1).unwrap();
+            for i in 0..200u64 {
+                let text = format!("alpha{} beta gamma{}", i % 7, i % 5);
+                w.add(&LineDoc { line_id: i + 1, position: i, book_id: 1 + i % 4, text, section_id: None, no_cross: false })
+                    .unwrap();
+            }
+            w.commit(None).unwrap();
+            w.merge_all().unwrap();
+        }
+        assert!(index.build_fm_sidecar().unwrap());
+        let update = VectorUpdate {
+            add: (1..=200u64).map(|id| VectorRecord { line_id: id, book_id: 1 + (id - 1) % 4, vector: vector(id, 8) }).collect(),
+            ..Default::default()
+        };
+        index.update_vectors(8, &update, None).unwrap();
+        let queries = ["*pha3", "beta~1", "/alpha[12]/", "/beta gamma[34]/", "alpha1 gamma2"];
+        let ids = |index: &LineIndex, q: &str| -> Vec<u64> {
+            let r = index.search_options(&SearchOptions { query: q.into(), user_regex: true, ..Default::default() }).unwrap();
+            r.hits.iter().map(|h| h.line_id).collect()
+        };
+        let before: Vec<Vec<u64>> = queries.iter().map(|q| ids(&index, q)).collect();
+        assert!(before.iter().all(|h| !h.is_empty()), "{:?}", before.iter().map(|h| h.len()).collect::<Vec<_>>());
+        let sem = index.semantic_search(&vector(9, 8), &SemanticOptions::default(), None).unwrap();
+        // a session open across the release keeps working
+        let mut open = index.search_options(&SearchOptions { query: "*pha3".into(), ..Default::default() }).unwrap();
+        index.release_memory().unwrap();
+        assert!(index.vectors.store.lock().unwrap().is_none());
+        assert_eq!(open.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), before[0]);
+        assert!(open.session.locate("alpha3 beta gamma1").is_some());
+        // after: same answers, caches reopened lazily
+        for (q, want) in queries.iter().zip(&before) {
+            assert_eq!(&ids(&index, q), want, "{q}");
+        }
+        assert!(index.has_fm_sidecar());
+        assert_eq!(index.semantic_search(&vector(9, 8), &SemanticOptions::default(), None).unwrap(), sem);
+        // releases racing searches on other threads
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let workers: Vec<_> = (0..3)
+            .map(|t| {
+                let (index, stop, before) = (index.clone(), stop.clone(), before.clone());
+                std::thread::spawn(move || {
+                    let mut runs = 0;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) || runs < 5 {
+                        let k = (runs + t) % queries.len();
+                        assert_eq!(ids(&index, queries[k]), before[k], "{}", queries[k]);
+                        index.semantic_search(&vector(9, 8), &SemanticOptions::default(), None).unwrap();
+                        runs += 1;
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..50 {
+            index.release_memory().unwrap();
+            std::thread::yield_now();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for w in workers {
+            w.join().unwrap();
+        }
     }
 }

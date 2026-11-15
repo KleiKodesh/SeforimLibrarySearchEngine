@@ -85,6 +85,9 @@ namespace SeforimSearch.Engine.Native
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern int se_index_reload(IndexHandle index);
 
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_index_release_memory(IndexHandle index);
+
         // ── Writer ──
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern WriterHandle se_writer_open(IndexHandle index, UIntPtr heapBytes, UIntPtr numThreads);

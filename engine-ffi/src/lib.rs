@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 11; // 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 12; // 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -464,6 +464,23 @@ pub unsafe extern "C" fn se_index_reload(index: *const LineIndex) -> i32 {
     guard(-1, || {
         let index = index.as_ref().ok_or("null index")?;
         index.reload().map_err(err)?;
+        Ok(0)
+    })
+}
+
+/// Drops the index's rebuildable caches without closing it (issue #40): the
+/// FM sidecar mapping, compiled user-regex words, the line-search cache, the
+/// vector store mapping and the reader's segment readers, each reopened
+/// lazily. Safe while searches run (they keep what they hold); open sessions
+/// stay valid. 0 = ok, -1 on error.
+///
+/// # Safety
+/// `index` must be a live index.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_release_memory(index: *const LineIndex) -> i32 {
+    guard(-1, || {
+        let index = index.as_ref().ok_or("null index")?;
+        index.release_memory().map_err(err)?;
         Ok(0)
     })
 }

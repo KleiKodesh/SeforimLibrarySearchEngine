@@ -552,12 +552,24 @@ struct PartCache {
     bytes: usize,
 }
 
+static PART_CACHE: OnceLock<Mutex<PartCache>> = OnceLock::new();
+
+/// Drops every compiled regex word (issue #40, the host's release-memory
+/// call): the next search compiles its patterns again. A search running now
+/// keeps the parts it holds (`Arc`).
+pub fn clear_cache() {
+    if let Some(cache) = PART_CACHE.get() {
+        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        c.map = HashMap::new();
+        c.bytes = 0;
+    }
+}
+
 /// Otzaria's `prepare_term_part`, cached by pattern, failures included
 /// (Otzaria caches its DFAs process-wide, bounded by entries and bytes;
 /// here the whole cache is dropped when a bound is passed).
 fn term_part(pattern: &str) -> Compiled {
-    static CACHE: OnceLock<Mutex<PartCache>> = OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
+    let cache = PART_CACHE.get_or_init(Default::default);
     if let Some((c, _)) = cache.lock().unwrap_or_else(|e| e.into_inner()).map.get(pattern) {
         return c.clone();
     }

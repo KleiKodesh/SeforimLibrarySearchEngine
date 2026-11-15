@@ -168,4 +168,21 @@ void main() {
       dir.deleteSync(recursive: true);
     }
   });
+
+  test('releaseMemory (issue #40): open sessions and new searches go on, also on the worker', () async {
+    final index = SeforimIndex.open(tmp.path);
+    final s = index.search(SearchOptions(word));
+    index.releaseMemory();
+    expect(s.allHits().length, lines);
+    final s2 = index.search(SearchOptions(word));
+    expect(s2.hitCount, lines);
+    s2.close();
+    s.close();
+    index.close();
+    final a = await worker.search(SearchOptions(word));
+    await worker.releaseMemory();
+    expect((await a.hits(0, lines)).length, lines);
+    await a.close();
+    expect((await worker.searchStream(SearchOptions(word)).toList()).single.hits.length, lines);
+  });
 }

@@ -152,6 +152,9 @@ final class SearchWorker {
   /// [SeforimIndex.reload] on the worker.
   Future<void> reload() => _call('index', 'reload');
 
+  /// [SeforimIndex.releaseMemory] on the worker (issue #40).
+  Future<void> releaseMemory() => _call('index', 'releaseMemory');
+
   /// [SeforimIndex.numLines] on the worker.
   Future<int> numLines() => _call('index', 'numLines');
 
@@ -568,6 +571,8 @@ void _workerMain((SendPort, String, String?) args) {
               value = index.buildFmSidecar();
             case 'reload':
               index.reload();
+            case 'releaseMemory':
+              index.releaseMemory();
             case 'numLines':
               value = index.numLines;
             case 'startBackgroundMerge':

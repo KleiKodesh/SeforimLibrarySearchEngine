@@ -1,489 +1,544 @@
 {
- "_note": "Reconstructed from FTS-SPECS-AND-COMPARISONS.md at commit cae7954 (raw output lost with a temporary scratchpad); times rounded as printed there.",
- "method": "Every query Otzaria ran (`otz_report.py`: one word = exact, several words = advanced with the TAB distance or 1000, `w~k` = fuzzy), against ours on the positions index (full-index-v8) with Otzaria-mode options: one word plain; several words `proximity: ordered, gaps = distance` and `cross_line: true` (Otzaria's advanced mode is ordered and crosses one line break); fuzzy with `ignore_quotes: true` (Otzaria's quote is transparent). Hits = matching lines. Each difference was diffed line by line (Otzaria book+segment mapped to line ids), sample lines read, and every differing line tagged by cause (scratchpad `hc_diff.py`, `hc_class.py`, `hc_fz.py`, logs `hc-*.log`).",
+ "method": "Every query Otzaria ran (`otz_report.py`: one word = exact, several words = advanced with the TAB distance or 1000, `w~k` = fuzzy), against ours on the positions index (current format) with Otzaria-mode options: one word plain; several words `proximity: ordered, gaps = distance` and `cross_line: true` (Otzaria's advanced mode is ordered and crosses one line break); fuzzy with `ignore_quotes: true` (Otzaria's quote is transparent). Hits = matching lines. Each difference was diffed line by line in the 2026-10-22 analysis (Otzaria v5.0.0, tantivy9); since 2026-11-13 the comparison runs against Otzaria 5babbce and also counts ours over real books only (footnote notes books excluded).",
+ "notes": [
+  "(2026-10-22, v5.0.0) Footnote markers (most rows, ours +0.02..0.1%): Otzaria removes inline tags with no separator (`strip_html_for_indexing`; `sup` is inline), so `word<sup>5</sup>` indexes as one token `word5` and the word is lost; ours ends a word at `<sup>`/`<sub>` (FtsLib's scanner rule). Every ours-only line of the exact rows has a `<sup>` (checked all; samples 8576169, 7692606, 2451902).",
+  "(2026-10-22, v5.0.0) Bare `&` (Otzaria bug): line 3760145 `Shiur & made ... pocket;` - Otzaria's entity rule `&[^;]+;` deletes everything up to the next `;`.",
+  "(2026-10-22, v5.0.0) Without `cross_line` our multi-word counts are lower by up to 39% (e.g. words q4: 87,256 vs 143,836): Otzaria's advanced mode always crosses one line break.",
+  "Fixed since 2026-10-22 (rows re-checked by the 2026-11-13 run, classes removed): cross-line enumerators (tantivy10 content edges), unterminated `<`, fuzzy swap = one edit (transposition).",
+  "Footnotes (2026-11-13): ours indexes each schema-7 note as a line of a virtual notes book (issue #13). Otzaria 5babbce indexes footnotes too (its index grew 1,988 to 2,182 MB with the same 7,643,689 line documents), so the notes are not a clean explanation: ours over real books only is BELOW Otzaria on most rows, ours with notes slightly above. Most rows stay unclassified until a line-level diff against 5babbce.",
+  "rules q19: intentional (user decision 2026-11-15): a query word of 128 bytes or more is dropped from the query (its position kept); Otzaria's advanced mode keeps it as a required word and returns 0."
+ ],
  "sets": {
   "large": [
    {
     "n": 0,
     "query": "אמר",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 802579,
-    "ours": 802677,
-    "class": "mixed",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule); 1 line lost by ours: unterminated `<` drops the rest of the line"
+    "otz": 823190,
+    "ours": 826951,
+    "ours_books": 816506,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 1,
     "query": "תורה",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 234264,
-    "ours": 234374,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 256035,
+    "ours": 257637,
+    "ours_books": 251609,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 2,
     "query": "ישראל",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 441028,
-    "ours": 441158,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 473503,
+    "ours": 476761,
+    "ours_books": 467688,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 3,
     "query": "שבת",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 230606,
-    "ours": 230796,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 247190,
+    "ours": 250061,
+    "ours_books": 242418,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 4,
     "query": "מצוה",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 171890,
-    "ours": 171942,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 189995,
+    "ours": 191144,
+    "ours_books": 186440,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 5,
     "query": "פסח",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 54911,
-    "ours": 54950,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 59200,
+    "ours": 59773,
+    "ours_books": 57953,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 6,
     "query": "ירושלים",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 25912,
-    "ours": 25927,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 28007,
+    "ours": 28236,
+    "ours_books": 27214,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 7,
     "query": "אלקים",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 35369,
-    "ours": 35375,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 37740,
+    "ours": 37777,
+    "ours_books": 37427,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 8,
     "query": "נבוכדנצר",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 4238,
-    "ours": 4239,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 4381,
+    "ours": 4423,
+    "ours_books": 4312,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 9,
     "query": "אחשורוש",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 5376,
-    "ours": 5377,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 5556,
+    "ours": 5598,
+    "ours_books": 5437,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 10,
     "query": "רש\"י",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 320864,
-    "ours": 321086,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 362014,
+    "ours": 365877,
+    "ours_books": 340326,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 11,
     "query": "רמב\"ם",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 37576,
-    "ours": 37617,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 40114,
+    "ours": 40440,
+    "ours_books": 39024,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 12,
     "query": "רמב\"ן",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 16271,
-    "ours": 16296,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 17780,
+    "ours": 17856,
+    "ours_books": 16845,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 13,
     "query": "ז\"ל",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 461312,
-    "ours": 461751,
-    "class": "mixed",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule); 1 line lost by ours: unterminated `<`"
+    "otz": 508202,
+    "ours": 508961,
+    "ours_books": 505879,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 14,
     "query": "ע\"ש",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 269905,
-    "ours": 270077,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 308494,
+    "ours": 309397,
+    "ours_books": 305568,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 15,
     "query": "חז\"ל",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 52613,
-    "ours": 52675,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 59808,
+    "ours": 60020,
+    "ours_books": 58354,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 16,
     "query": "תוס'",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 155773,
-    "ours": 156049,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 182424,
+    "ours": 184170,
+    "ours_books": 173484,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 17,
     "query": "רמבם",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 37629,
-    "ours": 37670,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 40169,
+    "ours": 40495,
+    "ours_books": 39077,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 18,
     "query": "רשי",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 322300,
-    "ours": 322523,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 363477,
+    "ours": 367347,
+    "ours_books": 341781,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 19,
     "query": "זל",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 461818,
-    "ours": 462256,
-    "class": "mixed",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule); 1 line lost by ours: unterminated `<`"
+    "otz": 508766,
+    "ours": 509528,
+    "ours_books": 506434,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 20,
     "query": "משה רבנו",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 2870,
-    "ours": 2873,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 3072,
+    "ours": 2996,
+    "ours_books": 2940,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 21,
     "query": "אברהם יצחק יעקב",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 9102,
-    "ours": 9110,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 9656,
+    "ours": 9575,
+    "ours_books": 9487,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 22,
     "query": "בית המקדש",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 20183,
-    "ours": 20192,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 21393,
+    "ours": 21357,
+    "ours_books": 20963,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 23,
     "query": "קריאת שמע",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 7578,
-    "ours": 7578,
-    "class": "equal",
-    "reason": "same lines"
+    "otz": 8016,
+    "ours": 8050,
+    "ours_books": 7835,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 24,
     "query": "תלמוד תורה",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 8097,
-    "ours": 8101,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 8548,
+    "ours": 8504,
+    "ours_books": 8269,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 25,
     "query": "עבודה זרה",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 17843,
-    "ours": 17852,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 17786,
+    "ours": 17986,
+    "ours_books": 17147,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 26,
     "query": "יום טוב",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 41081,
-    "ours": 41092,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 42879,
+    "ours": 42746,
+    "ours_books": 41502,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 27,
     "query": "ארץ ישראל",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 31644,
-    "ours": 31665,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 33654,
+    "ours": 33593,
+    "ours_books": 32930,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 28,
     "query": "משה אהרן",
     "dist": "(distance 0)",
     "mode": "advanced",
-    "otz": 588,
-    "ours": 588,
-    "class": "equal",
-    "reason": "same lines"
+    "otz": 628,
+    "ours": 630,
+    "ours_books": 619,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 29,
     "query": "משה אהרן",
     "dist": "(distance 3)",
     "mode": "advanced",
-    "otz": 4443,
-    "ours": 4409,
-    "class": "our bug",
-    "reason": "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (all 34 lines)"
+    "otz": 4691,
+    "ours": 4702,
+    "ours_books": 4635,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 30,
     "query": "שמע ישראל",
     "dist": "(distance 0)",
     "mode": "advanced",
-    "otz": 5455,
-    "ours": 5456,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 5735,
+    "ours": 5762,
+    "ours_books": 5681,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 31,
     "query": "ויאמר משה",
     "dist": "(distance 2)",
     "mode": "advanced",
-    "otz": 6973,
-    "ours": 6975,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 7230,
+    "ours": 7246,
+    "ours_books": 7179,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 32,
     "query": "אמר רבי",
     "dist": "(distance 1)",
     "mode": "advanced",
-    "otz": 80074,
-    "ours": 80158,
-    "class": "mixed",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+86); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-2)"
+    "otz": 75891,
+    "ours": 76058,
+    "ours_books": 75217,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 33,
     "query": "רבי יוחנן",
     "dist": "(distance 0)",
     "mode": "advanced",
-    "otz": 37533,
-    "ours": 37539,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 35398,
+    "ours": 35732,
+    "ours_books": 34504,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 34,
     "query": "רבי עקיבא",
     "dist": "(distance 5)",
     "mode": "advanced",
-    "otz": 18145,
-    "ours": 18146,
-    "class": "mixed",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+4); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-3)"
+    "otz": 17010,
+    "ours": 17247,
+    "ours_books": 15882,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 50,
     "query": "יצחק~1",
-    "dist": null,
+    "dist": "",
     "mode": "fuzzy",
-    "otz": 130667,
-    "ours": 130680,
-    "class": "deliberate deviation",
-    "reason": "Otzaria fuzzy is Damerau (transposition = 1 edit), ours FtsLib's plain Levenshtein (-3); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+16)"
+    "otz": 140101,
+    "ours": 140823,
+    "ours_books": 138015,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 51,
     "query": "ירושלים~1",
-    "dist": null,
+    "dist": "",
     "mode": "fuzzy",
-    "otz": 52669,
-    "ours": 52693,
-    "class": "deliberate deviation",
-    "reason": "Otzaria fuzzy is Damerau (transposition = 1 edit), ours FtsLib's plain Levenshtein (-1); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+25)"
+    "otz": 56312,
+    "ours": 56881,
+    "ours_books": 55089,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 52,
     "query": "אברהם~2",
-    "dist": null,
+    "dist": "",
     "mode": "fuzzy",
-    "otz": 976935,
-    "ours": 973729,
-    "class": "deliberate deviation",
-    "reason": "Otzaria fuzzy is Damerau (transposition = 1 edit), ours FtsLib's plain Levenshtein (-3,673); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+467)"
+    "otz": 1055757,
+    "ours": 1064516,
+    "ours_books": 1037197,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 53,
     "query": "שבת~1",
-    "dist": null,
+    "dist": "",
     "mode": "fuzzy",
-    "otz": 883124,
-    "ours": 881826,
-    "class": "deliberate deviation",
-    "reason": "Otzaria fuzzy is Damerau (transposition = 1 edit), ours FtsLib's plain Levenshtein (-1,707); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+409)"
+    "otz": 956053,
+    "ours": 967415,
+    "ours_books": 939567,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 54,
     "query": "רש\"י~1",
-    "dist": null,
+    "dist": "",
     "mode": "fuzzy",
-    "otz": 556757,
-    "ours": 1031823,
+    "otz": 625202,
+    "ours": 1236935,
+    "ours_books": 1188423,
     "class": "not equivalent query",
-    "reason": "quote word: Otzaria counts the gershayim as an edit on the query, ours (ignore_quotes) measures quote-free forms (1,031,823 hits); with the quote counted ours is 555,281; rest Otzaria fuzzy is Damerau (transposition = 1 edit), ours FtsLib's plain Levenshtein"
+    "reason": "quote word, fuzzy ~1: Otzaria 5babbce keeps the gershayim in the term and counts it as a character in the fuzzy automaton (plus the exact quote-free spelling only); hitcount sends ours with ignore_quotes (FtsLib behaviour), which runs the fuzzy on the quote-free form, so every quote-free word within 1 edit of the stem matches too"
    },
    {
     "n": 58,
     "query": "תלמוד תורה כנגד כולם",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 163,
-    "ours": 163,
-    "class": "equal",
-    "reason": "same lines"
+    "otz": 177,
+    "ours": 174,
+    "ours_books": 174,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 59,
     "query": "אלו דברים שאין להם שיעור",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 382,
-    "ours": 382,
-    "class": "equal",
-    "reason": "same lines"
+    "otz": 404,
+    "ours": 405,
+    "ours_books": 401,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 60,
     "query": "שמע ישראל ה' אלקינו ה' אחד",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 587,
-    "ours": 587,
-    "class": "equal",
-    "reason": "same lines"
+    "otz": 616,
+    "ours": 613,
+    "ours_books": 609,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    }
   ],
   "words": [
    {
     "n": 0,
     "query": "ה' אלהים",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 29106,
-    "ours": 29119,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 30638,
+    "ours": 30382,
+    "ours_books": 30081,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 1,
     "query": "ר' עקיבא",
     "dist": "(distance 0)",
     "mode": "advanced",
-    "otz": 10073,
-    "ours": 10077,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 10701,
+    "ours": 10713,
+    "ours_books": 10561,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 2,
     "query": "אמר ר",
     "dist": "(distance 0)",
     "mode": "advanced",
-    "otz": 36598,
-    "ours": 36601,
-    "class": "mixed",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+4); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-1)"
+    "otz": 40309,
+    "ours": 40321,
+    "ours_books": 40075,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 3,
     "query": "ב ג",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 143836,
-    "ours": 167816,
-    "class": "our bug",
-    "reason": "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words: the one-letter word matches a leading enumerator letter of the next line"
+    "otz": 166416,
+    "ours": 162589,
+    "ours_books": 158516,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 4,
     "query": "משה אהרן",
     "dist": "(distance 1)",
     "mode": "advanced",
-    "otz": 3052,
-    "ours": 3049,
-    "class": "our bug",
-    "reason": "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (3 lines)"
+    "otz": 3225,
+    "ours": 3233,
+    "ours_books": 3184,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 5,
@@ -492,26 +547,29 @@
     "mode": "advanced",
     "otz": 1,
     "ours": 1,
+    "ours_books": 1,
     "class": "equal",
-    "reason": "same lines"
+    "reason": "same count"
    },
    {
     "n": 6,
     "query": "פרק 1",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 1490,
-    "ours": 1642,
+    "otz": 2334,
+    "ours": 2298,
+    "ours_books": 2290,
     "class": "Otzaria bug",
     "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits)"
    },
    {
     "n": 7,
     "query": "סימן 12",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 70,
-    "ours": 274,
+    "otz": 219,
+    "ours": 137,
+    "ours_books": 128,
     "class": "Otzaria bug",
     "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits)"
    },
@@ -522,26 +580,29 @@
     "mode": "advanced",
     "otz": 0,
     "ours": 0,
+    "ours_books": 0,
     "class": "equal",
-    "reason": "same lines"
+    "reason": "same count"
    },
    {
     "n": 9,
     "query": "ב5",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 2,
-    "ours": 2,
-    "class": "equal",
-    "reason": "same lines"
+    "otz": 6,
+    "ours": 8,
+    "ours_books": 2,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 11,
     "query": "א~1",
-    "dist": null,
+    "dist": "",
     "mode": "fuzzy",
-    "otz": 4841951,
-    "ours": 4843052,
+    "otz": 5308236,
+    "ours": 5475472,
+    "ours_books": 5287868,
     "class": "Otzaria bug",
     "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (not line-checked: 4.8M hits; magnitude as the other sup rows)"
    },
@@ -550,10 +611,11 @@
     "query": "אמר ה",
     "dist": "(distance 2)",
     "mode": "advanced",
-    "otz": 16216,
-    "ours": 16251,
-    "class": "mixed",
-    "reason": "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (29 lines, the one-letter word = an enumerator); footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (7)"
+    "otz": 16846,
+    "ours": 16868,
+    "ours_books": 16682,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 13,
@@ -562,190 +624,209 @@
     "mode": "advanced",
     "otz": 1,
     "ours": 1,
+    "ours_books": 1,
     "class": "equal",
-    "reason": "same lines"
+    "reason": "same count"
    }
   ],
   "rules": [
    {
     "n": 0,
     "query": "ע.ש",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 270946,
-    "ours": 271118,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 309622,
+    "ours": 310526,
+    "ours_books": 306694,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 1,
     "query": "עש",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 270946,
-    "ours": 271118,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 309622,
+    "ours": 310526,
+    "ours_books": 306694,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 2,
     "query": "א.ב",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 53485,
-    "ours": 53499,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 58767,
+    "ours": 59125,
+    "ours_books": 57804,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 3,
     "query": "וי[א]מר",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 68072,
-    "ours": 68093,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 72543,
+    "ours": 72719,
+    "ours_books": 71760,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 4,
     "query": "ויאמר‏ משה",
     "dist": "(distance 0)",
     "mode": "advanced",
-    "otz": 3174,
-    "ours": 3174,
-    "class": "equal",
-    "reason": "same lines"
+    "otz": 3297,
+    "ours": 3301,
+    "ours_books": 3269,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 5,
     "query": "the",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 1393,
-    "ours": 1394,
+    "otz": 2776,
+    "ours": 2815,
+    "ours_books": 2772,
     "class": "Otzaria bug",
     "reason": "Otzaria strips a bare `&` through the next `;` (entity rule), deleting the words between"
    },
    {
     "n": 6,
     "query": "torah",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 20,
-    "ours": 20,
+    "otz": 53,
+    "ours": 53,
+    "ours_books": 52,
     "class": "equal",
-    "reason": "same lines"
+    "reason": "same count"
    },
    {
     "n": 7,
     "query": "de la",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
     "otz": 3,
     "ours": 3,
+    "ours_books": 2,
     "class": "equal",
-    "reason": "same lines"
+    "reason": "same count"
    },
    {
     "n": 8,
     "query": "בabc",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
     "otz": 0,
     "ours": 0,
+    "ours_books": 0,
     "class": "equal",
-    "reason": "same lines"
+    "reason": "same count"
    },
    {
     "n": 9,
     "query": "και",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
     "otz": 0,
     "ours": 0,
+    "ours_books": 0,
     "class": "equal",
-    "reason": "same lines"
+    "reason": "same count"
    },
    {
     "n": 10,
     "query": "תוס'",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 155773,
-    "ours": 156049,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 182424,
+    "ours": 184170,
+    "ours_books": 173484,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 11,
     "query": "תוס' ד״ה",
     "dist": "(distance 2)",
     "mode": "advanced",
-    "otz": 42598,
-    "ours": 42619,
-    "class": "mixed",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (+26); cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (-5)"
+    "otz": 50873,
+    "ours": 50981,
+    "ours_books": 48809,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 12,
     "query": "ר' יוחנן",
     "dist": "(distance 0)",
     "mode": "advanced",
-    "otz": 39427,
-    "ours": 39445,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 43779,
+    "ours": 43880,
+    "ours_books": 43321,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 13,
     "query": "רש”י",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 320864,
-    "ours": 321086,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 362014,
+    "ours": 365877,
+    "ours_books": 340326,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 14,
     "query": "ז’ל",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 32,
-    "ours": 32,
+    "otz": 38,
+    "ours": 38,
+    "ours_books": 38,
     "class": "equal",
-    "reason": "same lines"
+    "reason": "same count"
    },
    {
     "n": 15,
     "query": "רמב”ם הלכות",
     "dist": "(distance 3)",
     "mode": "advanced",
-    "otz": 1383,
-    "ours": 1392,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 1417,
+    "ours": 1419,
+    "ours_books": 1325,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 16,
     "query": "שׂלום",
-    "dist": null,
+    "dist": "",
     "mode": "exact",
-    "otz": 53339,
-    "ours": 53351,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule)"
+    "otz": 58312,
+    "ours": 58628,
+    "ours_books": 57727,
+    "class": "unclassified",
+    "reason": "not analysed yet"
    },
    {
     "n": 17,
     "query": "(הוצא) [היצא]",
-    "dist": null,
+    "dist": "",
     "mode": "advanced",
-    "otz": 229,
-    "ours": 229,
+    "otz": 237,
+    "ours": 237,
+    "ours_books": 236,
     "class": "equal",
-    "reason": "paired reading (X) [Y] is one typed word: equal (229) once sent without a gap list"
+    "reason": "same count"
    },
    {
     "n": 18,
@@ -754,8 +835,9 @@
     "mode": "advanced",
     "otz": 1,
     "ours": 1,
+    "ours_books": 1,
     "class": "equal",
-    "reason": "same lines"
+    "reason": "same count"
    },
    {
     "n": 19,
@@ -763,28 +845,22 @@
     "dist": "(distance 1)",
     "mode": "advanced",
     "otz": 0,
-    "ours": 1676,
+    "ours": 1786,
+    "ours_books": 1754,
     "class": "deliberate deviation",
-    "reason": "a 128-byte word is unindexable: ours skips it and keeps its position (FtsLib/our rule), Otzaria requires it and finds nothing"
+    "reason": "intentional, documented difference (user decision 2026-11-15): a query word of 128 bytes or more is unindexable; ours drops it from the query and keeps its position, Otzaria keeps it as a required word and finds nothing"
    },
    {
     "n": 20,
     "query": "משה רבנו",
     "dist": "(distance 0)",
     "mode": "advanced",
-    "otz": 1633,
-    "ours": 1632,
-    "class": "our bug",
-    "reason": "cross-line: Otzaria skips line-edge enumerators like (b) / [yg] / (49), ours counts them as words (1 line)"
+    "otz": 1738,
+    "ours": 1738,
+    "ours_books": 1707,
+    "class": "equal",
+    "reason": "same count"
    }
   ]
- },
- "notes": [
-  "Footnote markers (most rows, ours +0.02..0.1%): Otzaria removes inline tags with no separator (`strip_html_for_indexing`; `sup` is inline), so `word<sup>5</sup>` indexes as one token `word5` and the word is lost; ours ends a word at `<sup>`/`<sub>` (FtsLib's scanner rule). Every ours-only line of the exact rows has a `<sup>` (checked all; samples 8576169, 7692606, 2451902).",
-  "Cross-line enumerators (our bug): Otzaria's `cross_line::content_range` skips a leading `(b)`, `[yg]`, `{x}` and a trailing `(49)` / `(dp\"d):` when it joins two lines; ours counts them as words, so a gap is one too wide (Otzaria-only, e.g. 6175732, 6199135, 8985366) or a one-letter query word matches the enumerator (ours-only, e.g. 6172879, 6185728).",
-  "Unterminated `<` (our bug): line 5850708 has `...ayy< rbynw...` with no `>` after it; our scanner skips to the end of the line as if in a tag, so every word after it is unindexed. Otzaria keeps the `<` and indexes the rest.",
-  "Bare `&` (Otzaria bug): line 3760145 `Shiur & made ... pocket;` - Otzaria's entity rule `&[^;]+;` deletes everything up to the next `;`.",
-  "Fuzzy: Otzaria builds `FuzzyTermQuery(term, d, transposition=true)`; ours keeps FtsLib's Levenshtein (named deviation). Without `ignore_quotes` ours also misses quote words such as `wyc\"xq` (quote counted as an edit), which Otzaria matches by the quote-free form.",
-  "Without `cross_line` our multi-word counts are lower by up to 39% (e.g. words q4: 87,256 vs 143,836): Otzaria's advanced mode always crosses one line break."
- ]
+ }
 }

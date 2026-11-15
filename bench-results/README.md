@@ -8,7 +8,7 @@ parity dumps) stay in the bench `OUT_DIR`.
 | Path | Written by | Read for |
 |---|---|---|
 | `logs/build-{pos,nopos,marks,ftslib,otzaria}.log` | run-all `report` step (stage / size / total lines of the build log) | Index builds |
-| `logs/parity-<set>-{pos,nopos}-compare.log` | run-all `report` step (compare.py's "n/m queries identical" line) | Parity |
+| `logs/parity-<set>-{pos,nopos}-compare.log` | run-all `report` step (compare.py's "queries identical", "identical hits" and positions-rule lines) | Parity |
 | `sb-<set>-{pos,nopos,fts,otz}/search-report.json` (+ `.md`) | search_report.py / otz_report.py, copied by the `report` step | Search speed |
 | `otz-hitcount.json` | hitcount.py, copied by the `report` step | Hit-count comparison |
 | `machine.txt` | run-all `detect`, copied by the `report` step | Machine line |

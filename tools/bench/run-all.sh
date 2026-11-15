@@ -264,7 +264,7 @@ publish_results() {
   done
   for f in "$OUT_DIR"/logs/parity-*-compare.log; do
     [ -f "$f" ] || continue
-    grep -E 'queries identical|^EXIT ' "$f" > "$RESULTS_DIR/logs/$(basename "$f")"
+    grep -E 'queries identical|identical hits|positions rule|^EXIT ' "$f" > "$RESULTS_DIR/logs/$(basename "$f")"
   done
   for f in "$OUT_DIR"/sb-*/search-report.json; do
     [ -f "$f" ] || continue

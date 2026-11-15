@@ -1,0 +1,3 @@
+OS: windows (GitHub Actions windows-latest runner, shared; build times not representative)
+CPU: GitHub-hosted runner (4 vCPU class)
+source: fullrun workflow run 43398897140 (2026-11-13), DB tag v37-20261105163520

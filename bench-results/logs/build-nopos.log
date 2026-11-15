@@ -1,11 +1,20 @@
-# Reconstructed from FTS-SPECS-AND-COMPARISONS.md at commit cae7954 (raw output lost with a temporary scratchpad); times rounded as printed there.
-stage: indexing: 320.400s
-stage: merge: 51.600s
-stage: FM sidecar: 2.400s
-index size: 748.6 MB
-  .idx 579.3 MB
-  .fast 45.1 MB
-  .fmi 43.9 MB
-  .term 37.7 MB
-  .store 28.5 MB
-  .fieldnorm 14.2 MB
+  stage: indexing (read DB + tokenize + write segments + commits): 497.4s
+  stage memory: indexing: peak 491.7 MB (+368.1 MB over the stage start)
+  stage: merge into one segment: 196.1s
+  stage memory: merge into one segment: peak 1877.3 MB (+1488.0 MB over the stage start)
+  stage: FM-index sidecar: 3.7s
+  stage memory: FM-index sidecar: peak 346.9 MB (+143.8 MB over the stage start)
+  read queue (cap 4,096 lines / 64 MB): peak 4,096 lines / 22.3 MB; waits: reader 428462 ms (queue full), indexer 793 ms (queue empty)
+process peak working set: 1877.3 MB
+build: 7,920,835 lines, complete=True in 698.0s
+index size: 807.6 MB in 12 files
+  .idx           631.4 MB
+  .fmi            45.9 MB
+  .term           43.2 MB
+  .fast           39.3 MB
+  .store          31.9 MB
+  .fieldnorm      15.8 MB
+  .json            0.0 MB
+  .pos             0.0 MB
+  .lock            0.0 MB
+EXIT 0 (11 min)

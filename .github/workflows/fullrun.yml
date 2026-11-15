@@ -99,6 +99,13 @@ jobs:
           RUNS=1
           EOF
           tools/bench/run-all.sh --steps detect,db,build-tools,build-indexes,speed,hitcount,verify-xl
+      - name: hit-count line-level diff vs Otzaria (sampled differing line ids + features, into the log)
+        if: always()
+        shell: bash
+        run: |
+          [ -f C:/bench/otz-hitcount.json ] || exit 0
+          mkdir -p C:/bench/logs
+          python -I -X utf8 tools/bench/hitcount_diff.py target/release/seforim_search_native.dll C:/bench/indexes/ours-pos tools/bench/otzaria-driver/target/release/otzaria-driver.exe C:/bench/indexes/otzaria C:/bench/data/seforim.db C:/bench/otz-hitcount.json C:/bench/hc-diff.json 8 2>&1 | tee C:/bench/logs/hitcount-diff.log
       - if: always()
         uses: ./.github/actions/fullrun-upload
         with: { name: part-otzaria }
@@ -130,7 +137,7 @@ jobs:
         shell: bash
         run: |
           show() { for f in "$@"; do [ -f "$f" ] || continue; echo "===== $f"; sed 's/[^ -~]/?/g' "$f" | head -n 400 || true; done; }
-          show out/summary.md out/logs/parity-*-compare.log out/logs/hitcount.log out/logs/verify-xl.log out/logs/explain-pos-diffs.log
+          show out/summary.md out/logs/parity-*-compare.log out/logs/hitcount.log out/logs/verify-xl.log out/logs/explain-pos-diffs.log out/logs/hitcount-diff.log
           for f in out/logs/build-*.log; do echo "===== $f"; grep -E 'stage: |index size: |build: |EXIT |^ +\.[a-z]+ +[0-9.]+ MB' "$f" | sed 's/[^ -~]/?/g' || true; done
           ls out/logs 2>/dev/null | sed 's/[^ -~]/?/g' || true
           # the published bench-results/ as base64 tar.gz, for hosts that cannot download the artifact:

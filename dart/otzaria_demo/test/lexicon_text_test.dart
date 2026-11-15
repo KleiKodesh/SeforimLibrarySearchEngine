@@ -1,8 +1,7 @@
 import 'dart:convert';
 
 import 'package:otzaria_demo/acronym_lexicon.dart';
-import 'package:otzaria_demo/lexicon_text.dart';
-import 'package:otzaria_demo/translation_lexicon.dart';
+import 'package:seforim_search/seforim_search.dart';
 import 'package:test/test.dart';
 
 // Hebrew written as \u escapes only (network filter).

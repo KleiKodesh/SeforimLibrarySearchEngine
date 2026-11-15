@@ -174,7 +174,7 @@ md.append(f"""## Engines compared
 | Fuzzy: a swap of two adjacent letters is one edit (Otzaria; FtsLib changed too) | done |
 | Quoted phrases (Otzaria's rule, both engines): a whole-query phrase is literal and may cross a line (ours); a phrase among words is required in the line; in lexical fuzzy mode each quoted word keeps its slot (fuzzy, forms), in order, at most 1 word between | done; unit tests; FtsLib per line only |
 | Snippets from index positions (`locate_lines`, per-batch cost rule) | done |
-| Morphology (Otzaria's MagicDictionary) as host lexicon: dictionary forms as `lexical_forms` (lexical tier in relevance), blacklisted forms searched but not marked (`unmarked_alternatives` / `unmarked_lexical_forms`), per-word cap | done (Dart demo host); unit tests |
+| Morphology (Otzaria's MagicDictionary over lexical.db) as host lexicon: Dart package `LexicalDb` + expansion step (opt-in per word), dictionary forms as `lexical_forms` (lexical tier in relevance), blacklisted forms searched but not marked (`unmarked_alternatives` / `unmarked_lexical_forms`), per-word cap | done (Dart package host); unit tests + real lexical.db smoke test |
 | Negative query defaults to the positive proximity (Otzaria's negativeDistance; `proximity_base` under a custom spacing) | done |
 | Semantic search (issue #18): vector sidecar beside the index (usearch HNSW, i8, static in the native library; f16 full vectors), host-supplied vectors keyed by line id, per-book updates, book filter (exact scan under a threshold, else filtered HNSW), oversample + rescore, cancellation; hybrid = every lexical hit fused with the semantic top k (Otzaria weighted fusion by query type, or RRF) | built; synthetic-vector unit tests; embedding model not chosen, no real vectors |
 """)

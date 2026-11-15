@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'lexicon_text.dart';
+import 'package:seforim_search/seforim_search.dart' show normalizeLexiconWord, sortedKeys;
+
 import 'otzaria_query.dart' show splitQueryWords;
 
 /// Port of Otzaria's `AcronymLexicon` (otzaria_search_engine v5.0.0,

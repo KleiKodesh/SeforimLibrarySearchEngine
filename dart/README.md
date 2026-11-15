@@ -64,6 +64,38 @@ s.close(); index.close();
 - **Lifetimes.** A writer or session keeps a reference to its index, so the index cannot be garbage-collected first. An explicit `index.close()` must still come last.
 - **Errors.** Native failures throw `SeforimEngineException`, carrying the message from `se_last_error`.
 
+## Host API (`package:seforim_search/seforim_db.dart`)
+
+The ready-made layer a screen calls directly; seforim.db is read here, by
+line id (the engine itself stays free of SQLite):
+
+```dart
+if (SeforimLibrary.needsBuild(indexDir)) {
+  await for (final p in SeforimLibrary.buildOrUpdateIndex(dbPath, indexDir)) {
+    print(p); // stage (indexing / merging / fmSidecar / updating / done), done / total lines
+  }
+}
+final lib = await SeforimLibrary.open(indexDir, dbPath: dbPath);
+await for (final page in lib.search(SearchOptions(query))) {
+  // page.results: SearchHit = book title, line index, ref, text, snippet + highlights,
+  // short-row context; page.hitCount (total once page.complete)
+}
+final counts = await lib.counts(SearchOptions(query)); // exact total + per book
+final inBook = await lib.findInBook(bookId, words);     // every occurrence, by line
+await lib.close();
+```
+
+- `buildOrUpdateIndex`: a fresh build (catalog order, notes books, sections,
+  no-cross flags, one merged segment, FM sidecar) when the index is missing
+  or unreadable, else the per-book update (`book.contentHash`, issue #29);
+  runs on its own isolate, cancellable (`cancel:` future). A cancelled or
+  failed build removes the half-built directory.
+- Below it, public for hosts that need them: `SeforimDb` (schema probe, zstd,
+  `lineTexts`, `snippetTexts`, `lineLocations`, `sectionsOf`, `heRefs`,
+  `catalogBookOrder`), `SnippetTextCache`, the note id scheme,
+  `updateChangedBooks`, `buildIndexFromDb`. Moved here from the demo, which
+  re-exports them.
+
 ## Otzaria → engine mapping
 
 The current Otzaria app is [github.com/Otzaria/otzaria](https://github.com/Otzaria/otzaria). Its query building is in the Rust package `otzaria_search_engine`. Its Dart model is in `lib/search/models/search_configuration.dart` and `lib/search/search_query_builder.dart`. The mapping is in `otzaria_demo/lib/otzaria_query.dart`.

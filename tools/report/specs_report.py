@@ -28,6 +28,10 @@ STALE = [
     "Hit-count comparison (Otzaria 5babbce, run 2026-11-13): most rows are not classified yet; Otzaria 5babbce "
     "also indexes the footnotes, so the notes-only rule does not explain the small surplus (ours over real "
     "books only is below Otzaria): to analyse.",
+    "Parity (2026-11-15 fix, FtsLib and our no-positions path): with a word distance a line passes when ANY "
+    "occurrence set is within it, not only the tightest window; the positions-flavour distance surplus "
+    "(large 4, words 3, rules 3, ketiv 1 queries) is expected to vanish and both flavours' parity sets need a "
+    "rerun on the fullrun workflow.",
 ]
 # Snippets from index positions vs the text path (median of 15, first 4000 hits, 8 cores).
 SNIPPETS = [

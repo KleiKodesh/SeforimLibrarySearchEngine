@@ -772,17 +772,6 @@ impl SnippetWindowLocator {
         // occurrences; the order check is this window's existence. Order off:
         // unchanged.
         let ordered = !partial && require_ordered && all_groups > 1;
-        let ordered_best =
-            if ordered { ordered_cover_window(sub.0, sub.1, prepared, brk_s, marks, *word_span).map(shift) } else { None };
-        let (i_left, i_right, score) = match ordered_best {
-            Some(w) => w,
-            None => shift(find_window(sub.0, sub.1, prepared, group_count, required, brk_s, *word_span)),
-        };
-        if score == usize::MAX {
-            return SnippetDescriptor::NO_MATCH;
-        }
-        *last_window = Some((tokens[i_left].position, tokens[i_right].position));
-
         // WordDistance = extra words between matched slots (0 = all
         // consecutive). original_group_count overrides so skipped wildcards
         // still count as a slot.
@@ -794,6 +783,38 @@ impl SnippetWindowLocator {
             all_groups
         };
         let max_span = max_word_distance.saturating_add(denominator - 1);
+        // With a word distance a line passes when ANY occurrence set is within
+        // it (FtsLib, same change): the window is the tightest among the sets
+        // within the distance (same tie rule), and only when none is within it
+        // the tightest overall (the caller then drops it).
+        let pos_limit = if max_word_distance == usize::MAX { usize::MAX } else { max_span };
+        let ordered_best = if ordered {
+            ordered_cover_window(sub.0, sub.1, prepared, brk_s, marks, *word_span, pos_limit)
+                .or_else(|| {
+                    if pos_limit == usize::MAX {
+                        None
+                    } else {
+                        ordered_cover_window(sub.0, sub.1, prepared, brk_s, marks, *word_span, usize::MAX)
+                    }
+                })
+                .map(shift)
+        } else {
+            None
+        };
+        let (i_left, i_right, score) = match ordered_best {
+            Some(w) => w,
+            None => {
+                let mut w = find_window(sub.0, sub.1, prepared, group_count, required, brk_s, *word_span, pos_limit);
+                if w.2 == usize::MAX && pos_limit != usize::MAX {
+                    w = find_window(sub.0, sub.1, prepared, group_count, required, brk_s, *word_span, usize::MAX);
+                }
+                shift(w)
+            }
+        };
+        if score == usize::MAX {
+            return SnippetDescriptor::NO_MATCH;
+        }
+        *last_window = Some((tokens[i_left].position, tokens[i_right].position));
         // Words between the ends, by position (a paired reading's second
         // reading shares its first reading's position).
         let word_dist = (tokens[i_right].position - tokens[i_left].position).saturating_sub(denominator - 1);
@@ -1026,7 +1047,10 @@ fn find_window(
     required: usize,
     brk: Option<usize>,
     word: bool,
+    max_pos_span: usize,
 ) -> (usize, usize, usize) {
+    // Only windows within the position limit (word distance) compete.
+    let within = |l: usize, r: usize| tokens[r].position - tokens[l].position <= max_pos_span;
     let all_groups = prepared.group_count();
     if group_count.len() < all_groups {
         group_count.resize(all_groups * 2, 0);
@@ -1059,7 +1083,7 @@ fn find_window(
         while covered >= required {
             // Score in raw chars (used only for picking the tightest window).
             let span = span_of(tokens, l, r, word);
-            if brk.is_none() && span < best_score {
+            if brk.is_none() && span < best_score && within(l, r) {
                 best_score = span;
                 best_i_left = l;
                 best_i_right = r;
@@ -1080,7 +1104,7 @@ fn find_window(
             if r >= b && ordinals[r] != NO_TERM && l > 0 {
                 let x = if l - 1 < b { l - 1 } else { last };
                 let span = span_of(tokens, x, r, word);
-                if span < best_score {
+                if span < best_score && within(x, r) {
                     best_score = span;
                     best_i_left = x;
                     best_i_right = r;
@@ -1391,6 +1415,7 @@ fn ordered_cover_window(
     brk: Option<usize>,
     sc: &mut MarkScratch,
     word: bool,
+    max_pos_span: usize,
 ) -> Option<(usize, usize, usize)> {
     let k = prepared.group_count();
     let MarkScratch { last, starts, ends: pending, .. } = sc;
@@ -1430,7 +1455,7 @@ fn ordered_cover_window(
             if g == k - 1 {
                 if brk.is_none_or(|b| t >= b) {
                     let span = span_of(tokens, v, t, word);
-                    if best.is_none_or(|b| span < b.2) {
+                    if best.is_none_or(|b| span < b.2) && tokens[t].position - tokens[v].position <= max_pos_span {
                         best = Some((v, t, span));
                     }
                 }
@@ -2037,6 +2062,26 @@ mod tests {
         assert_eq!(loc.locate(text, &p, false, 0).word_distance, 2);
         // a third (skipped-wildcard) slot counted in the denominator
         assert_eq!(loc.locate(text, &p, false, 3).word_distance, 1);
+    }
+
+    #[test]
+    fn any_occurrence_set_within_the_distance_passes() {
+        // A x x B ... A long B: the char-tightest pair is 2 words apart, the
+        // later (wider in chars) pair 1: distance 1 passes on the later pair.
+        let text = "aaa bb cc ddd yy zz aaa qqqqqqqqqqqqqqqqqqqqqqqq ddd";
+        let p = PreparedQueryGroups::from_groups(&[vec!["aaa"], vec!["ddd"]]);
+        let mut loc = SnippetWindowLocator::new(0);
+        assert_eq!(loc.locate(text, &p, false, 0).word_distance, 2);
+        loc.tokenize(text);
+        for ordered in [false, true] {
+            let d = loc.locate_tokenized_within(&p, &[], ordered, 0, 1);
+            assert!(d.is_match, "ordered={ordered}");
+            assert_eq!(d.word_distance, 1, "ordered={ordered}");
+            assert_eq!(&text[d.snap_start..d.snap_end], "aaa qqqqqqqqqqqqqqqqqqqqqqqq ddd");
+            // none within distance 0: the tightest overall, which the caller drops
+            let d = loc.locate_tokenized_within(&p, &[], ordered, 0, 0);
+            assert_eq!(d.word_distance, 2, "ordered={ordered}");
+        }
     }
 
     #[test]

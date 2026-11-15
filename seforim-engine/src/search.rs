@@ -924,7 +924,8 @@ impl NegativeFilter {
         }
         // the negative always needs ALL its words, whatever the positive's mode
         locator.set_min_groups(0);
-        let d = locator.locate_tokenized_mapped(&self.prepared, map, self.require_ordered, 0);
+        // any occurrence set within the distance excludes (the locator's rule)
+        let d = locator.locate_tokenized_within(&self.prepared, map, self.require_ordered, 0, self.max_word_distance);
         let hit = d.is_match && d.word_distance <= self.max_word_distance;
         locator.set_min_groups(min_groups);
         hit

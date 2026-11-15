@@ -136,41 +136,6 @@ final class SearchWorker {
   /// [SemanticIndex.vectorInfo] on the worker.
   Future<VectorInfo?> vectorInfo() => _call('vectorInfo');
 
-  /// [SeforimIndex.openWriter] on the worker (issue #38): the writer lives
-  /// on the worker's isolate and every call is a Future, so a commit, merge
-  /// or re-sort never blocks the caller. The worker serves one request at a
-  /// time: a search sent while a merge runs waits for it (use a second
-  /// worker for searches during long writes). One writer at a time.
-  Future<AsyncIndexWriter> openWriter({int heapBytes = 0, int threads = 0, bool lowPriority = false}) async {
-    final id = await _call<int>('openWriter', heapBytes, threads, lowPriority);
-    return AsyncIndexWriter._(this, id);
-  }
-
-  /// [SeforimIndex.buildFmSidecar] on the worker.
-  Future<bool> buildFmSidecar() => _call('index', 'buildFmSidecar');
-
-  /// [SeforimIndex.reload] on the worker.
-  Future<void> reload() => _call('index', 'reload');
-
-  /// [SeforimIndex.numLines] on the worker.
-  Future<int> numLines() => _call('index', 'numLines');
-
-  /// [SeforimIndex.startBackgroundMerge] on the worker.
-  Future<bool> startBackgroundMerge([List<int>? bookOrder]) => _call('index', 'startBackgroundMerge', bookOrder);
-
-  /// [SeforimIndex.recordBackgroundMerge] on the worker.
-  Future<void> recordBackgroundMerge(List<int>? bookOrder) => _call('index', 'recordBackgroundMerge', bookOrder);
-
-  /// [SeforimIndex.waitBackgroundMerge] on the worker (the worker is busy
-  /// until the merge ends).
-  Future<void> waitBackgroundMerge() => _call('index', 'waitBackgroundMerge');
-
-  /// [SeforimIndex.stopBackgroundMerge] on the worker.
-  Future<void> stopBackgroundMerge() => _call('index', 'stopBackgroundMerge');
-
-  /// True while the background merge runs ([SeforimIndex.backgroundMergeRunning]).
-  Future<bool> backgroundMergeRunning() => _call('index', 'backgroundMergeRunning');
-
   /// [search] with slots built by the caller ([SearchRequest]).
   Future<AsyncSearchSession> searchRequest(SearchRequest request, {SearchCancelToken? cancel}) =>
       _open(request.toJson(), request.contextWords, cancel);
@@ -380,68 +345,6 @@ final class AsyncSearchSession {
   }
 }
 
-/// An [IndexWriter] living on a [SearchWorker] (issue #38): the same calls,
-/// each a Future served by the worker. [mergeAndClose], [resortAndClose]
-/// and [close] end it (terminal: a closed writer never reopens).
-final class AsyncIndexWriter {
-  AsyncIndexWriter._(this._worker, this._id);
-
-  final SearchWorker _worker;
-  final int _id;
-  var _closed = false;
-
-  Future<T> _call<T>(String op, [Object? a, Object? b]) {
-    if (_closed) return Future.error(StateError('IndexWriter is closed'));
-    return _worker._call<T>('writer', _id, op, (a, b));
-  }
-
-  Future<T> _end<T>(String op, [Object? a, Object? b]) {
-    final f = _call<T>(op, a, b);
-    _closed = true;
-    return f;
-  }
-
-  /// [IndexWriter.memoryBudgetPerThread].
-  Future<int> memoryBudgetPerThread() => _call('memoryBudget');
-
-  /// [IndexWriter.add].
-  Future<void> add(LineDocument line) => _call('addAll', [line]);
-
-  /// [IndexWriter.addAll]: one message and one native call for the batch.
-  Future<void> addAll(List<LineDocument> lines) => _call('addAll', lines);
-
-  /// [IndexWriter.delete].
-  Future<void> delete(int lineId) => _call('delete', lineId);
-
-  /// [IndexWriter.deleteBook].
-  Future<void> deleteBook(int bookId) => _call('deleteBook', bookId);
-
-  /// [IndexWriter.commit]; the worker's index (and its searches) see it after.
-  Future<void> commit([String? payload]) => _call('commit', payload);
-
-  /// [IndexWriter.rollback].
-  Future<void> rollback() => _call('rollback');
-
-  /// [IndexWriter.mergeAndClose] (terminal; merges drained before it returns).
-  Future<void> mergeAndClose() => _end('mergeAndClose');
-
-  /// [IndexWriter.resortAndClose] (terminal). [cancel] stops it from the
-  /// calling isolate; read [progress] here while it runs.
-  Future<int> resortAndClose(List<int> bookOrder, {SearchCancelToken? cancel, ResortProgressCell? progress}) async {
-    // both objects are Finalizable locals of this async function: kept
-    // alive until it ends, so their native addresses stay valid
-    final SearchCancelToken? c = cancel;
-    final ResortProgressCell? p = progress;
-    return await _end<int>('resortAndClose', bookOrder, (c?.address ?? 0, p?.address ?? 0));
-  }
-
-  /// [IndexWriter.close]: discards anything uncommitted. Idempotent.
-  Future<void> close() {
-    if (_closed) return Future.value();
-    return _end('close');
-  }
-}
-
 // -- worker isolate --
 
 void _workerMain((SendPort, String, String?) args) {
@@ -458,7 +361,6 @@ void _workerMain((SendPort, String, String?) args) {
   reply.send(control.sendPort);
   final sessions = <int, SearchSession>{};
   var nextSession = 1;
-  final writers = <int, IndexWriter>{};
   control.listen((m) {
     final (id, op, a, b, c) = m as (int, String, Object?, Object?, Object?);
     try {
@@ -528,68 +430,9 @@ void _workerMain((SendPort, String, String?) args) {
         case 'fuseSemantic':
           final (query, semantic, fusion) = b as (String, SemanticResult, FusionOptions);
           value = s().fuseSemantic(query, semantic, fusion);
-        case 'openWriter':
-          final wid = nextSession++;
-          writers[wid] = index.openWriter(heapBytes: a as int, threads: b as int, lowPriority: c as bool);
-          value = wid;
-        case 'writer':
-          final wid = a as int;
-          final w = writers[wid] ?? (throw StateError('IndexWriter is closed'));
-          final (x, y) = c as (Object?, Object?);
-          switch (b as String) {
-            case 'memoryBudget':
-              value = w.memoryBudgetPerThread;
-            case 'addAll':
-              w.addAll((x as List).cast<LineDocument>());
-            case 'delete':
-              w.delete(x as int);
-            case 'deleteBook':
-              w.deleteBook(x as int);
-            case 'commit':
-              w.commit(x as String?);
-            case 'rollback':
-              w.rollback();
-            case 'mergeAndClose':
-              writers.remove(wid);
-              w.mergeAndClose();
-            case 'resortAndClose':
-              writers.remove(wid);
-              final (cancel, progress) = y as (int, int);
-              value = writerResortAndCloseAt(w, (x as List).cast<int>(), cancel, progress);
-            case 'close':
-              writers.remove(wid);
-              w.close();
-            default:
-              throw StateError('unknown writer op $b');
-          }
-        case 'index':
-          switch (a as String) {
-            case 'buildFmSidecar':
-              value = index.buildFmSidecar();
-            case 'reload':
-              index.reload();
-            case 'numLines':
-              value = index.numLines;
-            case 'startBackgroundMerge':
-              value = index.startBackgroundMerge((b as List?)?.cast<int>());
-            case 'recordBackgroundMerge':
-              index.recordBackgroundMerge((b as List?)?.cast<int>());
-            case 'waitBackgroundMerge':
-              index.waitBackgroundMerge();
-            case 'stopBackgroundMerge':
-              index.stopBackgroundMerge();
-            case 'backgroundMergeRunning':
-              value = index.backgroundMergeRunning;
-            default:
-              throw StateError('unknown index op $a');
-          }
         case 'close':
           sessions.remove(a as int)?.close();
         case 'dispose':
-          for (final w in writers.values) {
-            w.close();
-          }
-          writers.clear();
           for (final s in sessions.values) {
             s.close();
           }

@@ -530,6 +530,48 @@ mod tests {
         }
     }
 
+    /// A word distance (with or without order) passes a line when ANY
+    /// occurrence set is within it, in both flavours: the hits decided from
+    /// the positions equal the no-positions (FtsLib) text decision.
+    #[test]
+    fn distance_hits_equal_in_both_flavours() {
+        let lines = corpus(7, 400);
+        let text_of = |id: u64| lines[(id - 1000) as usize].text.as_str();
+        let build = |positions: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let index = LineIndex::create(dir.path(), IndexOptions { positions, keep_marks: false }).unwrap();
+            let mut w = index.writer(50_000_000, 1).unwrap();
+            for l in &lines {
+                w.add(l).unwrap();
+            }
+            w.commit(None).unwrap();
+            (dir, index)
+        };
+        let ((_d1, pos), (_d2, flat)) = (build(true), build(false));
+        let mut checked = 0;
+        let distance: Vec<String> =
+            requests().into_iter().filter(|r| r.contains("max_word_distance") && !r.contains("\"gaps\"")).collect();
+        // (in order is left out: a paired reading's two readings share one
+        // position and never chain in order on the positions, a known
+        // difference from the text rule, issue #21)
+        for json in distance {
+            let request: SearchRequest = serde_json::from_str(&json).unwrap();
+            let got: Vec<u64> = pos.search(&request).unwrap().hits.iter().map(|h| h.line_id).collect();
+            let mut c = flat.search(&request).unwrap();
+            let candidates: Vec<u64> = c.hits.iter().map(|h| h.line_id).collect();
+            let want: Vec<u64> =
+                candidates.into_iter().filter(|&id| c.session.locate_pair(text_of(id), None).is_some()).collect();
+            if got != want {
+                let diff = |a: &[u64], b: &[u64]| -> Vec<String> {
+                    a.iter().filter(|i| !b.contains(i)).map(|&i| format!("{i}:{}", text_of(i).escape_unicode())).collect()
+                };
+                panic!("{} extra {:?} missing {:?}", json.escape_unicode(), diff(&got, &want), diff(&want, &got));
+            }
+            checked += want.len();
+        }
+        assert!(checked > 20, "too few distance hits: {checked}");
+    }
+
     /// Word-level descriptors (`word_windows`): the window decided from
     /// the positions during the search, turned into a snippet with the line
     /// text by `finish_windows` (no window search), equals the snippet the

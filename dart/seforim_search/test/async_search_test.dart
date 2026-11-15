@@ -128,44 +128,4 @@ void main() {
     final bad = SearchWorker.spawn('${tmp.path}/missing', nativePath: native);
     await expectLater(bad, throwsA(isA<SeforimEngineException>()));
   });
-
-  test('index writer on the worker (issue #38): add, delete, commit, merge, resort with progress + cancel', () async {
-    final dir = Directory.systemTemp.createTempSync('se_dart_async_w_');
-    SeforimIndex.create(dir.path).close();
-    final ww = await SearchWorker.spawn(dir.path, nativePath: native);
-    try {
-      final w = await ww.openWriter(heapBytes: 30000000, threads: 1);
-      expect(await w.memoryBudgetPerThread(), greaterThan(0));
-      await w.addAll([
-        for (var i = 0; i < 30; i++) LineDocument(lineId: 1 + i, position: i, bookId: 1 + i % 3, text: '$word y$i')
-      ]);
-      await w.add(LineDocument(lineId: 99, position: 30, bookId: 1, text: '$word z'));
-      await w.commit('p1');
-      expect(await ww.numLines(), 31);
-      await w.delete(99);
-      await w.deleteBook(3);
-      await w.commit();
-      expect((await ww.searchStream(SearchOptions(word)).toList()).single.hits.length, 20);
-      await w.mergeAndClose();
-      await expectLater(w.commit(), throwsA(isA<StateError>()));
-      // a cancelled re-sort leaves the index and frees the writer
-      final cancel = SearchCancelToken()..cancel();
-      final w2 = await ww.openWriter(heapBytes: 30000000, threads: 1);
-      await expectLater(w2.resortAndClose([2, 1], cancel: cancel), throwsA(isA<SearchCancelledException>()));
-      final progress = ResortProgressCell();
-      final w3 = await ww.openWriter(heapBytes: 30000000, threads: 1);
-      expect(await w3.resortAndClose([2, 1], progress: progress), 20);
-      expect(progress.read().stage, ResortStage.done);
-      final hits = (await ww.searchStream(SearchOptions(word)).toList()).single.hits;
-      expect(hits.first.lineId % 3, 2); // book 2 first now
-      expect(await ww.buildFmSidecar(), isA<bool>());
-      expect(await ww.startBackgroundMerge(), isFalse); // one segment: nothing to do
-      final w4 = await ww.openWriter(heapBytes: 30000000, threads: 1);
-      await w4.close();
-      await w4.close();
-    } finally {
-      await ww.close();
-      dir.deleteSync(recursive: true);
-    }
-  });
 }

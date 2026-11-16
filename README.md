@@ -2278,8 +2278,7 @@ query model.
 line's text is still the one its vector was built from: `book_lines` builds
 a book's lines from its raw seforim.db rows (`lineIndex, id` order) and
 `line_note` rows exactly as Otzaria indexes them (footnote bodies put back,
-`data:` URIs removed, rows joined and split on `
-`, so a row holding a
+`data:` URIs removed, rows joined and split on `\n`, so a row holding a
 newline is several lines: each line keeps its row and sub-line;
 `normalize_text_for_indexing`; a line starting `<h` opens a section), the
 `Chunker` computes each line's embedded text and SHA-256 chunk key (Meivin

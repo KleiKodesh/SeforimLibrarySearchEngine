@@ -30,6 +30,7 @@ import 'dart:ffi';
 
 import 'package:ffi/ffi.dart';
 
+import 'async_search.dart' show SearchWorker;
 import 'native.dart';
 import 'semantic.dart' show expandOxv;
 
@@ -665,7 +666,11 @@ class VectorSetWriter {
   final bool native;
   final VectorSegmentVerifier? verifySegment;
 
-  VectorSetWriter(this.dir, {this.native = true, this.verifySegment});
+  /// The worker isolate the engine's install runs on ([SearchWorker.installVectorSegment]);
+  /// `null`: on the calling isolate (blocks it while the segment is hashed).
+  final SearchWorker? worker;
+
+  VectorSetWriter(this.dir, {this.native = true, this.verifySegment, this.worker});
 
   String get incoming => '$dir${Platform.pathSeparator}incoming';
   String _p(String rel) => '$dir/$rel';
@@ -684,8 +689,11 @@ class VectorSetWriter {
   Future<VectorInstallReport> install(String segmentPath, String manifestJson,
       {String? publishedManifestSha256, bool Function()? isCancelled}) async {
     if (native) {
-      // Synchronous native work (hashing a multi-GB segment): hosts that must
-      // keep their isolate responsive run the updater in a worker isolate.
+      final w = worker;
+      if (w != null) {
+        return w.installVectorSegment(dir, segmentPath, manifestJson,
+            publishedManifestSha256: publishedManifestSha256);
+      }
       return installVectorSegment(dir, segmentPath, manifestJson,
           publishedManifestSha256: publishedManifestSha256);
     }

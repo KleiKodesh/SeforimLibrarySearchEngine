@@ -13,12 +13,12 @@
 //!   (`gen-NNNNNN/set.json`, `.del` per segment, `.links` per delta, `PREVIOUS`
 //!   then `CURRENT`, then the garbage of unnamed generations and segments).
 //!
-//! Not ported: the sidecar's recovery of an interrupted install (`recover`),
-//! the directory fsyncs (`sync_set_dir`; files are flushed, renames are not),
-//! the expected model identity (the host checks it when it picks the release)
-//! and the recomputation of the identity and package digests (canonical hashing
-//! of the sidecar's typed identity); the manifest's published SHA-256 is checked
-//! when the host passes it.
+//! Ported too: `recover` (staging, temporary pointers, garbage) before every
+//! install, the directory flushes (`sync_dir`, Unix only as in the sidecar), and
+//! the identity and package digests recomputed from the manifest
+//! (`IndexVersion::identity_digest`, `IndexPackage::digest`) and checked. Not
+//! ported: the expected model identity (the host checks it when it picks the
+//! release); the manifest's published SHA-256 is checked when the host passes it.
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -289,6 +289,135 @@ fn check_header(m: &ReleaseManifest, seg: &OxvFile) -> Result<()> {
     Ok(())
 }
 
+/// versioning.rs `IdentityField::ALL`: (path, JSON pointer).
+const IDENTITY_FIELDS: [(&str, &str); 15] = [
+    ("text.line_text_version", "/text/line_text_version"),
+    ("text.key_version", "/text/key_version"),
+    ("model.family_id", "/model/family_id"),
+    ("model.tokenizer_checksum", "/model/tokenizer_checksum"),
+    ("model.embedding_dim", "/model/embedding_dim"),
+    ("model.pooling", "/model/pooling"),
+    ("model.max_tokens", "/model/max_tokens"),
+    ("model.query_max_tokens", "/model/query_max_tokens"),
+    ("model.embedding_text_version", "/model/embedding_text_version"),
+    ("model.normalization_version", "/model/normalization_version"),
+    ("model.chunking_identity", "/model/chunking_identity"),
+    ("model.query_packages", "/model/query_packages"),
+    ("store.backend_id", "/store/backend_id"),
+    ("store.store_format_version", "/store/store_format_version"),
+    ("store.vector_precision", "/store/vector_precision"),
+];
+
+/// versioning.rs `IndexVersion::value`: a field's canonical text (None: an
+/// absent `query_max_tokens`, which the digests skip).
+fn identity_value(identity: &Value, path: &str, pointer: &str) -> Result<Option<String>> {
+    let v = identity.pointer(pointer);
+    if path == "model.query_max_tokens" && v.is_none_or(Value::is_null) {
+        return Ok(None);
+    }
+    let missing = || bad(format!("its identity has no {path}"));
+    Ok(Some(match v.ok_or_else(missing)? {
+        Value::String(s) => s.clone(),
+        Value::Number(n) if n.is_u64() => n.to_string(),
+        Value::Array(packages) => {
+            let mut all = Vec::new();
+            for p in packages {
+                let (Some(c), Some(q)) = (p.get("checksum").and_then(Value::as_str), p.get("quantization").and_then(Value::as_str)) else {
+                    return Err(missing());
+                };
+                all.push(format!("{c} {q}"));
+            }
+            all.sort();
+            all.join(",")
+        }
+        _ => return Err(missing()),
+    }))
+}
+
+fn identity_lines(identity: &Value, text: &mut String) -> Result<()> {
+    for (path, pointer) in IDENTITY_FIELDS {
+        if let Some(v) = identity_value(identity, path, pointer)? {
+            text.push_str(&format!("{path}={v}
+"));
+        }
+    }
+    Ok(())
+}
+
+/// versioning.rs `identity_digest_hex`: SHA-256 over `otzaria-vector-identity-v1`
+/// and one `path=value` line per field.
+pub fn identity_digest(identity: &Value) -> Result<String> {
+    let mut text = String::from("otzaria-vector-identity-v1
+");
+    identity_lines(identity, &mut text)?;
+    Ok(sha256_hex(text.as_bytes()))
+}
+
+/// package.rs `IndexPackage::digest` of the package a release manifest describes
+/// (install.rs `ReleaseManifest::package`: metadata version 3, one payload
+/// `segment.oxv`, total size = the segment's).
+fn package_digest(m: &ReleaseManifest) -> Result<String> {
+    let mut text = String::from("otzaria-artifact-digest-v2
+metadata_version=3
+");
+    identity_lines(&m.identity, &mut text)?;
+    let s = |p: &str| m.provenance.pointer(p).and_then(Value::as_str).map(str::to_string).ok_or_else(|| bad(format!("its provenance has no {p}")));
+    let c = &m.counts;
+    text.push_str(&format!("kind={}
+", m.kind));
+    text.push_str(&format!("from_library_version={}
+", m.from_library_version));
+    text.push_str(&format!("to_library_version={}
+", m.to_library_version));
+    text.push_str(&format!("library_release_tag={}
+", m.library_release_tag));
+    text.push_str(&format!("counts books={} slots={} extras={} foreign={} tombstones={}
+", c.books, c.slots, c.extras, c.foreign, c.tombstones));
+    text.push_str(&format!(
+        "provenance passage_package={} {} worker={} {}
+",
+        s("/passage_package/checksum")?,
+        s("/passage_package/quantization")?,
+        s("/worker/backend")?,
+        s("/worker/device")?
+    ));
+    text.push_str(&format!("total_size_bytes={}
+", m.segment.size));
+    text.push_str(&format!("payload segment.oxv={} {}
+", m.segment.sha256, m.segment.size));
+    Ok(sha256_hex(text.as_bytes()))
+}
+
+/// package.rs `sync_dir`: flush a directory entry (Unix; Windows cannot open a
+/// directory as a file, as in the sidecar).
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> Result<()> {
+    Ok(File::open(path)?.sync_all()?)
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// mod.rs `recover`: after a crash, `staging/`, temporary pointer files and the
+/// garbage go. Called with the lock held.
+fn recover(dir: &Path) -> Result<()> {
+    let staging = dir.join("staging");
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    for e in fs::read_dir(dir)?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let temporary = ["CURRENT", "PREVIOUS"].iter().any(|p| name.strip_prefix(p).is_some_and(|rest| rest.starts_with('.') && rest.ends_with(".tmp")));
+        if temporary {
+            fs::remove_file(e.path())?;
+        }
+    }
+    collect_garbage(dir);
+    Ok(())
+}
+
 fn parse_manifest(json: &str) -> Result<ReleaseManifest> {
     let m: ReleaseManifest =
         serde_json::from_str(json).map_err(|e| bad(format!("its release manifest is not one this build reads: {e}")))?;
@@ -297,6 +426,13 @@ fn parse_manifest(json: &str) -> Result<ReleaseManifest> {
     }
     if m.segment_id.len() != 32 || !m.segment_id.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
         return Err(bad("a segment id is 32 lowercase hex digits"));
+    }
+    let digest = identity_digest(&m.identity)?;
+    if digest != m.identity_digest {
+        return Err(bad(format!("its identity digest is {}, and its identity's is {digest}", m.identity_digest)));
+    }
+    if package_digest(&m)? != m.package_digest {
+        return Err(bad("its package digest is not the digest of the package it describes"));
     }
     match m.kind.as_str() {
         "base" | "delta" => Ok(m),
@@ -366,7 +502,11 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     if placed.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    Ok(placed?)
+    placed?;
+    match path.parent() {
+        Some(parent) => sync_dir(parent),
+        None => Ok(()),
+    }
 }
 
 fn read_pointer(dir: &Path, name: &str) -> std::result::Result<Option<Pointer>, ()> {
@@ -472,6 +612,7 @@ fn collect_garbage(dir: &Path) {
 /// `<dir>/incoming/` is moved into the set, any other copied.
 pub fn install(dir: &Path, segment: &Path, manifest_json: &str, published_sha256: Option<&str>) -> Result<InstallReport> {
     let _lock = SetLock::take(dir)?;
+    recover(dir)?;
     if let Some(p) = published_sha256 {
         let actual = sha256_hex(manifest_json.as_bytes());
         if actual != p {
@@ -660,6 +801,7 @@ pub fn install(dir: &Path, segment: &Path, manifest_json: &str, published_sha256
             }
         }
         fs::rename(&staged, &target)?;
+        sync_dir(&dir.join("segments"))?;
     }
     // Published, or the segment goes back where the host left it (install.rs).
     let published = (|| -> Result<SetDocument> {
@@ -670,6 +812,7 @@ pub fn install(dir: &Path, segment: &Path, manifest_json: &str, published_sha256
         let gen_name = gen_dir(generation);
         let gen_path = dir.join(&gen_name);
         fs::create_dir(&gen_path)?;
+        sync_dir(dir)?;
         let mut stats = SetStats::default();
         for ((entry, dead), l) in entries.iter_mut().zip(&deleted).zip(&links) {
             let (bytes, crc, count) = encode_deleted_words(entry.slots, dead);
@@ -736,7 +879,11 @@ pub fn install(dir: &Path, segment: &Path, manifest_json: &str, published_sha256
     };
     if discard {
         let path = dir.join("PREVIOUS");
-        let removed = if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) { fs::remove_dir(&path) } else { fs::remove_file(&path) };
+        let removed = if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) { fs::remove_dir(&path) } else { fs::remove_file(&path) }
+            .map_err(Error::from)
+            .map(|()| {
+                let _ = sync_dir(dir);
+            });
         if removed.is_err() {
             return Ok(report(&m, &document, tombstones_applied, duplicates_removed, foreign_unresolved));
         }

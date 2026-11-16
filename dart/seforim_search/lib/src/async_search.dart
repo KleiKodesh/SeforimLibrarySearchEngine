@@ -8,6 +8,7 @@ import 'package:ffi/ffi.dart';
 
 import 'index.dart';
 import 'models.dart';
+import 'vector_download.dart' show installVectorSegment, verifyOxv, VectorInstallReport;
 import 'native.dart';
 import 'semantic.dart';
 import 'session.dart';
@@ -134,6 +135,16 @@ final class SearchWorker {
 
   /// [SemanticIndex.closeVectors] on the worker.
   Future<void> closeVectors() => _call('closeVectors');
+
+  /// [installVectorSegment] on the worker (hashes and verifies the whole segment
+  /// off the calling isolate).
+  Future<VectorInstallReport> installVectorSegment(String setDir, String segmentPath, String manifestJson,
+          {String? publishedManifestSha256}) =>
+      _call('installVectorSegment', setDir, (segmentPath, manifestJson, publishedManifestSha256));
+
+  /// [verifyOxv] on the worker.
+  Future<Map<String, dynamic>> verifyOxv(String path, {String? manifestJson}) =>
+      _call('verifyOxv', path, manifestJson);
 
   /// [SemanticIndex.mapVectorBook] on the worker.
   Future<void> mapVectorBook(String name, int bookId, List<int> lineIds) =>
@@ -543,6 +554,11 @@ void _workerMain((SendPort, String, String?) args) {
           value = index.openVectors(a as String);
         case 'closeVectors':
           index.closeVectors();
+        case 'installVectorSegment':
+          final (segment, manifest, published) = b as (String, String, String?);
+          value = installVectorSegment(a as String, segment, manifest, publishedManifestSha256: published);
+        case 'verifyOxv':
+          value = verifyOxv(a as String, manifestJson: b as String?);
         case 'mapVectorBook':
           final (bookId, lineIds) = b as (int, List<int>);
           index.mapVectorBook(a as String, bookId, lineIds);

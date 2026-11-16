@@ -66,8 +66,9 @@ s.close(); index.close();
   installs a base or a delta chain in the engine (`installVectorSegment` = `se_vectors_install`, Otzaria's
   sidecar install: block CRCs, header vs manifest, a delta's tombstones / duplicates / foreign links) as the
   set directory Otzaria lays out (`segments/`, `gen-NNNNNN/set.json` + `.del` / `.links`, `CURRENT` /
-  `PREVIOUS`, `.lock`). `verifyOxv(path, manifestJson:)` = `se_oxv_verify`. The install runs on the calling
-  isolate (hashes the whole segment): run the updater in a worker isolate to keep a UI responsive.
+  `PREVIOUS`, `.lock`). `verifyOxv(path, manifestJson:)` = `se_oxv_verify`. `VectorSetWriter(dir, worker: w)`
+  runs the install on a `SearchWorker` isolate (`w.installVectorSegment`, `w.verifyOxv`); without a worker
+  it runs on the calling isolate (it hashes the whole segment).
 - **Lexical search expansion** (Otzaria's lexical.db / MagicDictionary, in the package, `LexicalDb`;
   SQLite through `package:sqlite3`, never in the engine): `LexicalDb.open(path)` / `tryOpen` (null when
   missing or not a lexical.db) opens Otzaria's `lexical.db` read-only (Otzaria ships it next to seforim.db

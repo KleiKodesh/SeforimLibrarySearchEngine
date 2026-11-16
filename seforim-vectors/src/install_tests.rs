@@ -15,10 +15,27 @@ fn axis(dims: usize, a: usize) -> Vec<f32> {
     v
 }
 
-/// Gives a written segment an id (header bytes 32..48) and recomputes the header CRC.
+/// The identity every test segment is of.
+fn identity(precision: &str) -> serde_json::Value {
+    serde_json::json!({
+        "text": {"line_text_version": 1, "key_version": 1},
+        "model": {"family_id": "f", "tokenizer_checksum": "t", "embedding_dim": 4, "pooling": "in-graph", "max_tokens": 256,
+            "embedding_text_version": 2, "normalization_version": 1, "chunking_identity": 7,
+            "query_packages": [{"checksum": "c", "quantization": "fp32"}]},
+        "store": {"backend_id": "otzaria-oxv", "store_format_version": 3, "vector_precision": precision}
+    })
+}
+
+/// Gives a written segment an id (header bytes 32..48) and the test identity's
+/// digest (48..80), and recomputes the header CRC.
 fn stamp(path: &Path, id: u8) {
+    let precision = OxvFile::open(path).unwrap().codec().name();
+    let digest = super::identity_digest(&identity(precision)).unwrap();
     let mut b = fs::read(path).unwrap();
     b[32..48].copy_from_slice(&[id; 16]);
+    for i in 0..32 {
+        b[48 + i] = u8::from_str_radix(&digest[2 * i..2 * i + 2], 16).unwrap();
+    }
     let crc = crc32fast::hash(&b[..4088]);
     b[4088..4092].copy_from_slice(&crc.to_le_bytes());
     fs::write(path, b).unwrap();
@@ -31,20 +48,21 @@ fn manifest(path: &Path) -> String {
     let hex = |r: std::ops::Range<usize>| super::hex(&b[r]);
     let u64_at = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
     let (from, to) = seg.library_versions();
-    serde_json::json!({
+    let mut m = serde_json::json!({
         "format": "otzaria-vectors-release", "formatVersion": 1, "kind": seg.kind(),
-        "identity": {"text": {"key_version": 1}, "model": {"family_id": "f", "chunking_identity": 7,
-            "query_packages": [{"checksum": "c", "quantization": "fp32"}]},
-            "store": {"backend_id": "otzaria-oxv", "store_format_version": 3, "vector_precision": seg.codec().name()}},
+        "identity": identity(seg.codec().name()),
         "identityDigest": hex(48..80), "codecParamsSha256": hex(80..112),
         "fromLibraryVersion": from, "toLibraryVersion": to, "libraryReleaseTag": seg.release_tag(),
         "segmentId": hex(32..48),
         "counts": {"books": u32::from_le_bytes(b[144..148].try_into().unwrap()), "slots": u64_at(112),
             "extras": u64_at(120), "foreign": u64_at(128), "tombstones": u64_at(136)},
         "segment": {"sha256": sha256_hex(b), "size": b.len()},
-        "packageDigest": "p", "provenance": {"worker": "test"}, "createdAt": "", "files": [],
-    })
-    .to_string()
+        "packageDigest": "", "createdAt": "", "files": [],
+        "provenance": {"passage_package": {"checksum": "c", "quantization": "fp32"}, "worker": {"backend": "test", "device": "cpu"}},
+    });
+    let parsed: super::ReleaseManifest = serde_json::from_value(m.clone()).unwrap();
+    m["packageDigest"] = super::package_digest(&parsed).unwrap().into();
+    m.to_string()
 }
 
 const D: usize = 8;
@@ -275,4 +293,33 @@ fn the_hosts_install_fixtures_are_current() {
     }
     let info = SegmentSet::open(&dir).unwrap().info(None);
     assert_eq!((info.library_version, info.segments.len(), info.slots_live), (3, 3, 3));
+}
+
+#[test]
+fn digests_are_recomputed_and_a_crash_is_recovered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (b, _) = segments(tmp.path());
+    let m = manifest(&b);
+    // another identity (the digest no longer its own), another package digest: refused
+    let other = m.replace("\"family_id\":\"f\"", "\"family_id\":\"g\"");
+    assert_ne!(other, m);
+    let e = verify_segment(&b, Some(&other)).unwrap_err().to_string();
+    assert!(e.contains("identity digest"), "{e}");
+    let v: serde_json::Value = serde_json::from_str(&m).unwrap();
+    let pd = v["packageDigest"].as_str().unwrap();
+    let e = verify_segment(&b, Some(&m.replace(pd, &"0".repeat(64)))).unwrap_err().to_string();
+    assert!(e.contains("package digest"), "{e}");
+
+    // a crash left staging/, a temporary pointer and an unnamed generation: recovered
+    let dir = tmp.path().join("v");
+    install(&dir, &b, &m, None).unwrap();
+    fs::create_dir_all(dir.join("staging")).unwrap();
+    fs::write(dir.join("staging/x.oxv"), b"half").unwrap();
+    fs::write(dir.join("CURRENT.123.tmp"), b"{").unwrap();
+    fs::create_dir_all(dir.join("gen-000009")).unwrap();
+    assert!(install(&dir, &b, &m, None).is_ok());
+    assert!(!dir.join("staging").exists());
+    assert!(!dir.join("CURRENT.123.tmp").exists());
+    assert!(!dir.join("gen-000009").exists());
+    assert!(SegmentSet::open(&dir).is_ok());
 }

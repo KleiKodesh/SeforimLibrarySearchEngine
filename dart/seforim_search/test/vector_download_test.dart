@@ -270,8 +270,14 @@ void main() {
     publishFixture('delta-v2-v3');
     publishFixture('base-v3', pad: 8192);
     final setDir = '${tmp.path}/vectors';
-    final writer = VectorSetWriter(setDir);
+    // the engine's install runs on a SearchWorker isolate
+    final indexDir = '${tmp.path}/index';
+    SeforimIndex.create(indexDir).close();
+    final worker = await SearchWorker.spawn(indexDir, nativePath: native);
+    addTearDown(worker.close);
+    final writer = VectorSetWriter(setDir, worker: worker);
     final updater = VectorSetUpdater(writer, locator: locator());
+    expect((await worker.verifyOxv('${tmp.path}/none.oxv').then((_) => 'ok', onError: (_) => 'refused')), 'refused');
 
     // A half download of the first part, from the same asset, is resumed.
     final target = (await locator().findForLibraryVersion(1, candidates: fixtureCandidates))!;

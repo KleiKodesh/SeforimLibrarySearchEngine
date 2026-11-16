@@ -2776,4 +2776,60 @@ mod tests {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+
+    /// se_oxv_verify + se_vectors_install on the seforim-vectors fixtures: a base and
+    /// two deltas installed through the C ABI open as a set; a corrupted block and a
+    /// delta without a base are refused; a null manifest of length 0 is "none".
+    #[test]
+    fn vector_set_install_through_c_abi() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../seforim-vectors/tests/data/install");
+        let tmp = std::env::temp_dir().join(format!("se_ffi_install_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let take = |p: *mut c_char| -> Option<serde_json::Value> {
+            if p.is_null() {
+                return None;
+            }
+            let v = serde_json::from_str(unsafe { CStr::from_ptr(p) }.to_str().unwrap()).unwrap();
+            unsafe { se_string_free(p) };
+            Some(v)
+        };
+        let set = tmp.join("set").to_string_lossy().into_owned();
+        let mut plain = Vec::new();
+        for name in ["base-v1", "delta-v1-v2", "delta-v2-v3"] {
+            let src = data.join(format!("{name}.oxv.zst")).to_string_lossy().into_owned();
+            let dst = tmp.join(format!("{name}.oxv")).to_string_lossy().into_owned();
+            assert!(unsafe { se_oxv_expand(src.as_ptr(), src.len(), dst.as_ptr(), dst.len()) } > 0);
+            let manifest = std::fs::read_to_string(data.join(format!("{name}.manifest.json"))).unwrap();
+            plain.push((dst, manifest));
+        }
+        unsafe {
+            let (p, m) = &plain[0];
+            let r = take(se_oxv_verify(p.as_ptr(), p.len(), m.as_ptr(), m.len())).unwrap();
+            assert_eq!(r["manifest_checked"], true);
+            let r = take(se_oxv_verify(p.as_ptr(), p.len(), ptr::null(), 0)).unwrap();
+            assert_eq!(r["manifest_checked"], false);
+            // a delta first: refused, the reason in se_last_error
+            let (d, dm) = &plain[1];
+            assert!(take(se_vectors_install(set.as_ptr(), set.len(), d.as_ptr(), d.len(), dm.as_ptr(), dm.len(), ptr::null(), 0)).is_none());
+            assert!(!CStr::from_ptr(se_last_error()).to_bytes().is_empty());
+            for (i, (p, m)) in plain.iter().enumerate() {
+                let r = take(se_vectors_install(set.as_ptr(), set.len(), p.as_ptr(), p.len(), m.as_ptr(), m.len(), ptr::null(), 0)).unwrap();
+                assert_eq!(r["generation"], i as u64 + 1, "{r}");
+                assert_eq!(r["library_version"], i as u64 + 1);
+            }
+            // a corrupted block
+            let mut bytes = std::fs::read(&plain[0].0).unwrap();
+            let sections = u32::from_le_bytes(bytes[28..32].try_into().unwrap()) as usize;
+            let at = (0..sections).map(|i| 224 + i * 40).find(|&e| u16::from_le_bytes([bytes[e], bytes[e + 1]]) == 0x0012).unwrap();
+            let off = u64::from_le_bytes(bytes[at + 8..at + 16].try_into().unwrap()) as usize;
+            bytes[off] ^= 0x40;
+            let bad = tmp.join("bad.oxv").to_string_lossy().into_owned();
+            std::fs::write(&bad, bytes).unwrap();
+            assert!(take(se_oxv_verify(bad.as_ptr(), bad.len(), ptr::null(), 0)).is_none());
+        }
+        let info = seforim_vectors::set::SegmentSet::open(std::path::Path::new(&set)).unwrap().info(None);
+        assert_eq!((info.library_version, info.segments.len()), (3, 3));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

@@ -2325,14 +2325,17 @@ fields), a `.del` bitmap (`OXVDEL1`, CRC-32) per segment and a `.links` table
 can fall back to it: `falls_back_to`), `CURRENT` (`set_sha256` of set.json),
 then the garbage of generations and segments neither pointer names. The set
 reader (`SegmentSet::open`) opens the result; the real installed Otzaria
-segments pass `se_oxv_verify` against their own `package.json`. Not ported: the
-recovery of an interrupted install (`recover`; a half install leaves files the
-next garbage collection or a retry replaces, CURRENT flips last; a failed
-commit moves the segment back to `incoming/`), the directory fsyncs (files are
-flushed, renames are not), the expected
-model identity at install time (the host picks the release by it), and the
-recomputation of the identity and package digests (the sidecar's canonical
-hashing of its typed identity). `VectorSetWriter(native: false)` (Dart) keeps a
+segments pass `se_oxv_verify` against their own `package.json`, including
+both digests. Also ported: `recover` before every install (a crash's `staging/`,
+temporary pointer files and unnamed generations go), the directory flushes
+(`sync_dir`, Unix only, as in the sidecar), a failed commit moving the segment
+back to `incoming/`, and the identity digest (`otzaria-vector-identity-v1`, the
+15 identity fields) and package digest (`otzaria-artifact-digest-v2`)
+recomputed from the manifest and checked. Not ported: the expected model
+identity at install time (the host picks the release by it). The Dart install
+runs on a `SearchWorker` isolate when the writer is given one
+(`VectorSetWriter(dir, worker: w)`, `SearchWorker.installVectorSegment` /
+`verifyOxv`), else on the calling isolate. `VectorSetWriter(native: false)` (Dart) keeps a
 pure-Dart install of a base for hosts without the native library.
 
 **Query embedding (host demos).** The Meivin model stays in the host: C#

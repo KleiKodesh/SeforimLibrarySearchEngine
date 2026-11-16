@@ -7,7 +7,6 @@ using System.Threading.Tasks;
 using FtsLib.Fts5;
 using SeforimSearch.Demo.Common;
 using SeforimSearch.Demo.SeforimDb;
-using SnippetMatchMode = FtsLib.Snippets.SnippetMatchMode;
 
 namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 {
@@ -374,8 +373,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// DB). Never capped unless <paramref name="cap"/> &gt; 0. Words marked '+' or '=' get
         /// their related forms first.</summary>
         public FtsSearchResult Search(
-            string query, int cap, int maxWordDistance, bool requireOrdered, int contextWords,
-            SnippetMatchMode matchMode = SnippetMatchMode.BestWindow)
+            string query, int cap, int maxWordDistance, bool requireOrdered, int contextWords)
         {
             EnsureIndexing();
             if (SeforimDbFtsRelatedFormExpander.HasRelatedMarker(query)) query = RewriteRelated(query);
@@ -396,7 +394,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 var unreadable = new SeforimDbFtsUnreadableRows();
                 foreach (var batch in Searcher.SearchInBatches(
                              GetEngine(), query, maxWordDistance, requireOrdered, contextWords, WordOptions, terms,
-                             unreadable: unreadable, matchMode: matchMode))
+                             unreadable: unreadable))
                 {
                     result.Results.AddRange(batch.Hits);
                     result.SnippetTexts.AddRange(batch.SnippetTexts);
@@ -507,12 +505,9 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// last one the caller already holds from an earlier, unfinished run of the same search.
         /// 0 = from the start. A line that cannot be placed any more restarts the search
         /// (<see cref="FtsStreamChunk.Restarted"/> on the first frame).</param>
-        /// <param name="matchMode">Each hit's snippet: the best window (default) or the whole line
-        /// with every full occurrence marked (issue #14).</param>
         public async Task StreamSearch(
             string query, int maxWordDistance, bool requireOrdered, int contextWords,
-            Func<FtsStreamChunk, Task> emit, CancellationToken clientCt, long resumeAfterLineId = 0,
-            SnippetMatchMode matchMode = SnippetMatchMode.BestWindow)
+            Func<FtsStreamChunk, Task> emit, CancellationToken clientCt, long resumeAfterLineId = 0)
         {
             EnsureIndexing();
             if (SeforimDbFtsRelatedFormExpander.HasRelatedMarker(query))
@@ -561,7 +556,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                                  {
                                      if (resultsSent) stageSinceLastResults = stage;
                                      else emit(new FtsStreamChunk { Stage = stage }).GetAwaiter().GetResult();
-                                 }, afterPosition, unreadable, matchMode))
+                                 }, afterPosition, unreadable))
                     {
                         resultsSent = true;
                         string? stage = stageSinceLastResults;

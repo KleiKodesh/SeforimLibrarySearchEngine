@@ -43,9 +43,6 @@ namespace SeforimSearch.Engine.Native
         public static extern void se_bytes_free(IntPtr data, UIntPtr len);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_user_regex_kind(byte* query, UIntPtr queryLen);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern void se_buffer_free(SeBuffer buffer);
 
         // ── Index ──
@@ -169,13 +166,6 @@ namespace SeforimSearch.Engine.Native
         public static extern ulong se_search_copy_hits(SearchHandle search, ulong offset, ulong count, ulong* output);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int se_search_set_match_mode(SearchHandle search, uint mode);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern SeBuffer se_find_all_matches(byte* text, UIntPtr textLen, IntPtr* words, UIntPtr* wordLens,
-                                                          UIntPtr wordCount, uint flags);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern SeBuffer se_search_locate_batch(SearchHandle search, IntPtr* texts, UIntPtr* lens, UIntPtr count);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
@@ -235,18 +225,6 @@ namespace SeforimSearch.Engine.Native
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr se_search_info(SearchHandle search);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_search_line_status(SearchHandle search);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern SeBuffer se_search_line_match_batch(SearchHandle search, IntPtr* texts, UIntPtr* lens, UIntPtr count);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern SeBuffer se_search_line_scan_batch(SearchHandle search, ulong* lines, IntPtr* texts, UIntPtr* lens, UIntPtr count);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern ulong se_search_copy_line_hits(SearchHandle search, ulong offset, ulong count, ulong* output);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern void se_search_close(IntPtr search);

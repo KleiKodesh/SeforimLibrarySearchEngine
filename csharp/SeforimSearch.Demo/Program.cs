@@ -13,7 +13,7 @@ namespace SeforimSearch.Demo
     ///   build  [--db path] [--index dir] [--max-lines N] [--no-positions] [--keep-marks]
     ///   search [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--page-size N] [--pages N] query...
     ///   selftest [--dir path] [--keep]   (C# corpus-pool and end-to-end tests on a small fixture)
-    ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] [--regex] [--order catalog|relevance|generation] [--cancel-after MS] query...
+    ///   count  [--db path] [--index dir] [--prefixes] [--suffixes] [--distance N] [--ordered] [--cancel-after MS] query...
     ///   load   [--db path] [--index dir] --queries file [--searchers N] [--rounds R] [--commit-every MS] [--update-lines K] [--update-from P]
     ///          (issue #31: N concurrent searches while a writer commits K re-indexed lines every MS ms; see LoadCommand)
     ///   resort [--db path] [--index dir] [--simulate-move-tenth]
@@ -28,12 +28,11 @@ namespace SeforimSearch.Demo
             Console.OutputEncoding = Encoding.UTF8;
             if (args.Length == 0)
             {
-                Console.Error.WriteLine("usage: build|search|findall [--db path] [--index dir] ...");
+                Console.Error.WriteLine("usage: build|search|count|dump|load|resort|update|substring|selftest [--db path] [--index dir] ...");
                 return 2;
             }
             string command = args[0];
             if (command == "selftest") return SelfTest.Run(args);
-            if (command == "findall") return FindAllCommand.Run(args);
             string? db = Option(args, "--db") ?? ResolveSeforimDb();
             string index = Option(args, "--index") ?? Path.Combine(AppContext.BaseDirectory, "TantivyIndex");
             if (db == null || !File.Exists(db))
@@ -204,7 +203,7 @@ namespace SeforimSearch.Demo
         private static int Count(SeforimDbFtsEngine engine, string[] args)
         {
             var words = args.Skip(1).Where((a, i) => !a.StartsWith("--", StringComparison.Ordinal)
-                && (i == 0 || !new[] { "--db", "--index", "--distance", "--cancel-after", "--order" }.Contains(args[i]))).ToArray();
+                && (i == 0 || !new[] { "--db", "--index", "--distance", "--cancel-after" }.Contains(args[i]))).ToArray();
             string query = string.Join(" ", words);
             int distance = int.TryParse(Option(args, "--distance"), out var d) ? d : int.MaxValue;
             var options = new FtsLib.Fts5.TantivySearchOptions
@@ -218,13 +217,6 @@ namespace SeforimSearch.Demo
                 },
                 MaxWordDistance = distance >= int.MaxValue ? (int?)null : distance,
                 RequireOrdered = args.Contains("--ordered"),
-                UserRegex = args.Contains("--regex"),
-                Order = Option(args, "--order") switch
-                {
-                    "relevance" => ResultsOrder.Relevance,
-                    "generation" => ResultsOrder.Generation,
-                    _ => ResultsOrder.Catalog,
-                },
             };
             // --cancel-after N: cancel the count after N ms (cancellation smoke test)
             using var cts = int.TryParse(Option(args, "--cancel-after"), out var ca)

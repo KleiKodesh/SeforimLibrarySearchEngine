@@ -854,16 +854,6 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
                 // and the unreadable line 11 counts as the hit it is)
                 Check(!countThrew && counts!.Exact && counts.Total == 1 && countRows.Count == 0,
                       $"CountByBook: unreadable row counted, not thrown (threw {countThrew}, rows {countRows.Count})");
-                var regexRows = new SeforimDbFtsUnreadableRows();
-                bool regexThrew = false;
-                try
-                {
-                    engine.Index.CountByBook("/gamma .* delta/", new FtsLib.Fts5.TantivySearchOptions { UserRegex = true },
-                                             CancellationToken.None, 4096, out _, regexRows);
-                }
-                catch (SeforimDb.SeforimDbContentCodecException) { regexThrew = true; }
-                Check(!regexThrew && regexRows.LineIds().Contains(11),
-                      $"RunLineRegex: unreadable row counted, not thrown (threw {regexThrew}, rows {regexRows.Count})");
                 Check(!Throws<SeforimDb.SeforimDbContentCodecException>(() =>
                           engine.Index.CountByBook("gamma delta", new FtsLib.Fts5.TantivySearchOptions { MaxWordDistance = 5 })),
                       "CountByBook without a rows object is lenient too");

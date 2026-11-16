@@ -121,13 +121,4 @@ namespace FtsLib.Snippets
 
         public static readonly SnippetDescriptor NoMatch = default;
     }
-
-    /// <summary>FtsLib's SnippetMatchMode (same name and values as Core uses): each hit's
-    /// snippet is the best window, or the whole line with every full occurrence marked
-    /// (the engine's <see cref="SeforimSearch.Engine.SnippetMatchMode"/>, issue #14).</summary>
-    public enum SnippetMatchMode
-    {
-        BestWindow = 0,
-        AllMatches = 1,
-    }
 }

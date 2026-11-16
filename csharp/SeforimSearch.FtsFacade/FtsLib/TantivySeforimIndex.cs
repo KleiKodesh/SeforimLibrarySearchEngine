@@ -116,21 +116,11 @@ namespace FtsLib.Fts5
 
         public bool RequireOrdered { get; set; }
 
-        /// <summary>Otzaria's user regex (/.../). Off in FtsLib mode: FtsLib had none.</summary>
-        public bool UserRegex { get; set; }
-
         public int ContextWords { get; set; } = TantivySeforimIndex.DefaultContextWords;
-
-        /// <summary>Result order (Otzaria's). Catalog, as FtsLib, by default.</summary>
-        public ResultsOrder Order { get; set; }
 
         /// <summary>Expansion cap per query word, one cap across all segments (null: 2000,
         /// FtsLib's; 0: uncapped). Whether it was hit: SearchInfo.Truncated.</summary>
         public int? MaxExpandedTerms { get; set; }
-
-        /// <summary>Each hit's snippet (FtsLib's SnippetMatchMode, issue #14): the best window
-        /// (default) or the whole line with every full occurrence marked.</summary>
-        public FtsLib.Snippets.SnippetMatchMode MatchMode { get; set; }
     }
 
     /// <summary>
@@ -193,13 +183,12 @@ namespace FtsLib.Fts5
             if (string.IsNullOrWhiteSpace(query)) yield break;
             // The engine parses the query (FtsLib's QueryParser rules) and builds
             // one walk per word with these options.
-            var request = WithBaseBooks(ToRequest(query, options));
+            var request = ToRequest(query, options);
             // An index with positions decides every hit AND its window during the search
             // (issue #21): keep the window as a word-level descriptor, so no text is read here;
             // the page finishes it with the text of the rows it shows.
             bool positions = Engine().GetInfo().Positions;
-            // (every match of the whole line is marked on its text: no word-level window then)
-            request.WordWindows = positions && options.MatchMode == FtsLib.Snippets.SnippetMatchMode.BestWindow;
+            request.WordWindows = positions;
             // Resume (FtsLib's afterPosition: rowid > position, 0 = from the start). FtsLib's
             // positions start at 1 and the engine's at 0 (same order), so FtsLib's position p
             // is the engine's p - 1; the engine bounds the hits while collecting.
@@ -211,8 +200,6 @@ namespace FtsLib.Fts5
             // prepared state. The native session is freed when the last result holding
             // it is collected (SafeHandle).
             var session = new SearchSessionRef(Engine().Search(request)); // no ct: the session outlives the enumeration (FtsLib-shaped locates never throw)
-            if (options.MatchMode != FtsLib.Snippets.SnippetMatchMode.BestWindow)
-                session.Session.MatchMode = (SeforimSearch.Engine.SnippetMatchMode)(int)options.MatchMode;
             using var corpus = _openCorpus();
             batchSizeAt ??= _ => 256;
 
@@ -265,22 +252,6 @@ namespace FtsLib.Fts5
             }
         }
 
-        /// <summary>The relevance order's base books (seforim.db <c>book.isBaseBook</c>), read
-        /// once per facade; the other orders need none.</summary>
-        private HashSet<long>? _baseBooks;
-
-        private SearchOptions WithBaseBooks(SearchOptions request)
-        {
-            if (request.Order != ResultsOrder.Relevance) return request;
-            if (_baseBooks == null)
-            {
-                using var corpus = _openCorpus();
-                _baseBooks = corpus.BaseBookIds();
-            }
-            request.BaseBooks.UnionWith(_baseBooks);
-            return request;
-        }
-
         /// <summary>The engine request for a query and this facade's options.</summary>
         private static SearchOptions ToRequest(string query, TantivySearchOptions options)
         {
@@ -309,8 +280,6 @@ namespace FtsLib.Fts5
                 MaxWordDistance = options.MaxWordDistance,
                 RequireOrdered = options.RequireOrdered,
                 ContextWords = options.ContextWords,
-                UserRegex = options.UserRegex,
-                Order = options.Order,
                 MaxExpandedTerms = options.MaxExpandedTerms,
             };
             ApplyKetivMarkers(query, request);
@@ -365,14 +334,7 @@ namespace FtsLib.Fts5
         {
             using var scope = (unreadable ?? new SeforimDbFtsUnreadableRows()).Enter();
             options ??= new TantivySearchOptions();
-            using var session = Engine().Search(WithBaseBooks(ToRequest(query, options)), ct);
-            var line = session.GetLineRegexStatus();
-            if (line != null)
-            {
-                RunLineRegex(session, line, ct, batchSize, null, unreadable);
-                info = session.GetInfo();
-                return session.GetCounts();
-            }
+            using var session = Engine().Search(ToRequest(query, options), ct);
             info = session.GetInfo();
             if (!session.CountNeedsText) return session.GetCounts();
             using var corpus = _openCorpus();
@@ -391,68 +353,6 @@ namespace FtsLib.Fts5
                 session.CountBatch(texts);
             }
             return session.GetCounts();
-        }
-
-        /// <summary>
-        /// Runs a user regex of Otzaria's Line kind to the end (or its 100,000-line cap):
-        /// the candidates' texts are fetched by line id and fed in hit order; a full scan
-        /// streams every line of the DB in catalog order (book by book, as Otzaria reads the
-        /// books) with its position and book id. <paramref name="onMatch"/> gets each
-        /// matching line with its UTF-16 match ranges.
-        /// </summary>
-        public void RunLineRegex(SearchSession session, LineRegexStatus status, CancellationToken ct, int batchSize,
-                                 Action<long, string, (int Start, int End)[]>? onMatch)
-            => RunLineRegex(session, status, ct, batchSize, onMatch, null);
-
-        /// <summary><see cref="RunLineRegex(SearchSession, LineRegexStatus, CancellationToken, int, Action{long, string, ValueTuple{int, int}[]}?)"/>
-        /// with the search's rule for unreadable rows (issue #13): an undecodable row (candidate or
-        /// full scan) reads as empty and is recorded in <paramref name="unreadable"/>; null = a private
-        /// scope (lenient, not surfaced). The scope covers the calling thread for the whole run.</summary>
-        public void RunLineRegex(SearchSession session, LineRegexStatus status, CancellationToken ct, int batchSize,
-                                 Action<long, string, (int Start, int End)[]>? onMatch, SeforimDbFtsUnreadableRows? unreadable)
-        {
-            using var scope = (unreadable ?? new SeforimDbFtsUnreadableRows()).Enter();
-            using var corpus = _openCorpus();
-            if (!status.FullScan)
-            {
-                for (long offset = 0; offset < session.HitCount;)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    PlacedHit[] hits = session.GetHits(offset, batchSize);
-                    if (hits.Length == 0) break;
-                    offset += hits.Length;
-                    var ids = new long[hits.Length];
-                    for (int i = 0; i < hits.Length; i++) ids[i] = hits[i].LineId;
-                    var byId = new Dictionary<long, string>(hits.Length);
-                    foreach (var (id, text, _) in corpus.FetchDocuments(ids)) byId[id] = text;
-                    var texts = new string[hits.Length];
-                    for (int i = 0; i < ids.Length; i++) texts[i] = byId.TryGetValue(ids[i], out var t) ? t : string.Empty;
-                    var found = session.LineMatchBatch(texts);
-                    for (int i = 0; i < found.Length; i++)
-                        if (found[i].Length > 0) onMatch?.Invoke(hits[i].LineId, texts[i], found[i]);
-                    if (session.GetLineRegexStatus()!.Done) break;
-                }
-                return;
-            }
-            var lines = new List<PlacedHit>(batchSize);
-            var batchTexts = new List<string>(batchSize);
-            long position = 0;
-            bool Flush()
-            {
-                var found = session.LineScanBatch(lines, batchTexts);
-                for (int i = 0; i < found.Length; i++)
-                    if (found[i].Length > 0) onMatch?.Invoke(lines[i].LineId, batchTexts[i], found[i]);
-                lines.Clear();
-                batchTexts.Clear();
-                return session.GetLineRegexStatus()!.Done;
-            }
-            foreach (var (id, text, bookId) in corpus.ReadDocumentsWithBookInResultOrder(0, ct))
-            {
-                lines.Add(new PlacedHit(position++, id, bookId));
-                batchTexts.Add(text);
-                if (lines.Count >= batchSize && Flush()) return;
-            }
-            if (lines.Count > 0) Flush();
         }
 
         // ── Snippet windows ───────────────────────────────────────────

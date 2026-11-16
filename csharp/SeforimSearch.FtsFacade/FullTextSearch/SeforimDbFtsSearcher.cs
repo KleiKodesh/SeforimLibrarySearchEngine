@@ -108,8 +108,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             CancellationToken cancellationToken = default,
             Action<string>? onStage = null,
             long afterPosition = 0,
-            SeforimDbFtsUnreadableRows? unreadable = null,
-            global::FtsLib.Snippets.SnippetMatchMode matchMode = global::FtsLib.Snippets.SnippetMatchMode.BestWindow)
+            SeforimDbFtsUnreadableRows? unreadable = null)
         {
             if (engine == null) throw new ArgumentNullException(nameof(engine));
             if (terms == null) throw new ArgumentNullException(nameof(terms));
@@ -135,7 +134,6 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 MaxWordDistance = maxWordDistance >= int.MaxValue ? (int?)null : maxWordDistance,
                 RequireOrdered = requireOrdered,
                 ContextWords = contextWords,
-                MatchMode = matchMode,
             };
             // The verification fetch reads the matched lines' text only (withPlacement: false):
             // the book id is read afterwards, for the hits that

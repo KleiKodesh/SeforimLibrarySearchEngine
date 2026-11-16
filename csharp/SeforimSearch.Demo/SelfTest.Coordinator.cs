@@ -6,7 +6,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 using SeforimSearch.Demo.SeforimDbFullTextSearch;
-using SnippetMatchMode = FtsLib.Snippets.SnippetMatchMode;
 
 namespace SeforimSearch.Demo
 {
@@ -94,11 +93,9 @@ namespace SeforimSearch.Demo
             var r = c.Search("beta", 0, int.MaxValue, false, 8);
             Check(r.Ready && r.Error == null && r.Results.Count == 2 * LinesPerBook / 3 && r.Terms.Count > 0, "one-shot: " + r.Results.Count);
             Check(c.Search("beta", 7, int.MaxValue, false, 8).Results.Count == 7, "cap");
-            var all = c.Search("alpha", 5, int.MaxValue, false, 8, SnippetMatchMode.AllMatches);
-            Check(all.Results.Count == 5 && all.Results.All(h => h.SnippetStart == 0 && h.SnippetMarks.Length >= 3), "AllMatches: whole line marked");
             var frames = new List<FtsStreamChunk>();
-            c.StreamSearch("beta", int.MaxValue, false, 8, f => { frames.Add(f); return Task.CompletedTask; }, CancellationToken.None,
-                           0, SnippetMatchMode.BestWindow).GetAwaiter().GetResult();
+            c.StreamSearch("beta", int.MaxValue, false, 8, f => { frames.Add(f); return Task.CompletedTask; }, CancellationToken.None)
+                           .GetAwaiter().GetResult();
             Check(frames.SelectMany(f => f.Results).Count() == r.Results.Count && frames.Last().Done, "stream = one-shot");
 
             var lines = c.LinesSearch("eta", new[] { new FtsLineRange { BookId = 1, FirstLineIndex = 0, LastLineIndex = 10 } });

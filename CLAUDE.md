@@ -129,6 +129,10 @@ in one or two lines. Remove entries that turn out to be wrong.
 - **C# must build and run on .NET 10 AND .NET Framework 4.8.** Package =
   netstandard2.0; demo = `net10.0;net48`, x64.
 - **The C# demo mirrors FtsLib's API** (same class / member names) for easy switching.
+- **C# supports ONLY what KitveiHakodesh's UI uses** (user, 2026-11-16; verify in KHS's
+  CSharpBackend + vue-frontend before adding/removing): no semantic / vectors / Meivin, no user
+  regex, no engine relevance / generation order (KHS sorts by word distance in Vue), no
+  all-matches mode / TextMatcher. The C ABI and Dart keep them.
 - **Commit as you go**, one commit per finished step, without waiting to be asked;
   tests green first.
 - **Commit only this session's own work.** Other sessions may be editing the tree:

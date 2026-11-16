@@ -102,7 +102,6 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// <summary>The book ids in the index order (catalog order, each notes book after its
         /// book): the order a re-sort (<c>resort</c>) brings an existing index to.</summary>
         public List<long> CatalogBookOrder() => C.CatalogBookOrder();
-        public HashSet<long> BaseBookIds() => C.BaseBookIds();
         public Dictionary<long, long>? BookContentHashes() => C.BookContentHashes();
         public IEnumerable<(long Id, string Text, long? SectionId)> ReadBookDocumentsWithSection(long bookId, CancellationToken ct = default) =>
             Guard(C.ReadBookDocumentsWithSection(bookId, ct));
@@ -499,19 +498,6 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             using var reader = command.ExecuteReader();
             while (reader.Read()) hashes[reader.GetInt64(0)] = reader.IsDBNull(1) ? 0 : reader.GetInt64(1);
             return hashes;
-        }
-
-        /// <summary>The ids of the books flagged <c>book.isBaseBook</c> (the relevance order puts
-        /// them first within a tier, issue #6). Empty when the column is missing.</summary>
-        public HashSet<long> BaseBookIds()
-        {
-            var ids = new HashSet<long>();
-            if (!SeforimDbSchema.ColumnExists(_connection, "book", "isBaseBook")) return ids;
-            using var command = _connection.CreateCommand();
-            command.CommandText = "SELECT id FROM book WHERE isBaseBook = 1";
-            using var reader = command.ExecuteReader();
-            while (reader.Read()) ids.Add(reader.GetInt64(0));
-            return ids;
         }
 
         /// <summary>

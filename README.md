@@ -241,7 +241,7 @@ copies together (engine-ffi `SE_ABI_VERSION`, Dart `seforimAbiVersion`, C#
 `NativeAbi.Expected`). Both packages check the loaded library at load and
 refuse a mismatch with an error naming both versions and the library's path
 (`se_native_library_path()`): Dart `NativeAbiMismatchException`, C#
-`SeforimEngineException` from the first `SeforimIndex` / `TextMatcher` call.
+`SeforimEngineException` from the first `SeforimIndex` call.
 
 **Dart package: Native Assets build hook** (`dart/seforim_search/hook/build.dart`,
 `hooks` 2.2 / `code_assets` 2.1, Dart >= 3.10; the pattern of `package:sqlite3`
@@ -628,11 +628,11 @@ way: every query, collector and statistic sees one index with more segments.
   and applies the options.
 - **User regex queries `/.../`** (`user_regex.rs`, Otzaria's
   `user_regex.rs` `parse` / `fold_pattern` / `prepare_term_part` and its
-  `term_automaton`; opt-in: `user_regex` in `SearchOptions`, C#
-  `UserRegex`, Dart `userRegex`, off by default so FtsLib mode is
-  unchanged; `user_regex_kind` / C ABI `se_user_regex_kind` / C#
-  `SeforimIndex.UserRegexKind` / Dart `SeforimIndex.userRegexKind` tell a
-  host what a query is, as Otzaria's `parse_user_regex`):
+  `term_automaton`; opt-in: `user_regex` in `SearchOptions`, Dart
+  `userRegex`, off by default so FtsLib mode is unchanged;
+  `user_regex_kind` / C ABI `se_user_regex_kind` / Dart
+  `SeforimIndex.userRegexKind` tell a host what a query is, as Otzaria's
+  `parse_user_regex`; not in C# (the C# package supports only what KitveiHakodesh's UI uses, so it has none)):
   - Detected when the trimmed query is longer than 2 chars, starts and ends
     with `/` and has no slash next to a space between the outer slashes
     (`/a/ /b/` is two words). The whole query is the regex, on its own:
@@ -726,10 +726,7 @@ way: every query, collector and statistic sees one index with more segments.
       checks the cancel token. Rust `SearchResult::line_regex` /
       `line_match_batch` / `line_scan_batch` / `line_hits`; C ABI
       `se_search_line_status` (JSON) / `se_search_line_match_batch` /
-      `se_search_line_scan_batch` / `se_search_copy_line_hits`; C#
-      `SearchSession.GetLineRegexStatus` / `LineMatchBatch` /
-      `LineScanBatch` / `GetLineHits` (demo `TantivySeforimIndex.RunLineRegex`,
-      used by `count --regex`); Dart `lineRegex()` / `lineMatchBatch` /
+      `se_search_line_scan_batch` / `se_search_copy_line_hits`; Dart `lineRegex()` / `lineMatchBatch` /
       `lineScanBatch` / `lineHits` (the Otzaria demo prints the matches).
     - A host that only locates snippets keeps its usual loop on the
       candidates: `locate` returns the whole line as the window (never
@@ -740,7 +737,8 @@ way: every query, collector and statistic sees one index with more segments.
       reading strategy (5,000-candidate threshold) and snippet painting
       are host concerns here; the 20M-keys-per-segment scan budget is not
       ported (one merged segment, about 1.8M terms).
-  - Measured (full index, C# demo `count --regex`, positions / no
+  - Measured (full index, C# demo `count --regex` before the C# package
+    dropped user regex, positions / no
     positions): a one-word pattern with `?` 102,774 lines in 209 / 284 ms;
     a broad `.*` word (capped) 707,649 lines in 285 / 216 ms; a two-word
     sequence 15,228 lines in 122 ms / 0.05-0.12 min (20k texts fetched from SQLite and validated; run to run); a leading
@@ -1604,8 +1602,8 @@ way: every query, collector and statistic sees one index with more segments.
     (one-letter words and digit runs too).
   - Measured on the full index, בית המקדש adjacent: 15,218 lines in 29 ms.
 - **Result order** (Otzaria's `ResultsOrder`; `order` in `SearchOptions`,
-  C# `SearchOptions.Order` / `BookGenerations` / `BaseBooks`, Dart `order` /
-  `bookGenerations` / `baseBooks`, Otzaria demo `--order catalog|relevance`;
+  Dart `order` / `bookGenerations` / `baseBooks`, not in C#; the C# package supports only what KitveiHakodesh's UI uses, so it has none:
+  KitveiHakodesh sorts by each hit's word distance in its frontend), Otzaria demo `--order catalog|relevance`;
   `seforim-engine/src/relevance.rs`). Catalog order stays the default and
   costs nothing: no score, no doc id kept.
   - `generation`: Otzaria's `OrderKind::Generation`: books by the
@@ -1661,11 +1659,8 @@ way: every query, collector and statistic sees one index with more segments.
     index without positions those shapes do not fail: the search comes
     back in catalog order (no scores) with the notice
     `relevance_needs_positions` (Rust `SearchResult::notices` / `info`, C
-    ABI `se_search_info` JSON `{"notices":[...]}`, C#
-    `SearchSession.GetInfo().Notices` /
-    `SearchInfo.RelevanceNeedsPositions`, Dart `session.info().notices` /
-    `SearchInfo.relevanceNeedsPositions`; the C# demo `count --order
-    relevance` and the Otzaria demo print it).
+    ABI `se_search_info` JSON `{"notices":[...]}`, Dart `session.info().notices` /
+    `SearchInfo.relevanceNeedsPositions`; the Otzaria demo prints it).
   - Deviations (named): the phrase IDF is taken from the slots' typed words
     (Otzaria's from its regex pattern strings, which equal the word for a
     plain word): a constant factor per query, the order inside a query is
@@ -1841,7 +1836,10 @@ stay available):
   status, progress, reset, lines / in-book search, index build / update). Semantic search,
   vector sets (open, map, install, verify, download), the Meivin query model and the user
   index are NOT on the C# side; the C ABI keeps them for Dart (`NativeAbi.Expected` still
-  equals `SE_ABI_VERSION`).
+  equals `SE_ABI_VERSION`). Nor are user regex `/.../` (incl. the line kind), the engine's
+  relevance / generation order and the all-matches snippet mode / find in an open text: no
+  KitveiHakodesh caller uses them (its 'relevance' sort runs in its frontend on each hit's
+  word distance, which the C# hits keep).
 - **Core's coordinator, drop-in** (`SeforimDbFtsIndexCoordinator`): Core's
   constructor shape `(dataSource, indexPath, indexIsExternal, log,
   relatedFormExpander = null)` (Core's `databasePath` becomes the host's data source) and every member the KitveiHakodesh service
@@ -1859,8 +1857,9 @@ stay available):
   plan on `TantivySeforimIndex.FindSubstringCandidates`, = FtsLib's, over
   the substring query + position ranges + decline, issue G-K1). Words marked
   `+` / `=` go through Core's `SeforimDbFtsRelatedFormExpander` (ported as
-  is, with FtsLib's `WordMarkers`) before the search. `SnippetMatchMode` is
-  `FtsLib.Snippets.SnippetMatchMode`, as Core names it. Not ported (host
+  is, with FtsLib's `WordMarkers`) before the search. Core's `matchMode`
+  parameter (all-matches snippets) is not mirrored: no KitveiHakodesh caller
+  passes it. Not ported (host
   plumbing of Core's service): `SeforimDbReadiness` (waiting while another
   app writes the DB) and the old trial-folder cleanup. The demo CLI keeps a
   second constructor `(engine, log)` over an index its `build` command made.
@@ -1992,8 +1991,7 @@ The snippet locator (`SnippetWindowLocator`, FtsLib's too) has a match mode
   pass, `score`, `word_distance`, the order and the counts do not change.
   Session API: `SnippetSession::set_match_mode`, C ABI
   `se_search_set_match_mode(search, 0|1)` (applies to `se_search_locate_batch`
-  / `_lines` / `_pairs`), C# `SearchSession.MatchMode`, Dart
-  `SearchSession.matchMode`. All matches locates from the text (the positions
+  / `_lines` / `_pairs`), Dart `SearchSession.matchMode` (not in C#; the C# package supports only what KitveiHakodesh's UI uses, so it has none). All matches locates from the text (the positions
   path stops after the window, so it is skipped); a line-regex search keeps
   its own snippet. FtsLib: `Locate(..., matchMode)`,
   `LocateSnippetWindow(..., matchMode)`; KitveiHakodesh Core:
@@ -2005,7 +2003,7 @@ The snippet locator (`SnippetWindowLocator`, FtsLib's too) has a match mode
   `SE_FIND_PHRASE` = 1: only runs of the words in order at consecutive
   positions, overlapping runs included; `SE_FIND_IGNORE_QUOTES` = 2;
   `SE_FIND_MATCH_MARKS` = 4: nikud / te'amim as typed, else both sides drop
-  them), C# `TextMatcher.FindAllMatches`, Dart `findAllMatches`, FtsLib
+  them), Dart `findAllMatches` (not in C#), FtsLib
   `Fts5SeforimIndex.FindAllMatches` (same options; FtsLib's terms are
   quote- and mark-free, so it checks a candidate's surface form, quotes and
   canonical marks, read off its raw span). Output: (start, length, term ordinal) triples,

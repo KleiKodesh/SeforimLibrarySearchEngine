@@ -39,16 +39,6 @@ namespace SeforimSearch.Engine
             }
         }
 
-        /// <summary>Otzaria's user-regex kind of <paramref name="query"/>: "none" (not
-        /// /.../), "invalid" (searched as plain text), "word", "sequence", "line" (matched on
-        /// each line's text: <see cref="SearchSession.GetLineRegexStatus"/>). Set <see cref="SearchOptions.UserRegex"/> to search /.../ as a regex.</summary>
-        public static string UserRegexKind(string query)
-        {
-            NativeAbi.EnsureLoaded();
-            byte[] q = Interop.ToUtf8(query);
-            fixed (byte* p = q)
-                return (string)Json.Parse(Interop.TakeString(NativeMethods.se_user_regex_kind(p, (UIntPtr)q.Length)))!;
-        }
 
         /// <summary>Creates a fresh index in <paramref name="directory"/>, WIPING it.</summary>
         public static SeforimIndex Create(string directory, IndexOptions? options = null)

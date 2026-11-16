@@ -64,7 +64,6 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         Dictionary<long, (long First, long Count)> BookPositionRanges();
         /// <summary>The book ids in the index order (catalog order, each notes book after its book).</summary>
         List<long> CatalogBookOrder();
-        HashSet<long> BaseBookIds();
         /// <summary>Per-book content hash (the per-book update), or null when the database has none.</summary>
         Dictionary<long, long>? BookContentHashes();
         IEnumerable<(long Id, string Text, long? SectionId)> ReadBookDocumentsWithSection(long bookId, CancellationToken ct = default);

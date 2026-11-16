@@ -552,22 +552,6 @@ namespace SeforimSearch.Engine
         }
     }
 
-    /// <summary>The order of the hits (Otzaria's ResultsOrder).</summary>
-    public enum ResultsOrder
-    {
-        /// <summary>Catalog order, as FtsLib (the default; costs nothing).</summary>
-        Catalog = 0,
-        /// <summary>Otzaria's relevance: by tier, then base books first
-        /// (<see cref="SearchOptions.BaseBooks"/>), then BM25, then catalog order. Phrase,
-        /// proximity and multi-word fuzzy queries need an index with positions; without,
-        /// they come back in catalog order with the notice
-        /// <see cref="SearchInfo.RelevanceNeedsPositions"/> (<see cref="SearchSession.GetInfo"/>).</summary>
-        Relevance = 1,
-        /// <summary>Otzaria's generation order: by each book's generation order
-        /// (<see cref="SearchOptions.BookGenerations"/>), then catalog order.</summary>
-        Generation = 2,
-    }
-
     /// <summary>
     /// THE search API: the query string (FtsLib syntax: words AND-ed, <c>a | b</c> one
     /// slot, <c>*</c> <c>?</c> wildcard, <c>word~N</c> fuzzy, <c>%word</c> / <c>word%</c>
@@ -665,19 +649,6 @@ namespace SeforimSearch.Engine
 
         /// <summary>Whole phrases ORed with the query (Otzaria's acronym expansion).</summary>
         public List<PhraseOptions> PhraseAlternatives { get; } = new List<PhraseOptions>();
-        /// <summary>Otzaria's user regex: a query wrapped in /.../ is a regex. Off (the
-        /// default, FtsLib's behaviour): the query is plain text.</summary>
-        public bool UserRegex { get; set; }
-        /// <summary>The order of the hits. Catalog by default.</summary>
-        public ResultsOrder Order { get; set; }
-        /// <summary>For <see cref="ResultsOrder.Generation"/>: book id to its generation order
-        /// (Otzaria's generationOrder, from the host). Books absent come last; negative
-        /// ids (no such book) are not sent.</summary>
-        public Dictionary<long, int> BookGenerations { get; } = new Dictionary<long, int>();
-        /// <summary>For <see cref="ResultsOrder.Relevance"/>: the base book ids (seforim.db
-        /// <c>book.isBaseBook</c>, from the host), first within each relevance tier (never
-        /// across tiers). Ignored by the other orders.</summary>
-        public HashSet<long> BaseBooks { get; } = new HashSet<long>();
         /// <summary>Cross-line matching: a match may continue from the end of a line onto the
         /// start of the next line of the same book (one break at most). Such a hit has
         /// <see cref="PlacedHit.NextLineId"/>; locate it with
@@ -732,7 +703,6 @@ namespace SeforimSearch.Engine
                 if (MaxExpandedTerms.Value < 0) throw new ArgumentOutOfRangeException(nameof(MaxExpandedTerms));
                 sb.Append(",\"max_expanded_terms\":").Append(MaxExpandedTerms.Value.ToString(inv));
             }
-            if (UserRegex) sb.Append(",\"user_regex\":true");
             if (LexicalFuzzy) sb.Append(",\"lexical_fuzzy\":true");
             if (ProximityBaseDistance.HasValue)
             {
@@ -787,35 +757,6 @@ namespace SeforimSearch.Engine
                 {
                     if (i > 0) sb.Append(',');
                     PhraseAlternatives[i].WriteJson(sb);
-                }
-                sb.Append(']');
-            }
-            if (Order == ResultsOrder.Relevance) sb.Append(",\"order\":\"relevance\"");
-            else if (Order == ResultsOrder.Generation) sb.Append(",\"order\":\"generation\"");
-            if (BookGenerations.Count > 0)
-            {
-                sb.Append(",\"book_generations\":[");
-                bool first = true;
-                foreach (var kv in BookGenerations)
-                {
-                    if (kv.Key < 0) continue; // book ids are unsigned in the engine
-                    if (!first) sb.Append(',');
-                    first = false;
-                    sb.Append('[').Append(kv.Key.ToString(inv)).Append(',')
-                        .Append(Math.Max(0, kv.Value).ToString(inv)).Append(']');
-                }
-                sb.Append(']');
-            }
-            if (BaseBooks.Count > 0)
-            {
-                sb.Append(",\"base_books\":[");
-                bool first = true;
-                foreach (long id in BaseBooks)
-                {
-                    if (id < 0) continue; // book ids are unsigned in the engine
-                    if (!first) sb.Append(',');
-                    first = false;
-                    sb.Append(id.ToString(inv));
                 }
                 sb.Append(']');
             }

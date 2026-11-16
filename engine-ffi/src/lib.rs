@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 17; // 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 18; // 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -262,6 +262,14 @@ fn guard<T>(fallback: T, f: impl FnOnce() -> Result<T, String>) -> T {
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
+}
+
+/// A vector install error; a cancellation as the engine's (`se_last_error_cancelled`).
+fn install_err(e: seforim_vectors::Error) -> String {
+    match e {
+        seforim_vectors::Error::Cancelled => err(seforim_engine::Error::Cancelled),
+        e => err(e),
+    }
 }
 
 // ── Index ───────────────────────────────────────────────────────────────
@@ -2257,16 +2265,25 @@ pub unsafe extern "C" fn se_oxv_info(path: *const u8, path_len: usize) -> *mut c
 /// 1 MiB block CRC, and, with `manifest_json` (its release manifest; length 0 =
 /// none), the header against the manifest). JSON `{"segment_id","kind",
 /// "from_library_version","to_library_version","slots","blocks",
-/// "manifest_checked"}`; null on error (the reason in `se_last_error`).
+/// "manifest_checked"}`; null on error (the reason in `se_last_error`;
+/// `se_last_error_cancelled` when `token`, may be null, was cancelled).
 ///
 /// # Safety
-/// The strings valid UTF-8 for their lengths.
+/// The strings valid UTF-8 for their lengths; `token` null or a live cancel token.
 #[no_mangle]
-pub unsafe extern "C" fn se_oxv_verify(path: *const u8, path_len: usize, manifest: *const u8, manifest_len: usize) -> *mut c_char {
+pub unsafe extern "C" fn se_oxv_verify(
+    path: *const u8,
+    path_len: usize,
+    manifest: *const u8,
+    manifest_len: usize,
+    token: *const CancelToken,
+) -> *mut c_char {
     guard(ptr::null_mut(), || {
         let path = str_arg(path, path_len)?;
         let manifest = if manifest_len == 0 { None } else { Some(str_arg(manifest, manifest_len)?) };
-        let r = seforim_vectors::install::verify_segment(std::path::Path::new(path), manifest).map_err(err)?;
+        let flag = token.as_ref().map(|t| t.flag());
+        let r = seforim_vectors::install::verify_segment_cancellable(std::path::Path::new(path), manifest, flag.as_deref())
+            .map_err(install_err)?;
         Ok(out_string(serde_json::to_string(&r).map_err(err)?))
     })
 }
@@ -2277,7 +2294,10 @@ pub unsafe extern "C" fn se_oxv_verify(path: *const u8, path_len: usize, manifes
 /// one; `gen-NNNNNN/set.json`, `.del`, `.links`, `PREVIOUS`, `CURRENT`, garbage
 /// collected. `segment`: the plain `.oxv` (moved when it lies in
 /// `<set_dir>/incoming/`, else copied); `manifest_json`: its release manifest;
-/// `published_sha256` (length 0 = none): the manifest's published SHA-256.
+/// `published_sha256` (length 0 = none): the manifest's published SHA-256;
+/// `model_json` (length 0 = none): the query model's model.json, which the release
+/// must be of (Otzaria's `InstallExpectation`); `token` (may be null): cancels the
+/// install between blocks, hashed chunks and slot ranges, leaving the set as it was.
 /// JSON `{"kind","library_version","generation","segments","slots_added",
 /// "tombstones_applied","duplicates_removed","foreign_unresolved",
 /// "bytes_on_disk","already_applied"}`; null on error.
@@ -2294,13 +2314,20 @@ pub unsafe extern "C" fn se_vectors_install(
     manifest_len: usize,
     published_sha256: *const u8,
     published_sha256_len: usize,
+    model_json: *const u8,
+    model_json_len: usize,
+    token: *const CancelToken,
 ) -> *mut c_char {
     guard(ptr::null_mut(), || {
         let dir = str_arg(set_dir, set_dir_len)?;
         let segment = str_arg(segment, segment_len)?;
         let manifest = str_arg(manifest, manifest_len)?;
         let published = if published_sha256_len == 0 { None } else { Some(str_arg(published_sha256, published_sha256_len)?) };
-        let r = seforim_vectors::install::install(std::path::Path::new(dir), std::path::Path::new(segment), manifest, published).map_err(err)?;
+        let model = if model_json_len == 0 { None } else { Some(str_arg(model_json, model_json_len)?) };
+        let flag = token.as_ref().map(|t| t.flag());
+        let opts = seforim_vectors::install::InstallOptions { published_sha256: published, expected_model_json: model, cancel: flag.as_deref() };
+        let r = seforim_vectors::install::install_with(std::path::Path::new(dir), std::path::Path::new(segment), manifest, &opts)
+            .map_err(install_err)?;
         Ok(out_string(serde_json::to_string(&r).map_err(err)?))
     })
 }
@@ -2805,16 +2832,27 @@ mod tests {
         }
         unsafe {
             let (p, m) = &plain[0];
-            let r = take(se_oxv_verify(p.as_ptr(), p.len(), m.as_ptr(), m.len())).unwrap();
+            let r = take(se_oxv_verify(p.as_ptr(), p.len(), m.as_ptr(), m.len(), ptr::null())).unwrap();
             assert_eq!(r["manifest_checked"], true);
-            let r = take(se_oxv_verify(p.as_ptr(), p.len(), ptr::null(), 0)).unwrap();
+            let r = take(se_oxv_verify(p.as_ptr(), p.len(), ptr::null(), 0, ptr::null())).unwrap();
             assert_eq!(r["manifest_checked"], false);
             // a delta first: refused, the reason in se_last_error
             let (d, dm) = &plain[1];
-            assert!(take(se_vectors_install(set.as_ptr(), set.len(), d.as_ptr(), d.len(), dm.as_ptr(), dm.len(), ptr::null(), 0)).is_none());
+            assert!(take(se_vectors_install(set.as_ptr(), set.len(), d.as_ptr(), d.len(), dm.as_ptr(), dm.len(), ptr::null(), 0, ptr::null(), 0, ptr::null())).is_none());
             assert!(!CStr::from_ptr(se_last_error()).to_bytes().is_empty());
+            // the wrong query model, then a cancelled install: refused, nothing installed
+            let wrong = r#"{"family_id":"g","chunking_identity":7}"#;
+            assert!(take(se_vectors_install(set.as_ptr(), set.len(), p.as_ptr(), p.len(), m.as_ptr(), m.len(), ptr::null(), 0, wrong.as_ptr(), wrong.len(), ptr::null())).is_none());
+            let token = se_cancel_token_new();
+            se_cancel_token_cancel(token);
+            assert!(take(se_vectors_install(set.as_ptr(), set.len(), p.as_ptr(), p.len(), m.as_ptr(), m.len(), ptr::null(), 0, ptr::null(), 0, token)).is_none());
+            assert_eq!(se_last_error_cancelled(), 1);
+            assert!(take(se_oxv_verify(p.as_ptr(), p.len(), ptr::null(), 0, token)).is_none());
+            se_cancel_token_free(token);
+            assert!(!std::path::Path::new(&set).join("CURRENT").exists());
+            let model = r#"{"family_id":"f","chunking_identity":7}"#;
             for (i, (p, m)) in plain.iter().enumerate() {
-                let r = take(se_vectors_install(set.as_ptr(), set.len(), p.as_ptr(), p.len(), m.as_ptr(), m.len(), ptr::null(), 0)).unwrap();
+                let r = take(se_vectors_install(set.as_ptr(), set.len(), p.as_ptr(), p.len(), m.as_ptr(), m.len(), ptr::null(), 0, model.as_ptr(), model.len(), ptr::null())).unwrap();
                 assert_eq!(r["generation"], i as u64 + 1, "{r}");
                 assert_eq!(r["library_version"], i as u64 + 1);
             }
@@ -2826,7 +2864,7 @@ mod tests {
             bytes[off] ^= 0x40;
             let bad = tmp.join("bad.oxv").to_string_lossy().into_owned();
             std::fs::write(&bad, bytes).unwrap();
-            assert!(take(se_oxv_verify(bad.as_ptr(), bad.len(), ptr::null(), 0)).is_none());
+            assert!(take(se_oxv_verify(bad.as_ptr(), bad.len(), ptr::null(), 0, ptr::null())).is_none());
         }
         let info = seforim_vectors::set::SegmentSet::open(std::path::Path::new(&set)).unwrap().info(None);
         assert_eq!((info.library_version, info.segments.len()), (3, 3));

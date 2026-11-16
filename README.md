@@ -2331,8 +2331,15 @@ temporary pointer files and unnamed generations go), the directory flushes
 (`sync_dir`, Unix only, as in the sidecar), a failed commit moving the segment
 back to `incoming/`, and the identity digest (`otzaria-vector-identity-v1`, the
 15 identity fields) and package digest (`otzaria-artifact-digest-v2`)
-recomputed from the manifest and checked. Not ported: the expected model
-identity at install time (the host picks the release by it). The Dart install
+recomputed from the manifest and checked, an identity value of the wrong JSON
+type refused (a number written as text, as the sidecar's typed identity does),
+the expected model identity (`InstallExpectation`: the query model's model.json,
+`se_vectors_install` `model_json` / Dart `expectedModelJson` / C#
+`expectedModelJson`, filled by the updaters from `VectorCandidate.fromModelJson`:
+each model field it names must be equal, its query packages accepted by the
+release), and cancellation (a cancel token, ABI 18: checked between blocks,
+hashed 1 MiB chunks and slot ranges; a cancelled install changes nothing the set
+names and `recover` clears what it staged). The Dart install
 runs on a `SearchWorker` isolate when the writer is given one
 (`VectorSetWriter(dir, worker: w)`, `SearchWorker.installVectorSegment` /
 `verifyOxv`), else on the calling isolate. `VectorSetWriter(native: false)` (Dart) keeps a

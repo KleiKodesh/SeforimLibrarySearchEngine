@@ -31,6 +31,7 @@ import 'dart:ffi';
 import 'package:ffi/ffi.dart';
 
 import 'async_search.dart' show SearchWorker;
+import 'index.dart' show SearchCancelToken;
 import 'native.dart';
 import 'semantic.dart' show expandOxv;
 
@@ -72,7 +73,11 @@ class VectorCandidate {
   final String modelFamilyId;
   final int chunkingIdentity;
 
-  const VectorCandidate(this.family, this.modelFamilyId, this.chunkingIdentity);
+  /// The query model's model.json text, when known: the install checks the release
+  /// against it (Otzaria's `InstallExpectation`).
+  final String? modelJson;
+
+  const VectorCandidate(this.family, this.modelFamilyId, this.chunkingIdentity, {this.modelJson});
 
   /// From the query model's model.json text.
   factory VectorCandidate.fromModelJson(VectorFamily family, String modelJson) {
@@ -85,7 +90,7 @@ class VectorCandidate {
     if (id is! String || id.isEmpty || chunking == null) {
       throw const FormatException('model.json: family_id / chunking_identity missing');
     }
-    return VectorCandidate(family, id, chunking);
+    return VectorCandidate(family, id, chunking, modelJson: modelJson);
   }
 }
 
@@ -591,13 +596,15 @@ typedef VectorSegmentVerifier = Future<void> Function(String segmentPath, String
 /// Verifies a plain `.oxv` in the engine (`se_oxv_verify`, Otzaria's sidecar
 /// `check_header` + `verify_blocks`): header and directory, every 1 MiB block
 /// CRC and, with [manifestJson], the header against its release manifest.
-/// Returns the report JSON; throws [SeforimEngineException] when it fails.
-Map<String, dynamic> verifyOxv(String path, {String? manifestJson}) {
+/// Returns the report JSON; throws [SeforimEngineException] when it fails and
+/// [SearchCancelledException] when [cancel] (or the token at [cancelAddress], a
+/// worker's) was cancelled.
+Map<String, dynamic> verifyOxv(String path, {String? manifestJson, SearchCancelToken? cancel, int? cancelAddress}) {
   final n = SeforimNative.instance;
   return jsonDecode(using((al) {
     final (p, pl) = utf8Native(path, al);
     final (m, ml) = manifestJson == null ? (nullptr.cast<Uint8>(), 0) : utf8Native(manifestJson, al);
-    return n.takeString(n.oxvVerify(p, pl, m, ml));
+    return n.takeString(n.oxvVerify(p, pl, m, ml, _token(cancel, cancelAddress)));
   })) as Map<String, dynamic>;
 }
 
@@ -605,9 +612,11 @@ Map<String, dynamic> verifyOxv(String path, {String? manifestJson}) {
 /// engine (`se_vectors_install`, Otzaria's sidecar `install_package`): a base
 /// starts a new generation, a delta applies its tombstones, duplicates and
 /// foreign links to the current one. A segment inside `<setDir>/incoming/` is
-/// moved, any other copied.
+/// moved, any other copied. [expectedModelJson]: the query model's model.json,
+/// which the release must be of. [cancel] stops it between blocks, hashed chunks
+/// and slot ranges, leaving the set as it was ([SearchCancelledException]).
 VectorInstallReport installVectorSegment(String setDir, String segmentPath, String manifestJson,
-    {String? publishedManifestSha256}) {
+    {String? publishedManifestSha256, String? expectedModelJson, SearchCancelToken? cancel, int? cancelAddress}) {
   final n = SeforimNative.instance;
   return VectorInstallReport.fromJson(jsonDecode(using((al) {
     final (d, dl) = utf8Native(setDir, al);
@@ -616,9 +625,13 @@ VectorInstallReport installVectorSegment(String setDir, String segmentPath, Stri
     final (h, hl) = publishedManifestSha256 == null
         ? (nullptr.cast<Uint8>(), 0)
         : utf8Native(publishedManifestSha256, al);
-    return n.takeString(n.vectorsInstall(d, dl, s, sl, m, ml, h, hl));
+    final (j, jl) = expectedModelJson == null ? (nullptr.cast<Uint8>(), 0) : utf8Native(expectedModelJson, al);
+    return n.takeString(n.vectorsInstall(d, dl, s, sl, m, ml, h, hl, j, jl, _token(cancel, cancelAddress)));
   })) as Map<String, dynamic>);
 }
+
+Pointer<Void> _token(SearchCancelToken? cancel, int? address) =>
+    cancel?.handle ?? (address == null ? nullptr : Pointer<Void>.fromAddress(address));
 
 class VectorSetException implements Exception {
   final String message;
@@ -686,16 +699,22 @@ class VectorSetWriter {
 
   /// Installs [segmentPath] (a plain `.oxv` that [manifestJson] describes) as a
   /// new generation. A segment inside [incoming] is moved, any other copied.
+  ///
+  /// Through the engine: [expectedModelJson] (the query model's model.json) is
+  /// checked against the release, and [cancel] stops it, leaving the set as it was.
   Future<VectorInstallReport> install(String segmentPath, String manifestJson,
-      {String? publishedManifestSha256, bool Function()? isCancelled}) async {
+      {String? publishedManifestSha256,
+      bool Function()? isCancelled,
+      String? expectedModelJson,
+      SearchCancelToken? cancel}) async {
     if (native) {
       final w = worker;
       if (w != null) {
         return w.installVectorSegment(dir, segmentPath, manifestJson,
-            publishedManifestSha256: publishedManifestSha256);
+            publishedManifestSha256: publishedManifestSha256, expectedModelJson: expectedModelJson, cancel: cancel);
       }
       return installVectorSegment(dir, segmentPath, manifestJson,
-          publishedManifestSha256: publishedManifestSha256);
+          publishedManifestSha256: publishedManifestSha256, expectedModelJson: expectedModelJson, cancel: cancel);
     }
     await Directory(dir).create(recursive: true);
     final lock = await File(_p('.lock')).open(mode: FileMode.append);
@@ -1024,7 +1043,8 @@ class VectorSetUpdater {
       {required List<VectorCandidate> candidates,
       String? libraryTag,
       VectorProgress? onProgress,
-      bool Function()? isCancelled}) async {
+      bool Function()? isCancelled,
+      SearchCancelToken? cancel}) async {
     final target = await locator.findForLibraryVersion(libraryVersion,
         libraryTag: libraryTag, candidates: candidates);
     if (target == null) return null;
@@ -1042,9 +1062,14 @@ class VectorSetUpdater {
         current!['identity_digest'] == target.identityDigest) {
       chain = await locator.findDeltaChain(target: target, installedVersion: installed);
     }
+    final model = candidates
+        .where((c) => c.family == target.family && c.modelFamilyId == target.modelFamilyId)
+        .firstOrNull
+        ?.modelJson;
     VectorInstallReport? last;
     for (final r in (chain == null || chain.isEmpty) ? [target] : chain) {
-      last = await installRelease(r, onProgress: onProgress, isCancelled: isCancelled);
+      last = await installRelease(r,
+          onProgress: onProgress, isCancelled: isCancelled, expectedModelJson: model, cancel: cancel);
     }
     return last;
   }
@@ -1052,7 +1077,10 @@ class VectorSetUpdater {
   /// Downloads (resumable) every file of [release] to incoming/, joins parts,
   /// expands, checks the segment's size and SHA-256, and installs it.
   Future<VectorInstallReport> installRelease(VectorRelease release,
-      {VectorProgress? onProgress, bool Function()? isCancelled}) async {
+      {VectorProgress? onProgress,
+      bool Function()? isCancelled,
+      String? expectedModelJson,
+      SearchCancelToken? cancel}) async {
     final incoming = writer.incoming;
     await Directory(incoming).create(recursive: true);
     final local = <String>[];
@@ -1083,7 +1111,10 @@ class VectorSetUpdater {
     }
     onProgress?.call('install', 0, null);
     final report = await writer.install(segment, release.manifestJson,
-        publishedManifestSha256: release.publishedManifestSha256, isCancelled: isCancelled);
+        publishedManifestSha256: release.publishedManifestSha256,
+        isCancelled: isCancelled,
+        expectedModelJson: expectedModelJson,
+        cancel: cancel);
     for (final p in {...local, compressed}) {
       final f = File(p);
       if (f.existsSync()) f.deleteSync();

@@ -491,7 +491,7 @@ namespace SeforimSearch.Engine
                                                          FusionOptions? fusion = null, CancellationToken ct = default) =>
             Task.Run(() => session.FuseSemantic(query, semantic, fusion), ct);
 
-        private static T WithToken<T>(CancellationToken ct, Func<CancelTokenHandle, T> call)
+        internal static T WithToken<T>(CancellationToken ct, Func<CancelTokenHandle, T> call)
         {
             ct.ThrowIfCancellationRequested();
             if (!ct.CanBeCanceled)

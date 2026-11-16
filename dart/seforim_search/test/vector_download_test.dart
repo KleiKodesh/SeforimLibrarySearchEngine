@@ -250,7 +250,7 @@ void main() {
     return b.takeBytes();
   }
 
-  final fixtureCandidates = [const VectorCandidate(family, 'f', 7)];
+  final fixtureCandidates = [VectorCandidate.fromModelJson(family, '{"family_id":"f","chunking_identity":7}')];
   void publishFixture(String name, {int parts = 1, int pad = 0}) {
     final m = fixtureManifest(name);
     final tag = m['libraryReleaseTag'] as String;
@@ -327,6 +327,18 @@ void main() {
     bytes[h.getUint64(at + 8, Endian.little)] ^= 0x40;
     final bad = File('${tmp.path}/bad.oxv')..writeAsBytesSync(bytes);
     expect(() => verifyOxv(bad.path), throwsA(isA<SeforimEngineException>()));
+
+    // the release must be of the query model; a cancelled install leaves nothing
+    final setDir = '${tmp.path}/n';
+    expect(
+        () => installVectorSegment(setDir, plain, manifestJson,
+            expectedModelJson: '{"family_id":"g","chunking_identity":7}'),
+        throwsA(isA<SeforimEngineException>()));
+    final token = SearchCancelToken()..cancel();
+    expect(() => installVectorSegment(setDir, plain, manifestJson, cancel: token),
+        throwsA(isA<SearchCancelledException>()));
+    expect(File('$setDir/CURRENT').existsSync(), isFalse);
+    expect(Directory('$setDir/staging').existsSync(), isFalse);
 
     final dartWriter = VectorSetWriter('${tmp.path}/d', native: false);
     final r = await dartWriter.install(plain, manifestJson);

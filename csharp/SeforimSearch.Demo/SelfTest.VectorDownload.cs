@@ -133,7 +133,7 @@ namespace SeforimSearch.Demo
             gh.Publish(fixtures!, "delta-v1-v2");
             gh.Publish(fixtures!, "delta-v2-v3");
             gh.Publish(fixtures!, "base-v3", pad: 8192);
-            var candidates = new[] { new VectorCandidate(VectorFamily.Qa491Windows, "f", 7) };
+            var candidates = new[] { VectorCandidate.FromModelJson(VectorFamily.Qa491Windows, "{\"family_id\":\"f\",\"chunking_identity\":7}") };
             Check(VectorCandidate.FromModelJson(VectorFamily.Qa491, "{\"family_id\":\"x\",\"chunking_identity\":320260894818558297}").ChunkingIdentity
                   == 320260894818558297UL, "model.json chunking identity exact");
 
@@ -173,6 +173,17 @@ namespace SeforimSearch.Demo
             string bad = Path.Combine(dir, "bad.oxv");
             File.WriteAllBytes(bad, bytes);
             Check(Throws<SeforimEngineException>(() => VectorSet.Verify(bad)), "corrupted block refused");
+
+            // the release must be of the query model; a cancelled install leaves nothing
+            string other = Path.Combine(dir, "other-set");
+            Check(Throws<SeforimEngineException>(() => VectorSet.Install(other, plain, manifest, null, "{\"family_id\":\"g\",\"chunking_identity\":7}")),
+                "another query model refused");
+            using (var cts = new CancellationTokenSource())
+            {
+                cts.Cancel();
+                Check(Throws<OperationCanceledException>(() => VectorSet.Install(other, plain, manifest, null, null, cts.Token)), "cancelled");
+            }
+            Check(!File.Exists(Path.Combine(other, "CURRENT")) && !Directory.Exists(Path.Combine(other, "staging")), "nothing installed");
         }
     }
 }

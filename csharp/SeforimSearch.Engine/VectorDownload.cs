@@ -45,12 +45,17 @@ namespace SeforimSearch.Engine
     /// <summary>A release a host can use: a family plus the query model's identity.</summary>
     public sealed class VectorCandidate
     {
-        public VectorCandidate(VectorFamily family, string modelFamilyId, ulong chunkingIdentity)
+        public VectorCandidate(VectorFamily family, string modelFamilyId, ulong chunkingIdentity, string? modelJson = null)
         {
             Family = family;
             ModelFamilyId = modelFamilyId;
             ChunkingIdentity = chunkingIdentity;
+            ModelJson = modelJson;
         }
+
+        /// <summary>The query model's model.json text, when known: the install checks the
+        /// release against it (Otzaria's <c>InstallExpectation</c>).</summary>
+        public string? ModelJson { get; }
 
         public VectorFamily Family { get; }
         public string ModelFamilyId { get; }
@@ -63,7 +68,7 @@ namespace SeforimSearch.Engine
             var id = j.TryGetValue("family_id", out var f) ? f as string : null;
             var chunking = VectorJson.Chunking(modelJson);
             if (string.IsNullOrEmpty(id) || chunking == null) throw new FormatException("model.json: family_id / chunking_identity missing");
-            return new VectorCandidate(family, id!, chunking.Value);
+            return new VectorCandidate(family, id!, chunking.Value, modelJson);
         }
     }
 
@@ -161,14 +166,19 @@ namespace SeforimSearch.Engine
     {
         /// <summary>Verifies a plain <c>.oxv</c> in the engine: header and directory, every
         /// 1 MiB block CRC and, with <paramref name="manifestJson"/>, the header against its
-        /// release manifest. Throws <see cref="SeforimEngineException"/> when it fails.</summary>
-        public static VectorVerifyReport Verify(string path, string? manifestJson = null)
+        /// release manifest. Throws <see cref="SeforimEngineException"/> when it fails,
+        /// <see cref="OperationCanceledException"/> when <paramref name="ct"/> is cancelled.</summary>
+        public static VectorVerifyReport Verify(string path, string? manifestJson = null, CancellationToken ct = default)
         {
             byte[] p = Interop.ToUtf8(path ?? throw new ArgumentNullException(nameof(path)));
             byte[] m = Interop.ToUtf8(manifestJson ?? "");
-            fixed (byte* pp = p) fixed (byte* pm = m)
+            var text = SeforimSemantic.WithToken(ct, token =>
             {
-                var j = (Dictionary<string, object?>)Json.Parse(Interop.TakeString(NativeMethods.se_oxv_verify(pp, (UIntPtr)p.Length, pm, (UIntPtr)m.Length)))!;
+                fixed (byte* pp = p) fixed (byte* pm = m)
+                    return Interop.TakeString(NativeMethods.se_oxv_verify(pp, (UIntPtr)p.Length, pm, (UIntPtr)m.Length, token));
+            });
+            {
+                var j = (Dictionary<string, object?>)Json.Parse(text)!;
                 return new VectorVerifyReport
                 {
                     SegmentId = (string)j["segment_id"]!,
@@ -185,17 +195,26 @@ namespace SeforimSearch.Engine
         /// <summary>Installs a downloaded plain <c>.oxv</c> into the set at <paramref name="setDir"/>
         /// in the engine (Otzaria's sidecar <c>install_package</c>): a base starts a new
         /// generation, a delta applies its tombstones, duplicates and foreign links to the current
-        /// one. A segment inside <c>&lt;setDir&gt;/incoming/</c> is moved, any other copied.</summary>
-        public static VectorInstallReport Install(string setDir, string segmentPath, string manifestJson, string? publishedManifestSha256 = null)
+        /// one. A segment inside <c>&lt;setDir&gt;/incoming/</c> is moved, any other copied.
+        /// <paramref name="expectedModelJson"/>: the query model's model.json, which the release must
+        /// be of. <paramref name="ct"/> stops it between blocks, hashed chunks and slot ranges, leaving
+        /// the set as it was (<see cref="OperationCanceledException"/>).</summary>
+        public static VectorInstallReport Install(string setDir, string segmentPath, string manifestJson, string? publishedManifestSha256 = null,
+            string? expectedModelJson = null, CancellationToken ct = default)
         {
             byte[] d = Interop.ToUtf8(setDir ?? throw new ArgumentNullException(nameof(setDir)));
             byte[] s = Interop.ToUtf8(segmentPath ?? throw new ArgumentNullException(nameof(segmentPath)));
             byte[] m = Interop.ToUtf8(manifestJson ?? throw new ArgumentNullException(nameof(manifestJson)));
             byte[] h = Interop.ToUtf8(publishedManifestSha256 ?? "");
-            fixed (byte* pd = d) fixed (byte* ps = s) fixed (byte* pm = m) fixed (byte* ph = h)
+            byte[] e = Interop.ToUtf8(expectedModelJson ?? "");
+            var text = SeforimSemantic.WithToken(ct, token =>
             {
-                var j = (Dictionary<string, object?>)Json.Parse(Interop.TakeString(NativeMethods.se_vectors_install(
-                    pd, (UIntPtr)d.Length, ps, (UIntPtr)s.Length, pm, (UIntPtr)m.Length, ph, (UIntPtr)h.Length)))!;
+                fixed (byte* pd = d) fixed (byte* ps = s) fixed (byte* pm = m) fixed (byte* ph = h) fixed (byte* pe = e)
+                    return Interop.TakeString(NativeMethods.se_vectors_install(
+                        pd, (UIntPtr)d.Length, ps, (UIntPtr)s.Length, pm, (UIntPtr)m.Length, ph, (UIntPtr)h.Length, pe, (UIntPtr)e.Length, token));
+            });
+            {
+                var j = (Dictionary<string, object?>)Json.Parse(text)!;
                 long L(string k) => (long)(double)j[k]!;
                 return new VectorInstallReport
                 {
@@ -667,15 +686,17 @@ namespace SeforimSearch.Engine
                 };
             IReadOnlyList<VectorRelease>? chain = null;
             if (installed != null && same) chain = await Locator.FindDeltaChainAsync(target, installed.Value, ct).ConfigureAwait(false);
+            string? model = candidates.FirstOrDefault(c => c.Family == target.Family && c.ModelFamilyId == target.ModelFamilyId)?.ModelJson;
             VectorInstallReport? last = null;
             foreach (var r in chain == null || chain.Count == 0 ? new[] { target } : chain)
-                last = await InstallReleaseAsync(r, progress, ct).ConfigureAwait(false);
+                last = await InstallReleaseAsync(r, progress, ct, model).ConfigureAwait(false);
             return last;
         }
 
         /// <summary>Downloads every file of <paramref name="release"/> to incoming/, joins parts,
         /// expands, checks the segment's size and SHA-256 and installs it in the engine.</summary>
-        public async Task<VectorInstallReport> InstallReleaseAsync(VectorRelease release, IProgress<(string Stage, long Done, long? Total)>? progress = null, CancellationToken ct = default)
+        public async Task<VectorInstallReport> InstallReleaseAsync(VectorRelease release, IProgress<(string Stage, long Done, long? Total)>? progress = null,
+            CancellationToken ct = default, string? expectedModelJson = null)
         {
             Directory.CreateDirectory(Incoming);
             var local = new List<string>();
@@ -703,7 +724,7 @@ namespace SeforimSearch.Engine
                 throw new VectorReleaseException(VectorFailure.Checksum, $"expanded segment is {written} bytes, expected {release.SegmentSize}");
             }
             progress?.Report(("install", 0, null));
-            var report = await Task.Run(() => VectorSet.Install(SetDir, segment, release.ManifestJson, release.PublishedManifestSha256), ct).ConfigureAwait(false);
+            var report = await Task.Run(() => VectorSet.Install(SetDir, segment, release.ManifestJson, release.PublishedManifestSha256, expectedModelJson, ct), ct).ConfigureAwait(false);
             foreach (var p in local.Append(compressed).Distinct())
                 if (File.Exists(p)) File.Delete(p);
             return report;

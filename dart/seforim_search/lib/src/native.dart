@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 17;
+const int seforimAbiVersion = 18;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -228,12 +228,13 @@ final class SeforimNative {
             int Function(Pointer<Uint8>, int, Pointer<Uint8>, int)>('se_oxv_expand'),
         oxvInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
             Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_oxv_info'),
-        oxvVerify = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size),
-            Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int)>('se_oxv_verify'),
+        oxvVerify = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>)>('se_oxv_verify'),
         vectorsInstall = lib.lookupFunction<
-            Pointer<Utf8> Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Uint8>, Size),
-            Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>,
-                int)>('se_vectors_install'),
+            Pointer<Utf8> Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Uint8>, Size,
+                Pointer<Uint8>, Size, Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int,
+                Pointer<Uint8>, int, Pointer<Void>)>('se_vectors_install'),
         vectorsInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_vectors_info'),
         semanticSearch = lib.lookupFunction<
@@ -348,9 +349,9 @@ final class SeforimNative {
   final int Function(Pointer<Void>, Pointer<Uint8>, int, int) vectorsSetMapping;
   final int Function(Pointer<Uint8>, int, Pointer<Uint8>, int) oxvExpand;
   final Pointer<Utf8> Function(Pointer<Uint8>, int) oxvInfo;
-  final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int) oxvVerify;
-  final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int)
-      vectorsInstall;
+  final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>) oxvVerify;
+  final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int,
+      Pointer<Uint8>, int, Pointer<Void>) vectorsInstall;
   final Pointer<Utf8> Function(Pointer<Void>) vectorsInfo;
   final Pointer<Utf8> Function(Pointer<Void>, Pointer<Float>, int, Pointer<Uint8>, int, Pointer<Void>) semanticSearch;
   final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int) fuseSemantic;

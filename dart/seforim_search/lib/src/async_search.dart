@@ -139,12 +139,13 @@ final class SearchWorker {
   /// [installVectorSegment] on the worker (hashes and verifies the whole segment
   /// off the calling isolate).
   Future<VectorInstallReport> installVectorSegment(String setDir, String segmentPath, String manifestJson,
-          {String? publishedManifestSha256}) =>
-      _call('installVectorSegment', setDir, (segmentPath, manifestJson, publishedManifestSha256));
+          {String? publishedManifestSha256, String? expectedModelJson, SearchCancelToken? cancel}) =>
+      _call('installVectorSegment', setDir, (segmentPath, manifestJson, publishedManifestSha256, expectedModelJson),
+          cancel?.address);
 
   /// [verifyOxv] on the worker.
-  Future<Map<String, dynamic>> verifyOxv(String path, {String? manifestJson}) =>
-      _call('verifyOxv', path, manifestJson);
+  Future<Map<String, dynamic>> verifyOxv(String path, {String? manifestJson, SearchCancelToken? cancel}) =>
+      _call('verifyOxv', path, manifestJson, cancel?.address);
 
   /// [SemanticIndex.mapVectorBook] on the worker.
   Future<void> mapVectorBook(String name, int bookId, List<int> lineIds) =>
@@ -555,10 +556,11 @@ void _workerMain((SendPort, String, String?) args) {
         case 'closeVectors':
           index.closeVectors();
         case 'installVectorSegment':
-          final (segment, manifest, published) = b as (String, String, String?);
-          value = installVectorSegment(a as String, segment, manifest, publishedManifestSha256: published);
+          final (segment, manifest, published, model) = b as (String, String, String?, String?);
+          value = installVectorSegment(a as String, segment, manifest,
+              publishedManifestSha256: published, expectedModelJson: model, cancelAddress: c as int?);
         case 'verifyOxv':
-          value = verifyOxv(a as String, manifestJson: b as String?);
+          value = verifyOxv(a as String, manifestJson: b as String?, cancelAddress: c as int?);
         case 'mapVectorBook':
           final (bookId, lineIds) = b as (int, List<int>);
           index.mapVectorBook(a as String, bookId, lineIds);

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{install, sha256_hex, verify_segment};
+use super::{install, install_with, sha256_hex, verify_segment, InstallOptions};
 use crate::oxv::{self, OxvBookMap, OxvFile, TestBook, TestCodec, TestSegment, TestSlot};
 use crate::set::{self, LineMap, LineSearch, SegmentSet};
 
@@ -322,4 +322,42 @@ fn digests_are_recomputed_and_a_crash_is_recovered() {
     assert!(!dir.join("CURRENT.123.tmp").exists());
     assert!(!dir.join("gen-000009").exists());
     assert!(SegmentSet::open(&dir).is_ok());
+}
+
+#[test]
+fn the_model_identity_types_and_cancellation_are_checked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (b, x) = segments(tmp.path());
+    let (mb, mx) = (manifest(&b), manifest(&x));
+    let dir = tmp.path().join("v");
+    let with = |seg: &Path, m: &str, model: Option<&str>, cancel: Option<&std::sync::atomic::AtomicBool>| {
+        install_with(&dir, seg, m, &InstallOptions { expected_model_json: model, cancel, ..Default::default() })
+    };
+    // the query model's model.json: another family or chunking is refused
+    let e = with(&b, &mb, Some(r#"{"family_id":"g","chunking_identity":7}"#), None).unwrap_err().to_string();
+    assert!(e.contains("model.family_id"), "{e}");
+    let e = with(&b, &mb, Some(r#"{"family_id":"f","chunking_identity":8}"#), None).unwrap_err().to_string();
+    assert!(e.contains("model.chunking_identity"), "{e}");
+    let e = with(&b, &mb, Some(r#"{"family_id":"f","chunking_identity":7,"query_packages":[{"checksum":"other","quantization":"int8"}]}"#), None);
+    assert!(e.is_err());
+    assert!(with(&b, &mb, Some(r#"{"chunking_identity":7}"#), None).is_err(), "family_id required");
+    assert!(!dir.join("CURRENT").exists());
+    // a number written as text is refused, as the sidecar's typed identity does
+    let texted = mb.replace("\"embedding_dim\":4", "\"embedding_dim\":\"4\"");
+    assert_ne!(texted, mb);
+    let e = verify_segment(&b, Some(&texted)).unwrap_err().to_string();
+    assert!(e.contains("model.embedding_dim"), "{e}");
+    // the right model installs
+    let model = r#"{"family_id":"f","chunking_identity":7,"embedding_dim":4,"query_packages":[{"checksum":"c","quantization":"fp32"}]}"#;
+    with(&b, &mb, Some(model), None).unwrap();
+    // a cancelled delta install leaves the set as it was, nothing staged
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    assert!(matches!(with(&x, &mx, Some(model), Some(&stop)), Err(crate::Error::Cancelled)));
+    assert!(!dir.join("staging").exists());
+    assert!(!dir.join(format!("segments/{}.oxv", "22".repeat(16))).exists());
+    assert_eq!(SegmentSet::open(&dir).unwrap().info(None).library_version, 1);
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    assert!(matches!(super::verify_segment_cancellable(&b, None, Some(&stop)), Err(crate::Error::Cancelled)));
+    // not cancelled: it applies
+    assert_eq!(with(&x, &mx, Some(model), None).unwrap().library_version, 2);
 }

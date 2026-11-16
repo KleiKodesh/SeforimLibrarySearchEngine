@@ -16,13 +16,17 @@
 //! Ported too: `recover` (staging, temporary pointers, garbage) before every
 //! install, the directory flushes (`sync_dir`, Unix only as in the sidecar), and
 //! the identity and package digests recomputed from the manifest
-//! (`IndexVersion::identity_digest`, `IndexPackage::digest`) and checked. Not
-//! ported: the expected model identity (the host checks it when it picks the
-//! release); the manifest's published SHA-256 is checked when the host passes it.
+//! (`IndexVersion::identity_digest`, `IndexPackage::digest`) and checked;
+//! the expected model identity (`InstallExpectation`, from the query model's
+//! model.json as Otzaria's app passes it), a manifest whose identity holds a value
+//! of the wrong JSON type refused (the sidecar's typed `IndexVersion`), and
+//! cancellation (between blocks, hashed chunks and slot ranges; a cancelled install
+//! leaves the set as it was, `recover` clearing what it staged).
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -181,12 +185,21 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex(&sha2::Sha256::digest(bytes))
 }
 
-fn hash_file(path: &Path) -> Result<String> {
+/// cancellation.rs `checkpoint`: stop when the host cancelled.
+fn checkpoint(cancel: Option<&AtomicBool>) -> Result<()> {
+    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return Err(Error::Cancelled);
+    }
+    Ok(())
+}
+
+fn hash_file(path: &Path, cancel: Option<&AtomicBool>) -> Result<String> {
     use sha2::Digest;
     let mut file = File::open(path)?;
     let mut hasher = sha2::Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
+        checkpoint(cancel)?;
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
@@ -194,6 +207,23 @@ fn hash_file(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex(&hasher.finalize()))
+}
+
+/// install.rs `copy_hashing` without the hash: a copy checked for cancellation.
+fn copy_checked(from: &Path, to: &Path, cancel: Option<&AtomicBool>) -> Result<()> {
+    let mut input = File::open(from)?;
+    let mut output = File::create(to)?;
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        checkpoint(cancel)?;
+        let n = input.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        output.write_all(&buf[..n])?;
+    }
+    output.sync_all()?;
+    Ok(())
 }
 
 fn u16_at(b: &[u8], at: usize) -> u16 {
@@ -208,7 +238,7 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 
 /// reader.rs `verify_blocks`: each 1 MiB block of the block-summed sections, in
 /// directory order, against `BLOCK_CRCS`. Returns the blocks checked.
-fn verify_blocks(b: &[u8]) -> Result<u64> {
+fn verify_blocks(b: &[u8], cancel: Option<&AtomicBool>) -> Result<u64> {
     let sections = u32_at(b, 28) as usize;
     let mut summed = Vec::new();
     let mut crcs = None;
@@ -233,6 +263,7 @@ fn verify_blocks(b: &[u8]) -> Result<u64> {
     let mut index = 0;
     for (kind, range) in summed {
         for (n, block) in b[range].chunks(BLOCK_SIZE).enumerate() {
+            checkpoint(cancel)?;
             let (actual, expected) = (crc32fast::hash(block), u32_at(crcs, index * 4));
             if actual != expected {
                 return Err(bad(format!(
@@ -315,11 +346,15 @@ fn identity_value(identity: &Value, path: &str, pointer: &str) -> Result<Option<
     if path == "model.query_max_tokens" && v.is_none_or(Value::is_null) {
         return Ok(None);
     }
-    let missing = || bad(format!("its identity has no {path}"));
+    let missing = || bad(format!("its identity has no {path} of the type the sidecar reads"));
+    let text = matches!(
+        path,
+        "model.family_id" | "model.tokenizer_checksum" | "model.pooling" | "store.backend_id" | "store.vector_precision"
+    );
     Ok(Some(match v.ok_or_else(missing)? {
-        Value::String(s) => s.clone(),
-        Value::Number(n) if n.is_u64() => n.to_string(),
-        Value::Array(packages) => {
+        Value::String(s) if text => s.clone(),
+        Value::Number(n) if !text && n.is_u64() && path != "model.query_packages" => n.to_string(),
+        Value::Array(packages) if path == "model.query_packages" => {
             let mut all = Vec::new();
             for p in packages {
                 let (Some(c), Some(q)) = (p.get("checksum").and_then(Value::as_str), p.get("quantization").and_then(Value::as_str)) else {
@@ -418,6 +453,39 @@ fn recover(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// versioning.rs `mismatches_against` for the model group the host knows: the
+/// query model's model.json (as Otzaria's app passes `modelIdentityJson`). Each
+/// identity field it names must be equal; its query packages must all be ones the
+/// release accepts (membership, by checksum). `family_id` and `chunking_identity`
+/// are required.
+fn check_expected_model(identity: &Value, model_json: &str) -> Result<()> {
+    let expected: Value = serde_json::from_str(model_json).map_err(|e| bad(format!("model.json: {e}")))?;
+    let mut mismatches = Vec::new();
+    for (path, _) in IDENTITY_FIELDS {
+        let Some(key) = path.strip_prefix("model.") else { continue };
+        let wanted = expected.get(key);
+        if wanted.is_none() && matches!(key, "family_id" | "chunking_identity") {
+            return Err(bad(format!("model.json has no {key}")));
+        }
+        let Some(wanted) = wanted.filter(|w| !w.is_null()) else { continue };
+        let artifact = identity.pointer(&format!("/model/{key}"));
+        let agrees = if key == "query_packages" {
+            let accepted: Vec<&Value> = artifact.and_then(Value::as_array).map(|a| a.iter().filter_map(|p| p.get("checksum")).collect()).unwrap_or_default();
+            wanted.as_array().is_some_and(|w| w.iter().all(|p| p.get("checksum").is_some_and(|c| accepted.contains(&c))))
+        } else {
+            artifact == Some(wanted)
+        };
+        if !agrees {
+            mismatches.push(format!("{path}: release {}, model {wanted}", artifact.map_or("none".to_string(), Value::to_string)));
+        }
+    }
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(bad(format!("the release is not of the query model: {}", mismatches.join("; "))))
+    }
+}
+
 fn parse_manifest(json: &str) -> Result<ReleaseManifest> {
     let m: ReleaseManifest =
         serde_json::from_str(json).map_err(|e| bad(format!("its release manifest is not one this build reads: {e}")))?;
@@ -444,8 +512,13 @@ fn parse_manifest(json: &str) -> Result<ReleaseManifest> {
 /// Verifies a plain `.oxv`: header and directory, every block CRC and, given
 /// its release manifest, that the header is the one the manifest describes.
 pub fn verify_segment(path: &Path, manifest_json: Option<&str>) -> Result<VerifyReport> {
+    verify_segment_cancellable(path, manifest_json, None)
+}
+
+/// [`verify_segment`], stopping with [`Error::Cancelled`] between blocks.
+pub fn verify_segment_cancellable(path: &Path, manifest_json: Option<&str>, cancel: Option<&AtomicBool>) -> Result<VerifyReport> {
     let seg = OxvFile::open(path)?;
-    let blocks = verify_blocks(seg.bytes())?;
+    let blocks = verify_blocks(seg.bytes(), cancel)?;
     if let Some(json) = manifest_json {
         check_header(&parse_manifest(json)?, &seg)?;
     }
@@ -606,13 +679,38 @@ fn collect_garbage(dir: &Path) {
     }
 }
 
-/// install.rs `install_package`: installs the plain `.oxv` at `segment` (as
-/// `manifest_json` describes it; `published_sha256`: the manifest's published
-/// SHA-256, checked when given) into the set at `dir`. A segment inside
-/// `<dir>/incoming/` is moved into the set, any other copied.
+/// What an install expects besides the manifest (install.rs `InstallExpectation`).
+#[derive(Default)]
+pub struct InstallOptions<'a> {
+    /// The manifest's published SHA-256.
+    pub published_sha256: Option<&'a str>,
+    /// The query model's model.json: the release must be of it.
+    pub expected_model_json: Option<&'a str>,
+    /// Set by the host to stop the install (between blocks, hashed chunks and slot ranges).
+    pub cancel: Option<&'a AtomicBool>,
+}
+
+/// [`install_with`] with only the published SHA-256.
 pub fn install(dir: &Path, segment: &Path, manifest_json: &str, published_sha256: Option<&str>) -> Result<InstallReport> {
+    install_with(dir, segment, manifest_json, &InstallOptions { published_sha256, ..Default::default() })
+}
+
+/// install.rs `install_package`: installs the plain `.oxv` at `segment` (as
+/// `manifest_json` describes it) into the set at `dir`, as [`InstallOptions`] expect.
+/// A segment inside `<dir>/incoming/` is moved into the set, any other copied.
+pub fn install_with(dir: &Path, segment: &Path, manifest_json: &str, opts: &InstallOptions) -> Result<InstallReport> {
     let _lock = SetLock::take(dir)?;
     recover(dir)?;
+    let r = install_locked(dir, segment, manifest_json, opts);
+    if matches!(r, Err(Error::Cancelled)) {
+        // a cancelled install changed nothing the set names; what it staged goes
+        let _ = recover(dir);
+    }
+    r
+}
+
+fn install_locked(dir: &Path, segment: &Path, manifest_json: &str, opts: &InstallOptions) -> Result<InstallReport> {
+    let (published_sha256, cancel) = (opts.published_sha256, opts.cancel);
     if let Some(p) = published_sha256 {
         let actual = sha256_hex(manifest_json.as_bytes());
         if actual != p {
@@ -620,6 +718,9 @@ pub fn install(dir: &Path, segment: &Path, manifest_json: &str, published_sha256
         }
     }
     let m = parse_manifest(manifest_json)?;
+    if let Some(model) = opts.expected_model_json {
+        check_expected_model(&m.identity, model)?;
+    }
 
     // The generation it goes on (CURRENT, else PREVIOUS, as the set opens).
     let base_pointer = [read_pointer(dir, "CURRENT"), read_pointer(dir, "PREVIOUS")]
@@ -672,7 +773,10 @@ pub fn install(dir: &Path, segment: &Path, manifest_json: &str, published_sha256
         let staging = dir.join("staging");
         fs::create_dir_all(&staging)?;
         let staged = staging.join(format!("{}.oxv", m.segment_id));
-        fs::copy(segment, &staged)?;
+        if let Err(e) = copy_checked(segment, &staged, cancel) {
+            let _ = fs::remove_file(&staged);
+            return Err(e);
+        }
         staged
     };
     let checked = (|| -> Result<(String, OxvFile)> {
@@ -680,13 +784,13 @@ pub fn install(dir: &Path, segment: &Path, manifest_json: &str, published_sha256
         if size != m.segment.size {
             return Err(bad(format!("the segment is {size} bytes, and its manifest declares {}", m.segment.size)));
         }
-        let sha = hash_file(&staged)?;
+        let sha = hash_file(&staged, cancel)?;
         if sha != m.segment.sha256 {
             return Err(bad(format!("the segment hashes to {sha}, and its manifest declares {}", m.segment.sha256)));
         }
         let new_seg = OxvFile::open(&staged)?;
         check_header(&m, &new_seg)?;
-        verify_blocks(new_seg.bytes())?;
+        verify_blocks(new_seg.bytes(), cancel)?;
         Ok((sha, new_seg))
     })();
     let (sha, new_seg) = match checked {
@@ -739,6 +843,9 @@ pub fn install(dir: &Path, segment: &Path, manifest_json: &str, published_sha256
         for (seg, older) in older.iter().enumerate() {
             let dead = &mut deleted[seg];
             for slot in 0..older.slot_count() {
+                if slot % (1 << 20) == 0 {
+                    checkpoint(cancel)?;
+                }
                 let (w, bit) = (slot as usize / 64, 1u64 << (slot % 64));
                 if dead[w] & bit != 0 {
                     continue;
@@ -789,10 +896,10 @@ pub fn install(dir: &Path, segment: &Path, manifest_json: &str, published_sha256
     // Place the segment (files.rs `place_segment`) and its manifest.
     fs::create_dir_all(dir.join("segments"))?;
     let target = dir.join(format!("segments/{}.oxv", m.segment_id));
-    let kept = target.exists() && hash_file(&target)? == sha;
+    let kept = target.exists() && hash_file(&target, cancel)? == sha;
     if !kept {
         if target.exists() {
-            let held = hash_file(&target)?;
+            let held = hash_file(&target, cancel)?;
             let live = ["CURRENT", "PREVIOUS"].iter().filter_map(|n| read_pointer(dir, n).ok().flatten()).filter_map(|p| read_generation(dir, &p)).any(|d| {
                 d.segments.iter().any(|s| s.id == m.segment_id && s.sha256 == held)
             });

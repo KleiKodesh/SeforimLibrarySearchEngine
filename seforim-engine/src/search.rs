@@ -79,7 +79,7 @@ impl CancelToken {
     }
 
     /// The shared flag (for a tantivy operation that takes one).
-    pub(crate) fn flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+    pub fn flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
         self.0.clone()
     }
 

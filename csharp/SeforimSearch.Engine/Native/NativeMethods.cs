@@ -277,11 +277,12 @@ namespace SeforimSearch.Engine.Native
         public static extern IntPtr se_oxv_info(byte* path, UIntPtr pathLen);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_oxv_verify(byte* path, UIntPtr pathLen, byte* manifest, UIntPtr manifestLen);
+        public static extern IntPtr se_oxv_verify(byte* path, UIntPtr pathLen, byte* manifest, UIntPtr manifestLen, CancelTokenHandle token);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr se_vectors_install(byte* setDir, UIntPtr setDirLen, byte* segment, UIntPtr segmentLen,
-            byte* manifest, UIntPtr manifestLen, byte* publishedSha256, UIntPtr publishedSha256Len);
+            byte* manifest, UIntPtr manifestLen, byte* publishedSha256, UIntPtr publishedSha256Len,
+            byte* modelJson, UIntPtr modelJsonLen, CancelTokenHandle token);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr se_vectors_info(IndexHandle index);

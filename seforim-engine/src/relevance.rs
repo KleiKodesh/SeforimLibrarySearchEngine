@@ -1098,13 +1098,15 @@ impl Bm25StatisticsProvider for GroupStatistics<'_> {
     }
 }
 
-/// The index snapshot a search ran on, as hybrid fusion reads it
-/// ([`hybrid_bm25`]). It keeps that snapshot's segments open while the
-/// result lives; the BM25 itself is computed only when fusion runs.
+/// What hybrid fusion reads the index through ([`hybrid_bm25`]): the
+/// index's shared reader, not a snapshot, so a live result pins no segment
+/// (issue #40, `release_memory`); fusion takes the current snapshot and finds
+/// the hits there by line id.
 #[derive(Clone)]
 pub(crate) struct HybridSource {
-    pub searcher: Searcher,
+    pub reader: crate::index::SharedReader,
     pub field: Field,
+    pub line_id: Field,
     pub marked_terms: bool,
     pub positions: bool,
 }
@@ -1112,8 +1114,9 @@ pub(crate) struct HybridSource {
 impl crate::LineIndex {
     pub(crate) fn hybrid_source(&self) -> HybridSource {
         HybridSource {
-            searcher: self.reader.searcher(),
+            reader: self.reader.clone(),
             field: self.fields.text,
+            line_id: self.fields.line_id,
             marked_terms: self.options.keep_marks,
             positions: self.options.positions,
         }
@@ -1125,8 +1128,12 @@ impl crate::LineIndex {
 const MAX_SPELLING_PHRASES: usize = 16;
 
 /// The lexical side of Otzaria's hybrid search (issue #18): the BM25 score
-/// of Otzaria's exact query for `query` (`build_exact_query_with`), per line
-/// it matches, keyed by line id. The query's words are the index tokenizer's
+/// of Otzaria's exact query for `query` (`build_exact_query_with`) for each
+/// of `lines` (the search's hits) it matches, keyed by line id. Only those
+/// lines are scored (each found by its line id, the postings sought to it),
+/// so a book filter or a narrow search costs only its hits; the statistics
+/// (doc frequency, average field norm) are index-wide, as Otzaria's
+/// query computes them (tantivy's `Bm25Weight`). The query's words are the index tokenizer's
 /// (a word too long to index dropped, as Otzaria's `RemoveLongFilter`):
 ///
 /// - one word: `quote_expansion::term_query`: the word's spellings (the word
@@ -1145,13 +1152,9 @@ const MAX_SPELLING_PHRASES: usize = 16;
 /// (`build_smart_exact_query` with alternatives). The words are scanned from
 /// the raw string (Otzaria's hybrid query is plain text): query syntax such
 /// as an exclude word or a wildcard's stem counts as a word (named).
-pub(crate) fn hybrid_bm25(
-    searcher: &Searcher,
-    field: Field,
-    marked_terms: bool,
-    positions: bool,
-    query: &str,
-) -> Result<HashMap<u64, Score>> {
+pub(crate) fn hybrid_bm25(source: &HybridSource, query: &str, lines: &[u64]) -> Result<HashMap<u64, Score>> {
+    let searcher = &source.reader.searcher();
+    let (field, marked_terms, positions) = (source.field, source.marked_terms, source.positions);
     let mut words: Vec<String> = Vec::new();
     hebrew_fts::scanner::scan_with(query, false, |w, span| {
         if span.term_bytes < hebrew_fts::chars::MAX_TERM_BYTES && !w.is_empty() {
@@ -1159,7 +1162,7 @@ pub(crate) fn hybrid_bm25(
         }
     });
     let mut out: HashMap<u64, Score> = HashMap::new();
-    if words.is_empty() {
+    if words.is_empty() || lines.is_empty() {
         return Ok(out);
     }
     if words.len() > 1 && !positions {
@@ -1200,45 +1203,61 @@ pub(crate) fn hybrid_bm25(
         None
     };
     for segment in searcher.segment_readers() {
-        let inverted = segment.inverted_index(field)?;
+        // the hits' live docs in this segment, ascending
+        let ids = segment.inverted_index(source.line_id)?;
         let alive = segment.alive_bitset();
-        let is_alive = |doc: DocId| alive.is_none_or(|a| a.is_alive(doc));
-        let line_ids = segment.fast_fields().u64("line_id")?;
-        let mut add = |doc: DocId, score: Score| {
-            if let Some(id) = line_ids.first(doc) {
-                let e = out.entry(id).or_insert(0.0);
-                *e = e.max(score);
+        let mut docs: Vec<(DocId, u64)> = Vec::new();
+        for &id in lines {
+            if let Some(mut p) = ids.read_postings(&Term::from_field_u64(source.line_id, id), IndexRecordOption::Basic)? {
+                let mut doc = p.doc();
+                while doc != tantivy::TERMINATED {
+                    if alive.is_none_or(|a| a.is_alive(doc)) {
+                        docs.push((doc, id));
+                    }
+                    doc = p.advance();
+                }
             }
+        }
+        if docs.is_empty() {
+            continue;
+        }
+        docs.sort_unstable();
+        docs.dedup();
+        let inverted = segment.inverted_index(field)?;
+        let mut add = |id: u64, score: Score| {
+            let e = out.entry(id).or_insert(0.0);
+            *e = e.max(score);
         };
         if let Some(bm25) = &single {
             let Some(mut union) = open_union(&inverted, field, &spellings[0], IndexRecordOption::Basic)? else {
                 continue;
             };
             let fieldnorms = segment.get_fieldnorms_reader(field)?;
-            let mut doc = union.doc();
-            while doc != tantivy::TERMINATED {
-                if is_alive(doc) {
-                    add(doc, bm25.score(fieldnorms.fieldnorm_id(doc), 1));
+            for &(doc, id) in &docs {
+                if holds(&mut union, doc) {
+                    add(id, bm25.score(fieldnorms.fieldnorm_id(doc), 1));
                 }
-                doc = union.advance();
             }
             continue;
         }
-        let mut sums: HashMap<DocId, Score> = HashMap::new();
+        let mut sums: Vec<Option<Score>> = vec![None; docs.len()];
         for (slots, bm25) in &phrases {
             let Some(Part::Phrase { mut scorer, .. }) = phrase_part(segment, &inverted, field, slots, Some(bm25.clone()), 0, None)? else {
                 continue;
             };
-            let mut doc = scorer.doc();
-            while doc != tantivy::TERMINATED {
-                if is_alive(doc) {
-                    *sums.entry(doc).or_insert(0.0) += tantivy::query::Scorer::score(scorer.as_mut());
+            for (i, &(doc, _)) in docs.iter().enumerate() {
+                if scorer.doc() < doc {
+                    scorer.seek(doc);
                 }
-                doc = scorer.advance();
+                if scorer.doc() == doc {
+                    *sums[i].get_or_insert(0.0) += tantivy::query::Scorer::score(scorer.as_mut());
+                }
             }
         }
-        for (doc, score) in sums {
-            add(doc, score);
+        for (&(_, id), sum) in docs.iter().zip(sums) {
+            if let Some(score) = sum {
+                add(id, score);
+            }
         }
     }
     Ok(out)
@@ -1600,6 +1619,45 @@ mod tests {
         assert_eq!(o.order, ResultsOrder::Catalog);
         let o: SearchOptions = serde_json::from_str(r#"{"query":"x"}"#).unwrap();
         assert_eq!(o.order, ResultsOrder::Catalog);
+    }
+
+    /// Issue #18 follow-up: the hybrid BM25 scores only the hits (a book
+    /// filter scores its lines as the unfiltered search does: index-wide
+    /// statistics), and a live result pins no snapshot (issue #40).
+    #[test]
+    fn hybrid_bm25_scores_the_hits_with_index_wide_statistics() {
+        use crate::semantic::FusionOptions;
+        let texts = [
+            (1u64, "alpha beta gamma"),
+            (1, "beta alpha"),
+            (2, "alpha beta alpha beta"),
+            (2, "alpha"),
+            (3, "gamma delta"),
+        ];
+        let (_dir, index) = build(IndexOptions::default(), &texts);
+        let lexical = |r: &crate::SearchResult, q: &str| -> HashMap<u64, Option<f32>> {
+            r.fuse_semantic(q, &[], &FusionOptions::default()).unwrap().into_iter().map(|f| (f.line_id, f.lexical)).collect()
+        };
+        for q in ["alpha", "alpha beta"] {
+            let all = index.search_options(&crate::SearchOptions { query: q.into(), ..Default::default() }).unwrap();
+            let book2 =
+                index.search_options(&crate::SearchOptions { query: q.into(), books: Some(vec![2]), ..Default::default() }).unwrap();
+            let (all_l, b2) = (lexical(&all, q), lexical(&book2, q));
+            assert!(!b2.is_empty() && b2.keys().all(|id| *id == 102 || *id == 103), "{q}: {b2:?}");
+            for (id, l) in &b2 {
+                assert_eq!(all_l[id], *l, "{q}: line {id}");
+            }
+            // only the hits are scored
+            let source = index.hybrid_source();
+            let only = hybrid_bm25(&source, q, &[102]).unwrap();
+            assert_eq!(only.keys().copied().collect::<Vec<_>>(), vec![102]);
+            assert_eq!(Some(only[&102]), all_l[&102]);
+        }
+        // a live result across release_memory: same numbers
+        let live = index.search_options(&crate::SearchOptions { query: "alpha".into(), ..Default::default() }).unwrap();
+        let before = lexical(&live, "alpha");
+        index.release_memory().unwrap();
+        assert_eq!(lexical(&live, "alpha"), before);
     }
 
     #[test]

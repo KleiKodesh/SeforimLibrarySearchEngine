@@ -252,7 +252,8 @@ impl SearchResult {
         };
         let exact = match &self.hybrid {
             Some(h) if !self.hits.is_empty() => {
-                crate::relevance::hybrid_bm25(&h.searcher, h.field, h.marked_terms, h.positions, query)?
+                let lines: Vec<u64> = self.hits.iter().map(|h| h.line_id).collect();
+                crate::relevance::hybrid_bm25(h, query, &lines)?
             }
             _ => std::collections::HashMap::new(),
         };

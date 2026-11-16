@@ -2240,7 +2240,12 @@ The lexical side is Otzaria's: each hit's BM25 under Otzaria's exact query for
 the typed string (`build_exact_query_with`; one word = its quote spellings as
 one term, doc frequencies summed, term frequency 1; several words = the exact
 phrase, slop 0, the sum over up to 16 spelling combinations), computed by the
-engine (`relevance::hybrid_bm25`); the search's own order and relevance scores
+engine (`relevance::hybrid_bm25`) at fusion time for the search's hits only
+(each found by line id in the current snapshot, so a book filter costs only its
+hits and a live result pins no segment; fusion reads the index as it is
+then, so a line updated since the search is scored in its new version or, gone,
+has no lexical score), with index-wide statistics as
+Otzaria's; the search's own order and relevance scores
 play no part, so any order works. Weighted (Otzaria's default "Balanced"
 profile) = alpha x `bm25 / (10 + bm25)` + (1 - alpha) x `(cos + 1) / 2`, + 0.10
 when both sides found the line, alpha by Otzaria's query-type table (quoted

@@ -11,11 +11,11 @@
 //! - lexical only: the plain search, unchanged (the default);
 //! - semantic only: [`LineIndex::semantic_search`], the top k lines by cosine
 //!   similarity, filtered by books like the lexical search;
-//! - hybrid: [`SearchResult::fuse_semantic`] fuses a finished lexical search
-//!   with a semantic top-k list as Otzaria's hybrid search does: the lexical
-//!   side is the BM25 of Otzaria's exact query (`relevance::hybrid_bm25`),
-//!   fused by Otzaria's weighted (Balanced) or RRF (Fast) profile
-//!   (`seforim_vectors::fusion`).
+//! - hybrid: [`LineIndex::hybrid_session`] = Otzaria's hybrid session: per
+//!   page a doubling candidate window of both sides, the lexical side the BM25
+//!   top window of Otzaria's smart exact query
+//!   (`relevance::hybrid_lexical_window`), fused by Otzaria's weighted
+//!   (Balanced) or RRF (Fast) profile (`seforim_vectors::fusion`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

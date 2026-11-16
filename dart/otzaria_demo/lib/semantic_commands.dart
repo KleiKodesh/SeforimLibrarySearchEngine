@@ -145,9 +145,9 @@ Map<OxvSkip, int> mapVectorBooks(SeforimIndex index, SeforimDb db, String vector
     }
     final ids = <int>[];
     final rows = <Uint8List>[];
-    for (final line in db.bookLines(bookId)) {
-      ids.add(line.id);
-      rows.add(utf8.encode(line.text));
+    for (final (id, raw) in db.bookRawRows(bookId)) {
+      ids.add(id);
+      rows.add(raw);
     }
     if (ids.isEmpty) {
       skips[OxvSkip.notInDb] = skips[OxvSkip.notInDb]! + 1;

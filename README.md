@@ -2421,7 +2421,9 @@ mean / p95 search latency and the peak working set.
 the text check alone and lists the books with the most unverified records. The
 host reads note bodies with the DB's codec (zstd frames, like line content):
 read as raw bytes they failed the check of about 10% of the full library's
-records (every book with footnotes).
+records (every book with footnotes). Rows go as stored (`bookRawRows`: a
+TEXT row's own bytes, a leading BOM kept as Otzaria reads it); on the full
+library 28 (i8) and 58 (rot) records stayed unverified before that last fix.
 
 **Full-library latency on CI.** `.github/workflows/vectors.yml` (manual)
 downloads a vector release per codec (the QA491 i8 release and a rot release),

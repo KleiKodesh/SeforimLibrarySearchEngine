@@ -445,6 +445,31 @@ class SeforimSqlDb implements SeforimDataSource {
   /// feed; the next query's LIMIT shrinks to what fit.
   static const bookLinesChunkBytes = 32000000;
 
+  /// A real book's rows as stored, in `lineIndex, id` order: (line id, raw
+  /// content) with zstd frames decoded but nothing else touched (a leading BOM
+  /// kept, unlike [bookLines]): what Otzaria's vector text check rebuilds the
+  /// book's lines from (`chunker::book_lines` strips only the first row's BOM).
+  Iterable<(int, Uint8List)> bookRawRows(int bookId) sync* {
+    // CAST AS BLOB: a TEXT row's own bytes (a string read would lose a leading BOM)
+    final rows = _select(
+        'SELECT l.id, typeof($_contentCol), CAST($_contentCol AS BLOB) FROM line l$_contentJoin'
+        ' WHERE l.bookId = ? ORDER BY l.lineIndex, l.id',
+        [bookId]);
+    for (final r in rows) {
+      final id = r[0] as int;
+      final raw = r[2] as Uint8List?;
+      if (raw == null) {
+        yield (id, Uint8List(0));
+      } else if (r[1] == 'blob') {
+        yield (id, Uint8List.fromList(utf8.encode(_decodeFrame(raw, id))));
+      } else if (compressed && raw.length >= 8 && raw[0] == 0x4B && raw[1] == 0x4C && raw[2] == 0x55 && raw[3] == 0x76) {
+        yield (id, Uint8List.fromList(utf8.encode(_decodeRaw(utf8.decode(raw), id)))); // "KLUv": base64 text of a frame
+      } else {
+        yield (id, raw);
+      }
+    }
+  }
+
   /// One book's lines in reading order.
   ///
   /// Read in chunks (keyset on `lineIndex, id`), each one fully read before

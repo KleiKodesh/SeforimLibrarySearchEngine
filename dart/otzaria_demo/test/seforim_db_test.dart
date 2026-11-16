@@ -378,6 +378,10 @@ void main() {
     expect(db.hasNotes, isFalse);
     db.checkNoteIds();
     expect(db.lineTexts([1]), {1: 'alpha'}); // BOM stripped
+    // the vector text check reads rows as stored: the BOM stays (Otzaria's row bytes)
+    final raw = db.bookRawRows(1).toList();
+    expect(raw.map((r) => r.$1), [1]);
+    expect(raw.single.$2, [0xEF, 0xBB, 0xBF, ...'alpha'.codeUnits]);
     db.close();
   });
 

@@ -1,9 +1,6 @@
 import 'package:seforim_search/seforim_search.dart';
 
 import 'acronym_lexicon.dart';
-import 'lexicon_text.dart' show foldPresentationForms;
-import 'magic_dictionary.dart';
-import 'translation_lexicon.dart';
 
 /// Otzaria's search modes (`SearchMode`).
 enum SearchMode { exact, advanced, fuzzy }
@@ -236,7 +233,7 @@ class OtzariaSearch {
   /// Otzaria, only the fuzzy mode uses it: each word's dictionary forms
   /// join its slot as exact words (Otzaria's lexical TermSetQuery), the
   /// forms of a blacklisted lemma searched but not marked.
-  final MagicDictionary? magicDictionary;
+  final LexicalDb? magicDictionary;
 
   /// Otzaria acronym_alternatives: when any word has the option, the whole
   /// query's phrase alternatives (advanced mode only).
@@ -330,7 +327,7 @@ class OtzariaSearch {
   /// Word [i]'s overrides of the global options ([own] vs [global]) and its
   /// alternatives; null when it has neither.
   WordOptions? _wordOverride(Set<String> own, Set<String> global, List<String> alternatives,
-      [({List<String> marked, List<String> unmarked})? forms, int? cap]) {
+      ) {
     bool? d(String k) => own.contains(k) == global.contains(k) ? null : own.contains(k);
     final w = WordOptions(
       grammarPrefixes: d(OtzariaOption.grammaticalPrefixes),
@@ -346,36 +343,8 @@ class OtzariaSearch {
       matchNikud: d(OtzariaOption.nikud),
       matchTeamim: d(OtzariaOption.teamim),
       alternatives: [for (final a in alternatives) _queryWord(a)],
-      lexicalForms: forms?.marked,
-      unmarkedLexicalForms: forms?.unmarked,
-      maxExpandedTerms: cap,
     );
     return w.toJson().isEmpty ? null : w;
-  }
-
-  /// Word [word]'s dictionary forms (fuzzy mode with a [magicDictionary]),
-  /// exact words: Otzaria's `build_lexical_fuzzy_query` recall forms
-  /// minus the token and its quote-free spelling, split by its highlight
-  /// forms. None for a wildcard word. A quoted word takes them too: the
-  /// engine's lexical fuzzy phrase keeps each word's slot.
-  ({List<String> marked, List<String> unmarked})? _magicForms(String word) {
-    final dict = magicDictionary;
-    if (dict == null || mode != SearchMode.fuzzy) return null;
-    if (word.contains('*') || word.contains('?')) return null;
-    return dict.formsFor(word);
-  }
-
-  /// Otzaria's `MAX_LEXICAL_PHRASE_TERMS_PER_TOKEN`.
-  static const _lexicalPhraseTerms = 256;
-
-  /// A lexical fuzzy phrase word's edit-distance budget (Otzaria's
-  /// `lexical_fuzzy_phrase_terms`): 256 terms per word, the word, its
-  /// quote-free spelling and its dictionary forms taken first.
-  int _lexicalPhraseCap(String word, ({List<String> marked, List<String> unmarked})? forms) {
-    final t = indexToken(word);
-    final taken = {t, t.replaceAll(RegExp('[\'"]'), ''), ...?forms?.marked, ...?forms?.unmarked};
-    final left = _lexicalPhraseTerms - taken.length;
-    return left > 0 ? left : 1;
   }
 
   /// Negative word [i]'s options (Otzaria keys): its own set from
@@ -531,11 +500,7 @@ class OtzariaSearch {
       if (mode == SearchMode.advanced && o.contains(OtzariaOption.aramaicTranslation) && translations == null) {
         warnings.add('option "${OtzariaOption.aramaicTranslation}" needs --dictionary (Otzaria assets/dictionary.json)');
       }
-      final forms = _magicForms(words[k]);
-      // a lexical fuzzy phrase word (the whole query, or a quoted part the
-      // engine requires within 1 word): Otzaria's 256-term budget
-      final phraseWord = lexicalPhrase || (lexicalFuzzy && sentPhrases[k] != null);
-      final w = _wordOverride(o, global, alts, forms, phraseWord ? _lexicalPhraseCap(words[k], forms) : null);
+      final w = _wordOverride(o, global, alts);
       if (w != null) perWord[k] = w;
     }
     final s = _withOptions(
@@ -559,8 +524,15 @@ class OtzariaSearch {
     } else if (words.length > 1 && !partial && mode != SearchMode.fuzzy) {
       s.proximity = _proximity(words.length, customSpacing);
     }
-    // the fuzzy words ranked as Otzaria's lexical fuzzy query
-    s.lexicalFuzzy = lexicalFuzzy;
+    // Otzaria's lexical expansion (the package's step): in fuzzy mode every
+    // word takes its dictionary forms, the fuzzy words ranked as Otzaria's
+    // lexical fuzzy query; a lexical fuzzy phrase word (the whole query, or
+    // a quoted part the engine requires within 1 word) gets Otzaria's
+    // 256-term budget
+    if (lexicalFuzzy) {
+      magicDictionary!.expand(s, {for (var k = 0; k < words.length; k++) k: words[k]},
+          phraseWords: {for (var k = 0; k < words.length; k++) if (lexicalPhrase || sentPhrases[k] != null) k});
+    }
     // the negative query's default: Otzaria's distance and any order (its
     // negative custom spacing defaults to none)
     if (mode == SearchMode.advanced) s.proximityBase = (distance: distance, anyOrder: anyOrder);

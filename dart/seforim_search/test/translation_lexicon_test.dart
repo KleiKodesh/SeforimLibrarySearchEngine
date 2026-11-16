@@ -1,5 +1,4 @@
-import 'package:otzaria_demo/otzaria_query.dart';
-import 'package:otzaria_demo/translation_lexicon.dart';
+import 'package:seforim_search/seforim_search.dart';
 import 'package:test/test.dart';
 
 // Otzaria's own lexicon tests (lexicons.rs), ported.
@@ -47,14 +46,5 @@ void main() {
 
   test('garbage rejected', () {
     expect(() => TranslationLexicon.parse('not json'), throwsFormatException);
-  });
-
-  test('option adds the translations as word alternatives', () {
-    final req = OtzariaSearch(query: 'הכא', globalOptions: {OtzariaOption.aramaicTranslation: true},
-            translations: TranslationLexicon.parse('{"d": [ { "הכא": "כאן" } ]}'))
-        .toOptions();
-    final json = req.toJson().toString();
-    expect(json, contains('alternatives'));
-    expect(json, contains('כאן'));
   });
 }

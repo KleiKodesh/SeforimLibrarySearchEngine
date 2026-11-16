@@ -59,6 +59,13 @@ s.takeNewTerms();                                        // term table, indexed 
 s.close(); index.close();
 ```
 
+- **Vector set download / update** (`vector_download.dart`, issue #18; host file work, no UI):
+  `VectorSetUpdater(VectorSetWriter(dir)).update(libraryVersion, candidates: [VectorCandidate.fromModelJson(
+  VectorFamily.qa491Windows, modelJson)])` finds the release on GitHub (`VectorReleaseLocator`), downloads it
+  resumably into `<dir>/incoming/` (`VectorDownloader`), checks every SHA-256, expands with `expandOxv` and
+  installs the set directory Otzaria's sidecar lays out (`segments/`, `gen-NNNNNN/set.json` + `.del`,
+  `CURRENT` / `PREVIOUS`, `.lock`). Deltas and the segment block check need native hooks
+  (`VectorDeltaApplier`, `VectorSegmentVerifier`) not yet in the C ABI: see the root README.
 - **Offsets.** `Snippet.start`, `end` and the marks are UTF-16 offsets, so they index Dart strings directly.
 - **Freeing.** Every handle (index, writer, search) has a `NativeFinalizer`. `close()` frees the handle and detaches the finalizer, so a handle is never freed twice, and calling `close()` again does nothing.
 - **Lifetimes.** A writer or session keeps a reference to its index, so the index cannot be garbage-collected first. An explicit `index.close()` must still come last.

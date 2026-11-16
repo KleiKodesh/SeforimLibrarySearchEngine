@@ -2277,6 +2277,34 @@ its vector was built from (Otzaria compares a SHA-256 key of its chunker
 text; porting the chunker is open), so import the release of the host's
 library edition.
 
+**Downloading / updating a vector set (host, Dart `vector_download.dart`).**
+A port of Otzaria's app download step (release locator, download client,
+staged import) and of its sidecar's set layout, as a library feature (no UI,
+no app settings). `VectorReleaseLocator` finds the release of a library
+version on the GitHub releases API (library tag `^v(\d+)-`, family prefixes
+`VectorFamily.qa491Windows` / `qa491` / `pardesQa491Windows`, base manifest
+`*-base.manifest.json`, delta manifest `-v<from>-v<to>.manifest.json`), checks
+the manifest against the SHA-256 published in the release notes and the asset
+digest, and the model identity (`family_id`, `chunking_identity` of the query
+model's `model.json`, `VectorCandidate.fromModelJson`); `findDeltaChain` takes
+deltas of the same identity digest, at most 8 steps and half the base's size.
+`VectorDownloader` downloads to `<set>/incoming/` (`.partial` resumed with a
+Range request when the same asset was half done, size + SHA-256 checked, then
+renamed). `VectorSetUpdater.update` joins `.part-NNN` files, expands with
+`expandOxv`, checks the segment's size and SHA-256 and installs it with
+`VectorSetWriter`: `segments/<id>.oxv` + `<id>.package.json`,
+`gen-NNNNNN/set.json` + `<id>.del` (the sidecar's `OXVDEL1` bitmap with
+CRC-32), `PREVIOUS` (the old generation when a host can fall back to it, the
+sidecar's `falls_back_to`), `CURRENT` (`set_sha256` of set.json), `.lock`, and
+the sidecar's garbage collection of unnamed generations and segments. Native
+steps are hooks, not yet in the C ABI: `VectorSegmentVerifier` (the sidecar's
+header check + `verify_blocks`; a host without it relies on the SHA-256 of the
+whole segment) and `VectorDeltaApplier` (a delta's tombstones, duplicates and
+foreign links resolved against the older segments into `.del` / `.links`);
+without an applier the updater installs the base and a delta is refused. Not
+checked host-side: the manifest's package digest and identity digest (the
+sidecar's canonical hashing). C# has no port yet (only `ExpandOxv`).
+
 **Query embedding (host demos).** The Meivin model stays in the host: C#
 `MeivinEmbedder` (Microsoft.ML.OnnxRuntime 1.28.0) and Dart
 `meivin_embedder.dart` (ONNX Runtime C API through dart:ffi; `unorm_dart`

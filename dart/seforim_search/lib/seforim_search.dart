@@ -10,3 +10,4 @@ export 'src/index.dart' hide writerResortAndCloseAt;
 export 'src/session.dart';
 export 'src/async_search.dart';
 export 'src/semantic.dart';
+export 'src/vector_download.dart';

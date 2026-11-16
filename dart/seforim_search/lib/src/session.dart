@@ -63,7 +63,8 @@ final class SearchSession implements Finalizable {
 
   /// Hybrid ranking (issue #18): EVERY hit of this finished search fused with
   /// [semantic] (from [SemanticIndex.semanticSearch] with the same book
-  /// filter). Weighted fusion needs the search in relevance order; a
+  /// filter), Otzaria-style: the lexical side is the BM25 of Otzaria's
+  /// exact query (any search order); a
   /// streamed search must be pulled to the end ([pull]). [query] is the
   /// lexical query text (the weighted alpha by query type).
   List<FusedHit> fuseSemantic(String query, SemanticResult semantic, [FusionOptions fusion = const FusionOptions()]) {

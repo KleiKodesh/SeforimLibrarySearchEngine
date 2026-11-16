@@ -287,7 +287,7 @@ namespace SeforimSearch.Engine
 
         /// <summary>Hybrid ranking: EVERY hit of the finished lexical <paramref name="session"/>
         /// fused with <paramref name="semantic"/> (from <see cref="SemanticSearch"/> with the same book
-        /// filter). Weighted fusion needs the search in relevance order; a streamed search must be
+        /// filter), Otzaria-style: the lexical side is the BM25 of Otzaria's exact query (any search order); a streamed search must be
         /// pulled to the end. <paramref name="query"/> is the lexical query text (alpha by query type).</summary>
         public static FusedHit[] FuseSemantic(this SearchSession session, string query, SemanticResult semantic,
                                               FusionOptions? fusion = null)

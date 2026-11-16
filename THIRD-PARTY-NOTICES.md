@@ -10,18 +10,18 @@ The modified tantivy copy (`tantivy/`, MIT) is part of this repository's workspa
 | License | Crates |
 | --- | ---: |
 | (MIT OR Apache-2.0) AND Unicode-3.0 | 1 |
-| Apache-2.0 | 5 |
+| Apache-2.0 | 3 |
 | Apache-2.0 / MIT | 1 |
 | Apache-2.0 / MIT / MPL-2.0 | 1 |
-| Apache-2.0 OR MIT | 7 |
+| Apache-2.0 OR MIT | 5 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 4 |
 | BSD-2-Clause OR Apache-2.0 OR MIT | 2 |
 | BSD-3-Clause | 4 |
-| MIT | 26 |
-| MIT OR Apache-2.0 | 97 |
+| MIT | 27 |
+| MIT OR Apache-2.0 | 96 |
 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | 2 |
-| MIT/Apache-2.0 | 5 |
-| Unlicense OR MIT | 5 |
+| MIT/Apache-2.0 | 6 |
+| Unlicense OR MIT | 3 |
 | Unlicense/MIT | 2 |
 | Zlib | 1 |
 | zlib-acknowledgement OR MIT | 1 |
@@ -37,6 +37,7 @@ The modified tantivy copy (`tantivy/`, MIT) is part of this repository's workspa
 | base64 | 0.23.1 | MIT OR Apache-2.0 | https://github.com/marshallpierce/rust-base64 |
 | bitflags | 2.13.2 | MIT OR Apache-2.0 | https://github.com/bitflags/bitflags |
 | bitpacking | 0.9.3 | MIT | https://github.com/quickwit-oss/bitpacking |
+| block-buffer | 0.10.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | bon | 3.10.2 | MIT OR Apache-2.0 | https://github.com/elastio/bon |
 | bon-macros | 3.10.2 | MIT OR Apache-2.0 | https://github.com/elastio/bon |
 | bumpalo | 3.20.3 | MIT OR Apache-2.0 | https://github.com/fitzgen/bumpalo |
@@ -44,25 +45,22 @@ The modified tantivy copy (`tantivy/`, MIT) is part of this repository's workspa
 | cc | 1.9.0 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
 | census | 0.4.2 | MIT | https://github.com/quickwit-inc/census |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if |
-| codespan-reporting | 0.13.1 | Apache-2.0 | https://github.com/brendanzab/codespan |
+| cpufeatures | 0.2.17 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | crc32fast | 1.5.2 | MIT OR Apache-2.0 | https://github.com/srijs/rust-crc32fast |
 | crossbeam-channel | 0.5.17 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crossbeam-deque | 0.8.8 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crossbeam-epoch | 0.9.21 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crunchy | 0.2.4 | MIT | https://github.com/eira-fransham/crunchy |
-| cxx | 1.0.205 | MIT OR Apache-2.0 | https://github.com/dtolnay/cxx |
-| cxx-build | 1.0.205 | MIT OR Apache-2.0 | https://github.com/dtolnay/cxx |
-| cxxbridge-flags | 1.0.205 | MIT OR Apache-2.0 | https://github.com/dtolnay/cxx |
-| cxxbridge-macro | 1.0.205 | MIT OR Apache-2.0 | https://github.com/dtolnay/cxx |
+| crypto-common | 0.1.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | darling | 0.24.1 | MIT | https://github.com/TedDriggs/darling |
 | darling_core | 0.24.1 | MIT | https://github.com/TedDriggs/darling |
 | darling_macro | 0.24.1 | MIT | https://github.com/TedDriggs/darling |
 | datasketches | 0.5.0 | Apache-2.0 | https://github.com/apache/datasketches-rust |
 | deranged | 0.5.9 | MIT OR Apache-2.0 | https://github.com/jhpratt/deranged |
+| digest | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | downcast-rs | 2.0.2 | MIT OR Apache-2.0 | https://github.com/marcianx/downcast-rs |
 | either | 1.19.0 | MIT OR Apache-2.0 | https://github.com/rayon-rs/either |
-| equivalent | 1.0.3 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/equivalent |
 | erased-serde | 0.4.10 | MIT OR Apache-2.0 | https://github.com/dtolnay/erased-serde |
 | errno | 0.3.14 | MIT OR Apache-2.0 | https://github.com/lambda-fairy/rust-errno |
 | fastdivide | 0.4.2 | zlib-acknowledgement OR MIT | https://github.com/fulmicoton/fastdivide |
@@ -76,12 +74,12 @@ The modified tantivy copy (`tantivy/`, MIT) is part of this repository's workspa
 | futures-macro | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | futures-task | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | futures-util | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| generic-array | 0.14.7 | MIT | https://github.com/fizyk20/generic-array.git |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | htmlescape | 0.3.1 | Apache-2.0 / MIT / MPL-2.0 | https://github.com/veddan/rust-htmlescape |
 | ident_case | 1.0.1 | MIT/Apache-2.0 | https://github.com/TedDriggs/ident_case |
-| indexmap | 2.14.2 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/indexmap |
 | inventory | 0.3.25 | MIT OR Apache-2.0 | https://github.com/dtolnay/inventory |
 | itertools | 0.14.0 | MIT OR Apache-2.0 | https://github.com/rust-itertools/itertools |
 | itoa | 1.0.18 | MIT OR Apache-2.0 | https://github.com/dtolnay/itoa |
@@ -89,7 +87,6 @@ The modified tantivy copy (`tantivy/`, MIT) is part of this repository's workspa
 | js-sys | 0.3.106 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys |
 | levenshtein_automata | 0.2.1 | MIT | https://github.com/tantivy-search/levenshtein-automata |
 | libc | 0.2.191 | MIT OR Apache-2.0 | https://github.com/rust-lang/libc |
-| link-cplusplus | 1.0.12 | MIT OR Apache-2.0 | https://github.com/dtolnay/link-cplusplus |
 | linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/sunfishcode/linux-raw-sys |
 | log | 0.4.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
 | lru | 0.18.5 | MIT | https://github.com/jeromefroe/lru-rs.git |
@@ -126,12 +123,12 @@ The modified tantivy copy (`tantivy/`, MIT) is part of this repository's workspa
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
-| scratch | 1.0.9 | MIT OR Apache-2.0 | https://github.com/dtolnay/scratch |
 | serde | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
 | serde-tuple-vec-map | 1.0.1 | MIT | https://github.com/daboross/serde-tuple-vec-map/ |
 | serde_core | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
 | serde_derive | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
 | serde_json | 1.0.154 | MIT OR Apache-2.0 | https://github.com/serde-rs/json |
+| sha2 | 0.10.9 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | shlex | 2.0.1 | MIT OR Apache-2.0 | https://github.com/comex/rust-shlex |
 | sketches-ddsketch | 0.4.1 | Apache-2.0 | https://github.com/mheffner/rust-sketches-ddsketch |
 | slab | 0.4.12 | MIT | https://github.com/tokio-rs/slab |
@@ -150,22 +147,21 @@ The modified tantivy copy (`tantivy/`, MIT) is part of this repository's workspa
 | tantivy-stacker | 0.27.0 | MIT | https://github.com/quickwit-oss/tantivy |
 | tantivy-tokenizer-api | 0.7.0 | MIT | https://github.com/quickwit-oss/tantivy |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | https://github.com/Stebalien/tempfile |
-| termcolor | 1.4.1 | Unlicense OR MIT | https://github.com/BurntSushi/termcolor |
 | thiserror | 2.0.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | thiserror-impl | 2.0.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | time | 0.3.55 | MIT OR Apache-2.0 | https://github.com/time-rs/time |
 | time-core | 0.1.9 | MIT OR Apache-2.0 | https://github.com/time-rs/time |
 | time-macros | 0.2.32 | MIT OR Apache-2.0 | https://github.com/time-rs/time |
 | typeid | 1.0.3 | MIT OR Apache-2.0 | https://github.com/dtolnay/typeid |
+| typenum | 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum |
 | typetag | 0.2.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/typetag |
 | typetag-impl | 0.2.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/typetag |
 | unicode-general-category | 1.1.0 | Apache-2.0 | https://github.com/yeslogic/unicode-general-category |
 | unicode-ident | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
-| unicode-width | 0.2.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
 | unwrap-infallible | 1.0.0 | MIT OR Apache-2.0 | https://github.com/mzabaluev/unwrap-infallible |
-| usearch | 2.26.6 | Apache-2.0 | https://github.com/unum-cloud/USearch |
 | utf8-ranges | 1.0.5 | Unlicense/MIT | https://github.com/BurntSushi/utf8-ranges |
 | uuid | 1.28.0 | Apache-2.0 OR MIT | https://github.com/uuid-rs/uuid |
+| version_check | 0.9.5 | MIT/Apache-2.0 | https://github.com/SergioBenitez/version_check |
 | wasip2 | 1.0.4+wasi-0.2.12 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/wasi-rs |
 | wasm-bindgen | 0.2.129 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen |
 | wasm-bindgen-macro | 0.2.129 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro |
@@ -173,7 +169,6 @@ The modified tantivy copy (`tantivy/`, MIT) is part of this repository's workspa
 | wasm-bindgen-shared | 0.2.129 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared |
 | winapi | 0.3.9 | MIT/Apache-2.0 | https://github.com/retep998/winapi-rs |
 | winapi-i686-pc-windows-gnu | 0.4.0 | MIT/Apache-2.0 | https://github.com/retep998/winapi-rs |
-| winapi-util | 0.1.11 | Unlicense OR MIT | https://github.com/BurntSushi/winapi-util |
 | winapi-x86_64-pc-windows-gnu | 0.4.0 | MIT/Apache-2.0 | https://github.com/retep998/winapi-rs |
 | windows-link | 0.2.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-sys | 0.59.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |

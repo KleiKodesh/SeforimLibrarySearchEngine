@@ -14,4 +14,3 @@ export 'src/db/snippet_texts.dart';
 export 'src/db/book_updates.dart';
 export 'src/db/index_builder.dart';
 export 'src/db/library.dart';
-export 'src/db/grouping.dart';

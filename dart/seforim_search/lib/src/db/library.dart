@@ -6,7 +6,6 @@
 import 'dart:async';
 
 import '../../seforim_search.dart';
-import 'grouping.dart';
 import 'index_builder.dart';
 import 'seforim_db.dart';
 
@@ -24,8 +23,6 @@ final class SearchHit {
     this.before = '',
     this.after = '',
     this.nextLineId,
-    this.groupSize = 1,
-    this.siblings = const [],
   });
 
   /// The hit's place in the search's order (catalog order by default).
@@ -47,40 +44,19 @@ final class SearchHit {
   /// A cross-line hit: the next line it continues onto.
   final int? nextLineId;
 
-  /// Grouped results ([SeforimLibrary.search] `grouping`): the hits in this
-  /// hit's group (it is the group's first, its representative) and up to
-  /// [mergedSiblingsCap] of the others.
-  final int groupSize;
-  final List<GroupSibling> siblings;
-
   /// The highlighted words as (start, end) ranges into [text].
   List<(int, int)> get highlights => [for (final m in snippet?.marks ?? const <SnippetMark>[]) (m.start, m.start + m.length)];
-}
-
-/// Another hit of a grouped result's group.
-final class GroupSibling {
-  const GroupSibling(this.lineId, this.bookId, this.bookTitle, this.lineIndex, this.reference);
-  final int lineId, bookId, lineIndex;
-  final String bookTitle, reference;
 }
 
 /// One page of [SeforimLibrary.search]: the next ready results and the
 /// search's progress. [hitCount] is the total once [complete]; [counts]
 /// (exact total + per book) comes on the last page when asked for.
 final class ResultPage {
-  const ResultPage(this.results, this.hitCount, this.complete,
-      {this.counts, this.terms = const [], this.groupCount});
+  const ResultPage(this.results, this.hitCount, this.complete, [this.counts]);
   final List<SearchHit> results;
   final int hitCount;
   final bool complete;
   final HitCounts? counts;
-
-  /// Index terms the search matched that no earlier page reported (the
-  /// words to highlight in an opened book: [SeforimLibrary.findInText]).
-  final List<String> terms;
-
-  /// Grouped search: the number of groups (with [complete]).
-  final int? groupCount;
 }
 
 /// One line found by [SeforimLibrary.findInBook] with every occurrence in it.
@@ -112,8 +88,7 @@ final class SeforimLibrary {
       SeforimIndexBuilder.ensure(dbPath, indexDir, options: options, cancel: cancel, nativePath: nativePath);
 
   /// True when [indexDir] needs [buildOrUpdateIndex] before [open].
-  static bool needsBuild(String indexDir, {IndexOptions? options}) =>
-      SeforimIndexBuilder.needsBuild(indexDir, options: options);
+  static bool needsBuild(String indexDir) => SeforimIndexBuilder.needsBuild(indexDir);
 
   /// Opens the DB ([dbPath], default: the usual install locations) and the
   /// index at [indexDir] on a worker isolate.
@@ -140,13 +115,7 @@ final class SeforimLibrary {
   /// same search, run to its end; no texts read past [limit]). Cancelling
   /// the subscription (or [cancel]) stops the search.
   Stream<ResultPage> search(SearchOptions options,
-      {SearchCancelToken? cancel,
-      int pageSize = 50,
-      int offset = 0,
-      int limit = 0,
-      bool withCounts = false,
-      SnippetMatchMode matchMode = SnippetMatchMode.bestWindow,
-      Grouping? grouping}) {
+      {SearchCancelToken? cancel, int pageSize = 50, int offset = 0, int limit = 0, bool withCounts = false}) {
     final token = cancel ?? SearchCancelToken();
     AsyncSearchSession? session;
     var stopped = false;
@@ -155,11 +124,6 @@ final class SeforimLibrary {
     Future<void> run() async {
       try {
         final s = session = await worker.searchStreaming(options, cancel: token);
-        if (matchMode != SnippetMatchMode.bestWindow) await s.setMatchMode(matchMode);
-        if (grouping != null) {
-          await _grouped(s, out, grouping, options.contextWords, offset, limit, pageSize, withCounts, () => stopped);
-          return;
-        }
         var at = offset, sent = 0;
         var done = false;
         while (!stopped && (limit <= 0 || sent < limit)) {
@@ -173,13 +137,12 @@ final class SeforimLibrary {
           final ready = await _ready(s, placed, options.contextWords);
           if (stopped) break;
           done = s.isComplete && at >= s.hitCount;
-          out.add(ResultPage(ready, s.hitCount, done,
-              counts: done && withCounts ? await _exactCounts(s) : null, terms: await s.takeNewTerms()));
+          out.add(ResultPage(ready, s.hitCount, done, done && withCounts ? await _exactCounts(s) : null));
           if (done || placed.isEmpty) break;
         }
         if (withCounts && !done && !stopped) {
           final c = await _exactCounts(s);
-          if (!stopped) out.add(ResultPage(const [], s.hitCount, true, counts: c, terms: await s.takeNewTerms()));
+          if (!stopped) out.add(ResultPage(const [], s.hitCount, true, c));
         }
       } catch (e, st) {
         if (!stopped) out.addError(e, st);
@@ -205,67 +168,6 @@ final class SeforimLibrary {
       },
     );
     return out.stream;
-  }
-
-  /// Otzaria's grouping, by the host over every hit (grouping.dart): groups
-  /// in the order of their first hit; [offset] / [limit] count groups; each
-  /// representative is a ready hit with its group size and siblings.
-  Future<void> _grouped(AsyncSearchSession s, StreamController<ResultPage> out, Grouping grouping, int contextWords,
-      int offset, int limit, int pageSize, bool withCounts, bool Function() stopped) async {
-    while (!s.isComplete) {
-      await s.pull(s.hitCount + 65536);
-    }
-    final all = <PlacedHit>[];
-    for (var at = 0; at < s.hitCount; at += 65536) {
-      all.addAll(await s.hits(at, 65536));
-    }
-    final ids = [for (final h in all) h.lineId];
-    final sections = grouping == Grouping.sameSection ? db.sectionsOf(ids) : const <int, int>{};
-    final texts = grouping == Grouping.identicalText ? db.lineTexts(ids) : const <int, String>{};
-    final groups = groupInOrder<PlacedHit>(
-        all,
-        (h) => groupKey(grouping,
-            tocEntryId: sections[h.lineId] ?? 0, lineId: h.lineId, text: texts[h.lineId]));
-    final counts = withCounts ? await _exactCounts(s) : null;
-    final end = limit > 0 && offset + limit < groups.length ? offset + limit : groups.length;
-    final titles = bookTitles;
-    var at = offset;
-    if (at >= end) {
-      out.add(ResultPage(const [], s.hitCount, true, counts: counts, groupCount: groups.length));
-      return;
-    }
-    while (at < end && !stopped()) {
-      final page = groups.sublist(at, at + pageSize < end ? at + pageSize : end);
-      at += page.length;
-      final reps = await _ready(s, [for (final g in page) g.members.first], contextWords);
-      final sib = [for (final g in page) g.members.skip(1).take(mergedSiblingsCap).toList()];
-      final sibIds = [for (final l in sib) for (final h in l) h.lineId];
-      final where = db.lineLocations(sibIds);
-      final refs = db.heRefs(sibIds);
-      final done = at >= end;
-      out.add(ResultPage([
-        for (var i = 0; i < reps.length; i++)
-          SearchHit(
-            position: reps[i].position,
-            lineId: reps[i].lineId,
-            bookId: reps[i].bookId,
-            bookTitle: reps[i].bookTitle,
-            lineIndex: reps[i].lineIndex,
-            reference: reps[i].reference,
-            text: reps[i].text,
-            snippet: reps[i].snippet,
-            before: reps[i].before,
-            after: reps[i].after,
-            nextLineId: reps[i].nextLineId,
-            groupSize: page[i].members.length,
-            siblings: [
-              for (final h in sib[i])
-                GroupSibling(h.lineId, h.bookId, titles[h.bookId] ?? '', where[h.lineId]?.lineIndex ?? 0,
-                    refs[h.lineId] ?? ''),
-            ],
-          ),
-      ], s.hitCount, done, counts: done ? counts : null, terms: await s.takeNewTerms(), groupCount: groups.length));
-    }
   }
 
   Future<List<SearchHit>> _ready(AsyncSearchSession s, List<PlacedHit> placed, int contextWords) async {
@@ -369,16 +271,6 @@ final class SeforimLibrary {
   static List<TextMatch> findInText(String text, List<String> words,
           {bool phrase = false, bool ignoreQuotes = false, bool matchMarks = false}) =>
       findAllMatches(text, words, phrase: phrase, ignoreQuotes: ignoreQuotes, matchMarks: matchMarks);
-
-  /// Re-sorts the index into the host's own catalog order (book ids, first
-  /// first; a book left out goes after the listed ones): one merge on the
-  /// worker, then searches come back in that order. A later per-book update
-  /// repacks in seforim.db's catalog order again.
-  Future<void> resort(List<int> bookOrder, {SearchCancelToken? cancel}) async {
-    final w = await worker.openWriter();
-    await w.resortAndClose(bookOrder, cancel: cancel);
-    await worker.reload();
-  }
 
   /// Picks up an index changed by [buildOrUpdateIndex].
   Future<void> reload() => worker.reload();

@@ -1,7 +1,7 @@
-// Semantic search in the host (issue #18): Otzaria's prebuilt vector files
-// (.oxv) mapped onto seforim.db line ids and imported into the engine's
-// vector sidecar, and the query embedded with Otzaria's Meivin model. The
-// model and SQLite stay here, never in the engine.
+// Semantic search in the host (issue #18): the engine opens Otzaria's own
+// vector set read-only and scans it; the host maps each book of the set
+// (`id:<bookId>`) onto seforim.db line ids and embeds the query with
+// Otzaria's Meivin model. The model and SQLite stay here, never in the engine.
 
 import 'dart:io';
 
@@ -11,12 +11,12 @@ import 'meivin_embedder.dart';
 import 'otzaria_query.dart';
 import 'seforim_db.dart';
 
-String _ms(int ms) => ms < 1000 ? '$ms ms' : '${(ms / 60000).toStringAsFixed(2)} min';
+String _ms(num ms) => ms < 1000 ? '${ms.toStringAsFixed(ms < 100 ? 1 : 0)} ms' : '${(ms / 60000).toStringAsFixed(2)} min';
 
-/// Why a book of the vector file was not mapped.
-enum OxvSkip { badName, notInDb, moreLinesThanDb, rowWithNewline, notSelected }
+/// Why a book of the vector set was not mapped.
+enum OxvSkip { badName, notInDb, moreLinesThanDb, rowWithNewline }
 
-/// Maps one book of an Otzaria vector file onto the DB's line ids: the line
+/// Maps one book of an Otzaria vector set onto the DB's line ids: the line
 /// id of each 0-based ordinal (`lineIndex, id` order). Null + [skip] when the
 /// book cannot be mapped exactly.
 OxvBookMap? mapOxvBook(SeforimDb db, OxvBookInfo book, void Function(OxvSkip) skip) {
@@ -29,7 +29,7 @@ OxvBookMap? mapOxvBook(SeforimDb db, OxvBookInfo book, void Function(OxvSkip) sk
   final ids = <int>[];
   for (final line in db.bookLines(bookId)) {
     // Otzaria splits a row holding a newline into several lines: the
-    // ordinals of the file then no longer follow the DB rows
+    // ordinals of the set then no longer follow the DB rows
     if (line.text.contains('\n')) {
       skip(OxvSkip.rowWithNewline);
       return null;
@@ -47,103 +47,159 @@ OxvBookMap? mapOxvBook(SeforimDb db, OxvBookInfo book, void Function(OxvSkip) sk
   return OxvBookMap(book.name, bookId, ids);
 }
 
-/// `semantic-import <index dir> <file.oxv | file.oxv.zst> [--books N]`:
-/// [booksLimit] = only the first N books of the catalog order (an index built
-/// with `build --max-books N`).
-void semanticImport(SeforimDb db, String indexDir, String file, {int? booksLimit, int batch = 200}) {
-  final sw = Stopwatch()..start();
-  var path = file;
-  if (path.endsWith('.zst')) {
-    path = path.substring(0, path.length - 4);
-    if (!File(path).existsSync()) {
-      final bytes = expandOxv(file, path);
-      stdout.writeln('expanded to $path: ${(bytes / 1e6).toStringAsFixed(1)} MB, ${_ms(sw.elapsedMilliseconds)}');
-    }
-  }
-  final info = readOxvInfo(path);
-  stdout.writeln('file: format ${info.format}, ${info.kind}, ${info.dims} dims, ${info.codec}, '
-      'library ${info.libraryReleaseTag} (v${info.fromLibraryVersion}..${info.toLibraryVersion}), '
-      '${info.books.length} books, ${info.slots} slots');
-  final selected = booksLimit == null ? null : db.catalogBookOrder().take(booksLimit).map((b) => 'id:$b').toSet();
-  final skips = {for (final s in OxvSkip.values) s: 0};
-  final maps = <OxvBookMap>[];
-  final mapWatch = Stopwatch()..start();
-  for (final b in info.books) {
-    if (selected != null && !selected.contains(b.name)) {
-      skips[OxvSkip.notSelected] = skips[OxvSkip.notSelected]! + 1;
-      continue;
-    }
-    final m = mapOxvBook(db, b, (s) => skips[s] = skips[s]! + 1);
-    if (m != null) maps.add(m);
-  }
-  stdout.writeln('mapped ${maps.length} books in ${_ms(mapWatch.elapsedMilliseconds)}; skipped: '
-      '${skips.entries.where((e) => e.value > 0).map((e) => '${e.key.name} ${e.value}').join(', ')}');
-  final index = SeforimIndex.open(indexDir);
-  try {
-    var imported = 0, records = 0, vectors = 0, lines = 0, outOfRange = 0, duplicates = 0, unmapped = 0;
-    final importWatch = Stopwatch()..start();
-    for (var i = 0; i < maps.length; i += batch) {
-      final r = index.importOxv(path, maps.sublist(i, i + batch > maps.length ? maps.length : i + batch));
-      imported += r.booksImported;
-      records += r.records;
-      vectors += r.vectors;
-      lines += r.lines;
-      outOfRange += r.outOfRange;
-      duplicates += r.duplicates;
-      unmapped += r.booksUnmapped;
-      if (r.booksNotInFile.isNotEmpty) stderr.writeln('not in the file: ${r.booksNotInFile.take(10).join(', ')}');
-      stdout.writeln('  batch ${i ~/ batch + 1}: ${r.booksImported} books, generation ${r.generation}');
-    }
-    stdout.writeln('imported $imported books: $records records, $vectors vectors, $lines lines '
-        '(out of range $outOfRange, duplicates $duplicates, unmapped $unmapped) in ${_ms(importWatch.elapsedMilliseconds)}');
-    final vi = index.vectorInfo();
-    if (vi != null) stdout.writeln('sidecar: ${vi.lines} lines, ${vi.books} books, ${vi.dims} dims');
-  } finally {
-    index.close();
-  }
-  stdout.writeln('total ${_ms(sw.elapsedMilliseconds)}');
-}
-
-/// `semantic-search <index dir> <query> [--k 10] [--hybrid]`.
-void semanticSearchCommand(SeforimDb db, String indexDir, String query,
-    {required String modelDir, required String ortLibrary, int k = 10, bool hybrid = false}) {
-  final sw = Stopwatch()..start();
-  final emb = MeivinEmbedder.open(modelDir, ortLibrary);
-  final openMs = sw.elapsedMilliseconds;
-  final index = SeforimIndex.open(indexDir);
-  try {
-    sw.reset();
-    final tokens = emb.queryTokens(query);
-    final v = emb.embedTokens(tokens);
-    final embedMs = sw.elapsedMilliseconds;
-    sw.reset();
-    final sem = index.semanticSearch(v, SemanticOptions(k: k));
-    stdout.writeln('model open ${_ms(openMs)}, embed ${_ms(embedMs)} (${tokens.length} tokens), '
-        'search ${_ms(sw.elapsedMilliseconds)} (${sem.exact ? 'exact' : 'hnsw'}, ${sem.allowed} lines allowed)');
-    for (final (i, h) in sem.hits.indexed) {
-      stdout
-          .writeln('${i + 1}. line ${h.lineId} book ${h.bookId} chunk ${h.chunk} score ${h.score.toStringAsFixed(4)}');
-    }
-    if (hybrid) {
-      final request = OtzariaSearch(query: query).toOptions(contextWords: 8)..order = ResultsOrder.relevance;
-      request.baseBooks.addAll(db.baseBooks());
-      final session = index.search(request);
-      try {
-        // a streamed search (positions index) is pulled to the end first
-        while (!session.pull(1 << 40)) {}
-        final fused = session.fuseSemantic(query, sem);
-        stdout.writeln('hybrid (${session.hitCount} lexical hits):');
-        for (final (i, f) in fused.take(k).indexed) {
-          stdout.writeln('${i + 1}. line ${f.lineId} book ${f.bookId} fused ${f.fused.toStringAsFixed(4)} '
-              'lexical ${f.lexical?.toStringAsFixed(4) ?? '-'} semantic ${f.semantic?.toStringAsFixed(4) ?? '-'} '
-              '(${f.source})');
-        }
-      } finally {
-        session.close();
+/// The books of an opened set (name -> line count), read from its segment
+/// files' headers ([vectors] = the set directory or one base `.oxv`).
+Map<String, OxvBookInfo> setBooks(String vectors, VectorSetInfo info) {
+  final files = <String>[];
+  if (File(vectors).existsSync()) {
+    files.add(vectors);
+  } else {
+    for (final s in info.segments) {
+      final name = s.file.split(RegExp(r'[\\/]')).last;
+      final hit = [s.file, '$vectors/${s.file}', '$vectors/segments/$name'].where((f) => File(f).existsSync());
+      if (hit.isEmpty) {
+        stderr.writeln('segment file not found: ${s.file}');
+      } else {
+        files.add(hit.first);
       }
     }
+  }
+  final books = <String, OxvBookInfo>{};
+  for (final f in files) {
+    final OxvInfo oi;
+    try {
+      oi = readOxvInfo(f);
+    } on SeforimEngineException catch (e) {
+      stderr.writeln('segment header not read ($f): $e');
+      continue;
+    }
+    for (final b in oi.books) {
+      final old = books[b.name];
+      if (old == null || b.lines > old.lines) books[b.name] = b;
+    }
+  }
+  return books;
+}
+
+/// Maps every `id:<bookId>` book of the opened set onto the DB (one
+/// [SemanticIndex.mapVectorBook] per book); returns the skip counts.
+Map<OxvSkip, int> mapVectorBooks(SeforimIndex index, SeforimDb db, String vectors, VectorSetInfo info) {
+  final skips = {for (final s in OxvSkip.values) s: 0};
+  for (final b in setBooks(vectors, info).values) {
+    final m = mapOxvBook(db, b, (s) => skips[s] = skips[s]! + 1);
+    if (m != null) index.mapVectorBook(m.name, m.bookId, m.lineIds);
+  }
+  return skips;
+}
+
+String _stripTags(String s) => s.replaceAll(RegExp(r'<[^>]*>'), ' ');
+
+/// `semantic-search <index dir> --vectors <set dir | file.oxv> (--line N | --lines a,b,c | --query text) [--k N] [--books a,b] [--threads N] [--hybrid] [--repeat N]`.
+void semanticSearchCommand(SeforimDb db, String indexDir, String vectors,
+    {required String modelDir,
+    required String ortLibrary,
+    List<int> lines = const [],
+    String? query,
+    int k = 10,
+    List<int>? books,
+    int threads = 0,
+    bool hybrid = false,
+    int repeat = 1}) {
+  final queries = <(int, String)>[];
+  final texts = db.lineTexts(lines);
+  for (final id in lines) {
+    final t = _stripTags(texts[id] ?? '');
+    if (t.trim().isEmpty) {
+      stdout.writeln('line $id: no text, skipped');
+    } else {
+      queries.add((id, t));
+    }
+  }
+  if (query != null && query.trim().isNotEmpty) queries.add((0, query));
+  if (queries.isEmpty) {
+    stderr.writeln('no query: pass --line, --lines or --query');
+    exitCode = 64;
+    return;
+  }
+  final index = SeforimIndex.open(indexDir);
+  final sw = Stopwatch()..start();
+  try {
+    var info = index.openVectors(vectors);
+    stdout.writeln('open: ${_ms(sw.elapsedMicroseconds / 1000)}');
+    sw.reset();
+    final skips = mapVectorBooks(index, db, vectors, info);
+    info = index.vectorInfo()!;
+    stdout.writeln('mapping: ${_ms(sw.elapsedMicroseconds / 1000)}, books mapped ${info.booksMapped}, '
+        'unmapped ${info.booksUnmapped}; skipped: '
+        '${skips.entries.where((e) => e.value > 0).map((e) => '${e.key.name} ${e.value}').join(', ')}');
+    stdout.writeln('set: generation ${info.generation}, dims ${info.dims}, codec ${info.codec}, '
+        'library ${info.libraryReleaseTag}, slots_live ${info.slotsLive}, slots_dead ${info.slotsDead}, '
+        'books ${info.books}, ${(info.bytesOnDisk / 1048576).toStringAsFixed(0)} MB, ${info.segments.length} segments');
+    sw.reset();
+    final emb = MeivinEmbedder.open(modelDir, ortLibrary);
+    stdout.writeln('model load: ${_ms(sw.elapsedMicroseconds / 1000)}');
+    final latencies = <double>[];
+    var withLine = 0, selfFirst = 0;
+    final options = SemanticOptions(k: k, books: books, threads: threads);
+    try {
+      for (final (line, text) in queries) {
+        sw.reset();
+        final tokens = emb.queryTokens(text);
+        final v = emb.embedTokens(tokens);
+        final embedMs = sw.elapsedMicroseconds / 1000;
+        late SemanticResult sem;
+        var last = 0.0;
+        for (var i = 0; i < repeat; i++) {
+          sw.reset();
+          sem = index.semanticSearch(v, options);
+          last = sw.elapsedMicroseconds / 1000;
+          latencies.add(last);
+        }
+        stdout.writeln('${line != 0 ? 'line $line' : 'query'}: embed ${_ms(embedMs)} (${tokens.length} tokens), '
+            'search ${_ms(last)}; vectors ${sem.vectors}, records ${sem.records}, unmapped ${sem.unmapped}, '
+            'scanned ${sem.scanned}, threads ${sem.threads}');
+        for (final (i, h) in sem.hits.indexed) {
+          final alias = h.chunk & SemanticHit.borrowed != 0 ? ' (alias)' : '';
+          stdout.writeln('  ${i + 1}. line ${h.lineId} book ${h.bookId} score ${h.score.toStringAsFixed(4)} '
+              'chunk ${h.chunk & ~SemanticHit.borrowed}$alias${line != 0 && h.lineId == line ? '   <- source line' : ''}');
+        }
+        if (line != 0) {
+          withLine++;
+          final first = sem.hits.isNotEmpty && sem.hits.first.lineId == line;
+          if (first) selfFirst++;
+          stdout.writeln('  source line first: ${first ? 'yes' : 'no'}');
+        }
+        if (hybrid) {
+          final request = OtzariaSearch(query: text).toOptions(contextWords: 8)..order = ResultsOrder.relevance;
+          request.baseBooks.addAll(db.baseBooks());
+          if (books != null) request.books = books;
+          final session = index.search(request);
+          try {
+            // a streamed search (positions index) is pulled to the end first
+            while (!session.pull(1 << 40)) {}
+            final fused = session.fuseSemantic(text, sem);
+            stdout.writeln('  hybrid (${session.hitCount} lexical hits):');
+            for (final (i, f) in fused.take(k).indexed) {
+              stdout.writeln('    ${i + 1}. line ${f.lineId} book ${f.bookId} fused ${f.fused.toStringAsFixed(4)} '
+                  'lexical ${f.lexical?.toStringAsFixed(4) ?? '-'} semantic ${f.semantic?.toStringAsFixed(4) ?? '-'} '
+                  '(${f.source})');
+            }
+          } finally {
+            session.close();
+          }
+        }
+      }
+    } finally {
+      emb.close();
+    }
+    final sorted = [...latencies]..sort();
+    final p95 = sorted[((0.95 * sorted.length).ceil() - 1).clamp(0, sorted.length - 1)];
+    final mean = sorted.reduce((a, b) => a + b) / sorted.length;
+    stdout.writeln('search latency over ${sorted.length} runs: mean ${mean.toStringAsFixed(1)} ms, '
+        'p95 ${p95.toStringAsFixed(1)} ms');
+    if (withLine > 0) stdout.writeln('source line ranked first: $selfFirst of $withLine');
+    stdout.writeln('peak working set: ${(ProcessInfo.maxRss / 1048576).toStringAsFixed(0)} MB');
   } finally {
     index.close();
-    emb.close();
   }
 }

@@ -16,11 +16,10 @@ import 'package:seforim_search/seforim_search.dart';
 
 const _usage = '''
 otzaria_demo build  [--db path] [--index dir] [--max-lines N] [--max-books N] [--keep-marks] [--no-positions]
-otzaria_demo semantic-import <index dir> <file.oxv | file.oxv.zst> [--books N] [--db path]
-                    Otzaria's vector file mapped onto seforim.db line ids (books named id:N;
-                    --books N = the first N catalog books, as build --max-books N)
-otzaria_demo semantic-search <index dir> <query> [--k 10] [--hybrid] [--ort onnxruntime.dll] [--model dir]
-                    [--query-file utf8.txt] (instead of <query>: shells can mangle Hebrew arguments)
+otzaria_demo semantic-search <index dir> --vectors <set dir | file.oxv> (--line N | --lines a,b,c | --query text)
+                    [--k 10] [--books a,b] [--threads N] [--hybrid] [--repeat N] [--ort onnxruntime.dll] [--model dir]
+                    [--query-file utf8.txt] (instead of --query: shells can mangle Hebrew arguments)
+                    Otzaria's vector set opened read-only, its id:N books mapped onto seforim.db line ids;
                     query embedded with Otzaria's Meivin model (default model dir: Otzaria's install)
 otzaria_demo search [--db path] [--index dir] [options] <query>
 otzaria_demo update [--db path] [--index dir] [--wait] [--watch]
@@ -65,7 +64,8 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
     'db', 'index', 'max-lines', 'mode', 'prefix-max', 'suffix-max', 'partial-max', 'grammar-prefix-max', //
     'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'pages', 'context', 'native', 'zstd', 'spacing', 'match',
     'match-count', 'exclude', 'exclude-scope', 'exclude-options', 'dictionary', 'acronyms', 'group', 'group-scan',
-    'order', 'scope', 'lexical', 'max-books', 'books', 'k', 'ort', 'model', 'query-file',
+    'order', 'scope', 'lexical', 'max-books', 'books', 'k', 'ort', 'model', 'query-file', 'vectors', 'line', //
+    'lines', 'query', 'threads', 'repeat',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -117,18 +117,25 @@ Future<void> main(List<String> args) async {
           stderr.writeln('${db.unreadableLineIds.length} rows unreadable (line ids: $ids'
               '${db.unreadableLineIds.length > 20 ? ', ...' : ''})');
         }
-      case 'semantic-import' when rest.length == 2:
-        semanticImport(db, rest[0], rest[1], booksLimit: _int(o, 'books'));
-      case 'semantic-search' when rest.length >= 2 || (rest.length == 1 && o['query-file'] != null):
+      case 'semantic-search' when rest.length == 1 && o['vectors'] != null:
         final model = o['model'] ?? defaultMeivinDir();
         final ort = o['ort'] ?? Platform.environment['OTZARIA_ONNX_RUNTIME'];
         if (model == null || ort == null) {
           stderr.writeln('pass --model (Meivin model folder) and --ort (onnxruntime library)');
           exit(64);
         }
-        semanticSearchCommand(db, rest[0],
-            o['query-file'] != null ? File(o['query-file']!).readAsStringSync() : rest.sublist(1).join(' '),
-            modelDir: model, ortLibrary: ort, k: _int(o, 'k') ?? 10, hybrid: o.containsKey('hybrid'));
+        List<int>? ints(String? s) =>
+            s == null ? null : [for (final p in s.split(',')) if (p.trim().isNotEmpty) int.parse(p.trim())];
+        semanticSearchCommand(db, rest[0], o['vectors']!,
+            modelDir: model,
+            ortLibrary: ort,
+            lines: [...?ints(o['line']), ...?ints(o['lines'])],
+            query: o['query-file'] != null ? File(o['query-file']!).readAsStringSync() : o['query'],
+            k: _int(o, 'k') ?? 10,
+            books: ints(o['books']),
+            threads: _int(o, 'threads') ?? 0,
+            hybrid: o.containsKey('hybrid'),
+            repeat: _int(o, 'repeat') ?? 1);
       default:
         stdout.write(_usage);
         exit(64);

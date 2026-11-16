@@ -46,8 +46,7 @@ namespace SeforimSearch.Demo
                 ("native ABI check (issue #17): loaded = expected, mismatch names both and the path", AbiCheck),
                 ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
                 ("per-book update (issue #29): changed / grown / removed books, crash mid-update, background merge", BookUpdates),
-                ("semantic search (issue #18): vectors, semantic-only, book filter, hybrid fusion, cancel", Semantic),
-                ("Otzaria vectors (issue #18): .oxv info, import by line ids, chunks, hybrid", OxvImport),
+                ("semantic search (issue #18): Otzaria vector set, line mapping, unmapped, book filter, hybrid, cancel", Semantic),
                 ("substring find (issue G-K1): FtsLib FindSubstringCandidates order, ranges, decline", SubstringFind),
                 ("coordinator (Core drop-in): build, progress, status, search, lines, reset, DB change", CoordinatorLifecycle),
                 ("related forms (Core's '+' / '=' rewrite): artifact lookup, markers", RelatedForms),
@@ -180,57 +179,9 @@ namespace SeforimSearch.Demo
             }
         }
 
+        /// <summary>The Rust-written fixture seforim-vectors/tests/data/synthetic.oxv (4 dims): book id:5 =
+        /// ordinal 0 with windows 0 (axis 1) and 1 (axis 2), ordinal 1 (axis 0); book id:7 ordinal 0 (axis 3).</summary>
         private static void Semantic(string db, string dir)
-        {
-            string d = Path.Combine(dir, "semantic");
-            using var index = SeforimIndex.Create(d);
-            var w = index.OpenWriter(30_000_000, 1);
-            w.Add(new LineDocument { LineId = 1, Position = 0, BookId = 5, Text = "alpha beta" });
-            w.Add(new LineDocument { LineId = 2, Position = 1, BookId = 5, Text = "gamma" });
-            w.Add(new LineDocument { LineId = 3, Position = 2, BookId = 6, Text = "delta" });
-            w.MergeAndClose();
-            Check(index.GetVectorInfo() == null, "no vectors yet");
-            var update = new VectorUpdate { Dims = 3 };
-            update.Add.Add(new LineVector { LineId = 1, BookId = 5, Vector = new[] { 1f, 0f, 0f } });
-            update.Add.Add(new LineVector { LineId = 2, BookId = 5, Vector = new[] { 0.9f, 0.1f, 0f } });
-            update.Add.Add(new LineVector { LineId = 3, BookId = 6, Vector = new[] { 0f, 0f, 1f } });
-            var stats = index.UpdateVectorsAsync(update).GetAwaiter().GetResult();
-            Check(stats.Lines == 3 && stats.Books == 2, "update stats: " + stats.Lines);
-            Check(index.GetVectorInfo()!.Dims == 3, "info dims");
-            var sem = index.SemanticSearchAsync(new[] { 1f, 0f, 0f }, new SemanticOptions { K = 2 }).GetAwaiter().GetResult();
-            Check(sem.Hits.Length == 2 && sem.Hits[0].LineId == 1 && sem.Hits[1].LineId == 2, "semantic order");
-            var filtered = index.SemanticSearch(new[] { 1f, 0f, 0f }, new SemanticOptions { K = 5, Books = new long[] { 6 } });
-            Check(filtered.Hits.Length == 1 && filtered.Hits[0].BookId == 6 && filtered.Exact, "book filter");
-            using (var s = index.Search(new SearchOptions("delta") { Order = ResultsOrder.Relevance }))
-            {
-                var fused = s.FuseSemanticAsync("delta", sem).GetAwaiter().GetResult();
-                Check(fused.Length == 3, "hybrid keeps the lexical hit and adds the semantic ones: " + fused.Length);
-                Check(fused.Any(f => f.LineId == 3 && f.Source == "lexical" && f.Position == 2), "lexical side");
-                Check(fused.Any(f => f.LineId == 1 && f.Source == "semantic" && f.Position == null), "semantic side");
-                var rrf = s.FuseSemantic("delta", sem, new FusionOptions { Strategy = FusionStrategy.Rrf });
-                Check(rrf.Length == 3, "rrf");
-                // issue #40: release the caches with this session open; it and new searches go on
-                index.ReleaseMemory();
-                Check(s.GetHits(0, 10).Length == 1, "session after ReleaseMemory");
-                using (var again = index.Search(new SearchOptions("delta")))
-                    Check(again.HitCount == 1, "search after ReleaseMemory");
-                var sem2 = index.SemanticSearch(new[] { 1f, 0f, 0f }, new SemanticOptions { K = 2 });
-                Check(sem2.Hits.Length == 2 && sem2.Hits[0].LineId == 1, "semantic after ReleaseMemory (store reopened)");
-            }
-            using (var cts = new CancellationTokenSource())
-            {
-                cts.Cancel();
-                Check(Throws<OperationCanceledException>(() => index.SemanticSearch(new[] { 1f, 0f, 0f }, null, cts.Token)), "cancelled");
-            }
-            Check(Throws<SeforimEngineException>(() => index.SemanticSearch(new[] { 1f, 0f }, null)), "wrong dims");
-            var remove = new VectorUpdate { Dims = 3 };
-            remove.RemoveBooks.Add(5);
-            Check(index.UpdateVectors(remove).Lines == 1, "book removed");
-        }
-
-        /// <summary>The Rust-written fixture seforim-vectors/tests/data/synthetic.oxv: books id:5 (line 0 with
-        /// chunks 0 and 1, line 1) and id:7, 4 dims, f32.</summary>
-        private static void OxvImport(string db, string dir)
         {
             string? oxv = null;
             for (var d0 = new DirectoryInfo(AppContext.BaseDirectory); d0 != null && oxv == null; d0 = d0.Parent)
@@ -239,30 +190,57 @@ namespace SeforimSearch.Demo
                 if (File.Exists(f)) oxv = f;
             }
             Check(oxv != null, "fixture found");
-            var info = SeforimSemantic.ReadOxvInfo(oxv!);
-            Check(info.Format == 3 && info.Dims == 4 && info.Codec == "f32" && info.LibraryReleaseTag == "v1-synthetic", "oxv header");
-            Check(info.Books.Count == 2 && info.Books[0].Name == "id:5" && info.Books[0].Records == 3 && info.Books[0].Lines == 2, "oxv books");
-            string d = Path.Combine(dir, "oxv");
+            var oxvInfo = SeforimSemantic.ReadOxvInfo(oxv!);
+            Check(oxvInfo.Dims == 4 && oxvInfo.Books.Count == 2 && oxvInfo.Books[0].Name == "id:5", "oxv info");
+            string d = Path.Combine(dir, "semantic");
             using var index = SeforimIndex.Create(d);
             var w = index.OpenWriter(30_000_000, 1);
-            w.Add(new LineDocument { LineId = 50, Position = 0, BookId = 5, Text = "alpha" });
-            w.Add(new LineDocument { LineId = 51, Position = 1, BookId = 5, Text = "beta" });
+            w.Add(new LineDocument { LineId = 1, Position = 0, BookId = 5, Text = "alpha beta" });
+            w.Add(new LineDocument { LineId = 2, Position = 1, BookId = 5, Text = "gamma" });
+            w.Add(new LineDocument { LineId = 3, Position = 2, BookId = 6, Text = "delta" });
             w.MergeAndClose();
-            var report = index.ImportOxvAsync(oxv!, new[]
-            {
-                new OxvBookMap { Name = "id:5", BookId = 5, LineIds = new long[] { 50, 51 } },
-                new OxvBookMap { Name = "id:9", BookId = 9, LineIds = new long[] { 90 } },
-            }).GetAwaiter().GetResult();
-            Check(report.BooksImported == 1 && report.BooksUnmapped == 1 && report.Vectors == 3 && report.Lines == 2, "import report");
-            Check(report.BooksNotInFile.Count == 1 && report.BooksNotInFile[0] == "id:9", "book not in file");
-            Check(index.GetVectorInfo()!.Vectors == 3 && index.GetVectorInfo()!.Lines == 2, "vectors and lines");
-            var sem = index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }, new SemanticOptions { K = 2 });
-            Check(sem.Hits[0].LineId == 50 && sem.Hits[0].Chunk == 1 && Math.Abs(sem.Hits[0].Score - 0.96f) < 1e-3, "found by its second chunk");
+            Check(index.VectorInfo() == null, "no vector set yet");
+            Check(index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }).Hits.Length == 0, "no set: no hits");
+            var info = index.OpenVectorsAsync(oxv!).GetAwaiter().GetResult();
+            Check(info.Dims == 4 && info.Books == 2 && info.BooksMapped == 0 && info.Segments.Count == 1, "set info");
+            index.MapVectorBook("id:5", 5, new long[] { 1, 2 });
+            Check(index.VectorInfo()!.BooksMapped == 1 && index.VectorInfo()!.BooksUnmapped == 1, "id:5 mapped, id:7 not");
+            var sem = index.SemanticSearchAsync(new[] { 0f, 0f, 1f, 0f }, new SemanticOptions { K = 2 }).GetAwaiter().GetResult();
+            Check(sem.Hits.Length >= 1 && sem.Hits[0].LineId == 1 && sem.Hits[0].BookId == 5 && sem.Hits[0].Chunk == 1
+                  && Math.Abs(sem.Hits[0].Score - 0.96f) < 1e-3, "found by its second window");
+            var none = index.SemanticSearch(new[] { 0f, 0f, 0f, 1f }, new SemanticOptions { K = 1 });
+            Check(none.Hits.Length == 0 && none.Unmapped == 1, "unmapped book: no hit, counted");
+            var axis0 = index.SemanticSearch(new[] { 1f, 0f, 0f, 0f }, new SemanticOptions { K = 1 });
+            Check(axis0.Hits.Length == 1 && axis0.Hits[0].LineId == 2, "ordinal 1 = line 2");
+            Check(index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }, new SemanticOptions { K = 5, Books = new long[] { 6 } }).Hits.Length == 0,
+                  "book filter excludes");
+            Check(index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }, new SemanticOptions { K = 5, Books = new long[] { 5 } }).Hits.All(h => h.BookId == 5),
+                  "book filter keeps");
+            index.SetVectorMapping(new[] { new OxvBookMap { Name = "id:7", BookId = 6, LineIds = new long[] { 3 } } }, false);
+            var seven = index.SemanticSearch(new[] { 0f, 0f, 0f, 1f }, new SemanticOptions { K = 1 });
+            Check(seven.Hits.Length == 1 && seven.Hits[0].LineId == 3 && seven.Unmapped == 0, "JSON mapping adds a book");
             using (var s = index.Search(new SearchOptions("alpha") { Order = ResultsOrder.Relevance }))
-                Check(s.FuseSemantic("alpha", sem)[0].Source == "both", "hybrid over imported vectors");
-            var update = new VectorUpdate { Dims = 4 };
-            update.Add.Add(new LineVector { LineId = 51, BookId = 5, Chunk = 2, Vector = new[] { 0f, 0f, 0f, 1f } });
-            Check(index.UpdateVectors(update).Vectors == 3, "a host chunk replaces the line's vectors");
+            {
+                var fused = s.FuseSemanticAsync("alpha", sem).GetAwaiter().GetResult();
+                Check(fused.Length >= 1 && fused[0].LineId == 1 && fused[0].Source == "both", "hybrid: lexical and semantic");
+                var rrf = s.FuseSemantic("alpha", sem, new FusionOptions { Strategy = FusionStrategy.Rrf });
+                Check(rrf.Length == fused.Length, "rrf");
+                // issue #40: release the caches with this session open; it and new searches go on
+                index.ReleaseMemory();
+                Check(s.GetHits(0, 10).Length == 1, "session after ReleaseMemory");
+                var sem2 = index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }, new SemanticOptions { K = 2 });
+                Check(sem2.Hits.Length >= 1 && sem2.Hits[0].LineId == 1, "semantic after ReleaseMemory");
+            }
+            using (var cts = new CancellationTokenSource())
+            {
+                cts.Cancel();
+                Check(Throws<OperationCanceledException>(() => index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }, null, cts.Token)), "cancelled");
+            }
+            Check(Throws<SeforimEngineException>(() => index.SemanticSearch(new[] { 1f, 0f }, null)), "wrong dims");
+            index.SetVectorMapping(new OxvBookMap[0], true);
+            Check(index.VectorInfo()!.BooksMapped == 0, "replace drops the mapping");
+            index.CloseVectors();
+            Check(index.VectorInfo() == null, "closed");
         }
 
         private static void AsyncOpen(string db, string dir)

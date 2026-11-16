@@ -1,12 +1,13 @@
-//! Semantic search (issue #18): the vector sidecar of a line index
-//! (`<index>/vectors/`, crate `seforim-vectors`: a usearch HNSW graph with i8
-//! vectors + f16 full vectors for the rescore and the exact filtered scan)
-//! and the hybrid fusion of a lexical search with a semantic one.
+//! Semantic search (issue #18), like Otzaria: an exact scan over Otzaria's
+//! own downloaded vector set (crate `seforim-vectors`: `.oxv` segments, base
+//! + deltas, read-only, from the directory the host points to, e.g.
+//! `%APPDATA%\otzaria\vectors`; nothing is converted or built), and the
+//! hybrid fusion of a lexical search with a semantic one.
 //!
-//! The host supplies the vectors (one or more per line, from its own
-//! embedding model) and the query vector; the engine never runs a model.
-//! Otzaria's prebuilt vector files (`.oxv`) are imported by
-//! [`LineIndex::import_oxv`], keyed by the host's line ids. Three modes:
+//! The host supplies the query vector (Otzaria's query model) and the line
+//! mapping: per Otzaria book name (`id:<bookId>`), its book id and the line
+//! id of each line ordinal ([`LineIndex::set_vector_mapping`], kept in
+//! memory); the engine never runs a model. Three modes:
 //! - lexical only: the plain search, unchanged (the default);
 //! - semantic only: [`LineIndex::semantic_search`], the top k lines by cosine
 //!   similarity, filtered by books like the lexical search;
@@ -16,103 +17,75 @@
 //!   fused by Otzaria's weighted (Balanced) or RRF (Fast) profile
 //!   (`seforim_vectors::fusion`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use seforim_vectors::fusion::{self, Fusion, QueryTypeAlphas};
-use seforim_vectors::{BuildParams, SearchParams, ThreadHooks, VectorStore};
+use seforim_vectors::set::{LineMap, SegmentSet};
 
-pub use seforim_vectors::{ApplyStats, VectorRecord, VectorUpdate, CHUNK_BORROWED, DEFAULT_CHUNK_PENALTY};
-pub use seforim_vectors::oxv::{OxvBookMap, OxvImportReport, OxvInfo};
+pub use seforim_vectors::oxv::{OxvBookMap, OxvInfo};
+pub use seforim_vectors::set::{LineSearch as SemanticOptions, SetInfo as VectorInfo, DEFAULT_WINDOW_PENALTY};
+pub use seforim_vectors::CHUNK_BORROWED;
 
 use crate::search::{CancelToken, SearchResult};
 use crate::{Error, LineIndex, Result};
 
-/// The sidecar directory's name inside the index directory.
-pub const VECTORS_DIR: &str = "vectors";
-
-/// The open vector store of an index (reopened when a newer generation is
-/// published) and the lock that serializes writes.
+/// The vector set of an index: where it is (the host's directory or file),
+/// the open set (dropped by `release_memory`, reopened lazily) and the
+/// host's line mapping (kept in memory).
 #[derive(Default)]
 pub struct VectorCache {
-    store: Mutex<Option<Arc<VectorStore>>>,
-    write: Mutex<()>,
+    state: Mutex<VectorState>,
+}
+
+#[derive(Default)]
+struct VectorState {
+    path: Option<PathBuf>,
+    set: Option<Arc<SegmentSet>>,
+    map: Arc<LineMap>,
 }
 
 impl VectorCache {
-    /// Drops the open store (issue #40): its mapping is released when the
-    /// last search holding it ends; the next call reopens it.
+    /// Drops the open set (issue #40): its mappings are released when the
+    /// last search holding it ends; the next call reopens it. The host's
+    /// line mapping stays.
     pub(crate) fn release(&self) {
-        *self.store.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).set = None;
     }
 }
 
-/// A semantic search request (JSON at the C ABI).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SemanticOptions {
-    /// How many lines (a ranked cut list by nature).
-    pub k: usize,
-    /// Only these books (the lexical search's `books` filter). None = all.
-    pub books: Option<Vec<u64>>,
-    /// Graph candidates = ceil(k * oversample), rescored with the full vectors.
-    pub oversample: f32,
-    /// A filter leaving at most this many vectors is an exact scan.
-    pub exact_threshold: usize,
-    /// Taken off a chunk past a line's first one before the line's best
-    /// chunk is chosen (Otzaria's window penalty, default 0.04).
-    pub chunk_penalty: f32,
-}
-
-impl Default for SemanticOptions {
-    fn default() -> Self {
-        let p = SearchParams::new(10);
-        SemanticOptions {
-            k: p.k,
-            books: None,
-            oversample: p.oversample,
-            exact_threshold: p.exact_threshold,
-            chunk_penalty: p.chunk_penalty,
-        }
-    }
-}
-
-/// One semantic hit, a line: its best chunk's cosine (-1..1) minus that
-/// chunk's penalty, best first, ties by line id.
+/// One semantic hit, a line: the vector's similarity minus this
+/// occurrence's penalty, best first.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SemanticHit {
     pub line_id: u64,
     pub book_id: u64,
     pub score: f32,
-    /// The chunk that scored the line (0 = its first vector).
+    /// The occurrence's window (0 = the line's first; n its n-th window; bit
+    /// 31 = found through a neighbour's vector, Otzaria's alias).
     #[serde(default)]
     pub chunk: u32,
 }
 
-/// A semantic search's hits and how it was served.
+/// A semantic search's hits and counts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SemanticResult {
     pub hits: Vec<SemanticHit>,
-    /// True: exact scan of the filtered lines; false: HNSW + rescore.
-    pub exact: bool,
-    /// Vectors (chunks) the filter allows.
-    pub allowed: u64,
-    /// The store generation searched.
+    /// Vectors the scan kept (Otzaria's top_k).
+    pub vectors: u64,
+    /// Records of those vectors read (admitted books only, under a filter).
+    pub records: u64,
+    /// Records the host's mapping does not cover (counted, never guessed).
+    pub unmapped: u64,
+    /// Slots the scan visited.
+    pub scanned: u64,
+    /// Scan threads used.
+    pub threads: usize,
+    /// The set generation searched (0: a single `.oxv`).
     pub generation: u64,
 }
 
-/// The vector store of an index, as reported to the host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VectorInfo {
-    pub dims: usize,
-    /// Distinct lines.
-    pub lines: u64,
-    /// Vectors (a long line may have several chunks).
-    pub vectors: u64,
-    pub books: u64,
-    pub generation: u64,
-}
 
 /// How to fuse (JSON at the C ABI: `{"strategy":"weighted","alpha":0.5}` or
 /// `{"strategy":"rrf","k":60}`).
@@ -176,93 +149,75 @@ fn map_err(e: seforim_vectors::Error) -> Error {
 }
 
 impl LineIndex {
-    /// The vector sidecar directory of this index.
-    pub fn vectors_dir(&self) -> PathBuf {
-        self.dir.join(VECTORS_DIR)
+    /// Opens Otzaria's vector set read-only (a set directory as Otzaria
+    /// installs it, e.g. `%APPDATA%\otzaria\vectors`, or one base `.oxv`)
+    /// and keeps it for [`semantic_search`](Self::semantic_search). Replaces
+    /// a set opened before; the line mapping stays.
+    pub fn open_vectors(&self, path: &Path) -> Result<VectorInfo> {
+        let set = Arc::new(SegmentSet::open(path).map_err(map_err)?);
+        let mut state = self.vectors.state.lock().unwrap();
+        let info = set.info(Some(&state.map));
+        state.path = Some(path.to_path_buf());
+        state.set = Some(set);
+        Ok(info)
     }
 
-    /// The current vector store (None: no vectors yet). A store published
-    /// since the last call (by this or another process) is picked up here;
-    /// a search holding the older one keeps it.
-    pub fn vector_store(&self) -> Result<Option<Arc<VectorStore>>> {
-        let dir = self.vectors_dir();
-        let latest = seforim_vectors::latest_generation(&dir);
-        let mut cached = self.vectors.store.lock().unwrap();
-        if cached.as_ref().map(|s| s.generation()) != latest {
-            *cached = VectorStore::open(&dir).map_err(map_err)?.map(Arc::new);
+    /// Forgets the vector set (the line mapping stays).
+    pub fn close_vectors(&self) {
+        let mut state = self.vectors.state.lock().unwrap();
+        state.path = None;
+        state.set = None;
+    }
+
+    /// Registers the host's line mapping: per Otzaria book name, its book id
+    /// and the line id of each line ordinal (the vectors' hint). `replace`
+    /// drops every book mapped before; otherwise the books given are added
+    /// or replaced.
+    pub fn set_vector_mapping(&self, books: Vec<OxvBookMap>, replace: bool) {
+        let mut state = self.vectors.state.lock().unwrap();
+        Arc::make_mut(&mut state.map).set(books, replace);
+    }
+
+    /// The open set and the mapping (reopened after `release_memory`).
+    fn vector_set(&self) -> Result<Option<(Arc<SegmentSet>, Arc<LineMap>)>> {
+        let mut state = self.vectors.state.lock().unwrap();
+        if state.set.is_none() {
+            if let Some(path) = state.path.clone() {
+                state.set = Some(Arc::new(SegmentSet::open(&path).map_err(map_err)?));
+            }
         }
-        Ok(cached.clone())
+        Ok(state.set.clone().map(|s| (s, state.map.clone())))
     }
 
-    /// The vector store's size (None: no vectors).
+    /// The open set (None: none opened), with the mapping's counts.
     pub fn vector_info(&self) -> Result<Option<VectorInfo>> {
-        Ok(self.vector_store()?.map(|s| VectorInfo {
-            dims: s.dims(),
-            lines: s.line_count(),
-            vectors: s.len() as u64,
-            books: s.book_counts().len() as u64,
-            generation: s.generation(),
-        }))
+        Ok(self.vector_set()?.map(|(set, map)| set.info(Some(&map))))
     }
 
-    /// Adds / removes / replaces line vectors (by line or by whole book,
-    /// following the per-book index updates of issue #29) and publishes a new
-    /// store generation. `dims` must match an existing store. Runs in the
-    /// OS background mode (issue #19), its graph workers too; writes are
-    /// serialized per index. Searches keep running on the old generation.
-    pub fn update_vectors(&self, dims: usize, update: &VectorUpdate, cancel: Option<&CancelToken>) -> Result<ApplyStats> {
-        let _write = self.vectors.write.lock().unwrap();
-        let _background = tantivy::indexer::BackgroundPriority::enter();
-        let hooks = ThreadHooks { start: Some(crate::resources::begin_background), end: Some(crate::resources::end_background) };
-        let flag = cancel.map(|c| c.flag());
-        let stats = seforim_vectors::apply(&self.vectors_dir(), &BuildParams::new(dims), update, hooks, flag.as_deref())
-            .map_err(map_err)?;
-        // the next search opens the new generation
-        let _ = self.vector_store();
-        Ok(stats)
-    }
-
-    /// Imports an Otzaria vector file (`.oxv`, see [`seforim_vectors::oxv`])
-    /// into the sidecar. The HOST maps the file's books to its own: for each
-    /// book name (`id:<bookId>` for a library book) its book id and the line
-    /// ids of its lines in the order the vectors count them (a record's hint
-    /// is the 0-based ordinal). Every chunk of a mapped line is kept (the
-    /// windows of a long line, borrowed vectors of short lines). Each mapped
-    /// book replaces its old vectors (one write per call: batch the books).
-    pub fn import_oxv(&self, path: &std::path::Path, books: &[OxvBookMap], cancel: Option<&CancelToken>) -> Result<OxvImportReport> {
-        let file = seforim_vectors::oxv::OxvFile::open(path).map_err(map_err)?;
-        let flag = cancel.map(|c| c.flag());
-        let decode = std::time::Instant::now();
-        let (update, mut report) = file.update_for(books, flag.as_deref()).map_err(map_err)?;
-        if std::env::var_os("SEFORIM_VECTORS_PROFILE").is_some() {
-            eprintln!("vectors-profile: oxv records + decode {} ms ({} vectors)", decode.elapsed().as_millis(), update.add.len());
-        }
-        if !update.add.is_empty() || !update.remove_books.is_empty() {
-            let stats = self.update_vectors(file.dims(), &update, cancel)?;
-            report.generation = stats.generation;
-        }
-        Ok(report)
-    }
-
-    /// The top `options.k` lines by cosine similarity to `query` (the
-    /// host's query vector, any length > 0 as long as it matches the store).
-    /// No store: an empty result.
+    /// The top `options.k` lines for `query` (the host's query vector, the
+    /// set's width; normalized here if it is not a unit vector): Otzaria's
+    /// exact scan over the set, the scanned vectors mapped to the host's
+    /// line ids, one result per line. No set: an empty result.
     pub fn semantic_search(&self, query: &[f32], options: &SemanticOptions, cancel: Option<&CancelToken>) -> Result<SemanticResult> {
-        let Some(store) = self.vector_store()? else { return Ok(SemanticResult::default()) };
-        let params = SearchParams {
-            k: options.k,
-            books: options.books.clone(),
-            oversample: options.oversample,
-            exact_threshold: options.exact_threshold,
-            chunk_penalty: options.chunk_penalty,
+        let Some((set, map)) = self.vector_set()? else { return Ok(SemanticResult::default()) };
+        let norm = query.iter().map(|x| f64::from(*x) * f64::from(*x)).sum::<f64>().sqrt();
+        let unit;
+        let query = if (norm - 1.0).abs() > 1e-4 {
+            unit = seforim_vectors::normalized(query).map_err(map_err)?;
+            &unit[..]
+        } else {
+            query
         };
         let flag = cancel.map(|c| c.flag());
-        let (hits, path) = store.search_with_path(query, &params, flag.as_deref()).map_err(map_err)?;
+        let r = set.search_lines(query, &map, options, flag.as_deref()).map_err(map_err)?;
         Ok(SemanticResult {
-            hits: hits.into_iter().map(|h| SemanticHit { line_id: h.line_id, book_id: h.book_id, score: h.score, chunk: h.chunk }).collect(),
-            exact: path.exact,
-            allowed: path.allowed,
-            generation: store.generation(),
+            hits: r.hits.into_iter().map(|h| SemanticHit { line_id: h.line_id, book_id: h.book_id, score: h.score, chunk: h.chunk }).collect(),
+            vectors: r.vectors,
+            records: r.records,
+            unmapped: r.unmapped,
+            scanned: r.scanned,
+            threads: r.threads,
+            generation: set.generation(),
         })
     }
 }
@@ -359,14 +314,17 @@ mod tests {
     use super::*;
     use crate::{IndexOptions, LineDoc, SearchOptions};
 
-    fn vector(seed: u64, dims: usize) -> Vec<f32> {
-        (0..dims).map(|i| (((seed * 31 + i as u64 * 17) % 97) as f32) - 48.0).collect()
+    fn axis(a: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; 8];
+        v[a] = 1.0;
+        v
     }
 
-    #[test]
-    fn semantic_and_hybrid_on_a_line_index() {
-        let tmp = tempfile::tempdir().unwrap();
-        let index = LineIndex::create(tmp.path(), IndexOptions::default()).unwrap();
+    /// Lines 1..4 (books 10, 20) indexed; an Otzaria set (one base `.oxv`)
+    /// holding books `id:10` (line ordinals 0, 1) and `id:20` (0, 1, a
+    /// second window of ordinal 1 on axis 5).
+    fn index_with_vectors(tmp: &Path) -> LineIndex {
+        let index = LineIndex::create(&tmp.join("index"), IndexOptions::default()).unwrap();
         let lines = [(1u64, 10u64, "alpha beta"), (2, 10, "beta gamma"), (3, 20, "gamma delta"), (4, 20, "alpha")];
         {
             let mut w = index.writer(50_000_000, 1).unwrap();
@@ -376,34 +334,64 @@ mod tests {
             }
             w.commit(None).unwrap();
         }
-        assert!(index.vector_info().unwrap().is_none());
-        assert!(index.semantic_search(&[1.0; 8], &SemanticOptions::default(), None).unwrap().hits.is_empty());
+        let oxv = tmp.join("lib.oxv");
+        seforim_vectors::oxv::write_test_segment(
+            &oxv,
+            8,
+            false,
+            "v1",
+            &[("id:10", vec![(0, 0, axis(1)), (1, 0, axis(2))]), ("id:20", vec![(0, 0, axis(3)), (1, 0, axis(4)), (1, 1, axis(5))])],
+        )
+        .unwrap();
+        index.open_vectors(&oxv).unwrap();
+        index.set_vector_mapping(
+            vec![
+                OxvBookMap { name: "id:10".into(), book_id: 10, line_ids: vec![1, 2] },
+                OxvBookMap { name: "id:20".into(), book_id: 20, line_ids: vec![3, 4] },
+            ],
+            true,
+        );
+        index
+    }
 
-        let update = VectorUpdate {
-            add: lines.iter().map(|&(id, book, _)| VectorRecord { line_id: id, book_id: book, chunk: 0, vector: vector(id, 8) }).collect(),
-            ..Default::default()
-        };
-        let stats = index.update_vectors(8, &update, None).unwrap();
-        assert_eq!((stats.lines, stats.books), (4, 2));
-        assert_eq!(index.vector_info().unwrap().unwrap().lines, 4);
+    #[test]
+    fn semantic_and_hybrid_on_a_line_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = LineIndex::create(&tmp.path().join("bare"), IndexOptions::default()).unwrap();
+        assert!(bare.vector_info().unwrap().is_none());
+        assert!(bare.semantic_search(&[1.0; 8], &SemanticOptions::default(), None).unwrap().hits.is_empty());
 
-        // the query is line 3's own vector: line 3 first, score 1
-        let r = index.semantic_search(&vector(3, 8), &SemanticOptions { k: 2, ..Default::default() }, None).unwrap();
-        assert_eq!(r.hits[0].line_id, 3);
-        assert!((r.hits[0].score - 1.0).abs() < 1e-3);
-        assert!(r.exact);
+        let index = index_with_vectors(tmp.path());
+        let info = index.vector_info().unwrap().unwrap();
+        assert_eq!((info.dims, info.slots_live, info.books, info.books_mapped, info.books_unmapped), (8, 5, 2, 2, 0));
+
+        // the query is line 3's own vector (not unit length: normalized): line 3 first, score 1
+        let mut q = axis(3);
+        q[3] = 2.0;
+        let r = index.semantic_search(&q, &SemanticOptions { k: 2, ..Default::default() }, None).unwrap();
+        assert_eq!((r.hits[0].line_id, r.hits[0].book_id), (3, 20));
+        assert!((r.hits[0].score - 1.0).abs() < 1e-5);
+        // a second window: 0.04 off, chunk 1
+        let r = index.semantic_search(&axis(5), &SemanticOptions { k: 1, ..Default::default() }, None).unwrap();
+        assert_eq!((r.hits[0].line_id, r.hits[0].chunk), (4, 1));
+        assert!((r.hits[0].score - 0.96).abs() < 1e-5);
         // book filter
         let opts = SemanticOptions { k: 4, books: Some(vec![10]), ..Default::default() };
-        let r = index.semantic_search(&vector(3, 8), &opts, None).unwrap();
+        let r = index.semantic_search(&axis(3), &opts, None).unwrap();
         assert!(r.hits.iter().all(|h| h.book_id == 10) && r.hits.len() == 2);
         // cancelled
         let token = CancelToken::new();
         token.cancel();
-        assert!(matches!(index.semantic_search(&vector(3, 8), &SemanticOptions::default(), Some(&token)), Err(Error::Cancelled)));
+        assert!(matches!(index.semantic_search(&axis(3), &SemanticOptions::default(), Some(&token)), Err(Error::Cancelled)));
+        // an unmapped book's records are counted
+        index.set_vector_mapping(vec![OxvBookMap { name: "id:10".into(), book_id: 10, line_ids: vec![1, 2] }], true);
+        let r = index.semantic_search(&axis(3), &SemanticOptions { k: 1, ..Default::default() }, None).unwrap();
+        assert_eq!((r.hits.len(), r.unmapped), (0, 1));
+        index.set_vector_mapping(vec![OxvBookMap { name: "id:20".into(), book_id: 20, line_ids: vec![3, 4] }], false);
 
         // hybrid: every lexical hit stays, the semantic-only line joins
         let lexical = index.search_options(&SearchOptions { query: "alpha".into(), order: crate::ResultsOrder::Relevance, ..Default::default() }).unwrap();
-        let semantic = index.semantic_search(&vector(3, 8), &SemanticOptions { k: 1, ..Default::default() }, None).unwrap();
+        let semantic = index.semantic_search(&axis(3), &SemanticOptions { k: 1, ..Default::default() }, None).unwrap();
         let fused = lexical.fuse_semantic("alpha", &semantic.hits, &FusionOptions::default()).unwrap();
         let mut got: Vec<u64> = fused.iter().map(|f| f.line_id).collect();
         got.sort_unstable();
@@ -422,20 +410,12 @@ mod tests {
         let want = 0.7 * fusion::normalize_bm25(bm25, 10.0) + 0.3 * one.semantic.map_or(0.0, fusion::normalize_cosine) + both;
         assert!((one.fused - want).abs() < 1e-6);
 
-        // a book's vectors replaced: the old lines go
-        let update = VectorUpdate {
-            remove_books: vec![20],
-            add: vec![VectorRecord { line_id: 5, book_id: 20, chunk: 0, vector: vector(5, 8) }],
-            ..Default::default()
-        };
-        index.update_vectors(8, &update, None).unwrap();
-        let r = index.semantic_search(&vector(3, 8), &SemanticOptions { k: 10, ..Default::default() }, None).unwrap();
-        let mut ids: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();
-        ids.sort_unstable();
-        assert_eq!(ids, vec![1, 2, 5]);
-        // wrong dims refused
-        assert!(index.update_vectors(4, &VectorUpdate::default(), None).is_err());
+        // a bad set path is an error; closing forgets the set
+        assert!(index.open_vectors(&tmp.path().join("missing")).is_err());
+        index.close_vectors();
+        assert!(index.vector_info().unwrap().is_none());
     }
+
 
     fn tantivy_scores(index: &LineIndex, q: &dyn tantivy::query::Query) -> std::collections::HashMap<u64, f32> {
         let searcher = index.reader.searcher();
@@ -528,9 +508,9 @@ mod tests {
         assert!(fused.iter().all(|f| f.source != "both"));
     }
 
-    /// Issue #40: release_memory drops the caches (sidecar, store, regex,
-    /// line search, reader) and everything reopens lazily with the same
-    /// answers, also while searches run on other threads.
+    /// Issue #40: release_memory drops the caches (sidecar, vector set,
+    /// regex, line search, reader) and everything reopens lazily with the
+    /// same answers, also while searches run on other threads.
     #[test]
     fn release_memory_keeps_answers_and_is_safe_mid_search() {
         let tmp = tempfile::tempdir().unwrap();
@@ -546,11 +526,11 @@ mod tests {
             w.merge_all().unwrap();
         }
         assert!(index.build_fm_sidecar().unwrap());
-        let update = VectorUpdate {
-            add: (1..=200u64).map(|id| VectorRecord { line_id: id, book_id: 1 + (id - 1) % 4, chunk: 0, vector: vector(id, 8) }).collect(),
-            ..Default::default()
-        };
-        index.update_vectors(8, &update, None).unwrap();
+        let oxv = tmp.path().join("v.oxv");
+        let recs: Vec<(u32, u32, Vec<f32>)> = (0..8u32).map(|i| (i, 0, axis(i as usize))).collect();
+        seforim_vectors::oxv::write_test_segment(&oxv, 8, false, "v1", &[("id:1", recs)]).unwrap();
+        index.open_vectors(&oxv).unwrap();
+        index.set_vector_mapping(vec![OxvBookMap { name: "id:1".into(), book_id: 1, line_ids: (1..=8).collect() }], true);
         let queries = ["*pha3", "beta~1", "/alpha[12]/", "/beta gamma[34]/", "alpha1 gamma2"];
         let ids = |index: &LineIndex, q: &str| -> Vec<u64> {
             let r = index.search_options(&SearchOptions { query: q.into(), user_regex: true, ..Default::default() }).unwrap();
@@ -558,11 +538,12 @@ mod tests {
         };
         let before: Vec<Vec<u64>> = queries.iter().map(|q| ids(&index, q)).collect();
         assert!(before.iter().all(|h| !h.is_empty()), "{:?}", before.iter().map(|h| h.len()).collect::<Vec<_>>());
-        let sem = index.semantic_search(&vector(9, 8), &SemanticOptions::default(), None).unwrap();
+        let sem = index.semantic_search(&axis(3), &SemanticOptions::default(), None).unwrap();
+        assert_eq!(sem.hits[0].line_id, 4);
         // a session open across the release keeps working
         let mut open = index.search_options(&SearchOptions { query: "*pha3".into(), ..Default::default() }).unwrap();
         index.release_memory().unwrap();
-        assert!(index.vectors.store.lock().unwrap().is_none());
+        assert!(index.vectors.state.lock().unwrap().set.is_none());
         assert_eq!(open.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), before[0]);
         assert!(open.session.locate("alpha3 beta gamma1").is_some());
         // after: same answers, caches reopened lazily
@@ -570,7 +551,7 @@ mod tests {
             assert_eq!(&ids(&index, q), want, "{q}");
         }
         assert!(index.has_fm_sidecar());
-        assert_eq!(index.semantic_search(&vector(9, 8), &SemanticOptions::default(), None).unwrap(), sem);
+        assert_eq!(index.semantic_search(&axis(3), &SemanticOptions::default(), None).unwrap(), sem);
         // releases racing searches on other threads
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let workers: Vec<_> = (0..3)
@@ -581,7 +562,7 @@ mod tests {
                     while !stop.load(std::sync::atomic::Ordering::Relaxed) || runs < 5 {
                         let k = (runs + t) % queries.len();
                         assert_eq!(ids(&index, queries[k]), before[k], "{}", queries[k]);
-                        index.semantic_search(&vector(9, 8), &SemanticOptions::default(), None).unwrap();
+                        index.semantic_search(&axis(3), &SemanticOptions::default(), None).unwrap();
                         runs += 1;
                     }
                 })

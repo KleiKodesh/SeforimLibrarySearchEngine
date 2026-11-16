@@ -13,24 +13,23 @@ using SeforimSearch.Engine;
 namespace SeforimSearch.Demo
 {
     /// <summary>
-    /// Semantic search in the host (issue #18). The engine only stores and searches vectors; the
+    /// Semantic search in the host (issue #18). The engine scans Otzaria's vector set; the
     /// seforim.db mapping and the query model live here.
     ///
-    ///   semantic-import &lt;index dir&gt; &lt;file.oxv | file.oxv.zst&gt; [--db path] [--books N] [--max-lines N]
-    ///                   [--book-ids 1,2,3] [--batch 200] [--no-newline-check]
-    ///     Maps each file book named id:&lt;bookId&gt; to its line ids (ordinal = row of
-    ///     SELECT id FROM line WHERE bookId=? ORDER BY lineIndex, id) and imports it.
-    ///     --books N: the first N books of the file; --max-lines N: only books that lie whole in
-    ///     the first N lines of the catalog order (the books a `build --max-lines N` indexed).
-    ///   semantic-search &lt;index dir&gt; [query...] [--db path] [--line lineId] [--k 10] [--hybrid] [--model dir]
-    ///     Embeds the query (or the text of line --line) with Otzaria's Meivin model and searches.
+    ///   semantic-search &lt;index dir&gt; --vectors &lt;set dir | file.oxv&gt; [--db path] [--model dir]
+    ///                   (--line N | --lines a,b,c | --query text) [--k N] [--books a,b] [--threads N]
+    ///                   [--hybrid] [--repeat N] [--no-newline-check]
+    ///     Opens Otzaria's vector set read-only, maps each set book named id:&lt;bookId&gt; to its line
+    ///     ids (ordinal = row of SELECT id FROM line WHERE bookId=? ORDER BY lineIndex, id), embeds
+    ///     each query with Otzaria's Meivin model and searches; prints open / mapping / per-query
+    ///     latencies, the hits, mean and p95 search latency and the peak working set.
     ///   semantic-tokcheck &lt;golden.json&gt; [--model dir]
     ///     Compares the tokenizer with Otzaria's golden token ids (otzaria-semantic-search
     ///     tests/data/onnx_golden_vectors*.json, same tokenizer.json checksum).
     /// </summary>
     internal static class SemanticCommand
     {
-        private static readonly string[] ValueOptions = { "--db", "--index", "--books", "--max-lines", "--book-ids", "--batch", "--line", "--lines", "--k", "--model" };
+        private static readonly string[] ValueOptions = { "--db", "--index", "--vectors", "--books", "--threads", "--repeat", "--query", "--line", "--lines", "--k", "--model" };
 
         private static List<string> Positional(string[] args)
         {
@@ -49,99 +48,7 @@ namespace SeforimSearch.Demo
         private static string DefaultModelDir() =>
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "otzaria", "books", "meivin-qa491-onnx");
 
-        // ---------------------------------------------------------------- import
-
-        public static int Import(string db, string[] args)
-        {
-            var pos = Positional(args);
-            if (pos.Count < 2) { Console.Error.WriteLine("usage: semantic-import <index dir> <file.oxv|file.oxv.zst> [--books N] [--max-lines N] [--book-ids a,b] [--batch 200]"); return 2; }
-            string indexDir = pos[0], oxv = pos[1];
-            var total = Stopwatch.StartNew();
-            if (oxv.EndsWith(".zst", StringComparison.OrdinalIgnoreCase))
-            {
-                string plain = oxv.Substring(0, oxv.Length - 4);
-                if (!File.Exists(plain))
-                {
-                    var esw = Stopwatch.StartNew();
-                    long bytes = SeforimSemantic.ExpandOxv(oxv, plain);
-                    Console.Error.WriteLine($"expanded {bytes / 1e6:F1} MB in {Time(esw.Elapsed)}");
-                }
-                oxv = plain;
-            }
-            var info = SeforimSemantic.ReadOxvInfo(oxv);
-            Console.Error.WriteLine($"oxv: format {info.Format}, {info.Kind}, {info.Dims} dims, {info.Codec}, library {info.LibraryReleaseTag} " +
-                                    $"(v{info.FromLibraryVersion}-{info.ToLibraryVersion}), {info.Books.Count} books, {info.Slots:N0} slots");
-            IEnumerable<OxvBookInfo> books = info.Books;
-            if (int.TryParse(Program.OptionOf(args, "--books"), out int nBooks) && nBooks > 0) books = books.Take(nBooks);
-            HashSet<long>? only = null;
-            string? idList = Program.OptionOf(args, "--book-ids");
-            if (idList != null) only = new HashSet<long>(idList.Split(',').Select(long.Parse));
-            bool checkNewlines = !args.Contains("--no-newline-check");
-            int batchSize = int.TryParse(Program.OptionOf(args, "--batch"), out int bs) && bs > 0 ? bs : 200;
-
-            using var conn = SqliteConnectionFactory.OpenCorpusRead(db);
-            if (long.TryParse(Program.OptionOf(args, "--max-lines"), out long maxLines) && maxLines > 0)
-            {
-                var whole = BooksWithinFirstLines(conn, maxLines);
-                only = only == null ? whole : new HashSet<long>(only.Where(whole.Contains));
-                Console.Error.WriteLine($"--max-lines {maxLines:N0}: {whole.Count} books lie whole in the catalog's first lines");
-            }
-            if (only != null) books = books.Where(b => TryBookId(b.Name, out long id) && only.Contains(id));
-
-            var schema = SeforimDbSchema.Probe(conn);
-            using var codec = SeforimDbLineContentCodec.Create(conn);
-            using var index = SeforimIndex.Open(indexDir);
-
-            long notIdName = 0, missing = 0, tooFew = 0, splitRows = 0, mapped = 0, dbRowsMore = 0;
-            var sum = new OxvImportReport();
-            var batch = new List<OxvBookMap>();
-            var mapTime = new Stopwatch();
-            var importTime = new Stopwatch();
-            void Flush()
-            {
-                if (batch.Count == 0) return;
-                importTime.Start();
-                var r = index.ImportOxv(oxv, batch);
-                importTime.Stop();
-                sum.BooksImported += r.BooksImported;
-                sum.BooksUnmapped += r.BooksUnmapped;
-                sum.BooksNotInFile.AddRange(r.BooksNotInFile);
-                sum.Records += r.Records;
-                sum.Vectors += r.Vectors;
-                sum.Lines += r.Lines;
-                sum.OutOfRange += r.OutOfRange;
-                sum.Duplicates += r.Duplicates;
-                sum.Generation = r.Generation;
-                batch.Clear();
-                Console.Error.WriteLine($"  imported {sum.BooksImported:N0} books, {sum.Vectors:N0} vectors ({Time(total.Elapsed)})");
-            }
-            foreach (var b in books)
-            {
-                if (!TryBookId(b.Name, out long bookId)) { notIdName++; continue; }
-                mapTime.Start();
-                var (lineIds, hasNewline) = ReadBookLines(conn, schema, codec, bookId, checkNewlines);
-                mapTime.Stop();
-                if (lineIds.Count == 0) { missing++; continue; }
-                if (b.Lines > lineIds.Count) { tooFew++; continue; }
-                if (hasNewline) { splitRows++; continue; }
-                if (lineIds.Count > b.Lines) dbRowsMore++;
-                mapped++;
-                batch.Add(new OxvBookMap { Name = b.Name, BookId = bookId, LineIds = lineIds });
-                if (batch.Count >= batchSize) Flush();
-            }
-            Flush();
-            Console.WriteLine($"books mapped: {mapped:N0} (of them {dbRowsMore:N0} with more DB rows than the file's lines)");
-            Console.WriteLine($"books skipped: name not id:N {notIdName:N0}, missing from DB {missingOr(missing)}, " +
-                              $"file lines > DB rows {tooFew:N0}, a row with a newline {splitRows:N0}" + (checkNewlines ? "" : " (not checked)"));
-            Console.WriteLine($"import: books {sum.BooksImported:N0}, unmapped {sum.BooksUnmapped:N0}, not in file {sum.BooksNotInFile.Count:N0}, " +
-                              $"records {sum.Records:N0}, vectors {sum.Vectors:N0}, lines {sum.Lines:N0}, out_of_range {sum.OutOfRange:N0}, " +
-                              $"duplicates {sum.Duplicates:N0}, generation {sum.Generation}");
-            Console.WriteLine($"time: total {Time(total.Elapsed)}, mapping (SQLite) {Time(mapTime.Elapsed)}, import {Time(importTime.Elapsed)}");
-            Console.WriteLine($"peak working set: {System.Diagnostics.Process.GetCurrentProcess().PeakWorkingSet64 / 1048576.0:N0} MB");
-            return 0;
-
-            static string missingOr(long n) => n.ToString("N0");
-        }
+        // ---------------------------------------------------------------- mapping
 
         private static bool TryBookId(string name, out long id)
         {
@@ -149,8 +56,57 @@ namespace SeforimSearch.Demo
             return name.StartsWith("id:", StringComparison.Ordinal) && long.TryParse(name.Substring(3), out id) && id > 0;
         }
 
+        /// <summary>The books of the opened set (name -> line count) read from its segment files'
+        /// headers; segments that cannot be read are reported and skipped.</summary>
+        private static Dictionary<string, long> SetBooks(string vectors, VectorSetInfo info)
+        {
+            var books = new Dictionary<string, long>(StringComparer.Ordinal);
+            var files = new List<string>();
+            if (File.Exists(vectors)) files.Add(vectors);
+            else
+                foreach (var seg in info.Segments)
+                {
+                    string[] tries = { seg.File, Path.Combine(vectors, seg.File), Path.Combine(vectors, "segments", Path.GetFileName(seg.File)) };
+                    string? hit = tries.FirstOrDefault(File.Exists);
+                    if (hit != null) files.Add(hit);
+                    else Console.Error.WriteLine($"segment file not found: {seg.File}");
+                }
+            foreach (var f in files)
+            {
+                OxvInfo oi;
+                try { oi = SeforimSemantic.ReadOxvInfo(f); }
+                catch (SeforimEngineException e) { Console.Error.WriteLine($"segment header not read ({Path.GetFileName(f)}): {e.Message}"); continue; }
+                foreach (var b in oi.Books)
+                    books[b.Name] = books.TryGetValue(b.Name, out long n) ? Math.Max(n, b.Lines) : b.Lines;
+            }
+            return books;
+        }
+
+        /// <summary>Maps every <c>id:&lt;bookId&gt;</c> book of the set to its seforim.db line ids
+        /// (ordinal = row of <c>SELECT id FROM line WHERE bookId=? ORDER BY lineIndex, id</c>), one
+        /// <see cref="SeforimSemantic.MapVectorBook"/> per book. Returns the books skipped.</summary>
+        internal static long MapBooks(SeforimIndex index, SqliteConnection conn, string vectors, VectorSetInfo info, bool checkNewlines)
+        {
+            var schema = SeforimDbSchema.Probe(conn);
+            using var codec = SeforimDbLineContentCodec.Create(conn);
+            var books = SetBooks(vectors, info);
+            long notIdName = 0, missing = 0, tooFew = 0, splitRows = 0;
+            foreach (var kv in books)
+            {
+                if (!TryBookId(kv.Key, out long bookId)) { notIdName++; continue; }
+                var (lineIds, hasNewline) = ReadBookLines(conn, schema, codec, bookId, checkNewlines);
+                if (lineIds.Count == 0) { missing++; continue; }
+                if (kv.Value > lineIds.Count) { tooFew++; continue; }
+                if (hasNewline) { splitRows++; continue; }
+                index.MapVectorBook(kv.Key, bookId, lineIds);
+            }
+            Console.WriteLine($"books skipped: name not id:N {notIdName:N0}, missing from DB {missing:N0}, set lines > DB rows {tooFew:N0}, " +
+                              $"a row with a newline {splitRows:N0}" + (checkNewlines ? "" : " (not checked)"));
+            return notIdName + missing + tooFew + splitRows;
+        }
+
         /// <summary>The book's line ids by 0-based ordinal (Otzaria's order), and whether a row holds
-        /// a newline (Otzaria splits such rows when it embeds, so the file's ordinals would shift).</summary>
+        /// a newline (Otzaria splits such rows when it embeds, so the set's ordinals would shift).</summary>
         private static (List<long> Ids, bool HasNewline) ReadBookLines(SqliteConnection conn, SeforimDbSchema schema,
                                                                         SeforimDbLineContentCodec codec, long bookId, bool checkNewlines)
         {
@@ -176,95 +132,118 @@ namespace SeforimSearch.Demo
             return (ids, newline);
         }
 
-        /// <summary>Books lying whole in the first <paramref name="maxLines"/> lines of the catalog order
-        /// (what a <c>build --max-lines</c> indexed; virtual notes books are not counted, so with notes
-        /// the last book or two may be only partly indexed).</summary>
-        private static HashSet<long> BooksWithinFirstLines(SqliteConnection conn, long maxLines)
-        {
-            var order = SeforimDbBookTreeOrder.Load(conn);
-            var counts = new Dictionary<long, long>();
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = "SELECT bookId, COUNT(*) FROM line GROUP BY bookId";
-                using var r = cmd.ExecuteReader();
-                while (r.Read()) counts[r.GetInt64(0)] = r.GetInt64(1);
-            }
-            var set = new HashSet<long>();
-            long acc = 0;
-            foreach (var kv in order.OrderBy(kv => kv.Value))
-            {
-                acc += counts.TryGetValue(kv.Key, out long c) ? c : 0;
-                if (acc > maxLines) break;
-                set.Add(kv.Key);
-            }
-            return set;
-        }
-
         // ---------------------------------------------------------------- search
 
         public static int Search(string db, string[] args)
         {
-            // --lines a,b,c: one model load, each line's text as a query, with a recall check of the
-            // graph against the exact scan (CI measurements)
-            string? many = Program.OptionOf(args, "--lines");
-            if (many != null) return SearchMany(db, args, many);
             var pos = Positional(args);
-            if (pos.Count < 1) { Console.Error.WriteLine("usage: semantic-search <index dir> [query...] [--line lineId] [--k 10] [--hybrid]"); return 2; }
-            string indexDir = pos[0];
-            string query = string.Join(" ", pos.Skip(1));
-            if (long.TryParse(Program.OptionOf(args, "--line"), out long lineId))
+            string? vectors = Program.OptionOf(args, "--vectors");
+            if (pos.Count < 1 || vectors == null)
             {
-                using var conn = SqliteConnectionFactory.OpenCorpusRead(db);
-                var schema = SeforimDbSchema.Probe(conn);
-                using var codec = SeforimDbLineContentCodec.Create(conn);
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT " + SeforimDbLineContentSql.RawContentExpression(schema, "l") + " FROM line l" +
-                                  SeforimDbLineContentSql.ContentJoin(schema, "l") + " WHERE l.id = $id";
-                cmd.Parameters.AddWithValue("$id", lineId);
-                using var r = cmd.ExecuteReader();
-                if (!r.Read()) { Console.Error.WriteLine("line not found"); return 2; }
-                query = StripTags(codec.DecodeColumn(r, 0, lineId) ?? "");
-                Console.WriteLine($"query = text of line {lineId} ({query.Length} chars)");
+                Console.Error.WriteLine("usage: semantic-search <index dir> --vectors <set dir|file.oxv> --db <seforim.db> --model <dir> " +
+                                        "(--line N | --lines a,b,c | --query text) [--k N] [--books a,b] [--threads N] [--hybrid] [--repeat N] [--no-newline-check]");
+                return 2;
             }
-            if (query.Trim().Length == 0) { Console.Error.WriteLine("empty query"); return 2; }
             int k = int.TryParse(Program.OptionOf(args, "--k"), out int kk) && kk > 0 ? kk : 10;
-            string modelDir = Program.OptionOf(args, "--model") ?? DefaultModelDir();
+            int threads = int.TryParse(Program.OptionOf(args, "--threads"), out int tt) && tt > 0 ? tt : 0;
+            int repeat = int.TryParse(Program.OptionOf(args, "--repeat"), out int rr) && rr > 0 ? rr : 1;
+            string? booksArg = Program.OptionOf(args, "--books");
+            long[]? books = booksArg == null ? null : booksArg.Split(',').Where(s => s.Trim().Length > 0).Select(s => long.Parse(s.Trim())).ToArray();
+            bool hybrid = args.Contains("--hybrid");
 
-            var sw = Stopwatch.StartNew();
-            using var embedder = new MeivinEmbedder(modelDir);
-            var load = sw.Elapsed;
-            sw.Restart();
-            long[] ids = embedder.QueryIds(query);
-            float[] vector = embedder.Embed(ids);
-            var embed = sw.Elapsed;
-            using var index = SeforimIndex.Open(indexDir);
-            sw.Restart();
-            var sem = index.SemanticSearch(vector, new SemanticOptions { K = k });
-            var search = sw.Elapsed;
-            Console.WriteLine($"model load {Time(load)}, embed {Time(embed)} ({ids.Length} tokens), semantic search {Time(search)} " +
-                              $"(exact={sem.Exact}, allowed {sem.Allowed:N0})");
-            for (int i = 0; i < sem.Hits.Length; i++)
+            // queries: (source line id or 0, text)
+            var queries = new List<(long Line, string Text)>();
+            var lineIds = new List<long>();
+            string? lineArg = Program.OptionOf(args, "--line");
+            string? linesArg = Program.OptionOf(args, "--lines");
+            string? queryArg = Program.OptionOf(args, "--query");
+            if (lineArg != null) lineIds.Add(long.Parse(lineArg));
+            if (linesArg != null) lineIds.AddRange(linesArg.Split(',').Where(s => s.Trim().Length > 0).Select(s => long.Parse(s.Trim())));
+            using var conn = SqliteConnectionFactory.OpenCorpusRead(db);
+            foreach (long id in lineIds)
             {
-                var h = sem.Hits[i];
-                Console.WriteLine($"{i + 1,3}. line {h.LineId,10}  book {h.BookId,6}  chunk {h.Chunk,3}  score {h.Score:F4}" +
-                                  (h.LineId == lineId ? "   <- the query line" : ""));
+                string text = LineText(conn, id);
+                if (text.Trim().Length == 0) { Console.WriteLine($"line {id}: no text, skipped"); continue; }
+                queries.Add((id, text));
             }
-            if (args.Contains("--hybrid"))
+            if (queryArg != null && queryArg.Trim().Length > 0) queries.Add((0, queryArg));
+            if (queries.Count == 0) { Console.Error.WriteLine("no query: pass --line, --lines or --query"); return 2; }
+
+            using var index = SeforimIndex.Open(pos[0]);
+            var sw = Stopwatch.StartNew();
+            var info = index.OpenVectors(vectors);
+            Console.WriteLine($"open: {Time(sw.Elapsed)}");
+            sw.Restart();
+            long skipped = MapBooks(index, conn, vectors, info, !args.Contains("--no-newline-check"));
+            info = index.VectorInfo()!;
+            Console.WriteLine($"mapping: {Time(sw.Elapsed)}, books mapped {info.BooksMapped:N0}, unmapped {info.BooksUnmapped:N0} (skipped {skipped:N0})");
+            Console.WriteLine($"set: generation {info.Generation}, dims {info.Dims}, codec {info.Codec}, library {info.LibraryReleaseTag}, " +
+                              $"slots_live {info.SlotsLive:N0}, slots_dead {info.SlotsDead:N0}, books {info.Books:N0}, " +
+                              $"{info.BytesOnDisk / 1048576.0:N0} MB on disk, {info.Segments.Count} segments" + (info.RecoveredFromPrevious ? " (recovered)" : ""));
+            foreach (var s in info.Segments)
+                Console.WriteLine($"  segment {Path.GetFileName(s.File)}: {s.Kind}, v{s.FromLibraryVersion}-{s.ToLibraryVersion}, slots {s.Slots:N0}, " +
+                                  $"dead {s.SlotsDead:N0}, foreign {s.Foreign:N0} (unresolved {s.ForeignUnresolved:N0}), {s.Size / 1048576.0:N1} MB");
+
+            sw.Restart();
+            using var embedder = new MeivinEmbedder(Program.OptionOf(args, "--model") ?? DefaultModelDir());
+            Console.WriteLine($"model load: {Time(sw.Elapsed)}");
+            var latencies = new List<double>();
+            int withLine = 0, selfFirst = 0;
+            var options = new SemanticOptions { K = k, Books = books, Threads = threads };
+            foreach (var (line, text) in queries)
             {
                 sw.Restart();
-                using var session = index.Search(new SearchOptions(query) { Order = ResultsOrder.Relevance });
-                var fused = session.FuseSemantic(query, sem);
-                Console.WriteLine($"hybrid: {session.HitCount:N0} lexical hits, {fused.Length:N0} fused in {Time(sw.Elapsed)}");
-                foreach (var f in fused.Take(k))
-                    Console.WriteLine($"     line {f.LineId,10}  book {f.BookId,6}  fused {f.Fused:F4}  lexical {f.Lexical?.ToString("F4") ?? "-"}  " +
-                                      $"semantic {f.Semantic?.ToString("F4") ?? "-"}  {f.Source}");
+                long[] ids = embedder.QueryIds(text);
+                float[] vector = embedder.Embed(ids);
+                double embedMs = sw.Elapsed.TotalMilliseconds;
+                SemanticResult sem = null!;
+                double last = 0;
+                for (int i = 0; i < repeat; i++)
+                {
+                    sw.Restart();
+                    sem = index.SemanticSearch(vector, options);
+                    last = sw.Elapsed.TotalMilliseconds;
+                    latencies.Add(last);
+                }
+                string label = line != 0 ? $"line {line}" : "query";
+                Console.WriteLine($"{label}: embed {embedMs:F0} ms ({ids.Length} tokens), search {last:F1} ms; vectors {sem.Vectors:N0}, " +
+                                  $"records {sem.Records:N0}, unmapped {sem.Unmapped:N0}, scanned {sem.Scanned:N0}, threads {sem.Threads}");
+                for (int i = 0; i < sem.Hits.Length; i++)
+                {
+                    var h = sem.Hits[i];
+                    Console.WriteLine($"  {i + 1,3}. line {h.LineId,10}  book {h.BookId,6}  score {h.Score:F4}  chunk {h.Chunk & ~SemanticHit.Borrowed}" +
+                                      ((h.Chunk & SemanticHit.Borrowed) != 0 ? " (alias)" : "") + (line != 0 && h.LineId == line ? "   <- source line" : ""));
+                }
+                if (line != 0)
+                {
+                    withLine++;
+                    bool first = sem.Hits.Length > 0 && sem.Hits[0].LineId == line;
+                    if (first) selfFirst++;
+                    Console.WriteLine($"  source line first: {(first ? "yes" : "no")}");
+                }
+                if (hybrid)
+                {
+                    sw.Restart();
+                    var so = new SearchOptions(text) { Order = ResultsOrder.Relevance };
+                    if (books != null) so.Books = books.ToList();
+                    using var session = index.Search(so);
+                    var fused = session.FuseSemantic(text, sem);
+                    Console.WriteLine($"  hybrid: {session.HitCount:N0} lexical hits, {fused.Length:N0} fused in {Time(sw.Elapsed)}");
+                    foreach (var f in fused.Take(k))
+                        Console.WriteLine($"       line {f.LineId,10}  book {f.BookId,6}  fused {f.Fused:F4}  lexical {f.Lexical?.ToString("F4") ?? "-"}  " +
+                                          $"semantic {f.Semantic?.ToString("F4") ?? "-"}  {f.Source}");
+                }
             }
+            var sorted = latencies.OrderBy(x => x).ToList();
+            double p95 = sorted[Math.Max(0, Math.Min(sorted.Count - 1, (int)Math.Ceiling(0.95 * sorted.Count) - 1))];
+            Console.WriteLine($"search latency over {sorted.Count} runs: mean {sorted.Average():F1} ms, p95 {p95:F1} ms");
+            if (withLine > 0) Console.WriteLine($"source line ranked first: {selfFirst} of {withLine}");
+            Console.WriteLine($"peak working set: {Process.GetCurrentProcess().PeakWorkingSet64 / 1048576.0:N0} MB");
             return 0;
         }
 
-        private static string LineText(string db, long lineId)
+        private static string LineText(SqliteConnection conn, long lineId)
         {
-            using var conn = SqliteConnectionFactory.OpenCorpusRead(db);
             var schema = SeforimDbSchema.Probe(conn);
             using var codec = SeforimDbLineContentCodec.Create(conn);
             using var cmd = conn.CreateCommand();
@@ -273,45 +252,6 @@ namespace SeforimSearch.Demo
             cmd.Parameters.AddWithValue("$id", lineId);
             using var r = cmd.ExecuteReader();
             return r.Read() ? StripTags(codec.DecodeColumn(r, 0, lineId) ?? "") : "";
-        }
-
-        private static int SearchMany(string db, string[] args, string many)
-        {
-            var pos = Positional(args);
-            if (pos.Count < 1) { Console.Error.WriteLine("usage: semantic-search <index dir> --lines a,b,c [--k 10]"); return 2; }
-            int k = int.TryParse(Program.OptionOf(args, "--k"), out int kk) && kk > 0 ? kk : 10;
-            using var embedder = new MeivinEmbedder(Program.OptionOf(args, "--model") ?? DefaultModelDir());
-            using var index = SeforimIndex.Open(pos[0]);
-            int queries = 0, self1 = 0, selfK = 0;
-            double recall = 0, graphMs = 0, exactMs = 0, embedMs = 0;
-            foreach (var part in many.Split(','))
-            {
-                if (!long.TryParse(part.Trim(), out long lineId)) continue;
-                string text = LineText(db, lineId);
-                if (text.Trim().Length == 0) continue;
-                var sw = Stopwatch.StartNew();
-                float[] vector = embedder.Embed(embedder.QueryIds(text));
-                embedMs += sw.Elapsed.TotalMilliseconds;
-                sw.Restart();
-                var graph = index.SemanticSearch(vector, new SemanticOptions { K = k, ExactThreshold = 0 });
-                graphMs += sw.Elapsed.TotalMilliseconds;
-                sw.Restart();
-                var exact = index.SemanticSearch(vector, new SemanticOptions { K = k, ExactThreshold = long.MaxValue });
-                exactMs += sw.Elapsed.TotalMilliseconds;
-                var want = new HashSet<long>(exact.Hits.Select(h => h.LineId));
-                double r = want.Count == 0 ? 1 : graph.Hits.Count(h => want.Contains(h.LineId)) / (double)want.Count;
-                int rank = Array.FindIndex(graph.Hits, h => h.LineId == lineId) + 1;
-                queries++;
-                recall += r;
-                if (rank == 1) self1++;
-                if (rank >= 1) selfK++;
-                Console.WriteLine($"line {lineId,10}: own rank {(rank == 0 ? "-" : rank.ToString())}, top score {(graph.Hits.Length > 0 ? graph.Hits[0].Score : 0):F4}, " +
-                                  $"recall@{k} {r:F2}");
-            }
-            if (queries == 0) { Console.Error.WriteLine("no query lines"); return 2; }
-            Console.WriteLine($"queries {queries}: own line rank 1 in {self1}, in top {k} in {selfK}; mean recall@{k} graph vs exact {recall / queries:F3}; " +
-                              $"mean embed {embedMs / queries:F0} ms, graph search {graphMs / queries:F0} ms, exact scan {exactMs / queries:F0} ms");
-            return 0;
         }
 
         private static string StripTags(string s)

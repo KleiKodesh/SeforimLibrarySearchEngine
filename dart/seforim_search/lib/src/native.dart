@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 14;
+const int seforimAbiVersion = 15;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -211,19 +211,18 @@ final class SeforimNative {
             Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>)>('se_search_stream'),
         searchStreamPull = lib.lookupFunction<Int32 Function(Pointer<Void>, Uint64, Int64),
             int Function(Pointer<Void>, int, int)>('se_search_stream_pull'),
-        vectorsUpdate = lib.lookupFunction<
-            Pointer<Utf8> Function(Pointer<Void>, Uint32, Pointer<Uint64>, Size, Pointer<Uint64>, Size, Pointer<Uint64>,
-                Pointer<Uint64>, Pointer<Uint32>, Pointer<Float>, Size, Pointer<Void>),
-            Pointer<Utf8> Function(Pointer<Void>, int, Pointer<Uint64>, int, Pointer<Uint64>, int, Pointer<Uint64>,
-                Pointer<Uint64>, Pointer<Uint32>, Pointer<Float>, int, Pointer<Void>)>('se_vectors_update'),
+        vectorsOpen = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, Size),
+            Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int)>('se_vectors_open'),
+        vectorsClose = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>('se_vectors_close'),
+        vectorsMapBook = lib.lookupFunction<
+            Int32 Function(Pointer<Void>, Pointer<Uint8>, Size, Uint64, Pointer<Uint64>, Size),
+            int Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint64>, int)>('se_vectors_map_book'),
+        vectorsSetMapping = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint8>, Size, Int32),
+            int Function(Pointer<Void>, Pointer<Uint8>, int, int)>('se_vectors_set_mapping'),
         oxvExpand = lib.lookupFunction<Int64 Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size),
             int Function(Pointer<Uint8>, int, Pointer<Uint8>, int)>('se_oxv_expand'),
         oxvInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
             Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_oxv_info'),
-        vectorsImportOxv = lib.lookupFunction<
-            Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Void>),
-            Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>)>(
-            'se_vectors_import_oxv'),
         vectorsInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_vectors_info'),
         semanticSearch = lib.lookupFunction<
@@ -330,11 +329,12 @@ final class SeforimNative {
   final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>) searchCancellable;
   final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>) searchStream;
   final int Function(Pointer<Void>, int, int) searchStreamPull;
-  final Pointer<Utf8> Function(Pointer<Void>, int, Pointer<Uint64>, int, Pointer<Uint64>, int, Pointer<Uint64>,
-      Pointer<Uint64>, Pointer<Uint32>, Pointer<Float>, int, Pointer<Void>) vectorsUpdate;
+  final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int) vectorsOpen;
+  final int Function(Pointer<Void>) vectorsClose;
+  final int Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint64>, int) vectorsMapBook;
+  final int Function(Pointer<Void>, Pointer<Uint8>, int, int) vectorsSetMapping;
   final int Function(Pointer<Uint8>, int, Pointer<Uint8>, int) oxvExpand;
   final Pointer<Utf8> Function(Pointer<Uint8>, int) oxvInfo;
-  final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>) vectorsImportOxv;
   final Pointer<Utf8> Function(Pointer<Void>) vectorsInfo;
   final Pointer<Utf8> Function(Pointer<Void>, Pointer<Float>, int, Pointer<Uint8>, int, Pointer<Void>) semanticSearch;
   final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int) fuseSemantic;

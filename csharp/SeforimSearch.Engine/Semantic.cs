@@ -8,74 +8,62 @@ using SeforimSearch.Engine.Native;
 
 namespace SeforimSearch.Engine
 {
-    /// <summary>One vector of a line from the host's embedding model (the engine runs no model).
-    /// A long line may have several (chunks); the line scores as its best chunk.</summary>
-    public sealed class LineVector
+    /// <summary>One segment file of the open Otzaria vector set.</summary>
+    public sealed class VectorSegmentInfo
     {
-        /// <summary><see cref="Chunk"/> bit: a vector borrowed from a neighbour (Otzaria's alias).</summary>
-        public const uint Borrowed = 1u << 31;
-        public long LineId { get; set; }
-        public long BookId { get; set; }
-        /// <summary>0 = the line's first (or only) vector; 1, 2, ... its further chunks; may carry <see cref="Borrowed"/>.</summary>
-        public uint Chunk { get; set; }
-        public float[] Vector { get; set; } = Array.Empty<float>();
+        public string File { get; set; } = "";
+        /// <summary>"base" or "delta".</summary>
+        public string Kind { get; set; } = "";
+        public int FromLibraryVersion { get; set; }
+        public int ToLibraryVersion { get; set; }
+        public long Slots { get; set; }
+        public long SlotsDead { get; set; }
+        public long Foreign { get; set; }
+        public long ForeignUnresolved { get; set; }
+        public long Size { get; set; }
     }
 
-    /// <summary>One vector-sidecar write: removals (whole books, single lines), then additions.
-    /// A line added again replaces its vector; an updated book = <see cref="RemoveBooks"/> + its lines.</summary>
-    public sealed class VectorUpdate
+    /// <summary>The open Otzaria vector set (<see cref="SeforimSemantic.OpenVectors"/>, read-only).</summary>
+    public sealed class VectorSetInfo
     {
-        public int Dims { get; set; }
-        public List<long> RemoveBooks { get; } = new List<long>();
-        public List<long> RemoveLines { get; } = new List<long>();
-        public List<LineVector> Add { get; } = new List<LineVector>();
-    }
-
-    /// <summary>What a vector write did.</summary>
-    public sealed class VectorUpdateStats
-    {
+        public string Path { get; set; } = "";
         public long Generation { get; set; }
-        public long Lines { get; set; }
-        /// <summary>Vectors (chunks) in the store.</summary>
-        public long Vectors { get; set; }
-        public long Books { get; set; }
-        public long Removed { get; set; }
-        public long Added { get; set; }
-        /// <summary>True: the HNSW graph was built afresh (first build, or many removals).</summary>
-        public bool Rebuilt { get; set; }
-    }
-
-    /// <summary>The vector sidecar's size.</summary>
-    public sealed class VectorInfo
-    {
+        public bool RecoveredFromPrevious { get; set; }
         public int Dims { get; set; }
-        public long Lines { get; set; }
-        /// <summary>Vectors (a long line may have several chunks).</summary>
-        public long Vectors { get; set; }
+        public string Codec { get; set; } = "";
+        public int LibraryVersion { get; set; }
+        public string LibraryReleaseTag { get; set; } = "";
+        public List<VectorSegmentInfo> Segments { get; set; } = new List<VectorSegmentInfo>();
+        public long SlotsLive { get; set; }
+        public long SlotsDead { get; set; }
+        /// <summary>Books in the set.</summary>
         public long Books { get; set; }
-        public long Generation { get; set; }
+        /// <summary>Books of the set the host mapped.</summary>
+        public long BooksMapped { get; set; }
+        public long BooksUnmapped { get; set; }
+        public long BytesOnDisk { get; set; }
     }
 
-    /// <summary>A semantic search request.</summary>
+    /// <summary>A semantic search request (Otzaria's exact scan).</summary>
     public sealed class SemanticOptions
     {
-        /// <summary>How many lines (a ranked cut list).</summary>
+        /// <summary>How many lines.</summary>
         public int K { get; set; } = 10;
         /// <summary>Only these books (the lexical search's filter); null = all.</summary>
         public IReadOnlyList<long>? Books { get; set; }
-        /// <summary>HNSW candidates = K * Oversample, rescored with the full vectors.</summary>
-        public float Oversample { get; set; } = 3f;
-        /// <summary>A filter leaving at most this many vectors is an exact scan.</summary>
-        public long ExactThreshold { get; set; } = 20000;
-        /// <summary>Taken off a chunk past a line's first one before its best chunk is chosen (Otzaria's window penalty).</summary>
-        public float ChunkPenalty { get; set; } = 0.04f;
+        /// <summary>Scan threads; 0 = half the cores, at most 8.</summary>
+        public int Threads { get; set; }
+        /// <summary>Taken off a window past a line's first one (Otzaria's window penalty).</summary>
+        public float WindowPenalty { get; set; } = 0.04f;
+        /// <summary>Taken off an occurrence found through a neighbour's vector (Otzaria's alias penalty).</summary>
+        public float AliasPenalty { get; set; } = 0.04f;
 
         internal string ToJson()
         {
             var sb = new StringBuilder("{\"k\":").Append(K.ToString(CultureInfo.InvariantCulture));
-            sb.Append(",\"oversample\":").Append(Oversample.ToString("R", CultureInfo.InvariantCulture));
-            sb.Append(",\"exact_threshold\":").Append(Math.Max(0, ExactThreshold).ToString(CultureInfo.InvariantCulture));
-            sb.Append(",\"chunk_penalty\":").Append(ChunkPenalty.ToString("R", CultureInfo.InvariantCulture));
+            sb.Append(",\"threads\":").Append(Math.Max(0, Threads).ToString(CultureInfo.InvariantCulture));
+            sb.Append(",\"window_penalty\":").Append(WindowPenalty.ToString("R", CultureInfo.InvariantCulture));
+            sb.Append(",\"alias_penalty\":").Append(AliasPenalty.ToString("R", CultureInfo.InvariantCulture));
             if (Books != null)
             {
                 sb.Append(",\"books\":[");
@@ -87,23 +75,30 @@ namespace SeforimSearch.Engine
         }
     }
 
-    /// <summary>One semantic hit: cosine similarity, best first, ties by line id.</summary>
+    /// <summary>One semantic hit: one per line (its best occurrence), best first.</summary>
     public sealed class SemanticHit
     {
+        /// <summary><see cref="Chunk"/> bit: found through a neighbour's vector (Otzaria's alias).</summary>
+        public const uint Borrowed = 1u << 31;
         public long LineId { get; set; }
         public long BookId { get; set; }
         public float Score { get; set; }
-        /// <summary>The chunk that scored the line (0 = its first vector).</summary>
+        /// <summary>0 = the line's first window, n its n-th; may carry <see cref="Borrowed"/>.</summary>
         public uint Chunk { get; set; }
     }
 
-    /// <summary>A semantic search's hits and how it was served.</summary>
+    /// <summary>A semantic search's hits and what the scan did.</summary>
     public sealed class SemanticResult
     {
         public SemanticHit[] Hits { get; set; } = Array.Empty<SemanticHit>();
-        /// <summary>True: exact scan of the filtered lines; false: HNSW + rescore.</summary>
-        public bool Exact { get; set; }
-        public long Allowed { get; set; }
+        /// <summary>Vectors scored.</summary>
+        public long Vectors { get; set; }
+        /// <summary>Line occurrences of the best vectors read.</summary>
+        public long Records { get; set; }
+        /// <summary>Records the host's mapping does not cover (dropped, never guessed).</summary>
+        public long Unmapped { get; set; }
+        public long Scanned { get; set; }
+        public int Threads { get; set; }
         public long Generation { get; set; }
         internal string Json { get; set; } = "{\"hits\":[]}";
     }
@@ -167,7 +162,7 @@ namespace SeforimSearch.Engine
         public long Lines { get; set; }
     }
 
-    /// <summary>The host's mapping of one book of an Otzaria vector file.</summary>
+    /// <summary>The host's mapping of one book of an Otzaria vector set (<see cref="SeforimSemantic.SetVectorMapping"/>).</summary>
     public sealed class OxvBookMap
     {
         public string Name { get; set; } = "";
@@ -176,82 +171,124 @@ namespace SeforimSearch.Engine
         public IReadOnlyList<long> LineIds { get; set; } = Array.Empty<long>();
     }
 
-    /// <summary>What <see cref="SeforimSemantic.ImportOxv"/> did.</summary>
-    public sealed class OxvImportReport
-    {
-        public long BooksImported { get; set; }
-        public List<string> BooksNotInFile { get; set; } = new List<string>();
-        public long BooksUnmapped { get; set; }
-        public long Records { get; set; }
-        public long Vectors { get; set; }
-        public long Lines { get; set; }
-        /// <summary>Records past the host's line list (dropped).</summary>
-        public long OutOfRange { get; set; }
-        public long Duplicates { get; set; }
-        public long Generation { get; set; }
-    }
-
     /// <summary>
-    /// Semantic search (issue #18): the vector sidecar of an index, semantic-only search
-    /// and hybrid fusion with a lexical search. Sync calls block; the <c>*Async</c> ones
-    /// run on the thread pool and are cancelled through the native cancel token.
+    /// Semantic search (issue #18), like Otzaria: the index opens Otzaria's own vector set
+    /// read-only (a set directory such as <c>%APPDATA%\otzaria\vectors</c>, or one base <c>.oxv</c>)
+    /// and runs an exact integer scan. The host maps each book of the set (<c>id:&lt;bookId&gt;</c>)
+    /// to its line ids. Sync calls block; the <c>*Async</c> ones run on the thread pool and are
+    /// cancelled through the native cancel token.
     /// </summary>
     public static unsafe class SeforimSemantic
     {
-        /// <summary>Applies a vector write and publishes a new generation (background priority).</summary>
-        public static VectorUpdateStats UpdateVectors(this SeforimIndex index, VectorUpdate update, CancellationToken ct = default)
+        /// <summary>Opens Otzaria's vector set read-only (replaces one opened before; the line mapping stays).</summary>
+        public static VectorSetInfo OpenVectors(this SeforimIndex index, string path)
         {
             if (index == null) throw new ArgumentNullException(nameof(index));
-            if (update == null) throw new ArgumentNullException(nameof(update));
-            int dims = update.Dims;
-            int n = update.Add.Count;
-            var lines = new ulong[n];
-            var books = new ulong[n];
-            var chunks = new uint[n];
-            var floats = new float[checked(n * dims)];
-            for (int i = 0; i < n; i++)
+            byte[] p = Interop.ToUtf8(path ?? throw new ArgumentNullException(nameof(path)));
+            fixed (byte* pp = p)
+                return ParseSetInfo((Dictionary<string, object?>)Json.Parse(Interop.TakeString(
+                    NativeMethods.se_vectors_open(index.Handle, pp, (UIntPtr)p.Length)))!);
+        }
+
+        /// <summary><see cref="OpenVectors"/> on the thread pool.</summary>
+        public static Task<VectorSetInfo> OpenVectorsAsync(this SeforimIndex index, string path, CancellationToken ct = default) =>
+            Task.Run(() => index.OpenVectors(path), ct);
+
+        /// <summary>Forgets the vector set (the line mapping stays).</summary>
+        public static void CloseVectors(this SeforimIndex index)
+        {
+            if (index == null) throw new ArgumentNullException(nameof(index));
+            if (NativeMethods.se_vectors_close(index.Handle) != 0) throw Interop.Fail(Interop.LastError());
+        }
+
+        /// <summary>Maps one book of the set (<paramref name="name"/>, <c>id:&lt;bookId&gt;</c> for a library
+        /// book) to the host's lines: <paramref name="lineIds"/>[ordinal] for each 0-based line ordinal
+        /// (seforim.db rows of the book in <c>lineIndex, id</c> order). Replaces that book's mapping;
+        /// an empty list removes it.</summary>
+        public static void MapVectorBook(this SeforimIndex index, string name, long bookId, IReadOnlyList<long> lineIds)
+        {
+            if (index == null) throw new ArgumentNullException(nameof(index));
+            if (lineIds == null) throw new ArgumentNullException(nameof(lineIds));
+            byte[] n = Interop.ToUtf8(name ?? throw new ArgumentNullException(nameof(name)));
+            var ids = new ulong[lineIds.Count];
+            for (int i = 0; i < ids.Length; i++) ids[i] = (ulong)lineIds[i];
+            fixed (byte* pn = n) fixed (ulong* pl = ids)
+                if (NativeMethods.se_vectors_map_book(index.Handle, pn, (UIntPtr)n.Length, (ulong)bookId, pl, (UIntPtr)ids.Length) != 0)
+                    throw Interop.Fail(Interop.LastError());
+        }
+
+        /// <summary>Maps several books at once (each as <see cref="MapVectorBook"/>); <paramref name="replace"/>
+        /// drops every book mapped before.</summary>
+        public static void SetVectorMapping(this SeforimIndex index, IEnumerable<OxvBookMap> books, bool replace)
+        {
+            if (index == null) throw new ArgumentNullException(nameof(index));
+            if (books == null) throw new ArgumentNullException(nameof(books));
+            var sb = new StringBuilder("[");
+            bool first = true;
+            foreach (var m in books)
             {
-                var v = update.Add[i];
-                if (v.Vector.Length != dims)
-                    throw new ArgumentException($"line {v.LineId} has {v.Vector.Length} dims, the update {dims}");
-                lines[i] = (ulong)v.LineId;
-                books[i] = (ulong)v.BookId;
-                chunks[i] = v.Chunk;
-                Array.Copy(v.Vector, 0, floats, i * dims, dims);
+                sb.Append(first ? "{" : ",{");
+                first = false;
+                sb.Append("\"name\":").Append(JsonString(m.Name));
+                sb.Append(",\"book_id\":").Append(m.BookId.ToString(CultureInfo.InvariantCulture)).Append(",\"line_ids\":[");
+                for (int i = 0; i < m.LineIds.Count; i++)
+                    sb.Append(i == 0 ? "" : ",").Append(m.LineIds[i].ToString(CultureInfo.InvariantCulture));
+                sb.Append("]}");
             }
-            var rb = ToU64(update.RemoveBooks);
-            var rl = ToU64(update.RemoveLines);
-            return WithToken(ct, token =>
-            {
-                fixed (ulong* prb = rb) fixed (ulong* prl = rl) fixed (ulong* pl = lines) fixed (ulong* pb = books) fixed (uint* pc = chunks) fixed (float* pv = floats)
-                {
-                    var obj = (Dictionary<string, object?>)Json.Parse(Interop.TakeString(NativeMethods.se_vectors_update(
-                        index.Handle, (uint)dims, prb, (UIntPtr)rb.Length, prl, (UIntPtr)rl.Length, pl, pb, pc, pv, (UIntPtr)n, token)))!;
-                    return new VectorUpdateStats
-                    {
-                        Generation = L(obj["generation"]),
-                        Lines = L(obj["lines"]),
-                        Vectors = L(obj["vectors"]),
-                        Books = L(obj["books"]),
-                        Removed = L(obj["removed"]),
-                        Added = L(obj["added"]),
-                        Rebuilt = (bool)obj["rebuilt"]!,
-                    };
-                }
-            });
+            byte[] json = Interop.ToUtf8(sb.Append(']').ToString());
+            fixed (byte* pj = json)
+                if (NativeMethods.se_vectors_set_mapping(index.Handle, pj, (UIntPtr)json.Length, replace ? 1 : 0) != 0)
+                    throw Interop.Fail(Interop.LastError());
         }
 
-        /// <summary>The vector sidecar's size; null when the index has no vectors.</summary>
-        public static VectorInfo? GetVectorInfo(this SeforimIndex index)
+        /// <summary>The open vector set; null when none is open.</summary>
+        public static VectorSetInfo? VectorInfo(this SeforimIndex index)
         {
             if (index == null) throw new ArgumentNullException(nameof(index));
-            if (!(Json.Parse(Interop.TakeString(NativeMethods.se_vectors_info(index.Handle))) is Dictionary<string, object?> obj))
-                return null;
-            return new VectorInfo { Dims = (int)L(obj["dims"]), Lines = L(obj["lines"]), Vectors = L(obj["vectors"]), Books = L(obj["books"]),
-                                    Generation = L(obj["generation"]) };
+            return Json.Parse(Interop.TakeString(NativeMethods.se_vectors_info(index.Handle))) is Dictionary<string, object?> obj
+                ? ParseSetInfo(obj) : null;
         }
 
-        /// <summary>The K lines closest (cosine) to the query vector (same model as the stored vectors).</summary>
+        private static VectorSetInfo ParseSetInfo(Dictionary<string, object?> obj)
+        {
+            var segments = new List<VectorSegmentInfo>();
+            foreach (var o in (List<object?>)obj["segments"]!)
+            {
+                var s = (Dictionary<string, object?>)o!;
+                segments.Add(new VectorSegmentInfo
+                {
+                    File = (string)s["file"]!,
+                    Kind = (string)s["kind"]!,
+                    FromLibraryVersion = (int)L(s["from_library_version"]),
+                    ToLibraryVersion = (int)L(s["to_library_version"]),
+                    Slots = L(s["slots"]),
+                    SlotsDead = L(s["slots_dead"]),
+                    Foreign = L(s["foreign"]),
+                    ForeignUnresolved = L(s["foreign_unresolved"]),
+                    Size = L(s["size"]),
+                });
+            }
+            return new VectorSetInfo
+            {
+                Path = (string)obj["path"]!,
+                Generation = L(obj["generation"]),
+                RecoveredFromPrevious = (bool)obj["recovered_from_previous"]!,
+                Dims = (int)L(obj["dims"]),
+                Codec = (string)obj["codec"]!,
+                LibraryVersion = (int)L(obj["library_version"]),
+                LibraryReleaseTag = (string)obj["library_release_tag"]!,
+                Segments = segments,
+                SlotsLive = L(obj["slots_live"]),
+                SlotsDead = L(obj["slots_dead"]),
+                Books = L(obj["books"]),
+                BooksMapped = L(obj["books_mapped"]),
+                BooksUnmapped = L(obj["books_unmapped"]),
+                BytesOnDisk = L(obj["bytes_on_disk"]),
+            };
+        }
+
+        /// <summary>The K lines closest to the query vector (Otzaria's query model): an exact scan of
+        /// every live vector of the set (or the filter's books), mapped to the host's lines.</summary>
         public static SemanticResult SemanticSearch(this SeforimIndex index, float[] query, SemanticOptions? options = null,
                                                     CancellationToken ct = default)
         {
@@ -276,8 +313,11 @@ namespace SeforimSearch.Engine
                     return new SemanticResult
                     {
                         Hits = hits,
-                        Exact = (bool)obj["exact"]!,
-                        Allowed = L(obj["allowed"]),
+                        Vectors = L(obj["vectors"]),
+                        Records = L(obj["records"]),
+                        Unmapped = L(obj["unmapped"]),
+                        Scanned = L(obj["scanned"]),
+                        Threads = (int)L(obj["threads"]),
                         Generation = L(obj["generation"]),
                         Json = text,
                     };
@@ -362,58 +402,6 @@ namespace SeforimSearch.Engine
             }
         }
 
-        /// <summary>Imports an Otzaria vector file into the index's vector sidecar by the host's line ids
-        /// (<paramref name="books"/>: per book of the file, its book id and the line id of each 0-based line
-        /// ordinal). Every chunk of a mapped line is kept; each mapped book replaces its old vectors; one
-        /// store write per call, so pass books in batches.</summary>
-        public static OxvImportReport ImportOxv(this SeforimIndex index, string path, IEnumerable<OxvBookMap> books,
-                                                CancellationToken ct = default)
-        {
-            if (index == null) throw new ArgumentNullException(nameof(index));
-            if (books == null) throw new ArgumentNullException(nameof(books));
-            byte[] p = Interop.ToUtf8(path ?? throw new ArgumentNullException(nameof(path)));
-            var sb = new StringBuilder("[");
-            bool first = true;
-            foreach (var m in books)
-            {
-                sb.Append(first ? "{" : ",{");
-                first = false;
-                sb.Append("\"name\":").Append(JsonString(m.Name));
-                sb.Append(",\"book_id\":").Append(m.BookId.ToString(CultureInfo.InvariantCulture)).Append(",\"line_ids\":[");
-                for (int i = 0; i < m.LineIds.Count; i++)
-                    sb.Append(i == 0 ? "" : ",").Append(m.LineIds[i].ToString(CultureInfo.InvariantCulture));
-                sb.Append("]}");
-            }
-            byte[] json = Interop.ToUtf8(sb.Append(']').ToString());
-            return WithToken(ct, token =>
-            {
-                fixed (byte* pp = p) fixed (byte* pj = json)
-                {
-                    var obj = (Dictionary<string, object?>)Json.Parse(Interop.TakeString(NativeMethods.se_vectors_import_oxv(
-                        index.Handle, pp, (UIntPtr)p.Length, pj, (UIntPtr)json.Length, token)))!;
-                    var missing = new List<string>();
-                    foreach (var n in (List<object?>)obj["books_not_in_file"]!) missing.Add((string)n!);
-                    return new OxvImportReport
-                    {
-                        BooksImported = L(obj["books_imported"]),
-                        BooksNotInFile = missing,
-                        BooksUnmapped = L(obj["books_unmapped"]),
-                        Records = L(obj["records"]),
-                        Vectors = L(obj["vectors"]),
-                        Lines = L(obj["lines"]),
-                        OutOfRange = L(obj["out_of_range"]),
-                        Duplicates = L(obj["duplicates"]),
-                        Generation = L(obj["generation"]),
-                    };
-                }
-            });
-        }
-
-        /// <summary><see cref="ImportOxv"/> on the thread pool.</summary>
-        public static Task<OxvImportReport> ImportOxvAsync(this SeforimIndex index, string path, IEnumerable<OxvBookMap> books,
-                                                           CancellationToken ct = default) =>
-            Task.Run(() => index.ImportOxv(path, books, ct), ct);
-
         private static string JsonString(string s)
         {
             var sb = new StringBuilder("\"");
@@ -425,10 +413,6 @@ namespace SeforimSearch.Engine
             }
             return sb.Append('"').ToString();
         }
-
-        /// <summary><see cref="UpdateVectors"/> on the thread pool.</summary>
-        public static Task<VectorUpdateStats> UpdateVectorsAsync(this SeforimIndex index, VectorUpdate update, CancellationToken ct = default) =>
-            Task.Run(() => index.UpdateVectors(update, ct), ct);
 
         /// <summary><see cref="SemanticSearch"/> on the thread pool.</summary>
         public static Task<SemanticResult> SemanticSearchAsync(this SeforimIndex index, float[] query, SemanticOptions? options = null,
@@ -448,13 +432,6 @@ namespace SeforimSearch.Engine
             using var token = NativeMethods.se_cancel_token_new();
             using var registration = ct.Register(s => NativeMethods.se_cancel_token_cancel(((CancelTokenHandle)s!).DangerousGetHandle()), token);
             return call(token);
-        }
-
-        private static ulong[] ToU64(List<long> values)
-        {
-            var a = new ulong[values.Count];
-            for (int i = 0; i < a.Length; i++) a[i] = (ulong)values[i];
-            return a;
         }
 
         private static long L(object? v) => (long)(double)v!;

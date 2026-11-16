@@ -129,16 +129,22 @@ final class SearchWorker {
           SearchCancelToken? cancel]) =>
       _call('semanticSearch', null, (query, options), cancel?.address);
 
-  /// [SemanticIndex.updateVectors] on the worker (background priority).
-  Future<VectorUpdateStats> updateVectors(VectorUpdate update, {SearchCancelToken? cancel}) =>
-      _call('updateVectors', null, update, cancel?.address);
+  /// [SemanticIndex.openVectors] on the worker.
+  Future<VectorSetInfo> openVectors(String path) => _call('openVectors', path);
+
+  /// [SemanticIndex.closeVectors] on the worker.
+  Future<void> closeVectors() => _call('closeVectors');
+
+  /// [SemanticIndex.mapVectorBook] on the worker.
+  Future<void> mapVectorBook(String name, int bookId, List<int> lineIds) =>
+      _call('mapVectorBook', name, (bookId, lineIds));
+
+  /// [SemanticIndex.setVectorMapping] on the worker.
+  Future<void> setVectorMapping(List<OxvBookMap> books, {bool replace = false}) =>
+      _call('setVectorMapping', books, replace);
 
   /// [SemanticIndex.vectorInfo] on the worker.
-  Future<VectorInfo?> vectorInfo() => _call('vectorInfo');
-
-  /// [SemanticIndex.importOxv] on the worker (background priority).
-  Future<OxvImportReport> importOxv(String path, List<OxvBookMap> books, {SearchCancelToken? cancel}) =>
-      _call('importOxv', path, books, cancel?.address);
+  Future<VectorSetInfo?> vectorInfo() => _call('vectorInfo');
 
   /// [SeforimIndex.openWriter] on the worker (issue #38): the writer lives
   /// on the worker's isolate and every call is a Future, so a commit, merge
@@ -528,12 +534,17 @@ void _workerMain((SendPort, String, String?) args) {
         case 'semanticSearch':
           final (query, options) = b as (Float32List, SemanticOptions);
           value = index.semanticSearch(query, options, null, c as int?);
-        case 'updateVectors':
-          value = index.updateVectors(b as VectorUpdate, cancelAddress: c as int?);
+        case 'openVectors':
+          value = index.openVectors(a as String);
+        case 'closeVectors':
+          index.closeVectors();
+        case 'mapVectorBook':
+          final (bookId, lineIds) = b as (int, List<int>);
+          index.mapVectorBook(a as String, bookId, lineIds);
+        case 'setVectorMapping':
+          index.setVectorMapping((a as List).cast<OxvBookMap>(), replace: b as bool);
         case 'vectorInfo':
           value = index.vectorInfo();
-        case 'importOxv':
-          value = index.importOxv(a as String, (b as List).cast<OxvBookMap>(), cancelAddress: c as int?);
         case 'fuseSemantic':
           final (query, semantic, fusion) = b as (String, SemanticResult, FusionOptions);
           value = s().fuseSemantic(query, semantic, fusion);

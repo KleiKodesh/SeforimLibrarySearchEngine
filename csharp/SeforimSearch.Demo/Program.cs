@@ -18,8 +18,7 @@ namespace SeforimSearch.Demo
     ///          (issue #31: N concurrent searches while a writer commits K re-indexed lines every MS ms; see LoadCommand)
     ///   resort [--db path] [--index dir] [--simulate-move-tenth]
     ///          (re-sort the index into the DB's current catalog order without re-indexing; see ResortCommand)
-    ///   semantic-import &lt;index dir&gt; &lt;file.oxv[.zst]&gt; [--books N] [--max-lines N] [--book-ids a,b]   (Otzaria vectors, issue #18)
-    ///   semantic-search &lt;index dir&gt; [query...] [--line lineId] [--k 10] [--hybrid]   (Meivin query model in the host)
+    ///   semantic-search &lt;index dir&gt; --vectors &lt;set dir|file.oxv&gt; (--line N | --lines a,b | --query text) [--k N] [--books a,b] [--threads N] [--hybrid] [--repeat N]   (Otzaria's vector set, issue #18)
     ///   semantic-tokcheck &lt;golden.json&gt;   (tokenizer vs Otzaria's golden token ids; see SemanticCommand)
     /// The seforim.db path defaults to KitveiHakodesh's resolution order
     /// (registry choice, then Otzaria, then Zayit).
@@ -45,7 +44,6 @@ namespace SeforimSearch.Demo
                 Console.Error.WriteLine("seforim.db not found; pass --db");
                 return 2;
             }
-            if (command == "semantic-import") return SemanticCommand.Import(db, args);
             if (command == "semantic-search") return SemanticCommand.Search(db, args);
             Console.Error.WriteLine($"db: {db}\nindex: {index}\nengine: {SeforimIndex.NativeVersion}  runtime: {System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}");
 

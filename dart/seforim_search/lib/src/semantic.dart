@@ -7,100 +7,116 @@ import 'package:ffi/ffi.dart';
 import 'index.dart';
 import 'native.dart';
 
-/// One vector of a line from the host's embedding model (the engine runs no
-/// model). A long line may have several (chunks); the line scores as its
-/// best chunk.
-final class LineVector {
-  const LineVector(this.lineId, this.bookId, this.vector, {this.chunk = 0});
-  final int lineId;
-  final int bookId;
-  final Float32List vector;
+/// One segment file of the open Otzaria vector set.
+final class VectorSegmentInfo {
+  const VectorSegmentInfo(this.file, this.kind, this.fromLibraryVersion, this.toLibraryVersion, this.slots,
+      this.slotsDead, this.foreign, this.foreignUnresolved, this.size);
+  final String file;
 
-  /// 0 = the line's first (or only) vector; 1, 2, ... further chunks; may
-  /// carry [borrowed].
-  final int chunk;
+  /// 'base' or 'delta'.
+  final String kind;
+  final int fromLibraryVersion, toLibraryVersion, slots, slotsDead, foreign, foreignUnresolved, size;
 
-  /// [chunk] bit: a vector borrowed from a neighbour (Otzaria's alias).
-  static const int borrowed = 1 << 31;
+  factory VectorSegmentInfo.fromJson(Map<String, dynamic> j) => VectorSegmentInfo(
+      j['file'] as String,
+      j['kind'] as String,
+      j['from_library_version'] as int,
+      j['to_library_version'] as int,
+      j['slots'] as int,
+      j['slots_dead'] as int,
+      j['foreign'] as int,
+      j['foreign_unresolved'] as int,
+      j['size'] as int);
 }
 
-/// One vector-sidecar write (issue #18): removals (whole books, single
-/// lines), then additions. A line added again replaces its vector; an
-/// updated book = [removeBooks] + its lines.
-final class VectorUpdate {
-  VectorUpdate(this.dims, {this.removeBooks = const [], this.removeLines = const [], this.add = const []});
+/// The open Otzaria vector set ([SemanticIndex.openVectors], read-only).
+final class VectorSetInfo {
+  const VectorSetInfo(
+      {required this.path,
+      required this.generation,
+      required this.recoveredFromPrevious,
+      required this.dims,
+      required this.codec,
+      required this.libraryVersion,
+      required this.libraryReleaseTag,
+      required this.segments,
+      required this.slotsLive,
+      required this.slotsDead,
+      required this.books,
+      required this.booksMapped,
+      required this.booksUnmapped,
+      required this.bytesOnDisk});
+  final String path;
+  final int generation;
+  final bool recoveredFromPrevious;
   final int dims;
-  final List<int> removeBooks;
-  final List<int> removeLines;
-  final List<LineVector> add;
+  final String codec;
+  final int libraryVersion;
+  final String libraryReleaseTag;
+  final List<VectorSegmentInfo> segments;
+  final int slotsLive, slotsDead;
+
+  /// Books in the set; [booksMapped] of them mapped by the host.
+  final int books, booksMapped, booksUnmapped;
+  final int bytesOnDisk;
+
+  factory VectorSetInfo.fromJson(Map<String, dynamic> j) => VectorSetInfo(
+      path: j['path'] as String,
+      generation: j['generation'] as int,
+      recoveredFromPrevious: j['recovered_from_previous'] as bool,
+      dims: j['dims'] as int,
+      codec: j['codec'] as String,
+      libraryVersion: j['library_version'] as int,
+      libraryReleaseTag: j['library_release_tag'] as String,
+      segments: (j['segments'] as List).map((e) => VectorSegmentInfo.fromJson(e as Map<String, dynamic>)).toList(),
+      slotsLive: j['slots_live'] as int,
+      slotsDead: j['slots_dead'] as int,
+      books: j['books'] as int,
+      booksMapped: j['books_mapped'] as int,
+      booksUnmapped: j['books_unmapped'] as int,
+      bytesOnDisk: j['bytes_on_disk'] as int);
 }
 
-/// What a vector write did.
-final class VectorUpdateStats {
-  const VectorUpdateStats(this.generation, this.lines, this.books, this.removed, this.added, this.rebuilt,
-      {this.vectors = 0});
-  final int generation, lines, books, removed, added;
-
-  /// Vectors (chunks) in the store.
-  final int vectors;
-
-  /// True: the HNSW graph was built afresh (first build, or many removals).
-  final bool rebuilt;
-
-  factory VectorUpdateStats.fromJson(Map<String, dynamic> j) => VectorUpdateStats(j['generation'] as int,
-      j['lines'] as int, j['books'] as int, j['removed'] as int, j['added'] as int, j['rebuilt'] as bool,
-      vectors: j['vectors'] as int);
-}
-
-/// The vector sidecar's size.
-final class VectorInfo {
-  const VectorInfo(this.dims, this.lines, this.books, this.generation, {this.vectors = 0});
-  final int dims, lines, books, generation;
-
-  /// Vectors (a long line may have several chunks).
-  final int vectors;
-}
-
-/// A semantic search request.
+/// A semantic search request (Otzaria's exact scan).
 final class SemanticOptions {
-  const SemanticOptions(
-      {this.k = 10, this.books, this.oversample = 3.0, this.exactThreshold = 20000, this.chunkPenalty = 0.04});
+  const SemanticOptions({this.k = 10, this.books, this.threads = 0, this.windowPenalty = 0.04, this.aliasPenalty = 0.04});
 
-  /// How many lines (a ranked cut list).
+  /// How many lines.
   final int k;
 
   /// Only these books (the lexical search's filter); null = all.
   final List<int>? books;
 
-  /// HNSW candidates = k * oversample, rescored with the full vectors.
-  final double oversample;
+  /// Scan threads; 0 = half the cores, at most 8.
+  final int threads;
 
-  /// A filter leaving at most this many vectors is an exact scan.
-  final int exactThreshold;
+  /// Taken off a window past a line's first one (Otzaria's window penalty).
+  final double windowPenalty;
 
-  /// Taken off a chunk past a line's first one before its best chunk is
-  /// chosen (Otzaria's window penalty).
-  final double chunkPenalty;
+  /// Taken off an occurrence found through a neighbour's vector (Otzaria's alias penalty).
+  final double aliasPenalty;
 
   Map<String, Object?> toJson() => {
         'k': k,
-        'oversample': oversample,
-        'exact_threshold': exactThreshold,
-        'chunk_penalty': chunkPenalty,
+        'threads': threads,
+        'window_penalty': windowPenalty,
+        'alias_penalty': aliasPenalty,
         if (books != null) 'books': books
       };
 }
 
-/// One semantic hit, a line: its best chunk's cosine minus that chunk's
-/// penalty, best first, ties by line id.
+/// One semantic hit: one per line (its best occurrence), best first.
 final class SemanticHit {
   const SemanticHit(this.lineId, this.bookId, this.score, {this.chunk = 0});
   final int lineId;
   final int bookId;
   final double score;
 
-  /// The chunk that scored the line (0 = its first vector).
+  /// 0 = the line's first window, n its n-th; may carry [borrowed].
   final int chunk;
+
+  /// [chunk] bit: found through a neighbour's vector (Otzaria's alias).
+  static const int borrowed = 1 << 31;
 }
 
 /// One book of an Otzaria vector file.
@@ -144,7 +160,7 @@ final class OxvInfo {
           .toList());
 }
 
-/// The host's mapping of one book of an Otzaria vector file.
+/// The host's mapping of one book of an Otzaria vector set ([SemanticIndex.setVectorMapping]).
 final class OxvBookMap {
   const OxvBookMap(this.name, this.bookId, this.lineIds);
   final String name;
@@ -155,30 +171,6 @@ final class OxvBookMap {
   final List<int> lineIds;
 
   Map<String, Object?> toJson() => {'name': name, 'book_id': bookId, 'line_ids': lineIds};
-}
-
-/// What [SemanticIndex.importOxv] did.
-final class OxvImportReport {
-  const OxvImportReport(this.booksImported, this.booksNotInFile, this.booksUnmapped, this.records, this.vectors,
-      this.lines, this.outOfRange, this.duplicates, this.generation);
-  final int booksImported;
-  final List<String> booksNotInFile;
-  final int booksUnmapped, records, vectors, lines;
-
-  /// Records past the host's line list (dropped).
-  final int outOfRange;
-  final int duplicates, generation;
-
-  factory OxvImportReport.fromJson(Map<String, dynamic> j) => OxvImportReport(
-      j['books_imported'] as int,
-      (j['books_not_in_file'] as List).cast<String>(),
-      j['books_unmapped'] as int,
-      j['records'] as int,
-      j['vectors'] as int,
-      j['lines'] as int,
-      j['out_of_range'] as int,
-      j['duplicates'] as int,
-      j['generation'] as int);
 }
 
 /// Expands Otzaria's downloaded vector file (`.oxv.zst`) to a plain `.oxv`;
@@ -205,15 +197,18 @@ OxvInfo readOxvInfo(String path) {
   return OxvInfo.fromJson(jsonDecode(text) as Map<String, dynamic>);
 }
 
-/// A semantic search's hits and how it was served.
+/// A semantic search's hits and what the scan did.
 final class SemanticResult {
-  SemanticResult._(this.hits, this.exact, this.allowed, this.generation, this.json);
+  SemanticResult._(this.hits, this.vectors, this.records, this.unmapped, this.scanned, this.threads, this.generation,
+      this.json);
   final List<SemanticHit> hits;
 
-  /// True: exact scan of the filtered lines; false: HNSW + rescore.
-  final bool exact;
-  final int allowed;
-  final int generation;
+  /// Vectors scored; records = line occurrences of the best vectors read.
+  final int vectors, records;
+
+  /// Records the host's mapping does not cover (dropped, never guessed).
+  final int unmapped;
+  final int scanned, threads, generation;
 
   /// The engine's JSON (passed back for [FusionOptions] fusion).
   final String json;
@@ -225,7 +220,8 @@ final class SemanticResult {
         .map((h) => SemanticHit(h['line_id'] as int, h['book_id'] as int, (h['score'] as num).toDouble(),
             chunk: h['chunk'] as int? ?? 0))
         .toList();
-    return SemanticResult._(hits, j['exact'] as bool, j['allowed'] as int, j['generation'] as int, text);
+    return SemanticResult._(hits, j['vectors'] as int, j['records'] as int, j['unmapped'] as int,
+        j['scanned'] as int, j['threads'] as int, j['generation'] as int, text);
   }
 }
 
@@ -276,74 +272,65 @@ final class FusedHit {
       j['source'] as String);
 }
 
-/// Semantic search on an index (issue #18): the vector sidecar and the
-/// semantic-only search. Hybrid: [SearchSession.fuseSemantic]. Blocking;
-/// [SearchWorker] has the async versions.
+/// Semantic search on an index (issue #18), like Otzaria: the index opens
+/// Otzaria's own vector set read-only and runs an exact integer scan; the
+/// host maps each book of the set (`id:<bookId>`) to its line ids. Hybrid:
+/// [SearchSession.fuseSemantic]. Blocking; [SearchWorker] has the async
+/// versions.
 extension SemanticIndex on SeforimIndex {
-  /// Applies a vector write and publishes a new generation (background
-  /// priority). [cancel] (or a raw token address) stops it before publishing.
-  VectorUpdateStats updateVectors(VectorUpdate update, {SearchCancelToken? cancel, int? cancelAddress}) {
-    final n = SeforimNative.instance;
-    final dims = update.dims;
-    final count = update.add.length;
-    final text = using((al) {
-      Pointer<Uint64> u64s(List<int> v) {
-        final p = al<Uint64>(v.isEmpty ? 1 : v.length);
-        for (var i = 0; i < v.length; i++) {
-          p[i] = v[i];
-        }
-        return p;
-      }
-
-      final lines = al<Uint64>(count == 0 ? 1 : count);
-      final books = al<Uint64>(count == 0 ? 1 : count);
-      final chunks = al<Uint32>(count == 0 ? 1 : count);
-      final floats = al<Float>(count * dims == 0 ? 1 : count * dims);
-      final view = floats.asTypedList(count * dims);
-      for (var i = 0; i < count; i++) {
-        final v = update.add[i];
-        if (v.vector.length != dims) {
-          throw ArgumentError('line ${v.lineId} has ${v.vector.length} dims, the update $dims');
-        }
-        lines[i] = v.lineId;
-        books[i] = v.bookId;
-        chunks[i] = v.chunk;
-        view.setRange(i * dims, (i + 1) * dims, v.vector);
-      }
-      final token = cancel?.handle ?? (cancelAddress == null ? nullptr : Pointer<Void>.fromAddress(cancelAddress));
-      return n.takeString(n.vectorsUpdate(handle, dims, u64s(update.removeBooks), update.removeBooks.length,
-          u64s(update.removeLines), update.removeLines.length, lines, books, chunks, floats, count, token));
-    });
-    return VectorUpdateStats.fromJson(jsonDecode(text) as Map<String, dynamic>);
-  }
-
-  /// The vector sidecar's size; null when the index has no vectors.
-  VectorInfo? vectorInfo() {
-    final n = SeforimNative.instance;
-    final j = jsonDecode(n.takeString(n.vectorsInfo(handle)));
-    if (j == null) return null;
-    final m = j as Map<String, dynamic>;
-    return VectorInfo(m['dims'] as int, m['lines'] as int, m['books'] as int, m['generation'] as int,
-        vectors: m['vectors'] as int);
-  }
-
-  /// Imports an Otzaria vector file into the vector sidecar by the host's
-  /// line ids ([books]: per book of the file, its book id and the line id
-  /// of each 0-based line ordinal). Every chunk of a mapped line is kept;
-  /// each mapped book replaces its old vectors; one store write per call,
-  /// so pass books in batches.
-  OxvImportReport importOxv(String path, List<OxvBookMap> books, {SearchCancelToken? cancel, int? cancelAddress}) {
+  /// Opens Otzaria's vector set read-only: a set directory (`CURRENT`,
+  /// `gen-N/set.json`, `segments/*.oxv`) or one base `.oxv`. Replaces a set
+  /// opened before; the line mapping stays.
+  VectorSetInfo openVectors(String path) {
     final n = SeforimNative.instance;
     final text = using((al) {
       final (p, pl) = utf8Native(path, al);
-      final (j, jl) = utf8Native(jsonEncode([for (final b in books) b.toJson()]), al);
-      final token = cancel?.handle ?? (cancelAddress == null ? nullptr : Pointer<Void>.fromAddress(cancelAddress));
-      return n.takeString(n.vectorsImportOxv(handle, p, pl, j, jl, token));
+      return n.takeString(n.vectorsOpen(handle, p, pl));
     });
-    return OxvImportReport.fromJson(jsonDecode(text) as Map<String, dynamic>);
+    return VectorSetInfo.fromJson(jsonDecode(text) as Map<String, dynamic>);
   }
 
-  /// The k lines closest (cosine) to [query] (same model as the stored vectors).
+  /// Forgets the vector set (the line mapping stays).
+  void closeVectors() {
+    final n = SeforimNative.instance;
+    if (n.vectorsClose(handle) != 0) throw n.error();
+  }
+
+  /// Maps one book of the set ([name], `id:<bookId>` for a library book) to
+  /// the host's lines: [lineIds][ordinal] for each 0-based line ordinal
+  /// (seforim.db rows of the book in `lineIndex, id` order). Replaces that
+  /// book's mapping; an empty list removes it.
+  void mapVectorBook(String name, int bookId, List<int> lineIds) {
+    final n = SeforimNative.instance;
+    final rc = using((al) {
+      final (p, pl) = utf8Native(name, al);
+      final ids = al<Uint64>(lineIds.isEmpty ? 1 : lineIds.length);
+      ids.asTypedList(lineIds.length).setAll(0, lineIds);
+      return n.vectorsMapBook(handle, p, pl, bookId, ids, lineIds.length);
+    });
+    if (rc != 0) throw n.error();
+  }
+
+  /// Maps several books at once (each as [mapVectorBook]); [replace] drops
+  /// every book mapped before.
+  void setVectorMapping(List<OxvBookMap> books, {bool replace = false}) {
+    final n = SeforimNative.instance;
+    final rc = using((al) {
+      final (j, jl) = utf8Native(jsonEncode([for (final b in books) b.toJson()]), al);
+      return n.vectorsSetMapping(handle, j, jl, replace ? 1 : 0);
+    });
+    if (rc != 0) throw n.error();
+  }
+
+  /// The open vector set; null when none is open.
+  VectorSetInfo? vectorInfo() {
+    final n = SeforimNative.instance;
+    final j = jsonDecode(n.takeString(n.vectorsInfo(handle)));
+    return j == null ? null : VectorSetInfo.fromJson(j as Map<String, dynamic>);
+  }
+
+  /// The k lines closest to [query] (Otzaria's query model): an exact scan
+  /// of every live vector of the set (or the filter's books).
   SemanticResult semanticSearch(Float32List query,
       [SemanticOptions options = const SemanticOptions(), SearchCancelToken? cancel, int? cancelAddress]) {
     final n = SeforimNative.instance;

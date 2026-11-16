@@ -253,19 +253,23 @@ namespace SeforimSearch.Engine.Native
 
         // semantic search (issue #18)
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_vectors_update(IndexHandle index, uint dims, ulong* removeBooks, UIntPtr removeBooksCount,
-                                                      ulong* removeLines, UIntPtr removeLinesCount, ulong* lineIds, ulong* bookIds,
-                                                      uint* chunks, float* vectors, UIntPtr addCount, CancelTokenHandle token);
+        public static extern IntPtr se_vectors_open(IndexHandle index, byte* path, UIntPtr pathLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_vectors_close(IndexHandle index);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_vectors_map_book(IndexHandle index, byte* name, UIntPtr nameLen, ulong bookId,
+                                                     ulong* lineIds, UIntPtr count);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_vectors_set_mapping(IndexHandle index, byte* maps, UIntPtr mapsLen, int replace);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern long se_oxv_expand(byte* src, UIntPtr srcLen, byte* dst, UIntPtr dstLen);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr se_oxv_info(byte* path, UIntPtr pathLen);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_vectors_import_oxv(IndexHandle index, byte* path, UIntPtr pathLen, byte* maps, UIntPtr mapsLen,
-                                                          CancelTokenHandle token);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr se_vectors_info(IndexHandle index);

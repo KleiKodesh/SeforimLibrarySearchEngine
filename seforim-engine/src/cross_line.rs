@@ -38,7 +38,7 @@
 //!    texts are checked by the locator over the joined text (like the
 //!    in-line rule).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use hebrew_fts::{PreparedQueryGroups, Proximity, SnippetWindowLocator};
 use tantivy::columnar::Column;
@@ -149,33 +149,96 @@ pub(crate) struct CrossOutput {
     pub needs_text: bool,
 }
 
-/// Bits over catalog positions.
+/// Bits over catalog positions (relative to the range's base).
+///
+/// Dense words for a range of at most [`Bits::DENSE_MAX`] positions (the
+/// library: positions are dense); sparse words (only the non-zero ones, in
+/// order) above it: an attached user index puts its positions at 2^51 +
+/// (document << 24) + line (README "User index"), so a range reaching it
+/// spans ~2^51 positions of which only a few are lines.
 #[derive(Clone)]
-struct Bits(Vec<u64>);
+enum Bits {
+    Dense(Vec<u64>),
+    Sparse(BTreeMap<u64, u64>),
+}
 
 impl Bits {
+    /// Ranges up to this many positions keep dense words (8 MB).
+    const DENSE_MAX: usize = 1 << 26;
+
     fn new(n: usize) -> Bits {
-        Bits(vec![0; n.div_ceil(64)])
+        if n <= Self::DENSE_MAX {
+            Bits::Dense(vec![0; n.div_ceil(64)])
+        } else {
+            Bits::Sparse(BTreeMap::new())
+        }
     }
     fn set(&mut self, i: u64) {
-        self.0[(i / 64) as usize] |= 1 << (i % 64);
+        match self {
+            Bits::Dense(w) => w[(i / 64) as usize] |= 1 << (i % 64),
+            Bits::Sparse(m) => *m.entry(i / 64).or_insert(0) |= 1 << (i % 64),
+        }
+    }
+    fn word(&self, k: u64) -> u64 {
+        match self {
+            Bits::Dense(w) => w.get(k as usize).copied().unwrap_or(0),
+            Bits::Sparse(m) => m.get(&k).copied().unwrap_or(0),
+        }
     }
     fn get(&self, i: u64) -> bool {
-        self.0.get((i / 64) as usize).is_some_and(|w| w & (1 << (i % 64)) != 0)
+        self.word(i / 64) & (1 << (i % 64)) != 0
     }
     fn and(&mut self, o: &Bits) {
-        self.0.iter_mut().zip(&o.0).for_each(|(a, b)| *a &= b);
+        match self {
+            Bits::Dense(w) => w.iter_mut().enumerate().for_each(|(k, a)| *a &= o.word(k as u64)),
+            Bits::Sparse(m) => m.retain(|&k, a| {
+                *a &= o.word(k);
+                *a != 0
+            }),
+        }
     }
     fn or(&mut self, o: &Bits) {
-        self.0.iter_mut().zip(&o.0).for_each(|(a, b)| *a |= b);
+        match (self, o) {
+            (Bits::Dense(w), Bits::Dense(v)) => w.iter_mut().zip(v).for_each(|(a, b)| *a |= b),
+            (this, o) => {
+                for (k, b) in o.words() {
+                    match this {
+                        Bits::Dense(w) => w[k as usize] |= b,
+                        Bits::Sparse(m) => *m.entry(k).or_insert(0) |= b,
+                    }
+                }
+            }
+        }
     }
     /// Bit `i` of the result = bit `i + 1` of self (the next line's bit on `L`).
     fn shifted_down(&self) -> Bits {
-        let w = &self.0;
-        Bits((0..w.len()).map(|i| (w[i] >> 1) | w.get(i + 1).map_or(0, |n| n << 63)).collect())
+        match self {
+            Bits::Dense(w) => {
+                Bits::Dense((0..w.len()).map(|i| (w[i] >> 1) | w.get(i + 1).map_or(0, |n| n << 63)).collect())
+            }
+            Bits::Sparse(m) => {
+                let mut out = BTreeMap::new();
+                for (&k, &w) in m {
+                    if w >> 1 != 0 {
+                        *out.entry(k).or_insert(0) |= w >> 1;
+                    }
+                    if k > 0 && w & 1 != 0 {
+                        *out.entry(k - 1).or_insert(0) |= 1 << 63;
+                    }
+                }
+                Bits::Sparse(out)
+            }
+        }
+    }
+    /// The non-zero words in order: (word index, word).
+    fn words(&self) -> Box<dyn Iterator<Item = (u64, u64)> + '_> {
+        match self {
+            Bits::Dense(w) => Box::new(w.iter().enumerate().filter(|(_, &w)| w != 0).map(|(k, &w)| (k as u64, w))),
+            Bits::Sparse(m) => Box::new(m.iter().map(|(&k, &w)| (k, w))),
+        }
     }
     fn ones(&self) -> impl Iterator<Item = u64> + '_ {
-        self.0.iter().enumerate().flat_map(|(i, &w)| {
+        self.words().flat_map(|(i, w)| {
             let mut w = w;
             std::iter::from_fn(move || {
                 if w == 0 {
@@ -183,7 +246,7 @@ impl Bits {
                 }
                 let b = w.trailing_zeros() as u64;
                 w &= w - 1;
-                Some(i as u64 * 64 + b)
+                Some(i * 64 + b)
             })
         })
     }

@@ -303,6 +303,33 @@ mod tests {
         assert!(lib.search(&q(Sources::User)).is_err());
     }
 
+    /// Cross-line over the library and a user index: the user positions sit
+    /// at 2^51 + (document << 24) + line, so the cross-line bits over a range
+    /// reaching them must not be dense (it aborted on a 2^48-byte allocation).
+    #[test]
+    fn cross_line_reaches_user_documents() {
+        let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let lib = library(d1.path());
+        let user = Arc::new(LineIndex::create_user(d2.path(), IndexOptions::default()).unwrap());
+        {
+            let mut w = user.writer(50_000_000, 1).unwrap();
+            w.put_document("c:/a.txt", "s", &lines(&[("x delta", 0), ("alpha y", 0)])).unwrap();
+            w.put_document("c:/b.txt", "s", &lines(&[("delta", 0), ("z", 0), ("alpha", 0)])).unwrap();
+            w.commit(None).unwrap();
+        }
+        lib.attach_user_index(Some(user)).unwrap();
+        let q = |sources| SearchOptions { query: "delta alpha".into(), cross_line: true, sources, ..Default::default() };
+        let hits = |sources| -> Vec<(u64, Option<u64>)> {
+            lib.search_options(&q(sources)).unwrap().hits.iter().map(|h| (h.line_id, h.next_line_id)).collect()
+        };
+        // library lines 11 + 12 pair; its last line "delta" never continues
+        // into a user document, nor one document into the next
+        let user = (line_id(0, 0), Some(line_id(0, 1)));
+        assert_eq!(hits(Sources::All), vec![(11, Some(12)), user]);
+        assert_eq!(hits(Sources::User), vec![user]);
+        assert_eq!(hits(Sources::Library), vec![(11, Some(12))]);
+    }
+
     #[test]
     fn fm_expansions_merge_both_indexes() {
         let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());

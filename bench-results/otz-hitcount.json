@@ -5,8 +5,8 @@
   "(2026-10-22, v5.0.0) Bare `&` (Otzaria bug): line 3760145 `Shiur & made ... pocket;` - Otzaria's entity rule `&[^;]+;` deletes everything up to the next `;`.",
   "(2026-10-22, v5.0.0) Without `cross_line` our multi-word counts are lower by up to 39% (e.g. words q4: 87,256 vs 143,836): Otzaria's advanced mode always crosses one line break.",
   "Fixed since 2026-10-22 (rows re-checked by the 2026-11-13 run, classes removed): cross-line enumerators (tantivy10 content edges), unterminated `<`, fuzzy swap = one edit (transposition).",
-  "Footnotes (2026-11-13): ours indexes each schema-7 note as a line of a virtual notes book (issue #13). Otzaria 5babbce indexes footnotes too (its index grew 1,988 to 2,182 MB with the same 7,643,689 line documents), so the notes are not a clean explanation: ours over real books only is BELOW Otzaria on most rows, ours with notes slightly above. Most rows stay unclassified until a line-level diff against 5babbce.",
-  "rules q19: intentional (user decision 2026-11-15): a query word of 128 bytes or more is dropped from the query (its position kept); Otzaria's advanced mode keeps it as a required word and returns 0."
+  "rules q19: intentional (user decision 2026-11-15): a query word of 128 bytes or more is dropped from the query (its position kept); Otzaria's advanced mode keeps it as a required word and returns 0.",
+  "Footnotes (2026-11-15 line-level diff): Otzaria 5babbce rehydrates each line's notes into the line text; ours keeps them as a separate virtual notes book (intentional, user decision). Mapping our note hits to their line, most rows match Otzaria exactly except for those notes."
  ],
  "sets": {
   "large": [
@@ -18,8 +18,8 @@
     "otz": 823190,
     "ours": 826951,
     "ours_books": 816506,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 1,
@@ -29,8 +29,8 @@
     "otz": 256035,
     "ours": 257637,
     "ours_books": 251609,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 2,
@@ -40,8 +40,8 @@
     "otz": 473503,
     "ours": 476761,
     "ours_books": 467688,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 3,
@@ -51,8 +51,8 @@
     "otz": 247190,
     "ours": 250061,
     "ours_books": 242418,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 4,
@@ -62,8 +62,8 @@
     "otz": 189995,
     "ours": 191144,
     "ours_books": 186440,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 5,
@@ -73,8 +73,8 @@
     "otz": 59200,
     "ours": 59773,
     "ours_books": 57953,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 6,
@@ -84,8 +84,8 @@
     "otz": 28007,
     "ours": 28236,
     "ours_books": 27214,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 7,
@@ -93,10 +93,10 @@
     "dist": "",
     "mode": "exact",
     "otz": 37740,
-    "ours": 37777,
-    "ours_books": 37427,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "ours": 103070,
+    "ours_books": 101809,
+    "class": "divine names (intentional)",
+    "reason": "divine-name placeholder spellings are query-side alternatives in ours, always on (issue #39, user-approved): the query's placeholder spelling also matches the full spelling and vice versa; Otzaria searches the typed spelling only"
    },
    {
     "n": 8,
@@ -106,8 +106,8 @@
     "otz": 4381,
     "ours": 4423,
     "ours_books": 4312,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 9,
@@ -117,8 +117,8 @@
     "otz": 5556,
     "ours": 5598,
     "ours_books": 5437,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 10,
@@ -128,8 +128,8 @@
     "otz": 362014,
     "ours": 365877,
     "ours_books": 340326,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 11,
@@ -139,8 +139,8 @@
     "otz": 40114,
     "ours": 40440,
     "ours_books": 39024,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 12,
@@ -150,8 +150,8 @@
     "otz": 17780,
     "ours": 17856,
     "ours_books": 16845,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 13,
@@ -161,8 +161,8 @@
     "otz": 508202,
     "ours": 508961,
     "ours_books": 505879,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 14,
@@ -172,8 +172,8 @@
     "otz": 308494,
     "ours": 309397,
     "ours_books": 305568,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 15,
@@ -183,8 +183,8 @@
     "otz": 59808,
     "ours": 60020,
     "ours_books": 58354,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 16,
@@ -194,8 +194,8 @@
     "otz": 182424,
     "ours": 184170,
     "ours_books": 173484,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 17,
@@ -205,8 +205,8 @@
     "otz": 40169,
     "ours": 40495,
     "ours_books": 39077,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 18,
@@ -216,8 +216,8 @@
     "otz": 363477,
     "ours": 367347,
     "ours_books": 341781,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes); 1-2 sampled lines without notes remain"
    },
    {
     "n": 19,
@@ -227,8 +227,8 @@
     "otz": 508766,
     "ours": 509528,
     "ours_books": 506434,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 20,
@@ -238,8 +238,8 @@
     "otz": 3072,
     "ours": 2996,
     "ours_books": 2940,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "mixed",
+    "reason": "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
    },
    {
     "n": 21,
@@ -249,8 +249,8 @@
     "otz": 9656,
     "ours": 9575,
     "ours_books": 9487,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "mixed",
+    "reason": "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
    },
    {
     "n": 22,
@@ -260,8 +260,8 @@
     "otz": 21393,
     "ours": 21357,
     "ours_books": 20963,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "mixed",
+    "reason": "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
    },
    {
     "n": 23,
@@ -271,8 +271,8 @@
     "otz": 8016,
     "ours": 8050,
     "ours_books": 7835,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "mixed",
+    "reason": "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
    },
    {
     "n": 24,
@@ -282,8 +282,8 @@
     "otz": 8548,
     "ours": 8504,
     "ours_books": 8269,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "mixed",
+    "reason": "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
    },
    {
     "n": 25,
@@ -293,8 +293,8 @@
     "otz": 17786,
     "ours": 17986,
     "ours_books": 17147,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "mixed",
+    "reason": "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
    },
    {
     "n": 26,
@@ -304,8 +304,8 @@
     "otz": 42879,
     "ours": 42746,
     "ours_books": 41502,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "mixed",
+    "reason": "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
    },
    {
     "n": 27,
@@ -315,8 +315,8 @@
     "otz": 33654,
     "ours": 33593,
     "ours_books": 32930,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "mixed",
+    "reason": "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
    },
    {
     "n": 28,
@@ -326,8 +326,8 @@
     "otz": 628,
     "ours": 630,
     "ours_books": 619,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 29,
@@ -337,8 +337,8 @@
     "otz": 4691,
     "ours": 4702,
     "ours_books": 4635,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 30,
@@ -348,8 +348,8 @@
     "otz": 5735,
     "ours": 5762,
     "ours_books": 5681,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 31,
@@ -359,8 +359,8 @@
     "otz": 7230,
     "ours": 7246,
     "ours_books": 7179,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 32,
@@ -370,8 +370,8 @@
     "otz": 75891,
     "ours": 76058,
     "ours_books": 75217,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 33,
@@ -381,8 +381,8 @@
     "otz": 35398,
     "ours": 35732,
     "ours_books": 34504,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 34,
@@ -392,8 +392,8 @@
     "otz": 17010,
     "ours": 17247,
     "ours_books": 15882,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 50,
@@ -403,8 +403,8 @@
     "otz": 140101,
     "ours": 140823,
     "ours_books": 138015,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 51,
@@ -414,8 +414,8 @@
     "otz": 56312,
     "ours": 56881,
     "ours_books": 55089,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 52,
@@ -423,10 +423,10 @@
     "dist": "",
     "mode": "fuzzy",
     "otz": 1055757,
-    "ours": 1064516,
-    "ours_books": 1037197,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "ours": 1064515,
+    "ours_books": 1037196,
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes); 1-2 sampled lines without notes remain"
    },
    {
     "n": 53,
@@ -436,8 +436,8 @@
     "otz": 956053,
     "ours": 967415,
     "ours_books": 939567,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 54,
@@ -458,8 +458,8 @@
     "otz": 177,
     "ours": 174,
     "ours_books": 174,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 59,
@@ -469,8 +469,8 @@
     "otz": 404,
     "ours": 405,
     "ours_books": 401,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "mixed",
+    "reason": "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
    },
    {
     "n": 60,
@@ -478,10 +478,10 @@
     "dist": "",
     "mode": "advanced",
     "otz": 616,
-    "ours": 613,
-    "ours_books": 609,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "ours": 1666,
+    "ours_books": 1650,
+    "class": "divine names (intentional)",
+    "reason": "divine-name placeholder spellings are query-side alternatives in ours, always on (issue #39, user-approved): the query's placeholder spelling also matches the full spelling and vice versa; Otzaria searches the typed spelling only"
    }
   ],
   "words": [
@@ -491,10 +491,10 @@
     "dist": "",
     "mode": "advanced",
     "otz": 30638,
-    "ours": 30382,
-    "ours_books": 30081,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "ours": 46950,
+    "ours_books": 46534,
+    "class": "divine names (intentional)",
+    "reason": "divine-name placeholder spellings are query-side alternatives in ours, always on (issue #39, user-approved): the query's placeholder spelling also matches the full spelling and vice versa; Otzaria searches the typed spelling only"
    },
    {
     "n": 1,
@@ -504,8 +504,8 @@
     "otz": 10701,
     "ours": 10713,
     "ours_books": 10561,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 2,
@@ -515,8 +515,8 @@
     "otz": 40309,
     "ours": 40321,
     "ours_books": 40075,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 3,
@@ -526,8 +526,8 @@
     "otz": 166416,
     "ours": 162589,
     "ours_books": 158516,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "mixed",
+    "reason": "two one-letter words, ordered with distance 1000: the Otzaria-only lines (4,130) mostly match through a footnote rehydrated into the line or a parenthesised enumerator plus a note (intentional, notes stay a separate book); a few lines without notes are not explained yet"
    },
    {
     "n": 4,
@@ -537,8 +537,8 @@
     "otz": 3225,
     "ours": 3233,
     "ours_books": 3184,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 5,
@@ -559,8 +559,8 @@
     "otz": 2334,
     "ours": 2298,
     "ours_books": 2290,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits)"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 7,
@@ -570,8 +570,8 @@
     "otz": 219,
     "ours": 137,
     "ours_books": 128,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits)"
+    "class": "mixed",
+    "reason": "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
    },
    {
     "n": 8,
@@ -592,8 +592,8 @@
     "otz": 6,
     "ours": 8,
     "ours_books": 2,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 11,
@@ -603,8 +603,8 @@
     "otz": 5308236,
     "ours": 5475472,
     "ours_books": 5287868,
-    "class": "Otzaria bug",
-    "reason": "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (not line-checked: 4.8M hits; magnitude as the other sup rows)"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes); 1-2 sampled lines without notes remain"
    },
    {
     "n": 12,
@@ -614,8 +614,8 @@
     "otz": 16846,
     "ours": 16868,
     "ours_books": 16682,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 13,
@@ -638,8 +638,8 @@
     "otz": 309622,
     "ours": 310526,
     "ours_books": 306694,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 1,
@@ -649,8 +649,8 @@
     "otz": 309622,
     "ours": 310526,
     "ours_books": 306694,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 2,
@@ -660,8 +660,8 @@
     "otz": 58767,
     "ours": 59125,
     "ours_books": 57804,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 3,
@@ -671,8 +671,8 @@
     "otz": 72543,
     "ours": 72719,
     "ours_books": 71760,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 4,
@@ -682,8 +682,8 @@
     "otz": 3297,
     "ours": 3301,
     "ours_books": 3269,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 5,
@@ -748,8 +748,8 @@
     "otz": 182424,
     "ours": 184170,
     "ours_books": 173484,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 11,
@@ -759,8 +759,8 @@
     "otz": 50873,
     "ours": 50981,
     "ours_books": 48809,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 12,
@@ -770,8 +770,8 @@
     "otz": 43779,
     "ours": 43880,
     "ours_books": 43321,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 13,
@@ -781,8 +781,8 @@
     "otz": 362014,
     "ours": 365877,
     "ours_books": 340326,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 14,
@@ -803,8 +803,8 @@
     "otz": 1417,
     "ours": 1419,
     "ours_books": 1325,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 16,
@@ -814,8 +814,8 @@
     "otz": 58312,
     "ours": 58628,
     "ours_books": 57727,
-    "class": "unclassified",
-    "reason": "not analysed yet"
+    "class": "notes (intentional)",
+    "reason": "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
    },
    {
     "n": 17,

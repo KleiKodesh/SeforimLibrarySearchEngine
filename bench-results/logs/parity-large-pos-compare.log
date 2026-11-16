@@ -1,4 +1,4 @@
 0/61 queries identical
-57/61 queries with identical hits (set and order)
+61/61 queries with identical hits (set and order)
 positions rule (no distance: same hits; distance: hits only added, issue #21): ok
 EXIT 0 (0 min)

@@ -1,26 +1,270 @@
 {
- "note": "Hand classes kept from the 2026-10-22 analysis (tantivy9) where still valid; classes of bugs fixed since (cross-line enumerators, fuzzy swap, unterminated <) removed. Rows whose only difference is the footnote notes books are classified automatically by hitcount.py. Re-check after any engine change.",
+ "note": "Classes from the line-level diff against Otzaria 5babbce (fullrun 2026-11-15/16, tools/bench/hitcount_diff.py), plus earlier hand analyses still valid (large:54, rules:5, rules:17, rules:19). Re-check after any engine change.",
  "method": "Every query Otzaria ran (`otz_report.py`: one word = exact, several words = advanced with the TAB distance or 1000, `w~k` = fuzzy), against ours on the positions index (current format) with Otzaria-mode options: one word plain; several words `proximity: ordered, gaps = distance` and `cross_line: true` (Otzaria's advanced mode is ordered and crosses one line break); fuzzy with `ignore_quotes: true` (Otzaria's quote is transparent). Hits = matching lines. Each difference was diffed line by line in the 2026-10-22 analysis (Otzaria v5.0.0, tantivy9); since 2026-11-13 the comparison runs against Otzaria 5babbce and also counts ours over real books only (footnote notes books excluded).",
  "notes": [
   "(2026-10-22, v5.0.0) Footnote markers (most rows, ours +0.02..0.1%): Otzaria removes inline tags with no separator (`strip_html_for_indexing`; `sup` is inline), so `word<sup>5</sup>` indexes as one token `word5` and the word is lost; ours ends a word at `<sup>`/`<sub>` (FtsLib's scanner rule). Every ours-only line of the exact rows has a `<sup>` (checked all; samples 8576169, 7692606, 2451902).",
   "(2026-10-22, v5.0.0) Bare `&` (Otzaria bug): line 3760145 `Shiur & made ... pocket;` - Otzaria's entity rule `&[^;]+;` deletes everything up to the next `;`.",
   "(2026-10-22, v5.0.0) Without `cross_line` our multi-word counts are lower by up to 39% (e.g. words q4: 87,256 vs 143,836): Otzaria's advanced mode always crosses one line break.",
   "Fixed since 2026-10-22 (rows re-checked by the 2026-11-13 run, classes removed): cross-line enumerators (tantivy10 content edges), unterminated `<`, fuzzy swap = one edit (transposition).",
-  "Footnotes (2026-11-13): ours indexes each schema-7 note as a line of a virtual notes book (issue #13). Otzaria 5babbce indexes footnotes too (its index grew 1,988 to 2,182 MB with the same 7,643,689 line documents), so the notes are not a clean explanation: ours over real books only is BELOW Otzaria on most rows, ours with notes slightly above. Most rows stay unclassified until a line-level diff against 5babbce.",
-  "rules q19: intentional (user decision 2026-11-15): a query word of 128 bytes or more is dropped from the query (its position kept); Otzaria's advanced mode keeps it as a required word and returns 0."
+  "rules q19: intentional (user decision 2026-11-15): a query word of 128 bytes or more is dropped from the query (its position kept); Otzaria's advanced mode keeps it as a required word and returns 0.",
+  "Footnotes (2026-11-15 line-level diff): Otzaria 5babbce rehydrates each line's notes into the line text; ours keeps them as a separate virtual notes book (intentional, user decision). Mapping our note hits to their line, most rows match Otzaria exactly except for those notes."
  ],
  "classes": {
+  "large:0": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:1": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:2": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:3": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:4": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:5": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:6": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:8": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:9": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:10": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:11": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:12": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:13": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:14": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:15": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:16": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:17": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:19": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:28": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:29": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:30": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:31": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:32": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:33": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:34": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:50": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:51": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:53": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:58": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "words:1": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "words:2": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "words:4": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
   "words:6": [
-   "Otzaria bug",
-   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits)"
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "words:9": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "words:12": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "rules:0": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "rules:1": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "rules:2": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "rules:3": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "rules:4": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "rules:10": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "rules:11": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "rules:12": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "rules:13": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "rules:15": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "rules:16": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes)"
+  ],
+  "large:7": [
+   "divine names (intentional)",
+   "divine-name placeholder spellings are query-side alternatives in ours, always on (issue #39, user-approved): the query's placeholder spelling also matches the full spelling and vice versa; Otzaria searches the typed spelling only"
+  ],
+  "large:60": [
+   "divine names (intentional)",
+   "divine-name placeholder spellings are query-side alternatives in ours, always on (issue #39, user-approved): the query's placeholder spelling also matches the full spelling and vice versa; Otzaria searches the typed spelling only"
+  ],
+  "words:0": [
+   "divine names (intentional)",
+   "divine-name placeholder spellings are query-side alternatives in ours, always on (issue #39, user-approved): the query's placeholder spelling also matches the full spelling and vice versa; Otzaria searches the typed spelling only"
+  ],
+  "large:20": [
+   "mixed",
+   "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
+  ],
+  "large:21": [
+   "mixed",
+   "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
+  ],
+  "large:22": [
+   "mixed",
+   "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
+  ],
+  "large:23": [
+   "mixed",
+   "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
+  ],
+  "large:24": [
+   "mixed",
+   "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
+  ],
+  "large:25": [
+   "mixed",
+   "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
+  ],
+  "large:26": [
+   "mixed",
+   "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
+  ],
+  "large:27": [
+   "mixed",
+   "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
+  ],
+  "large:59": [
+   "mixed",
+   "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
   ],
   "words:7": [
-   "Otzaria bug",
-   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (marker digits on the next line become our cross-line hits)"
+   "mixed",
+   "Otzaria-only lines in advanced mode: most are matches through a footnote rehydrated into the line (intentional, notes stay a separate book); a few sampled lines without notes are not explained yet"
+  ],
+  "words:3": [
+   "mixed",
+   "two one-letter words, ordered with distance 1000: the Otzaria-only lines (4,130) mostly match through a footnote rehydrated into the line or a parenthesised enumerator plus a note (intentional, notes stay a separate book); a few lines without notes are not explained yet"
+  ],
+  "large:18": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes); 1-2 sampled lines without notes remain"
+  ],
+  "large:52": [
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes); 1-2 sampled lines without notes remain"
   ],
   "words:11": [
-   "Otzaria bug",
-   "footnote marker: Otzaria glues `<sup>` to the word (word5), ours ends the word at `<sup>` (FtsLib rule) (not line-checked: 4.8M hits; magnitude as the other sup rows)"
+   "notes (intentional)",
+   "footnotes are a separate virtual notes book (user decision): a line hit by its text and by its note counts twice for ours, once for Otzaria 5babbce, which rehydrates notes into the line (line-level diff 2026-11-15: every differing sample line has notes); 1-2 sampled lines without notes remain"
+  ],
+  "large:54": [
+   "not equivalent query",
+   "quote word, fuzzy ~1: Otzaria 5babbce keeps the gershayim in the term and counts it as a character in the fuzzy automaton (plus the exact quote-free spelling only); hitcount sends ours with ignore_quotes (FtsLib behaviour), which runs the fuzzy on the quote-free form, so every quote-free word within 1 edit of the stem matches too"
   ],
   "rules:5": [
    "Otzaria bug",
@@ -33,10 +277,6 @@
   "rules:19": [
    "deliberate deviation",
    "intentional, documented difference (user decision 2026-11-15): a query word of 128 bytes or more is unindexable; ours drops it from the query and keeps its position, Otzaria keeps it as a required word and finds nothing"
-  ],
-  "large:54": [
-   "not equivalent query",
-   "quote word, fuzzy ~1: Otzaria 5babbce keeps the gershayim in the term and counts it as a character in the fuzzy automaton (plus the exact quote-free spelling only); hitcount sends ours with ignore_quotes (FtsLib behaviour), which runs the fuzzy on the quote-free form, so every quote-free word within 1 edit of the stem matches too"
   ]
  }
 }

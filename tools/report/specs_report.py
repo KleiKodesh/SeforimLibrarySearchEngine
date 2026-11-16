@@ -20,30 +20,11 @@ P = sys.argv[sys.argv.index("--prefix") + 1] if "--prefix" in sys.argv else ""
 OUT = os.path.join(ROOT, "FTS-SPECS-AND-COMPARISONS.md")
 INDEX_FORMAT = "tantivy17"   # C# TantivySeforimIndex.IndexFormatVersion
 FTSLIB_FORMAT = "fts14"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
-MEASURED_FTSLIB = "fts13"     # FtsLib format of the runs in the results dir (= FTSLIB_FORMAT once rerun)
+MEASURED_FTSLIB = "fts14"     # FtsLib format of the runs in the results dir (= FTSLIB_FORMAT once rerun)
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
 STALE = [
-    "`tantivy17` / `fts14` (issue #37, both engines): a one-letter `<sup>` / `<sub>` between letters is "
-    "transparent without a mark (presentation forms count, bidi / CGJ / inline tags skipped) and a "
-    "`footnote-marker` tag always splits: on the local DB one line changes; both full-DB rebuilds and the "
-    "parity sets need a rerun on the fullrun workflow.",
-    "In order: a paired reading's two readings (one position) no longer chain on an index without "
-    "positions or in FtsLib (as with positions and Otzaria): the parity sets with in-order queries "
-    "need a rerun (both engines changed together).",
-    "Divine-name placeholder spellings (issue #39, both engines, default): queries holding a spelling of the "
-    "name now also find its other spellings; the parity sets and the Otzaria hit-count comparison need a rerun.",
-    "Search speed and the first-page profile were measured on `tantivy9` / FtsLib `fts8` on the dev machine "
-    "and need a rerun (the 2026-11-13 full-DB run on CI covered index builds, parity and the Otzaria hit counts only). The keep-marks build was not rebuilt (its row is the old dev-machine `tantivy9` number).",
-    "Hit-count comparison (Otzaria 5babbce, run 2026-11-13): most rows are not classified yet; Otzaria 5babbce "
-    "also indexes the footnotes, so the notes-only rule does not explain the small surplus (ours over real "
-    "books only is below Otzaria): to analyse.",
-    "Parity (2026-11-15 fix, FtsLib and our no-positions path): with a word distance a line passes when ANY "
-    "occurrence set is within it, not only the tightest window; the positions-flavour distance surplus "
-    "(large 4, words 3, rules 3, ketiv 1 queries) is expected to vanish and both flavours' parity sets need a "
-    "rerun on the fullrun workflow.",
-    "Typo words in Otzaria mode (issue #36, Otzaria engine 7.0.1): a 4+ letter word in a phrase or with "
-    "other options now also takes every single-letter edit, and an overflowing typo expansion keeps the "
-    "exact option forms first: the Otzaria hit-count rows with typo need a rerun (FtsLib parity unchanged).",
+    "The keep-marks build was not rebuilt (its row is the old dev-machine `tantivy9` number); every other "
+    "result is from fullrun run 43815271560 (2026-11-16, `tantivy17` / `fts14`, one GitHub windows runner per job).",
 ]
 # Snippets from index positions vs the text path (median of 15, first 4000 hits, 8 cores).
 SNIPPETS = [
@@ -484,7 +465,7 @@ readme_block = "\n".join([
     "",
     "**Index builds (full DB, 7,920,835 lines; CI runner, times not representative):**", "",
     "| Build | Total | Size |", "|---|---|---|", *build_lines(), "",
-    ("**Parity with FtsLib** (first 20,000 hits): " + "no positions: every set identical (" + ", ".join(x[0] for x in PAR_RUN) + "); positions: same hits on queries without a distance, on distance queries only added hits (decided on the word-tightest window, where FtsLib checks only its fewest-UTF-16 window; issue #21) and snippet windows differ" + "." if PAR_ALL_SAME
+    ("**Parity with FtsLib** (first 20,000 hits): " + "no positions: every set identical (" + ", ".join(x[0] for x in PAR_RUN) + "); positions: " + ("identical hit sets on every set" if all(x[2] and x[2].startswith(x[2].split(" ")[0].split("/")[1] + "/") for x in PAR_RUN) else "same hits without a distance, only added hits with one") + ", snippet windows differ (word-tightest window, issue #21)" + "." if PAR_ALL_SAME
      else "**Parity with FtsLib** (identical lines, first 20,000 hits): " + parity_summary() + "."), "",
     *([f"**Machine:** {MACHINE_LINE}", ""] if MACHINE_LINE else []),
     "**Search speed** (every hit read, median per query):", "",
@@ -501,7 +482,7 @@ claude_block = "\n".join([
     f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, divine-name placeholder spellings, positions snippets, FM sidecar, all-matches locate + find in an open text, substring find over position ranges (decline over the cap), "
     f"morphology forms from the host (lexical tier, unmarked forms), semantic search like Otzaria (exact integer scan over Otzaria's own vector set, read-only, host line mapping) + hybrid fusion, Meivin query model in the hosts, vector set install (Otzaria's sidecar install in the engine; the app downloads).",
     "Builds: " + "; ".join(l.strip("| ").replace(" | ", " ") for l in build_lines()) + ".",
-    ("Parity with FtsLib: " + "no positions: every set identical (" + ", ".join(x[0] for x in PAR_RUN) + "); positions: same hits on queries without a distance, on distance queries only added hits (decided on the word-tightest window, where FtsLib checks only its fewest-UTF-16 window; issue #21) and snippet windows differ" + "."
+    ("Parity with FtsLib: " + "no positions: every set identical (" + ", ".join(x[0] for x in PAR_RUN) + "); positions: " + ("identical hit sets on every set" if all(x[2] and x[2].startswith(x[2].split(" ")[0].split("/")[1] + "/") for x in PAR_RUN) else "same hits without a distance, only added hits with one") + ", snippet windows differ (word-tightest window, issue #21)" + "."
      if PAR_ALL_SAME else "Parity with FtsLib: " + parity_summary() + "."),
     *(["Machine: " + MACHINE_LINE + "."] if MACHINE_LINE else []),
     ("Stale: " + " ".join(STALE)) if STALE else "All results current.",

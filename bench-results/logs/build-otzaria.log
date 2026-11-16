@@ -1,10 +1,10 @@
-  stage: catalogue: 0.020s
-  stage: open: 0.025s
-  stage: add books: 266.833s
-  stage: commit: 2.257s
-  stage: optimize: 4.613s
-  stage: book order: 0.013s
-build: 7643689 lines, 8154 books indexed (0 missing, 0 failed) of 8154 in 273.774s
+  stage: catalogue: 0.030s
+  stage: open: 0.022s
+  stage: add books: 322.837s
+  stage: commit: 2.429s
+  stage: optimize: 6.028s
+  stage: book order: 0.031s
+build: 7643689 lines, 8154 books indexed (0 missing, 0 failed) of 8154 in 331.390s
 index size: 2182.0 MB in 56 files
   .idx 838.9 MB
   .pos 767.1 MB
@@ -14,4 +14,4 @@ index size: 2182.0 MB in 56 files
   .fieldnorm 14.6 MB
   .json 0.5 MB
   .lock 0.0 MB
-EXIT 0 (4 min)
+EXIT 0 (5 min)

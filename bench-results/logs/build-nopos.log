@@ -1,12 +1,12 @@
-  stage: indexing (read DB + tokenize + write segments + commits): 497.4s
-  stage memory: indexing: peak 491.7 MB (+368.1 MB over the stage start)
-  stage: merge into one segment: 196.1s
-  stage memory: merge into one segment: peak 1877.3 MB (+1488.0 MB over the stage start)
-  stage: FM-index sidecar: 3.7s
-  stage memory: FM-index sidecar: peak 346.9 MB (+143.8 MB over the stage start)
-  read queue (cap 4,096 lines / 64 MB): peak 4,096 lines / 22.3 MB; waits: reader 428462 ms (queue full), indexer 793 ms (queue empty)
-process peak working set: 1877.3 MB
-build: 7,920,835 lines, complete=True in 698.0s
+  stage: indexing (read DB + tokenize + write segments + commits): 483.4s
+  stage memory: indexing: peak 506.3 MB (+383.0 MB over the stage start)
+  stage: merge into one segment: 186.7s
+  stage memory: merge into one segment: peak 1873.3 MB (+1482.5 MB over the stage start)
+  stage: FM-index sidecar: 3.6s
+  stage memory: FM-index sidecar: peak 346.0 MB (+142.3 MB over the stage start)
+  read queue (cap 4,096 lines / 64 MB): peak 4,096 lines / 22.0 MB; waits: reader 413882 ms (queue full), indexer 762 ms (queue empty)
+process peak working set: 1873.3 MB
+build: 7,920,835 lines, complete=True in 674.5s
 index size: 807.6 MB in 12 files
   .idx           631.4 MB
   .fmi            45.9 MB

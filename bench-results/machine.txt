@@ -1,3 +1,3 @@
-OS: windows (GitHub Actions windows-latest runner, shared; build times not representative)
+OS: windows (GitHub Actions windows-latest runner, shared: builds and speed are this runner's, all four engines measured in the same job)
 CPU: GitHub-hosted runner (4 vCPU class)
-source: fullrun workflow run 43398897140 (2026-11-13), DB tag v37-20261105163520
+source: fullrun workflow run 43815271560 (2026-11-16), DB tag v37-20261105163520

@@ -1,6 +1,6 @@
-  stage: lines (read DB + tokenize + FTS5 insert, background priority): 403.5s
-  stage: compact (FTS5 optimize + VACUUM): 48.9s
-  stage: term dictionary (terms.db + FM sidecar + trigram sidecar): 23.0s
-build: complete in 476.0s
+  stage: lines (read DB + tokenize + FTS5 insert, background priority): 396.3s
+  stage: compact (FTS5 optimize + VACUUM): 49.7s
+  stage: term dictionary (terms.db + FM sidecar + trigram sidecar): 22.8s
+build: complete in 469.4s
 index size: 817.0 MB in 7 files
 EXIT 0 (7 min)

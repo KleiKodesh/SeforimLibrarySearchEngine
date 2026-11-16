@@ -1,12 +1,12 @@
-  stage: indexing (read DB + tokenize + write segments + commits): 580.1s
-  stage memory: indexing: peak 420.3 MB (+296.3 MB over the stage start)
-  stage: merge into one segment: 546.8s
-  stage memory: merge into one segment: peak 3971.4 MB (+3603.1 MB over the stage start)
+  stage: indexing (read DB + tokenize + write segments + commits): 542.5s
+  stage memory: indexing: peak 414.8 MB (+290.7 MB over the stage start)
+  stage: merge into one segment: 519.5s
+  stage memory: merge into one segment: peak 3939.5 MB (+3616.8 MB over the stage start)
   stage: FM-index sidecar: 3.6s
-  stage memory: FM-index sidecar: peak 281.2 MB (+147.9 MB over the stage start)
-  read queue (cap 4,096 lines / 64 MB): peak 4,096 lines / 22.2 MB; waits: reader 510200 ms (queue full), indexer 845 ms (queue empty)
-process peak working set: 3971.4 MB
-build: 7,920,835 lines, complete=True in 1131.3s
+  stage memory: FM-index sidecar: peak 231.6 MB (+147.5 MB over the stage start)
+  read queue (cap 4,096 lines / 64 MB): peak 4,096 lines / 22.2 MB; waits: reader 471802 ms (queue full), indexer 798 ms (queue empty)
+process peak working set: 3939.5 MB
+build: 7,920,835 lines, complete=True in 1066.4s
 index size: 1757.9 MB in 12 files
   .idx           812.6 MB
   .pos           765.2 MB
@@ -17,4 +17,4 @@ index size: 1757.9 MB in 12 files
   .fieldnorm      15.8 MB
   .json            0.0 MB
   .lock            0.0 MB
-EXIT 0 (18 min)
+EXIT 0 (17 min)

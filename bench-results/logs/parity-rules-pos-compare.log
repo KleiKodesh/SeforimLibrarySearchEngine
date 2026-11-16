@@ -1,4 +1,4 @@
 5/21 queries identical
-18/21 queries with identical hits (set and order)
+21/21 queries with identical hits (set and order)
 positions rule (no distance: same hits; distance: hits only added, issue #21): ok
 EXIT 0 (0 min)

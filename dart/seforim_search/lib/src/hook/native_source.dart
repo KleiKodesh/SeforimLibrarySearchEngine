@@ -11,6 +11,7 @@
 ///       path: native/seforim_search_native.dll   # source: file (string, or a map per OS)
 ///       sha256: <hex>      # optional for source: file
 ///       url_pattern: https://mirror/{tag}/{file}  # optional for prebuilt
+///       optional: true     # no library to be had: bundle nothing, don't fail the build
 /// ```
 library;
 

@@ -90,6 +90,10 @@ await for (final page in lib.search(SearchOptions(query))) {
 // a results page: load more with offset, stop texts at limit, exact counts
 // (total + per book) on the last page, all from ONE search
 lib.search(SearchOptions(query), offset: 50, limit: 50, withCounts: true);
+// every occurrence marked (user regex), Otzaria's grouping on the host,
+// the matched index terms per page (highlight an opened book with findInText)
+lib.search(options, matchMode: SnippetMatchMode.allMatches, grouping: Grouping.sameSection);
+await lib.resort(appBookOrder); // the host's own catalog order (one merge)
 final counts = await lib.counts(SearchOptions(query)); // exact total + per book
 final inBook = await lib.findInBook(bookId, words);     // every occurrence, by line
 await lib.close();
@@ -100,6 +104,9 @@ await lib.close();
   or unreadable, else the per-book update (`book.contentHash`, issue #29);
   runs on its own isolate, cancellable (`cancel:` future). A cancelled or
   failed build removes the half-built directory.
+- `optional: true` (hook user-define): when no native library can be had
+  (no file, no pinned prebuilt, no cargo) the build bundles nothing instead of
+  failing; the app then must not load the engine.
 - Below it, public for hosts that need them: `SeforimDb` (schema probe, zstd,
   `lineTexts`, `snippetTexts`, `lineLocations`, `sectionsOf`, `heRefs`,
   `catalogBookOrder`), `SnippetTextCache`, the note id scheme,

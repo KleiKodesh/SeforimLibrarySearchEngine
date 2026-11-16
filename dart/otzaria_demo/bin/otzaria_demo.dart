@@ -210,8 +210,8 @@ void _build(SeforimDb db, String dir, Map<String, String?> o) {
       '  stage: indexing: ${_ms(indexingMs)} (DB read + commit ${_ms(indexingMs - addWatch.elapsedMilliseconds)}, '
       'engine add ${_ms(addWatch.elapsedMilliseconds)})');
   stdout.writeln('  stage memory: indexing: ${mem.take()}');
-  stdout.writeln('  read queue (batch cap 1,000 lines / 16 MB, chunk cap ${SeforimDb.bookLinesChunk} lines / '
-      '${SeforimDb.bookLinesChunkBytes ~/ 1000000} MB): peak batch $peakBatchLines lines / '
+  stdout.writeln('  read queue (batch cap 1,000 lines / 16 MB, chunk cap ${SeforimSqlDb.bookLinesChunk} lines / '
+      '${SeforimSqlDb.bookLinesChunkBytes ~/ 1000000} MB): peak batch $peakBatchLines lines / '
       '${(peakBatchBytes / 1e6).toStringAsFixed(1)} MB; synchronous feed, no queue waits');
   // One segment (the walks and their caps run per segment), then the
   // FM-index sidecar for leading-* wildcards and fuzzy words.

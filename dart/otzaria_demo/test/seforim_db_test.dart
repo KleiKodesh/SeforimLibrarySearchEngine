@@ -170,7 +170,7 @@ void main() {
   test('db: early stop of bookLines releases everything (file can be renamed after close)', () {
     final path = '${dir.path}/c.db';
     final w = create(path);
-    const n = SeforimDb.bookLinesChunk * 2 + 17;
+    const n = SeforimSqlDb.bookLinesChunk * 2 + 17;
     w.execute('BEGIN');
     final ins = w.prepare("INSERT INTO line VALUES (?, 1, ?, 'w', '', 0)");
     for (var i = 0; i < n; i++) {
@@ -327,7 +327,7 @@ void main() {
     expect(db.noteSource(10, 1), isNull);
     expect(db.heRefs([v, 11]), {v: 'ref10', 11: 'ref11'});
     final titles = db.bookTitles();
-    expect(titles[n1], '${SeforimDb.notesTitlePrefix} one');
+    expect(titles[n1], '${SeforimSqlDb.notesTitlePrefix} one');
     expect(titles.containsKey(notesBookId(2)), isFalse);
     expect(db.unreadableLineIds, isEmpty);
     db.close();

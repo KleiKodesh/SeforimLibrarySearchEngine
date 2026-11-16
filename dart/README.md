@@ -5,7 +5,7 @@ Three packages:
 | Folder | What |
 |---|---|
 | `seforim_search/` | `dart:ffi` binding to `seforim_search_native` (the C ABI in `engine-ffi/src/lib.rs`). Mirrors the C# `SeforimSearch.Engine` package. Also the host layer (`seforim_db.dart`) over a pluggable `SeforimDataSource`: no SQLite dependency. |
-| `seforim_search_sqlite/` | The ready-made sqlite side: `SeforimDb` (seforim.db reader implementing `SeforimDataSource`, zstd), `defaultDbPath`, `openSeforimLibrary`, and `LexicalDb` (Otzaria's lexical.db). Depends on `seforim_search` and `package:sqlite3`. |
+| `seforim_search_sqlite/` | The ready-made sqlite side: `SeforimDb` (`SeforimSqlDb` over a `package:sqlite3` connection + libzstd), `defaultDbPath`, `openSeforimLibrary`, and `LexicalDb` (`LexicalDictionary` over `package:sqlite3`). Depends on `seforim_search` and `package:sqlite3`. |
 | `otzaria_demo/` | A console app that does what Otzaria's full-text search does, on this engine. It reads seforim.db with `package:sqlite3` and decodes zstd through `libzstd`. |
 
 ## Build and run
@@ -72,8 +72,9 @@ s.close(); index.close();
   (`expectedModelJson`). `VectorSetWriter(dir, worker: w)`
   runs the install on a `SearchWorker` isolate (`w.installVectorSegment`, `w.verifyOxv`); without a worker
   it runs on the calling isolate (it hashes the whole segment).
-- **Lexical search expansion** (Otzaria's lexical.db / MagicDictionary, `LexicalDb` in
-  `seforim_search_sqlite`; SQLite through `package:sqlite3`, never in the engine): `LexicalDb.open(path)` / `tryOpen` (null when
+- **Lexical search expansion** (Otzaria's lexical.db / MagicDictionary, `LexicalDictionary` over the
+  host's `SqlReadConnection`; `LexicalDb` in `seforim_search_sqlite` = `package:sqlite3`; never in the
+  engine): `LexicalDb.open(path)` / `tryOpen` (null when
   missing or not a lexical.db) opens Otzaria's `lexical.db` read-only (Otzaria ships it next to seforim.db
   and loads it when present; the host passes the path). `recallForms(word)` (searched) and
   `highlightForms(word)` (blacklisted lemmas left out) give Otzaria's forms, at most 32 per word;
@@ -97,6 +98,16 @@ through a `SeforimDataSource` (the engine itself stays free of SQLite, and so
 does this package). A host with its own database layer implements the
 interface over it (one connection, its own sqlite library); otherwise
 `package:seforim_search_sqlite` gives `SeforimDb` and `openSeforimLibrary`.
+
+A host whose layer is SQLite only plugs in its CONNECTION: `SeforimSqlDb(path,
+opener)` holds every seforim.db query (schema probe, catalog order, notes
+books, snippet texts, the line feed, reopen on a DB change) and reads through
+the host's `SeforimSqlConnection` (`select` rows as column lists, `execute`,
+`close`, and `decodeFrame`: the host's zstd decoding of line content with the
+DB's `zstd_dict`). `SeforimDb` is that class over `package:sqlite3`; the
+Otzaria app plugs in its own connection and codec. Otzaria's lexical.db reads
+the same way: `LexicalDictionary(SqlReadConnection)`; `LexicalDb.open(path)`
+is the `package:sqlite3` one.
 
 `SeforimDataSource` members: display reads (`FutureOr`, caller's isolate)
 `lineTexts`, `snippetTexts` (short rows: +-2 non-empty same-book neighbours),

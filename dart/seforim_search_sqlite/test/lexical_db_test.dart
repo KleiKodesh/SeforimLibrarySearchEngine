@@ -114,9 +114,9 @@ void main() {
     dict.expand(o, {0: halachti, 1: shuv}, phraseWords: {0, 1});
     expect(o.words[0]!.ignoreQuotes, isTrue);
     expect(o.words[0]!.lexicalForms, [hlkFinal, holechFinal]); // no duplicate
-    expect(o.words[0]!.maxExpandedTerms, LexicalDb.maxPhraseTermsPerWord - 3);
+    expect(o.words[0]!.maxExpandedTerms, LexicalDictionary.maxPhraseTermsPerWord - 3);
     expect(o.words[1]!.lexicalForms, [tashuv]);
-    expect(o.words[1]!.maxExpandedTerms, LexicalDb.maxPhraseTermsPerWord - 2);
+    expect(o.words[1]!.maxExpandedTerms, LexicalDictionary.maxPhraseTermsPerWord - 2);
   });
 
   // The real lexical.db, when Otzaria is installed here (skipped otherwise).
@@ -126,7 +126,7 @@ void main() {
     try {
       final forms = db.recallForms(halachti);
       expect(forms, isNotEmpty);
-      expect(forms.length, lessThanOrEqualTo(LexicalDb.maxLexicalForms));
+      expect(forms.length, lessThanOrEqualTo(LexicalDictionary.maxLexicalForms));
       expect(forms.toSet().length, forms.length);
     } finally {
       db.close();

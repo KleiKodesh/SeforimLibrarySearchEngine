@@ -13,7 +13,7 @@ import 'src/seforim_db.dart';
 export 'package:seforim_search/seforim_db.dart';
 export 'src/seforim_db.dart';
 export 'src/zstd.dart';
-export 'src/lexical_db.dart' show LexicalDb, isBlacklisted, indexToken;
+export 'src/lexical_db.dart';
 
 /// [SeforimLibrary.open] over seforim.db at [dbPath] (default: the usual
 /// install locations, [defaultDbPath]); the library closes the DB.

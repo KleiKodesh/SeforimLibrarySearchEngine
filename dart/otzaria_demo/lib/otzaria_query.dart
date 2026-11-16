@@ -234,7 +234,7 @@ class OtzariaSearch {
   /// Otzaria, only the fuzzy mode uses it: each word's dictionary forms
   /// join its slot as exact words (Otzaria's lexical TermSetQuery), the
   /// forms of a blacklisted lemma searched but not marked.
-  final LexicalDb? magicDictionary;
+  final LexicalDictionary? magicDictionary;
 
   /// Otzaria acronym_alternatives: when any word has the option, the whole
   /// query's phrase alternatives (advanced mode only).

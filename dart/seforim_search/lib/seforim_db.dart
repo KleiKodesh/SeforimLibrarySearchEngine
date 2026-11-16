@@ -3,13 +3,17 @@
 /// progress ([SeforimIndexBuilder]), the snippet-text cache, grouping,
 /// footnote ids and user-document helpers.
 ///
-/// No SQLite here: every database read goes through [SeforimDataSource],
-/// which the host implements over ITS OWN database layer (or takes the
-/// ready-made sqlite one from package:seforim_search_sqlite). Separate from
+/// No sqlite library here: every database read goes through
+/// [SeforimDataSource], which the host implements over ITS OWN database layer,
+/// or gets as [SeforimSqlDb] (seforim.db's queries) over its own SQL
+/// connection ([SeforimSqlConnection]); package:seforim_search_sqlite has the
+/// ready-made package:sqlite3 one. Separate from
 /// `seforim_search.dart`: the engine itself knows no database.
 library;
 
 export 'src/db/data_source.dart';
+export 'src/db/seforim_sql_db.dart';
+export 'src/db/lexical_dictionary.dart' show LexicalDictionary, isBlacklisted, indexToken;
 export 'src/db/note_ids.dart';
 export 'src/db/snippet_texts.dart';
 export 'src/db/book_updates.dart';

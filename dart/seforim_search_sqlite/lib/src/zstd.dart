@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:seforim_search/seforim_db.dart' show zstdFrameDictionaryId;
 
 /// Minimal dart:ffi binding to the system libzstd (dictionary decompression
 /// only). No pub.dev zstd package exposes dictionaries portably, and libzstd
@@ -112,22 +113,7 @@ final class ZstdDictDecoder {
   }
 
   /// The dictionary id in a frame header.
-  static int readFrameDictionaryId(Uint8List f) {
-    if (f.length < 5 || ByteData.sublistView(f).getUint32(0, Endian.little) != 0xFD2FB528) {
-      throw const FormatException('not a zstd frame');
-    }
-    final fhd = f[4];
-    var width = fhd & 3;
-    if (width == 3) width = 4;
-    if (width == 0) throw const FormatException('zstd frame carries no dictionary id');
-    final offset = (fhd & 0x20) != 0 ? 5 : 6;
-    if (f.length < offset + width) throw const FormatException('truncated zstd frame header');
-    var id = 0;
-    for (var i = 0; i < width; i++) {
-      id |= f[offset + i] << (8 * i);
-    }
-    return id;
-  }
+  static int readFrameDictionaryId(Uint8List f) => zstdFrameDictionaryId(f);
 
   Uint8List decode(Uint8List frame) {
     if (_closed) throw StateError('ZstdDictDecoder is closed');

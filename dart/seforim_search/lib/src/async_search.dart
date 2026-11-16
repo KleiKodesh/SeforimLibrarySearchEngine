@@ -8,7 +8,7 @@ import 'package:ffi/ffi.dart';
 
 import 'index.dart';
 import 'models.dart';
-import 'vector_download.dart' show installVectorSegment, verifyOxv, VectorInstallReport;
+import 'vector_set.dart' show installVectorSegment, verifyOxv, VectorInstallReport;
 import 'native.dart';
 import 'semantic.dart';
 import 'session.dart';

@@ -10,7 +10,7 @@ export 'src/index.dart' hide writerResortAndCloseAt;
 export 'src/session.dart';
 export 'src/async_search.dart';
 export 'src/semantic.dart';
-export 'src/vector_download.dart';
+export 'src/vector_set.dart';
 
 export 'src/lexical/lexicon_text.dart';
 export 'src/lexical/translation_lexicon.dart';

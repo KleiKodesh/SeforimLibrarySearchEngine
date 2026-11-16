@@ -60,11 +60,10 @@ s.takeNewTerms();                                        // term table, indexed 
 s.close(); index.close();
 ```
 
-- **Vector set download / update** (`vector_download.dart`, issue #18; host file work, no UI):
-  `VectorSetUpdater(VectorSetWriter(dir)).update(libraryVersion, candidates: [VectorCandidate.fromModelJson(
-  VectorFamily.qa491Windows, modelJson)])` finds the release on GitHub (`VectorReleaseLocator`), downloads it
-  resumably into `<dir>/incoming/` (`VectorDownloader`), checks every SHA-256, expands with `expandOxv` and
-  installs a base or a delta chain in the engine (`installVectorSegment` = `se_vectors_install`, Otzaria's
+- **Vector set install / verify** (`vector_set.dart`, issue #18). Finding and downloading a release
+  (GitHub lookup, release naming, base or delta chain) is the host app's own work (Otzaria keeps its
+  downloaders); the host expands the downloaded segment with `expandOxv` and
+  `VectorSetWriter(dir).install(segmentPath, manifestJson)` installs a base or a delta in the engine (`installVectorSegment` = `se_vectors_install`, Otzaria's
   sidecar install: block CRCs, header vs manifest, a delta's tombstones / duplicates / foreign links) as the
   set directory Otzaria lays out (`segments/`, `gen-NNNNNN/set.json` + `.del` / `.links`, `CURRENT` /
   `PREVIOUS`, `.lock`). `verifyOxv(path, manifestJson:)` = `se_oxv_verify`. Both take a

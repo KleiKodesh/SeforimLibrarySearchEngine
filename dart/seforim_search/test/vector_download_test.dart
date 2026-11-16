@@ -14,6 +14,14 @@ const modelId = 'test/model';
 const chunking = 320260894818558297;
 const digest = 'aa00000000000000000000000000000000000000000000000000000000000000';
 
+String _repoRoot() {
+  var dir = Directory.current;
+  while (!Directory('${dir.path}/seforim-vectors').existsSync()) {
+    dir = dir.parent;
+  }
+  return dir.path;
+}
+
 String? _nativePath() {
   final env = Platform.environment['SEFORIM_SEARCH_NATIVE'];
   if (env != null) return env;
@@ -129,8 +137,9 @@ class FakeGithub {
 void main() {
   late FakeGithub gh;
   late Directory tmp;
-  final oxv = File('../../seforim-vectors/tests/data/synthetic.oxv').readAsBytesSync();
-  final zst = File('test/fixtures/synthetic.oxv.zst').readAsBytesSync();
+  // The locator tests serve made-up manifests: only the release logic runs.
+  final oxv = Uint8List(64);
+  final zst = Uint8List(247);
   final native = _nativePath();
   final candidates = [const VectorCandidate(family, modelId, chunking)];
   const id1 = '11111111111111111111111111111111';
@@ -222,73 +231,109 @@ void main() {
     expect(await locator().findDeltaChain(target: target, installedVersion: 1), isNull);
   });
 
-  test('download resumes, verifies, expands and installs; generations roll and GC', () async {
-    int Function(String, String) expand;
-    if (native != null) {
-      SeforimNative.load(native);
-      expand = expandOxv;
-    } else {
-      // No native build here: the fixture's plain bytes stand in for the expansion.
-      expand = (s, d) => (File(d)..writeAsBytesSync(oxv)).lengthSync();
+  // Fixtures written by seforim-vectors (install_tests.rs): base v1, deltas v1-v2
+  // and v2-v3, base v3; real segments with block CRCs, ids and manifests.
+  final fixtures = '${_repoRoot()}/seforim-vectors/tests/data/install';
+  Map<String, dynamic> fixtureManifest(String name) =>
+      jsonDecode(File('$fixtures/$name.manifest.json').readAsStringSync()) as Map<String, dynamic>;
+  Uint8List fixtureZst(String name, {int pad = 0}) {
+    final b = BytesBuilder()..add(File('$fixtures/$name.oxv.zst').readAsBytesSync());
+    if (pad > 0) {
+      // a zstd skippable frame: makes the download bigger, expands to nothing
+      b.add((ByteData(8)
+            ..setUint32(0, 0x184D2A50, Endian.little)
+            ..setUint32(4, pad, Endian.little))
+          .buffer
+          .asUint8List());
+      b.add(Uint8List(pad));
     }
-    publishBase(1, id1, parts: 2);
+    return b.takeBytes();
+  }
+
+  final fixtureCandidates = [const VectorCandidate(family, 'f', 7)];
+  void publishFixture(String name, {int parts = 1, int pad = 0}) {
+    final m = fixtureManifest(name);
+    final tag = m['libraryReleaseTag'] as String;
+    final delta = m['kind'] == 'delta';
+    gh.publish('vectors-qa491-windows-${delta ? 'delta-' : ''}$tag', tag, m, fixtureZst(name, pad: pad),
+        parts: parts, delta: delta);
+  }
+
+  test('download resumes, verifies, expands and installs; a delta chain applies', () async {
+    if (native == null) {
+      markTestSkipped('native library not built');
+      return;
+    }
+    SeforimNative.load(native);
+    publishFixture('base-v1', parts: 2);
+    publishFixture('delta-v1-v2');
+    publishFixture('delta-v2-v3');
+    publishFixture('base-v3', pad: 8192);
     final setDir = '${tmp.path}/vectors';
     final writer = VectorSetWriter(setDir);
-    final updater = VectorSetUpdater(writer, locator: locator(), expand: expand);
+    final updater = VectorSetUpdater(writer, locator: locator());
 
     // A half download of the first part, from the same asset, is resumed.
-    final target = (await locator().findForLibraryVersion(1, candidates: candidates))!;
+    final target = (await locator().findForLibraryVersion(1, candidates: fixtureCandidates))!;
     final p0 = target.files.first;
     Directory(writer.incoming).createSync(recursive: true);
     File('${writer.incoming}/${p0.name}.partial')
         .writeAsBytesSync(gh.assets['/dl/vectors-qa491-windows-v1-20261101/${p0.name}']!.sublist(0, 10));
-    File('${writer.incoming}/${p0.name}.partial.id')
-        .writeAsStringSync('${p0.assetId}:${p0.sha256}:${p0.size}');
+    File('${writer.incoming}/${p0.name}.partial.id').writeAsStringSync('${p0.assetId}:${p0.sha256}:${p0.size}');
 
-    final r1 = (await updater.update(1, candidates: candidates))!;
+    final r1 = (await updater.update(1, candidates: fixtureCandidates))!;
     expect(gh.ranges, ['bytes=10-']);
-    expect(r1.generation, 1);
-    expect(r1.libraryVersion, 1);
-    expect(File('$setDir/segments/$id1.oxv').readAsBytesSync(), oxv);
-    expect(File('$setDir/segments/$id1.package.json').existsSync(), isTrue);
+    expect((r1.kind, r1.generation, r1.libraryVersion), ('base', 1, 1));
     expect(Directory(writer.incoming).listSync(), isEmpty);
+    expect((await updater.update(1, candidates: fixtureCandidates))!.alreadyApplied, isTrue);
+
+    // v1 -> v3: two deltas (smaller than half the padded base) applied in the engine
+    final r3 = (await updater.update(3, candidates: fixtureCandidates))!;
+    expect((r3.kind, r3.generation, r3.libraryVersion, r3.segments), ('delta', 3, 3, 3));
+    expect(r3.tombstonesApplied, 1);
     final cur = jsonDecode(File('$setDir/CURRENT').readAsStringSync());
-    final setBytes = File('$setDir/${cur['set']}').readAsBytesSync();
-    expect(cur['set_sha256'], _sha(setBytes));
-    final set = jsonDecode(utf8.decode(setBytes));
-    expect(set['format'], 'otzaria-vector-set');
-    expect(set['segments'][0]['del']['file'], '$id1.del');
-    expect(File('$setDir/gen-000001/$id1.del').lengthSync(), 24 + 2 * 8 + 4);
-    expect(writer.installedVersion(), 1);
-
-    // Same version again: nothing to do.
-    expect((await updater.update(1, candidates: candidates))!.alreadyApplied, isTrue);
-
-    // v2 (new segment id): gen 2 current, gen 1 previous; v3: gen 1 collected.
-    const id2 = '22222222222222222222222222222222', id3 = '33333333333333333333333333333333';
-    publishBase(2, id2);
-    expect((await updater.update(2, candidates: candidates))!.generation, 2);
-    expect(jsonDecode(File('$setDir/PREVIOUS').readAsStringSync())['generation'], 1);
-    publishBase(3, id3);
-    expect((await updater.update(3, candidates: candidates))!.generation, 3);
+    expect(cur['generation'], 3);
+    expect(jsonDecode(File('$setDir/PREVIOUS').readAsStringSync())['generation'], 2);
+    expect(File('$setDir/gen-000003/${'33' * 16}.links').existsSync(), isTrue);
     expect(Directory('$setDir/gen-000001').existsSync(), isFalse);
-    expect(File('$setDir/segments/$id1.oxv').existsSync(), isFalse);
-    expect(File('$setDir/segments/$id2.oxv').existsSync(), isTrue);
+
+    // the engine's set reader opens what was installed
+    final set = jsonDecode(File('$setDir/${cur['set']}').readAsStringSync());
+    expect((set['stats']['slots'] as int) - (set['stats']['slots_dead'] as int), 3);
   });
 
-  test('a delta is refused without the native applier; a bad download is dropped', () async {
-    final setDir = '${tmp.path}/v';
-    final writer = VectorSetWriter(setDir);
-    final seg = File('${tmp.path}/s.oxv')..writeAsBytesSync(oxv);
-    final base = gh.manifest(
-        kind: 'base', from: 0, to: 1, tag: 'v1-x', segmentId: id1, segment: oxv, files: []);
-    await writer.install(seg.path, jsonEncode(base));
-    final delta = gh.manifest(kind: 'delta', from: 1, to: 2, tag: 'v2-x',
-        segmentId: '22222222222222222222222222222222', segment: oxv, files: []);
-    expect(() => writer.install(seg.path, jsonEncode(delta)), throwsA(isA<VectorSetException>()));
+  test('a corrupted block is refused; the Dart writer installs a base without native', () async {
+    if (native == null) {
+      markTestSkipped('native library not built');
+      return;
+    }
+    SeforimNative.load(native);
+    final plain = '${tmp.path}/b.oxv';
+    expandOxv('$fixtures/base-v1.oxv.zst', plain);
+    final manifestJson = File('$fixtures/base-v1.manifest.json').readAsStringSync();
+    expect(verifyOxv(plain, manifestJson: manifestJson)['manifest_checked'], isTrue);
+    final bytes = File(plain).readAsBytesSync();
+    // flip a byte of the VECTORS section (0x0012, block-summed: only its block CRC sees it)
+    final h = ByteData.sublistView(bytes);
+    final at = [
+      for (var i = 0; i < h.getUint32(28, Endian.little); i++) 224 + i * 40
+    ].firstWhere((e) => h.getUint16(e, Endian.little) == 0x0012);
+    bytes[h.getUint64(at + 8, Endian.little)] ^= 0x40;
+    final bad = File('${tmp.path}/bad.oxv')..writeAsBytesSync(bytes);
+    expect(() => verifyOxv(bad.path), throwsA(isA<SeforimEngineException>()));
 
-    final f = VectorFile('x', '${gh.base}/missing-but-404', 3, 'ab' * 32, '1');
-    gh.assets['/missing-but-404'] = Uint8List.fromList([1, 2, 3]);
+    final dartWriter = VectorSetWriter('${tmp.path}/d', native: false);
+    final r = await dartWriter.install(plain, manifestJson);
+    expect((r.generation, r.libraryVersion), (1, 1));
+    final delta = '${tmp.path}/x.oxv';
+    expandOxv('$fixtures/delta-v1-v2.oxv.zst', delta);
+    expect(() => dartWriter.install(delta, File('$fixtures/delta-v1-v2.manifest.json').readAsStringSync()),
+        throwsA(isA<VectorSetException>()));
+  });
+
+  test('a bad download is dropped', () async {
+    final f = VectorFile('x', '${gh.base}/bad', 3, 'ab' * 32, '1');
+    gh.assets['/bad'] = Uint8List.fromList([1, 2, 3]);
     expect(() => VectorDownloader().download(f, '${tmp.path}/x'),
         throwsA(isA<VectorReleaseException>().having((e) => e.kind, 'k', VectorFailure.checksum)));
   });

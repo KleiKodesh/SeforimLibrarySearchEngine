@@ -374,6 +374,11 @@ impl SegmentSet {
         self.segments[0].dims()
     }
 
+    /// The segments, their dead-slot words and their links (install).
+    pub(crate) fn parts(&self) -> (&[OxvFile], &[Vec<u64>], &[Vec<Link>]) {
+        (&self.segments, &self.deleted, &self.links)
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -723,6 +728,35 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Test writer: `OXVDEL1\n`, slots, dead count, words, CRC (files.rs
 /// `Deleted::encode`). Returns (bytes, crc, dead).
+/// files.rs `Deleted::encode` of a bitmap: (bytes, crc, dead).
+pub(crate) fn encode_deleted_words(slots: u64, words: &[u64]) -> (Vec<u8>, u32, u64) {
+    let dead: u64 = words.iter().map(|w| w.count_ones() as u64).sum();
+    let mut bytes = DEL_MAGIC.to_vec();
+    bytes.extend_from_slice(&slots.to_le_bytes());
+    bytes.extend_from_slice(&dead.to_le_bytes());
+    for w in words {
+        bytes.extend_from_slice(&w.to_le_bytes());
+    }
+    let crc = crc32fast::hash(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    (bytes, crc, dead)
+}
+
+/// files.rs `encode_links`: (bytes, crc, unresolved).
+pub(crate) fn encode_link_list(links: &[Link]) -> (Vec<u8>, u32, u64) {
+    let mut bytes = LINKS_MAGIC.to_vec();
+    bytes.extend_from_slice(&(links.len() as u64).to_le_bytes());
+    for l in links {
+        bytes.extend_from_slice(&l.seg.to_le_bytes());
+        bytes.extend_from_slice(&l.flags.to_le_bytes());
+        bytes.extend_from_slice(&l.slot.to_le_bytes());
+    }
+    let crc = crc32fast::hash(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    let unresolved = links.iter().filter(|l| l.flags & LINK_UNRESOLVED != 0).count() as u64;
+    (bytes, crc, unresolved)
+}
+
 #[doc(hidden)]
 pub fn encode_deleted(slots: u64, dead_slots: &[u32]) -> (Vec<u8>, u32, u64) {
     let mut words = vec![0u64; slots.div_ceil(64) as usize];

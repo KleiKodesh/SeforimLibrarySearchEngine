@@ -44,6 +44,8 @@
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
     <PackageReference Include="System.Text.Json" Version="10.0.5" />
+    <!-- HttpClient in the engine package's vector download API (issue #18). -->
+    <Reference Include="System.Net.Http" />
   </ItemGroup>
 
 </Project>

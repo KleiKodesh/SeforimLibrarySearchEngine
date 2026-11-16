@@ -291,6 +291,7 @@ pub struct OxvFile {
     foreign: Range<usize>,
     foreign_count: u32,
     tombstone_count: u64,
+    tombstones: Range<usize>,
     occurrences: Option<Range<usize>>,
 }
 
@@ -478,6 +479,7 @@ impl OxvFile {
             foreign,
             foreign_count: foreign_count as u32,
             tombstone_count,
+            tombstones,
             occurrences,
         })
     }
@@ -598,6 +600,25 @@ impl OxvFile {
             }
         }
         (low..count).map(move |p| self.extra_by_slot(p)).take_while(move |i| self.extra(*i).0 == slot)
+    }
+
+    /// The whole mapped file (install: header fields, block CRCs).
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.map
+    }
+
+    /// The segment format (2 or 3).
+    pub(crate) fn format(&self) -> u32 {
+        self.format
+    }
+
+    pub(crate) fn tombstone_count(&self) -> u32 {
+        self.tombstone_count as u32
+    }
+
+    /// Tombstone `index`: the key a delta retires.
+    pub(crate) fn tombstone(&self, index: u32) -> Key {
+        self.key_at(self.tombstones.start + index as usize * self.key_len)
     }
 
     pub(crate) fn foreign_count(&self) -> u32 {
@@ -1072,6 +1093,19 @@ struct Head<'a> {
 }
 
 fn assemble(path: &Path, h: &Head, sections: &[(u16, u16, u32, u64, Vec<u8>)]) -> Result<()> {
+    // reader.rs: one CRC per 1 MiB block of the block-summed sections, in order.
+    let mut crcs = Vec::new();
+    for (_, flags, _, _, bytes) in sections {
+        if flags & SECTION_BLOCKSUMMED != 0 {
+            crcs.extend(bytes.chunks(1 << 20).map(crc32fast::hash));
+        }
+    }
+    let mut owned = sections.to_vec();
+    if !crcs.is_empty() {
+        let n = crcs.len() as u64;
+        owned.push((S_BLOCK_CRCS, SECTION_CRITICAL, 4, n, crcs.iter().flat_map(|c| c.to_le_bytes()).collect()));
+    }
+    let sections = &owned[..];
     let mut header = vec![0u8; HEADER_LEN];
     header[..8].copy_from_slice(MAGIC);
     header[8..12].copy_from_slice(&h.format.to_le_bytes());

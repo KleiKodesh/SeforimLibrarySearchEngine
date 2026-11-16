@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 16; // 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 17; // 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -2250,6 +2250,58 @@ pub unsafe extern "C" fn se_oxv_info(path: *const u8, path_len: usize) -> *mut c
         let path = str_arg(path, path_len)?;
         let file = seforim_vectors::oxv::OxvFile::open(std::path::Path::new(path)).map_err(err)?;
         Ok(out_string(serde_json::to_string(&file.info()).map_err(err)?))
+    })
+}
+
+/// Verifies a plain `.oxv` (Otzaria's sidecar: header and directory, every
+/// 1 MiB block CRC, and, with `manifest_json` (its release manifest; length 0 =
+/// none), the header against the manifest). JSON `{"segment_id","kind",
+/// "from_library_version","to_library_version","slots","blocks",
+/// "manifest_checked"}`; null on error (the reason in `se_last_error`).
+///
+/// # Safety
+/// The strings valid UTF-8 for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn se_oxv_verify(path: *const u8, path_len: usize, manifest: *const u8, manifest_len: usize) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let path = str_arg(path, path_len)?;
+        let manifest = if manifest_len == 0 { None } else { Some(str_arg(manifest, manifest_len)?) };
+        let r = seforim_vectors::install::verify_segment(std::path::Path::new(path), manifest).map_err(err)?;
+        Ok(out_string(serde_json::to_string(&r).map_err(err)?))
+    })
+}
+
+/// Installs a verified download into the vector set directory `set_dir`, as
+/// Otzaria's sidecar does (`install_package`): a base starts a new generation, a
+/// delta applies its tombstones, duplicates and foreign links to the current
+/// one; `gen-NNNNNN/set.json`, `.del`, `.links`, `PREVIOUS`, `CURRENT`, garbage
+/// collected. `segment`: the plain `.oxv` (moved when it lies in
+/// `<set_dir>/incoming/`, else copied); `manifest_json`: its release manifest;
+/// `published_sha256` (length 0 = none): the manifest's published SHA-256.
+/// JSON `{"kind","library_version","generation","segments","slots_added",
+/// "tombstones_applied","duplicates_removed","foreign_unresolved",
+/// "bytes_on_disk","already_applied"}`; null on error.
+///
+/// # Safety
+/// The strings valid UTF-8 for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn se_vectors_install(
+    set_dir: *const u8,
+    set_dir_len: usize,
+    segment: *const u8,
+    segment_len: usize,
+    manifest: *const u8,
+    manifest_len: usize,
+    published_sha256: *const u8,
+    published_sha256_len: usize,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let dir = str_arg(set_dir, set_dir_len)?;
+        let segment = str_arg(segment, segment_len)?;
+        let manifest = str_arg(manifest, manifest_len)?;
+        let published = if published_sha256_len == 0 { None } else { Some(str_arg(published_sha256, published_sha256_len)?) };
+        let r = seforim_vectors::install::install(std::path::Path::new(dir), std::path::Path::new(segment), manifest, published).map_err(err)?;
+        Ok(out_string(serde_json::to_string(&r).map_err(err)?))
     })
 }
 

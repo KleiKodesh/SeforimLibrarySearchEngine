@@ -20,6 +20,7 @@
 
 pub mod chunker;
 pub mod fusion;
+pub mod install;
 pub mod kernel;
 pub mod oxv;
 pub mod scan;

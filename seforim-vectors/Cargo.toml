@@ -2,7 +2,7 @@
 name = "seforim-vectors"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Semantic search over Otzaria's vector set (.oxv segments), read-only: Otzaria's exact integer scan, keyed to the host's line ids. No model runs here."
 license = "MIT"
 

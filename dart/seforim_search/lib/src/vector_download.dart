@@ -15,12 +15,10 @@
 //   <dir>/CURRENT, <dir>/PREVIOUS ({"generation","set","set_sha256"})
 //   <dir>/incoming/ (downloads), <dir>/.lock (one install at a time)
 //
-// Native-only steps (the sidecar reads the segment for them) are hooks:
-// [VectorSegmentVerifier] (header + block checks, sidecar `check_header` +
-// `Segment::verify_blocks`) and [VectorDeltaApplier] (a delta's tombstones,
-// duplicates and foreign links resolved against the older segments). Without a
-// delta applier a delta is refused with [VectorSetException], never installed
-// half-way.
+// The install itself runs in the engine (`se_vectors_install`, a port of the
+// sidecar's `install_package`: block verification, a delta's tombstones,
+// duplicates and foreign links); `VectorSetWriter(native: false)` keeps a Dart
+// port for a base only.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -28,6 +26,11 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
+import 'dart:ffi';
+
+import 'package:ffi/ffi.dart';
+
+import 'native.dart';
 import 'semantic.dart' show expandOxv;
 
 /// Limits on a delta chain instead of a base: at most [maxSteps] deltas, whose
@@ -581,20 +584,39 @@ class VectorDownloader {
   }
 }
 
-/// Checks a staged segment before it is installed (the sidecar's `check_header`
-/// and `Segment::verify_blocks`): throw to refuse it. A native call (see README).
-typedef VectorSegmentVerifier = Future<void> Function(String segmentPath, Map<String, dynamic> manifest);
+/// Checks a staged segment before the Dart writer installs it: throw to refuse it.
+typedef VectorSegmentVerifier = Future<void> Function(String segmentPath, String manifestJson);
 
-/// Applies a verified delta segment onto the current generation: writes the new
-/// generation's `.del` / `.links` files and returns its set.json segment entries
-/// and stats. Needs the segments' keys, tombstones and foreign records: a native call.
-typedef VectorDeltaApplier = Future<VectorDeltaResult> Function(
-    String setDir, String segmentPath, Map<String, dynamic> manifest, String generationDir);
+/// Verifies a plain `.oxv` in the engine (`se_oxv_verify`, Otzaria's sidecar
+/// `check_header` + `verify_blocks`): header and directory, every 1 MiB block
+/// CRC and, with [manifestJson], the header against its release manifest.
+/// Returns the report JSON; throws [SeforimEngineException] when it fails.
+Map<String, dynamic> verifyOxv(String path, {String? manifestJson}) {
+  final n = SeforimNative.instance;
+  return jsonDecode(using((al) {
+    final (p, pl) = utf8Native(path, al);
+    final (m, ml) = manifestJson == null ? (nullptr.cast<Uint8>(), 0) : utf8Native(manifestJson, al);
+    return n.takeString(n.oxvVerify(p, pl, m, ml));
+  })) as Map<String, dynamic>;
+}
 
-class VectorDeltaResult {
-  final List<Map<String, dynamic>> segments;
-  final Map<String, dynamic> stats;
-  const VectorDeltaResult(this.segments, this.stats);
+/// Installs a downloaded plain `.oxv` into the set directory [setDir] in the
+/// engine (`se_vectors_install`, Otzaria's sidecar `install_package`): a base
+/// starts a new generation, a delta applies its tombstones, duplicates and
+/// foreign links to the current one. A segment inside `<setDir>/incoming/` is
+/// moved, any other copied.
+VectorInstallReport installVectorSegment(String setDir, String segmentPath, String manifestJson,
+    {String? publishedManifestSha256}) {
+  final n = SeforimNative.instance;
+  return VectorInstallReport.fromJson(jsonDecode(using((al) {
+    final (d, dl) = utf8Native(setDir, al);
+    final (s, sl) = utf8Native(segmentPath, al);
+    final (m, ml) = utf8Native(manifestJson, al);
+    final (h, hl) = publishedManifestSha256 == null
+        ? (nullptr.cast<Uint8>(), 0)
+        : utf8Native(publishedManifestSha256, al);
+    return n.takeString(n.vectorsInstall(d, dl, s, sl, m, ml, h, hl));
+  })) as Map<String, dynamic>);
 }
 
 class VectorSetException implements Exception {
@@ -609,21 +631,41 @@ class VectorInstallReport {
   final String kind;
   final int libraryVersion, generation, segments, slotsAdded, bytesOnDisk;
   final bool alreadyApplied;
+
+  /// Delta only (0 otherwise): older slots a tombstone retired, older copies of a
+  /// key the delta ships again, foreign records no older live slot holds.
+  final int tombstonesApplied, duplicatesRemoved, foreignUnresolved;
   const VectorInstallReport(this.kind, this.libraryVersion, this.generation, this.segments,
-      this.slotsAdded, this.bytesOnDisk, this.alreadyApplied);
+      this.slotsAdded, this.bytesOnDisk, this.alreadyApplied,
+      {this.tombstonesApplied = 0, this.duplicatesRemoved = 0, this.foreignUnresolved = 0});
+
+  factory VectorInstallReport.fromJson(Map<String, dynamic> j) => VectorInstallReport(
+      j['kind'] as String,
+      j['library_version'] as int,
+      j['generation'] as int,
+      j['segments'] as int,
+      j['slots_added'] as int,
+      j['bytes_on_disk'] as int,
+      j['already_applied'] as bool,
+      tombstonesApplied: j['tombstones_applied'] as int,
+      duplicatesRemoved: j['duplicates_removed'] as int,
+      foreignUnresolved: j['foreign_unresolved'] as int);
 }
 
-/// A set directory as the sidecar lays it out; writes generations
-/// (port of `install_package` / `NewGeneration::commit` for a base segment).
+/// A set directory as the sidecar lays it out. [install] goes through the
+/// engine ([installVectorSegment]: base and delta, the segment verified) unless
+/// [native] is false: then the Dart port of `install_package` /
+/// `NewGeneration::commit` installs a base (checked by [verifySegment] when
+/// given, else by its SHA-256 only) and a delta is refused.
 class VectorSetWriter {
   static const releaseFormat = 'otzaria-vectors-release';
   static const setFormat = 'otzaria-vector-set';
 
   final String dir;
+  final bool native;
   final VectorSegmentVerifier? verifySegment;
-  final VectorDeltaApplier? applyDelta;
 
-  VectorSetWriter(this.dir, {this.verifySegment, this.applyDelta});
+  VectorSetWriter(this.dir, {this.native = true, this.verifySegment});
 
   String get incoming => '$dir${Platform.pathSeparator}incoming';
   String _p(String rel) => '$dir/$rel';
@@ -641,6 +683,12 @@ class VectorSetWriter {
   /// new generation. A segment inside [incoming] is moved, any other copied.
   Future<VectorInstallReport> install(String segmentPath, String manifestJson,
       {String? publishedManifestSha256, bool Function()? isCancelled}) async {
+    if (native) {
+      // Synchronous native work (hashing a multi-GB segment): hosts that must
+      // keep their isolate responsive run the updater in a worker isolate.
+      return installVectorSegment(dir, segmentPath, manifestJson,
+          publishedManifestSha256: publishedManifestSha256);
+    }
     await Directory(dir).create(recursive: true);
     final lock = await File(_p('.lock')).open(mode: FileMode.append);
     try {
@@ -709,10 +757,7 @@ class VectorSetWriter {
         throw VectorSetException(
             'the delta goes from ${m['fromLibraryVersion']}, the set stands at $stands');
       }
-      if (applyDelta == null) {
-        throw const VectorSetException(
-            'applying a delta needs the native delta applier (not in the C ABI yet)');
-      }
+      throw const VectorSetException('a delta is installed by the engine (native: true)');
     }
 
     // Stage (move from incoming/, else copy), then check size + hash + segment.
@@ -732,7 +777,7 @@ class VectorSetWriter {
     }
     final sha = await sha256OfFile(staged, isCancelled: isCancelled);
     if (sha != seg['sha256']) throw VectorSetException('segment sha256 $sha != ${seg['sha256']}');
-    await verifySegment?.call(staged, m);
+    await verifySegment?.call(staged, manifestJson);
 
     // Place the segment (kept when the same bytes are already there).
     await Directory(_p('segments')).create(recursive: true);
@@ -772,11 +817,7 @@ class VectorSetWriter {
     };
     List<Map<String, dynamic>> segments;
     Map<String, dynamic> stats;
-    if (kind == 'delta') {
-      final r = await applyDelta!(dir, target.path, m, genDir.path);
-      segments = r.segments;
-      stats = r.stats;
-    } else {
+    {
       final slots = counts['slots'] as int;
       final (bytes, crc) = encodeDel(slots, Uint64List((slots + 63) ~/ 64));
       _writeAtomically('${genDir.path}/$id.del', bytes);
@@ -989,7 +1030,7 @@ class VectorSetUpdater {
     }
     List<VectorRelease>? chain;
     if (installed != null &&
-        writer.applyDelta != null &&
+        writer.native &&
         current!['identity_digest'] == target.identityDigest) {
       chain = await locator.findDeltaChain(target: target, installedVersion: installed);
     }

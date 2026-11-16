@@ -47,6 +47,7 @@ namespace SeforimSearch.Demo
                 ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
                 ("per-book update (issue #29): changed / grown / removed books, crash mid-update, background merge", BookUpdates),
                 ("semantic search (issue #18): Otzaria vector set, line mapping, unmapped, book filter, hybrid, cancel", Semantic),
+                ("vector set download / update (issue #18): fake releases, resume, base, delta chain, block check", VectorDownload),
                 ("substring find (issue G-K1): FtsLib FindSubstringCandidates order, ranges, decline", SubstringFind),
                 ("coordinator (Core drop-in): build, progress, status, search, lines, reset, DB change", CoordinatorLifecycle),
                 ("related forms (Core's '+' / '=' rewrite): artifact lookup, markers", RelatedForms),

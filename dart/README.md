@@ -63,9 +63,11 @@ s.close(); index.close();
   `VectorSetUpdater(VectorSetWriter(dir)).update(libraryVersion, candidates: [VectorCandidate.fromModelJson(
   VectorFamily.qa491Windows, modelJson)])` finds the release on GitHub (`VectorReleaseLocator`), downloads it
   resumably into `<dir>/incoming/` (`VectorDownloader`), checks every SHA-256, expands with `expandOxv` and
-  installs the set directory Otzaria's sidecar lays out (`segments/`, `gen-NNNNNN/set.json` + `.del`,
-  `CURRENT` / `PREVIOUS`, `.lock`). Deltas and the segment block check need native hooks
-  (`VectorDeltaApplier`, `VectorSegmentVerifier`) not yet in the C ABI: see the root README.
+  installs a base or a delta chain in the engine (`installVectorSegment` = `se_vectors_install`, Otzaria's
+  sidecar install: block CRCs, header vs manifest, a delta's tombstones / duplicates / foreign links) as the
+  set directory Otzaria lays out (`segments/`, `gen-NNNNNN/set.json` + `.del` / `.links`, `CURRENT` /
+  `PREVIOUS`, `.lock`). `verifyOxv(path, manifestJson:)` = `se_oxv_verify`. The install runs on the calling
+  isolate (hashes the whole segment): run the updater in a worker isolate to keep a UI responsive.
 - **Lexical search expansion** (Otzaria's lexical.db / MagicDictionary, in the package, `LexicalDb`;
   SQLite through `package:sqlite3`, never in the engine): `LexicalDb.open(path)` / `tryOpen` (null when
   missing or not a lexical.db) opens Otzaria's `lexical.db` read-only (Otzaria ships it next to seforim.db

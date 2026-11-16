@@ -11,7 +11,7 @@ namespace SeforimSearch.Engine
     public static class NativeAbi
     {
         /// <summary>The C ABI version this package was built for.</summary>
-        public const int Expected = 16;
+        public const int Expected = 17;
 
         private static readonly object Gate = new object();
         private static volatile bool _checked;

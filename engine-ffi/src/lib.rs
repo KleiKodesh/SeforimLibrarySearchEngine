@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 15; // 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 16; // 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -2026,6 +2026,83 @@ pub unsafe extern "C" fn se_vectors_map_book(
     })
 }
 
+/// Maps one book WITH Otzaria's text check (issue #18): the book's raw rows
+/// (seforim.db `lineIndex, id` order; `line_content` decoded from zstd by the
+/// host, NULL as empty) given as `content` (all rows concatenated, `content_len`
+/// bytes) cut at `offsets[0..=row_count]` (u64, row `i` = `offsets[i]..offsets[i+1]`),
+/// `row_line_ids[i]` the line id of row `i`, and the book's `line_note` rows as
+/// `notes_json` (may be empty): `[{"line_index":N,"char_pos":N,"has_marker":bool,
+/// "body":".."}]` in `lineIndex, noteIndex` order. The engine rebuilds the book's
+/// lines exactly as Otzaria indexes them (a row holding a newline gives several
+/// lines, each mapped to its row's line id), checks every record of the book in
+/// the open set against the recomputed chunk key at the stored width (a moved line
+/// found within 16 lines and remapped) and drops the records that fail (counted).
+/// `chunking_identity` 0 = the set's (set.json); a single `.oxv` needs the query
+/// model's `chunking_identity` (model.json). Needs an open set. Returns JSON
+/// `{"lines":N,"records":N,"verified":N,"moved":N,"unverified":N}`, null on error.
+///
+/// # Safety
+/// `index` live; `name` valid UTF-8 for `name_len`; `row_line_ids` valid for
+/// `row_count`; `offsets` valid for `row_count + 1`; `content` for `content_len`;
+/// `notes_json` valid UTF-8 for `notes_len`.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn se_vectors_map_book_rows(
+    index: *const LineIndex,
+    name: *const u8,
+    name_len: usize,
+    book_id: u64,
+    row_line_ids: *const u64,
+    row_count: usize,
+    content: *const u8,
+    content_len: usize,
+    offsets: *const u64,
+    notes_json: *const u8,
+    notes_len: usize,
+    chunking_identity: u64,
+) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    struct Note {
+        line_index: i64,
+        #[serde(default = "minus_one")]
+        char_pos: i64,
+        #[serde(default)]
+        has_marker: bool,
+        body: String,
+    }
+    fn minus_one() -> i64 {
+        -1
+    }
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        let name = str_arg(name, name_len)?;
+        check_id("book_id", book_id)?;
+        let ids = slice_arg(row_line_ids, row_count, "row_line_ids")?;
+        for &l in ids {
+            check_id("line_id", l)?;
+        }
+        let bytes = slice_arg(content, content_len, "content")?;
+        let cuts = slice_arg(offsets, row_count + 1, "offsets")?;
+        let mut rows: Vec<&[u8]> = Vec::with_capacity(row_count);
+        for w in cuts.windows(2) {
+            let (a, b) = (w[0] as usize, w[1] as usize);
+            if a > b || b > bytes.len() {
+                return Err("offsets out of order or past content".into());
+            }
+            rows.push(&bytes[a..b]);
+        }
+        let text = str_arg(notes_json, notes_len)?;
+        let notes: Vec<Note> = if text.trim().is_empty() { Vec::new() } else { serde_json::from_str(text).map_err(err)? };
+        let notes: Vec<seforim_engine::semantic::BookNote> = notes
+            .into_iter()
+            .map(|n| seforim_engine::semantic::BookNote { line_index: n.line_index, char_pos: n.char_pos, has_marker: n.has_marker, body: n.body })
+            .collect();
+        let identity = (chunking_identity != 0).then_some(chunking_identity);
+        let v = index.map_vector_book_rows(name, book_id, ids, &rows, &notes, identity).map_err(err)?;
+        Ok(out_string(serde_json::to_string(&v).map_err(err)?))
+    })
+}
+
 /// Maps several books at once: `maps_json` `[{"name":"id:123","book_id":123,
 /// "line_ids":[..]}]` (as `se_vectors_map_book` each); `replace` != 0 drops
 /// every book mapped before. 0, or -1 on error.
@@ -2576,6 +2653,73 @@ mod tests {
             let (g, x) = (gz.to_string_lossy().into_owned(), dir.join("x.oxv").to_string_lossy().into_owned());
             assert_eq!(se_oxv_expand(g.as_ptr(), g.len(), x.as_ptr(), x.len()) as u64, std::fs::metadata(&oxv).unwrap().len());
             assert!(se_oxv_info(g.as_ptr(), g.len()).is_null());
+            se_index_close(index);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn a_book_mapped_from_rows_through_the_c_abi() {
+        use seforim_vectors::chunker::{book_lines, BookLine, Chunker, ChunkerConfig, LineRef};
+        use seforim_vectors::oxv::{TestBook, TestCodec, TestSegment, TestSlot};
+        unsafe {
+            let dir = std::env::temp_dir().join(format!("se_ffi_rows_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let d = dir.join("index").to_string_lossy().into_owned();
+            let index = se_index_create(d.as_ptr(), d.len(), ptr::null(), 0);
+            assert!(!index.is_null());
+            let rows: Vec<&[u8]> = vec![b"first line that is long enough to stand", b"second line long enough\nthird line long enough to stand alone"];
+            let lines = book_lines(&rows, &[]);
+            let refs: Vec<LineRef<'_>> = lines.iter().map(BookLine::as_ref).collect();
+            let chunker = Chunker::production();
+            let slots = (0..lines.len())
+                .map(|p| {
+                    let key = chunker.window_keys(&refs, p)[0].1;
+                    let mut v = vec![0.0f32; 4];
+                    v[p] = 1.0;
+                    TestSlot { key: u64::from_be_bytes(key.0[..8].try_into().unwrap()), hint: p as u32, window: 0, vector: v }
+                })
+                .collect();
+            let oxv = dir.join("b.oxv");
+            std::fs::create_dir_all(&dir).unwrap();
+            let seg = TestSegment {
+                dims: 4,
+                codec: TestCodec::F32,
+                delta: false,
+                from: 0,
+                to: 1,
+                tag: "v1".into(),
+                books: vec![TestBook { name: "id:9".into(), slots, ..Default::default() }],
+                occurrences: vec![],
+                tombstones: vec![],
+            };
+            seforim_vectors::oxv::write_segment(&oxv, &seg).unwrap();
+            let take = |p: *mut c_char| {
+                assert!(!p.is_null(), "{}", se_last_error_message());
+                let s = CStr::from_ptr(p).to_str().unwrap().to_string();
+                se_string_free(p);
+                s
+            };
+            let name = "id:9";
+            let ids = [7u64, 8];
+            let content: Vec<u8> = rows.concat();
+            let offsets = [0u64, rows[0].len() as u64, content.len() as u64];
+            let identity = ChunkerConfig::production().identity();
+            // no set open: an error
+            assert!(se_vectors_map_book_rows(index, name.as_ptr(), name.len(), 9, ids.as_ptr(), 2, content.as_ptr(), content.len(), offsets.as_ptr(), ptr::null(), 0, identity)
+                .is_null());
+            let o = oxv.to_string_lossy().into_owned();
+            take(se_vectors_open(index, o.as_ptr(), o.len()));
+            let v = take(se_vectors_map_book_rows(index, name.as_ptr(), name.len(), 9, ids.as_ptr(), 2, content.as_ptr(), content.len(), offsets.as_ptr(), ptr::null(), 0, identity));
+            assert_eq!(v, r#"{"lines":3,"records":3,"verified":3,"moved":0,"unverified":0}"#);
+            let q = [0.0f32, 0.0, 1.0, 0.0];
+            let sem = take(se_semantic_search(index, q.as_ptr(), 4, ptr::null(), 0, ptr::null()));
+            let j: serde_json::Value = serde_json::from_str(&sem).unwrap();
+            // the row's second line (ordinal 2) is the row's line id
+            assert_eq!(j["hits"][0]["line_id"], 8, "{sem}");
+            // bad offsets
+            let bad = [0u64, 999, 5];
+            assert!(se_vectors_map_book_rows(index, name.as_ptr(), name.len(), 9, ids.as_ptr(), 2, content.as_ptr(), content.len(), bad.as_ptr(), ptr::null(), 0, identity).is_null());
             se_index_close(index);
             let _ = std::fs::remove_dir_all(dir);
         }

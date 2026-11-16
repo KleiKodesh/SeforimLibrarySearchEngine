@@ -362,3 +362,119 @@ fn the_hosts_oxv_fixture_is_current() {
     let r = set.search_lines(&axis(4, 2), &map, &LineSearch { k: 3, ..Default::default() }, None).unwrap();
     assert_eq!((r.hits[0].line_id, r.hits[0].chunk), (1, 1));
 }
+
+/// The text check (`map_book_rows`): keys recomputed from the host's raw rows; a row
+/// holding a newline gives two lines of one line id; a tampered row's records are
+/// dropped and counted; lines shifted by an inserted row are found again.
+#[test]
+fn a_book_mapped_from_its_rows_is_verified_against_the_keys() {
+    use crate::chunker::{book_lines, BookLine, Chunker, ChunkerConfig, LineRef};
+    let identity = ChunkerConfig::production().identity();
+    let chunker = Chunker::production();
+    let rows: Vec<&[u8]> = vec![
+        b"<h1>Title of the book</h1>",
+        b"first line that is long enough to stand",
+        b"second\nthird line long enough to stand alone too",
+        b"fourth line long enough to stand alone here",
+    ];
+    let lines = book_lines(&rows, &[]);
+    assert_eq!(lines.len(), 5);
+    let refs: Vec<LineRef<'_>> = lines.iter().map(BookLine::as_ref).collect();
+    let d = 8;
+    let slots: Vec<TestSlot> = (0..5)
+        .map(|p| {
+            let key = chunker.window_keys(&refs, p)[0].1;
+            slot(u64::from_be_bytes(key.0[..8].try_into().unwrap()), p as u32, 0, axis(d, p))
+        })
+        .collect();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("book.oxv");
+    let seg = TestSegment {
+        dims: d,
+        codec: TestCodec::I8Vec,
+        delta: false,
+        from: 0,
+        to: 1,
+        tag: "v1".into(),
+        books: vec![TestBook { name: "id:3".into(), slots, ..Default::default() }],
+        occurrences: vec![],
+        tombstones: vec![],
+    };
+    oxv::write_segment(&path, &seg).unwrap();
+    let set = SegmentSet::open(&path).unwrap();
+    let ids = [100u64, 101, 102, 103];
+    // no identity: refused
+    assert!(set.map_book_rows("id:3", 3, &ids, &rows, &[], None).is_err());
+    let (map, v) = set.map_book_rows("id:3", 3, &ids, &rows, &[], Some(identity)).unwrap();
+    assert_eq!((v.lines, v.records, v.verified, v.moved, v.unverified), (5, 5, 5, 0, 0));
+    assert_eq!(map.line_ids, vec![100, 101, 102, 102, 103]);
+    let mut lm = LineMap::default();
+    lm.set(vec![map], true);
+    let r = set.search_lines(&axis(d, 3), &lm, &LineSearch { k: 1, ..Default::default() }, None).unwrap();
+    assert_eq!(r.hits[0].line_id, 102);
+
+    // a tampered row: its records are dropped and counted
+    let mut tampered = rows.clone();
+    tampered[3] = b"fourth line CHANGED enough to stand alone here";
+    let (map, v) = set.map_book_rows("id:3", 3, &ids, &tampered, &[], Some(identity)).unwrap();
+    assert!(v.unverified >= 1 && map.line_ids[4] == set::UNVERIFIED, "{v:?}");
+    lm.set(vec![map], true);
+    let r = set.search_lines(&axis(d, 4), &lm, &LineSearch { k: 1, ..Default::default() }, None).unwrap();
+    assert!(r.hits.is_empty() && r.unmapped == 1);
+
+    // a row inserted above: the long lines are found one line down
+    let mut shifted = vec![&b"<h1>Title of the book</h1>"[..], b"an inserted line long enough to stand alone"];
+    shifted.extend_from_slice(&rows[1..]);
+    let (map, v) = set.map_book_rows("id:3", 3, &[100, 99, 101, 102, 103], &shifted, &[], Some(identity)).unwrap();
+    assert!(v.moved >= 3, "{v:?}");
+    assert_eq!((map.line_ids[1], map.line_ids[4]), (101, 103));
+}
+
+/// The hosts' rows-verify fixture (`seforim-vectors/tests/data/verified.oxv`, used by
+/// the C# self-test and the Dart tests): book `id:3` with the 4 rows of
+/// [`a_book_mapped_from_its_rows_is_verified_against_the_keys`], real chunk keys of the
+/// production chunker, F32, 8 dims, line `p` = axis `p`. `REGEN_OXV=1` rewrites it.
+#[test]
+fn the_hosts_verified_fixture_is_current() {
+    use crate::chunker::{book_lines, BookLine, Chunker, ChunkerConfig, LineRef};
+    let chunker = Chunker::production();
+    let rows: Vec<&[u8]> = vec![
+        b"<h1>Title of the book</h1>",
+        b"first line that is long enough to stand",
+        b"second\nthird line long enough to stand alone too",
+        b"fourth line long enough to stand alone here",
+    ];
+    let lines = book_lines(&rows, &[]);
+    let refs: Vec<LineRef<'_>> = lines.iter().map(BookLine::as_ref).collect();
+    let d = 8;
+    let slots: Vec<TestSlot> = (0..lines.len())
+        .map(|p| {
+            let key = chunker.window_keys(&refs, p)[0].1;
+            slot(u64::from_be_bytes(key.0[..8].try_into().unwrap()), p as u32, 0, axis(d, p))
+        })
+        .collect();
+    let seg = TestSegment {
+        dims: d,
+        codec: TestCodec::F32,
+        delta: false,
+        from: 0,
+        to: 1,
+        tag: "v1-verified".into(),
+        books: vec![TestBook { name: "id:3".into(), slots, ..Default::default() }],
+        occurrences: vec![],
+        tombstones: vec![],
+    };
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/verified.oxv");
+    let tmp = tempfile::tempdir().unwrap();
+    let fresh = tmp.path().join("v.oxv");
+    oxv::write_segment(&fresh, &seg).unwrap();
+    if std::env::var("REGEN_OXV").is_ok() {
+        std::fs::copy(&fresh, &fixture).unwrap();
+    }
+    assert_eq!(std::fs::read(&fixture).unwrap(), std::fs::read(&fresh).unwrap());
+    let set = SegmentSet::open(&fixture).unwrap();
+    let identity = ChunkerConfig::production().identity();
+    assert_eq!(identity, 320_260_894_818_558_297, "the hosts' tests pass this identity");
+    let (_, v) = set.map_book_rows("id:3", 3, &[100, 101, 102, 103], &rows, &[], Some(identity)).unwrap();
+    assert_eq!((v.lines, v.records, v.verified, v.unverified), (5, 5, 5, 0));
+}

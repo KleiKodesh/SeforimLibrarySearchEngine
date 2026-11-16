@@ -173,6 +173,34 @@ final class OxvBookMap {
   Map<String, Object?> toJson() => {'name': name, 'book_id': bookId, 'line_ids': lineIds};
 }
 
+/// One `line_note` row of a book (non-NULL body) for
+/// [SemanticIndex.mapVectorBookRows].
+final class VectorBookNote {
+  const VectorBookNote(this.lineIndex, this.body, {this.charPos = -1, this.hasMarker = false});
+
+  /// The `lineIndex` of the note's line.
+  final int lineIndex;
+
+  /// `charPos`, -1 when absent.
+  final int charPos;
+  final bool hasMarker;
+  final String body;
+
+  Map<String, Object?> toJson() => {'line_index': lineIndex, 'char_pos': charPos, 'has_marker': hasMarker, 'body': body};
+}
+
+/// The text check of one book ([SemanticIndex.mapVectorBookRows]).
+final class VectorBookVerify {
+  const VectorBookVerify(this.lines, this.records, this.verified, this.moved, this.unverified);
+  factory VectorBookVerify.fromJson(Map<String, dynamic> j) => VectorBookVerify(
+      j['lines'] as int, j['records'] as int, j['verified'] as int, j['moved'] as int, j['unverified'] as int);
+  final int lines;
+  final int records;
+  final int verified;
+  final int moved;
+  final int unverified;
+}
+
 /// Expands Otzaria's downloaded vector file (`.oxv.zst`) to a plain `.oxv`;
 /// returns the bytes written.
 int expandOxv(String source, String destination) {
@@ -309,6 +337,42 @@ extension SemanticIndex on SeforimIndex {
       return n.vectorsMapBook(handle, p, pl, bookId, ids, lineIds.length);
     });
     if (rc != 0) throw n.error();
+  }
+
+  /// Maps one book WITH Otzaria's text check: [rows] = the book's raw rows
+  /// (UTF-8 content, seforim.db `lineIndex, id` order, NULL as empty),
+  /// [rowLineIds] their line ids, [notes] its `line_note` rows (lineIndex,
+  /// noteIndex order). Records whose recomputed chunk key fails are dropped
+  /// and counted. [chunkingIdentity] 0 = the set's (a single `.oxv` needs the
+  /// model's).
+  VectorBookVerify mapVectorBookRows(String name, int bookId, List<int> rowLineIds, List<Uint8List> rows,
+      [List<VectorBookNote> notes = const [], int chunkingIdentity = 0]) {
+    if (rows.length != rowLineIds.length) {
+      throw ArgumentError('rows and rowLineIds differ in length');
+    }
+    final n = SeforimNative.instance;
+    final text = using((al) {
+      final (p, pl) = utf8Native(name, al);
+      final ids = al<Uint64>(rowLineIds.isEmpty ? 1 : rowLineIds.length);
+      ids.asTypedList(rowLineIds.length).setAll(0, rowLineIds);
+      final offsets = al<Uint64>(rows.length + 1);
+      final off = offsets.asTypedList(rows.length + 1);
+      var total = 0;
+      for (var i = 0; i < rows.length; i++) {
+        off[i] = total;
+        total += rows[i].length;
+      }
+      off[rows.length] = total;
+      final content = al<Uint8>(total == 0 ? 1 : total);
+      final c = content.asTypedList(total);
+      for (var i = 0; i < rows.length; i++) {
+        c.setAll(off[i], rows[i]);
+      }
+      final (j, jl) = utf8Native(jsonEncode([for (final t in notes) t.toJson()]), al);
+      return n.takeString(n.vectorsMapBookRows(
+          handle, p, pl, bookId, ids, rowLineIds.length, content, total, offsets, j, jl, chunkingIdentity));
+    });
+    return VectorBookVerify.fromJson(jsonDecode(text) as Map<String, dynamic>);
   }
 
   /// Maps several books at once (each as [mapVectorBook]); [replace] drops

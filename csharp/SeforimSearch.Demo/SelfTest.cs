@@ -241,6 +241,31 @@ namespace SeforimSearch.Demo
             Check(index.VectorInfo()!.BooksMapped == 0, "replace drops the mapping");
             index.CloseVectors();
             Check(index.VectorInfo() == null, "closed");
+
+            // the text check (rows path): seforim-vectors/tests/data/verified.oxv, book id:3, real chunk keys, 8 dims
+            string verified = Path.Combine(Path.GetDirectoryName(oxv!)!, "verified.oxv");
+            Check(File.Exists(verified), "verified fixture found");
+            index.OpenVectors(verified);
+            var rows = new[]
+            {
+                "<h1>Title of the book</h1>",
+                "first line that is long enough to stand",
+                "second\nthird line long enough to stand alone too",
+                "fourth line long enough to stand alone here",
+            }.Select(System.Text.Encoding.UTF8.GetBytes).ToArray();
+            ulong[] rowIds = { 100, 101, 102, 103 };
+            const ulong identity = 320260894818558297;
+            var vb = index.MapVectorBookRows("id:3", 3, rowIds, rows, null, identity);
+            Check(vb.Lines == 5 && vb.Records == 5 && vb.Verified == 5 && vb.Unverified == 0, "rows verified");
+            float[] Axis(int a) { var v = new float[8]; v[a] = 1f; return v; }
+            var r3 = index.SemanticSearch(Axis(3), new SemanticOptions { K = 1 });
+            Check(r3.Hits.Length == 1 && r3.Hits[0].LineId == 102, "newline row: second line maps to its row id");
+            rows[3] = System.Text.Encoding.UTF8.GetBytes("fourth line CHANGED enough to stand alone here");
+            var vt = index.MapVectorBookRows("id:3", 3, rowIds, rows, new List<VectorBookNote>(), identity);
+            Check(vt.Unverified >= 1, "tampered row unverified");
+            var r4 = index.SemanticSearch(Axis(4), new SemanticOptions { K = 1 });
+            Check(r4.Hits.Length == 0 && r4.Unmapped == 1, "tampered record dropped, counted");
+            index.CloseVectors();
         }
 
         private static void AsyncOpen(string db, string dir)

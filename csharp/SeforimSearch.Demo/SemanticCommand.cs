@@ -18,9 +18,10 @@ namespace SeforimSearch.Demo
     ///
     ///   semantic-search &lt;index dir&gt; --vectors &lt;set dir | file.oxv&gt; [--db path] [--model dir]
     ///                   (--line N | --lines a,b,c | --query text) [--k N] [--books a,b] [--threads N]
-    ///                   [--hybrid] [--repeat N] [--no-newline-check]
-    ///     Opens Otzaria's vector set read-only, maps each set book named id:&lt;bookId&gt; to its line
-    ///     ids (ordinal = row of SELECT id FROM line WHERE bookId=? ORDER BY lineIndex, id), embeds
+    ///                   [--hybrid] [--repeat N] [--no-verify] [--chunking-identity N]
+    ///     Opens Otzaria's vector set read-only, maps each set book named id:&lt;bookId&gt; from its raw
+    ///     rows (lineIndex, id order) and line_note rows with Otzaria's text check (--no-verify: the
+    ///     unchecked ordinal mapping; --chunking-identity N, default model.json's, else the set's), embeds
     ///     each query with Otzaria's Meivin model and searches; prints open / mapping / per-query
     ///     latencies, the hits, mean and p95 search latency and the peak working set.
     ///   semantic-tokcheck &lt;golden.json&gt; [--model dir]
@@ -29,7 +30,7 @@ namespace SeforimSearch.Demo
     /// </summary>
     internal static class SemanticCommand
     {
-        private static readonly string[] ValueOptions = { "--db", "--index", "--vectors", "--books", "--threads", "--repeat", "--query", "--line", "--lines", "--k", "--model" };
+        private static readonly string[] ValueOptions = { "--db", "--index", "--vectors", "--books", "--threads", "--repeat", "--query", "--line", "--lines", "--k", "--model", "--chunking-identity" };
 
         private static List<string> Positional(string[] args)
         {
@@ -82,38 +83,54 @@ namespace SeforimSearch.Demo
             return books;
         }
 
-        /// <summary>Maps every <c>id:&lt;bookId&gt;</c> book of the set to its seforim.db line ids
-        /// (ordinal = row of <c>SELECT id FROM line WHERE bookId=? ORDER BY lineIndex, id</c>), one
-        /// <see cref="SeforimSemantic.MapVectorBook"/> per book. Returns the books skipped.</summary>
-        internal static long MapBooks(SeforimIndex index, SqliteConnection conn, string vectors, VectorSetInfo info, bool checkNewlines)
+        /// <summary>Maps every <c>id:&lt;bookId&gt;</c> book of the set. Default: Otzaria's text check
+        /// (<see cref="SeforimSemantic.MapVectorBookRows"/>: the book's raw rows in <c>lineIndex, id</c>
+        /// order plus its <c>line_note</c> rows; a row holding a newline gives several lines). With
+        /// <paramref name="verify"/> false: the old unchecked ordinal mapping (<see cref="SeforimSemantic.MapVectorBook"/>).
+        /// Returns the books skipped.</summary>
+        internal static long MapBooks(SeforimIndex index, SqliteConnection conn, string vectors, VectorSetInfo info, bool verify, ulong chunkingIdentity)
         {
             var schema = SeforimDbSchema.Probe(conn);
             using var codec = SeforimDbLineContentCodec.Create(conn);
             var books = SetBooks(vectors, info);
-            long notIdName = 0, missing = 0, tooFew = 0, splitRows = 0;
+            bool hasNotes = verify && SeforimDbSchema.TableExists(conn, "line_note");
+            var noteCols = hasNotes ? NoteColumns(conn) : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            long notIdName = 0, missing = 0, tooFew = 0, mapped = 0;
+            var tot = new VectorBookVerify();
             foreach (var kv in books)
             {
                 if (!TryBookId(kv.Key, out long bookId)) { notIdName++; continue; }
-                var (lineIds, hasNewline) = ReadBookLines(conn, schema, codec, bookId, checkNewlines);
+                var (lineIds, rows) = ReadBookRows(conn, schema, codec, bookId, verify);
                 if (lineIds.Count == 0) { missing++; continue; }
-                if (kv.Value > lineIds.Count) { tooFew++; continue; }
-                if (hasNewline) { splitRows++; continue; }
-                index.MapVectorBook(kv.Key, bookId, lineIds);
+                if (!verify)
+                {
+                    if (kv.Value > lineIds.Count) { tooFew++; continue; }
+                    index.MapVectorBook(kv.Key, bookId, lineIds);
+                    mapped++;
+                    continue;
+                }
+                var notes = hasNotes ? ReadBookNotes(conn, noteCols, bookId) : new List<VectorBookNote>();
+                var v = index.MapVectorBookRows(kv.Key, (ulong)bookId, lineIds.Select(x => (ulong)x).ToArray(), rows!.ToArray(), notes, chunkingIdentity);
+                mapped++;
+                tot.Lines += v.Lines; tot.Records += v.Records; tot.Verified += v.Verified; tot.Moved += v.Moved; tot.Unverified += v.Unverified;
             }
-            Console.WriteLine($"books skipped: name not id:N {notIdName:N0}, missing from DB {missing:N0}, set lines > DB rows {tooFew:N0}, " +
-                              $"a row with a newline {splitRows:N0}" + (checkNewlines ? "" : " (not checked)"));
-            return notIdName + missing + tooFew + splitRows;
+            Console.WriteLine($"books mapped {mapped:N0}; skipped: name not id:N {notIdName:N0}, missing from DB {missing:N0}" +
+                              (verify ? "" : $", set lines > DB rows {tooFew:N0} (no text check)"));
+            if (verify)
+                Console.WriteLine($"text check: lines {tot.Lines:N0}, records {tot.Records:N0}, verified {tot.Verified:N0}, " +
+                                  $"moved {tot.Moved:N0}, unverified {tot.Unverified:N0}");
+            return notIdName + missing + tooFew;
         }
 
-        /// <summary>The book's line ids by 0-based ordinal (Otzaria's order), and whether a row holds
-        /// a newline (Otzaria splits such rows when it embeds, so the set's ordinals would shift).</summary>
-        private static (List<long> Ids, bool HasNewline) ReadBookLines(SqliteConnection conn, SeforimDbSchema schema,
-                                                                        SeforimDbLineContentCodec codec, long bookId, bool checkNewlines)
+        /// <summary>The book's line ids in <c>lineIndex, id</c> order and (when <paramref name="withRows"/>)
+        /// each row's decoded raw content as UTF-8 (NULL as empty).</summary>
+        private static (List<long> Ids, List<byte[]>? Rows) ReadBookRows(SqliteConnection conn, SeforimDbSchema schema,
+                                                                          SeforimDbLineContentCodec codec, long bookId, bool withRows)
         {
             var ids = new List<long>();
-            bool newline = false;
+            var rows = withRows ? new List<byte[]>() : null;
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = checkNewlines
+            cmd.CommandText = withRows
                 ? "SELECT l.id, " + SeforimDbLineContentSql.RawContentExpression(schema, "l") + " FROM line l" +
                   SeforimDbLineContentSql.ContentJoin(schema, "l") + " WHERE l.bookId = $b ORDER BY l.lineIndex, l.id"
                 : "SELECT id FROM line WHERE bookId = $b ORDER BY lineIndex, id";
@@ -123,13 +140,58 @@ namespace SeforimSearch.Demo
             {
                 long id = r.GetInt64(0);
                 ids.Add(id);
-                if (checkNewlines && !newline)
-                {
-                    string? text = codec.DecodeColumn(r, 1, id);
-                    if (text != null && text.IndexOf('\n') >= 0) newline = true;
-                }
+                if (rows != null) rows.Add(Encoding.UTF8.GetBytes(codec.DecodeColumn(r, 1, id) ?? ""));
             }
-            return (ids, newline);
+            return (ids, rows);
+        }
+
+        private static HashSet<string> NoteColumns(SqliteConnection conn)
+        {
+            var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA table_info(line_note)";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) cols.Add(r.GetString(1));
+            return cols;
+        }
+
+        /// <summary>The book's <c>line_note</c> rows with a body, in <c>lineIndex, noteIndex</c> order.</summary>
+        private static List<VectorBookNote> ReadBookNotes(SqliteConnection conn, HashSet<string> cols, long bookId)
+        {
+            var notes = new List<VectorBookNote>();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT l.lineIndex, " + (cols.Contains("charPos") ? "n.charPos" : "NULL") + ", " +
+                              (cols.Contains("hasMarker") ? "n.hasMarker" : "0") + ", n.body FROM line_note n JOIN line l ON l.id = n.lineId" +
+                              " WHERE l.bookId = $b AND n.body IS NOT NULL ORDER BY l.lineIndex, l.id, n.noteIndex";
+            cmd.Parameters.AddWithValue("$b", bookId);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                notes.Add(new VectorBookNote
+                {
+                    LineIndex = r.GetInt64(0),
+                    CharPos = r.IsDBNull(1) ? -1 : r.GetInt64(1),
+                    HasMarker = !r.IsDBNull(2) && r.GetInt64(2) != 0,
+                    Body = r.GetValue(3) is byte[] b ? Encoding.UTF8.GetString(b) : Convert.ToString(r.GetValue(3), System.Globalization.CultureInfo.InvariantCulture) ?? "",
+                });
+            return notes;
+        }
+
+        /// <summary><c>chunking_identity</c> of <c>&lt;model dir&gt;/model.json</c>, 0 (= the set's) when absent.</summary>
+        private static ulong ModelChunkingIdentity(string modelDir)
+        {
+            string f = Path.Combine(modelDir, "model.json");
+            if (!File.Exists(f)) return 0;
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(f, Encoding.UTF8));
+                if (doc.RootElement.TryGetProperty("chunking_identity", out var e))
+                    return e.ValueKind == JsonValueKind.String ? ulong.Parse(e.GetString()!) : e.GetUInt64();
+            }
+            catch (Exception ex) when (ex is JsonException || ex is FormatException || ex is InvalidOperationException || ex is OverflowException)
+            {
+                Console.Error.WriteLine($"model.json: chunking_identity not read ({ex.Message})");
+            }
+            return 0;
         }
 
         // ---------------------------------------------------------------- search
@@ -141,7 +203,7 @@ namespace SeforimSearch.Demo
             if (pos.Count < 1 || vectors == null)
             {
                 Console.Error.WriteLine("usage: semantic-search <index dir> --vectors <set dir|file.oxv> --db <seforim.db> --model <dir> " +
-                                        "(--line N | --lines a,b,c | --query text) [--k N] [--books a,b] [--threads N] [--hybrid] [--repeat N] [--no-newline-check]");
+                                        "(--line N | --lines a,b,c | --query text) [--k N] [--books a,b] [--threads N] [--hybrid] [--repeat N] [--no-verify] [--chunking-identity N]");
                 return 2;
             }
             int k = int.TryParse(Program.OptionOf(args, "--k"), out int kk) && kk > 0 ? kk : 10;
@@ -174,9 +236,12 @@ namespace SeforimSearch.Demo
             var info = index.OpenVectors(vectors);
             Console.WriteLine($"open: {Time(sw.Elapsed)}");
             sw.Restart();
-            long skipped = MapBooks(index, conn, vectors, info, !args.Contains("--no-newline-check"));
+            string modelDir = Program.OptionOf(args, "--model") ?? DefaultModelDir();
+            string? ciArg = Program.OptionOf(args, "--chunking-identity");
+            ulong chunkingIdentity = ciArg != null ? ulong.Parse(ciArg) : ModelChunkingIdentity(modelDir);
+            long skipped = MapBooks(index, conn, vectors, info, !args.Contains("--no-verify"), chunkingIdentity);
             info = index.VectorInfo()!;
-            Console.WriteLine($"mapping: {Time(sw.Elapsed)}, books mapped {info.BooksMapped:N0}, unmapped {info.BooksUnmapped:N0} (skipped {skipped:N0})");
+            Console.WriteLine($"mapping + verify: {Time(sw.Elapsed)}, books mapped {info.BooksMapped:N0}, unmapped {info.BooksUnmapped:N0} (skipped {skipped:N0})");
             Console.WriteLine($"set: generation {info.Generation}, dims {info.Dims}, codec {info.Codec}, library {info.LibraryReleaseTag}, " +
                               $"slots_live {info.SlotsLive:N0}, slots_dead {info.SlotsDead:N0}, books {info.Books:N0}, " +
                               $"{info.BytesOnDisk / 1048576.0:N0} MB on disk, {info.Segments.Count} segments" + (info.RecoveredFromPrevious ? " (recovered)" : ""));
@@ -185,7 +250,7 @@ namespace SeforimSearch.Demo
                                   $"dead {s.SlotsDead:N0}, foreign {s.Foreign:N0} (unresolved {s.ForeignUnresolved:N0}), {s.Size / 1048576.0:N1} MB");
 
             sw.Restart();
-            using var embedder = new MeivinEmbedder(Program.OptionOf(args, "--model") ?? DefaultModelDir());
+            using var embedder = new MeivinEmbedder(modelDir);
             Console.WriteLine($"model load: {Time(sw.Elapsed)}");
             var latencies = new List<double>();
             int withLine = 0, selfFirst = 0;

@@ -25,7 +25,8 @@ use seforim_vectors::fusion::{self, Fusion, QueryTypeAlphas};
 use seforim_vectors::set::{LineMap, SegmentSet};
 
 pub use seforim_vectors::oxv::{OxvBookMap, OxvInfo};
-pub use seforim_vectors::set::{LineSearch as SemanticOptions, SetInfo as VectorInfo, DEFAULT_WINDOW_PENALTY};
+pub use seforim_vectors::chunker::BookNote;
+pub use seforim_vectors::set::{BookVerify, LineSearch as SemanticOptions, SetInfo as VectorInfo, DEFAULT_WINDOW_PENALTY};
 pub use seforim_vectors::CHUNK_BORROWED;
 
 use crate::search::{CancelToken, SearchResult};
@@ -176,6 +177,31 @@ impl LineIndex {
     pub fn set_vector_mapping(&self, books: Vec<OxvBookMap>, replace: bool) {
         let mut state = self.vectors.state.lock().unwrap();
         Arc::make_mut(&mut state.map).set(books, replace);
+    }
+
+    /// Maps one book WITH the text check (Otzaria's resolver): the book's raw
+    /// rows (`lineIndex, id` order; `row_line_ids[i]` the line id of row `i`) and
+    /// its `line_note` rows rebuild its lines as Otzaria indexes them (a row
+    /// holding a newline is several lines of one line id), every record of the
+    /// book in the open set is checked against its recomputed chunk key (moved
+    /// lines found within 16 lines), and records that fail are dropped and
+    /// counted. `identity`: the query model's chunking identity (None: the
+    /// set's). Needs an open set.
+    pub fn map_vector_book_rows(
+        &self,
+        name: &str,
+        book_id: u64,
+        row_line_ids: &[u64],
+        rows: &[&[u8]],
+        notes: &[BookNote],
+        identity: Option<u64>,
+    ) -> Result<BookVerify> {
+        let Some((set, _)) = self.vector_set()? else {
+            return Err(Error::Unsupported("open the vector set first".into()));
+        };
+        let (map, verify) = set.map_book_rows(name, book_id, row_line_ids, rows, notes, identity).map_err(map_err)?;
+        self.set_vector_mapping(vec![map], false);
+        Ok(verify)
     }
 
     /// The open set and the mapping (reopened after `release_memory`).

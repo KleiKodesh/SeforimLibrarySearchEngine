@@ -216,6 +216,8 @@ pub(crate) struct Occ {
     pub book: u32,
     pub hint: u32,
     pub window: u8,
+    /// An alias row's own key (the short line's); the row's key otherwise.
+    pub anchor: Key,
 }
 
 /// What a `.oxv` holds (JSON at the C ABI).
@@ -551,6 +553,12 @@ impl OxvFile {
         key
     }
 
+    fn key_at_row(&self, row: &[u8], at: usize) -> Key {
+        let mut key = [0u8; 16];
+        key[..self.key_len].copy_from_slice(&row[at..at + self.key_len]);
+        key
+    }
+
     pub(crate) fn key(&self, slot: u32) -> Key {
         self.key_at(self.keys.start + slot as usize * self.key_len)
     }
@@ -635,7 +643,7 @@ impl OxvFile {
                 .map(|i| {
                     let r = row(i);
                     let window = if r[2 * k + 9] == ROLE_ALIAS { ALIAS_WINDOW } else { r[2 * k + 8] };
-                    Occ { book: u32_at(r, k), hint: u32_at(r, k + 4) & HINT_MASK, window }
+                    Occ { book: u32_at(r, k), hint: u32_at(r, k + 4) & HINT_MASK, window, anchor: self.key_at_row(r, k + 8) }
                 })
                 .collect(),
         )

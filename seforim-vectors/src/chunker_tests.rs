@@ -116,3 +116,93 @@ fn data_uris_are_stripped() {
     assert_eq!(strip_data_uris_for_index(&format!("a data:{payload} b")), "a  b");
     assert_eq!(strip_data_uris_for_index("a data:AAAA b"), "a data:AAAA b");
 }
+
+/// Real data (read-only): recompute every record's key of ~50 books of seforim.db
+/// against the .oxv. Rows are dumped by the host-side script (no database code here):
+/// `SE_CHUNKER_BOOKS` = JSON from `dump_books.py`, `SE_CHUNKER_OXV` = the .oxv.
+#[test]
+#[ignore]
+fn real_data_match_rate() {
+    use crate::oxv::OxvFile;
+    let books = std::env::var("SE_CHUNKER_BOOKS").expect("SE_CHUNKER_BOOKS");
+    let oxv = OxvFile::open(std::path::Path::new(&std::env::var("SE_CHUNKER_OXV").expect("SE_CHUNKER_OXV"))).unwrap();
+    let index: HashMap<String, usize> = oxv.books().iter().enumerate().map(|(i, b)| (b.name.clone(), i)).collect();
+    let dump: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(books).unwrap()).unwrap();
+    let chunker = Chunker::production();
+    let (mut all, mut ok) = (0u64, 0u64);
+    for book in dump.as_array().unwrap() {
+        let id = book["book_id"].as_i64().unwrap();
+        let rows: Vec<Vec<u8>> = book["rows"].as_array().unwrap().iter().map(|r| b64(r["b64"].as_str().unwrap())).collect();
+        let notes: Vec<BookNote> = book["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| BookNote {
+                line_index: n[0].as_i64().unwrap(),
+                char_pos: n[2].as_i64().unwrap(),
+                has_marker: n[3].as_i64().unwrap() == 1,
+                body: String::from_utf8_lossy(&b64(n[4].as_str().unwrap())).into_owned(),
+            })
+            .collect();
+        let Some(&b) = index.get(&format!("id:{id}")) else {
+            println!("book {id}: not in the .oxv");
+            continue;
+        };
+        let row_refs: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
+        let lines = book_lines(&row_refs, &notes);
+        let line_refs: Vec<LineRef> = lines.iter().map(BookLine::as_ref).collect();
+        // Primary records and extra records (a key repeated in the book), format 2:
+        // no aliases, no occurrence snapshots.
+        let book_info = &oxv.books()[b];
+        let mut records: Vec<(u32, u32)> = book_info.slots.clone().map(|slot| (slot, oxv.hint(slot))).collect();
+        records.extend(book_info.extras.clone().map(|i| oxv.extra(i)).filter(|&(slot, _)| slot < oxv.slot_count()));
+        let (mut n, mut m, mut moved) = (0u64, 0u64, 0u64);
+        for &(slot, hint) in &records {
+            let window = oxv.slot_window(slot);
+            if window == ALIAS_WINDOW {
+                continue;
+            }
+            let key = oxv.key(slot);
+            n += 1;
+            if holds(&chunker, &line_refs, hint as usize, window, ChunkKey(key)) {
+                m += 1;
+            } else if locate(&chunker, &line_refs, hint as usize, window, &key).is_some() {
+                moved += 1;
+            }
+        }
+        all += n;
+        ok += m;
+        println!(
+            "book {id}: rows {} lines {} notes {} records {n} match {m} ({:.2}%) moved-within-reach {moved}",
+            rows.len(),
+            lines.len(),
+            notes.len(),
+            if n == 0 { 100.0 } else { 100.0 * m as f64 / n as f64 }
+        );
+    }
+    println!("TOTAL records {all} match {ok} ({:.3}%)", 100.0 * ok as f64 / all.max(1) as f64);
+}
+
+fn b64(s: &str) -> Vec<u8> {
+    let val = |c: u8| match c {
+        b'A'..=b'Z' => c - b'A',
+        b'a'..=b'z' => c - b'a' + 26,
+        b'0'..=b'9' => c - b'0' + 52,
+        b'+' => 62,
+        _ => 63,
+    };
+    let bytes: Vec<u8> = s.bytes().filter(|&c| c != b'=').collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let v: Vec<u32> = chunk.iter().map(|&c| val(c) as u32).collect();
+        let n = v.iter().fold(0u32, |a, &x| (a << 6) | x) << (6 * (4 - v.len()));
+        out.push((n >> 16) as u8);
+        if v.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if v.len() > 3 {
+            out.push(n as u8);
+        }
+    }
+    out
+}

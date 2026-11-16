@@ -18,6 +18,7 @@ const _usage = '''
 otzaria_demo build  [--db path] [--index dir] [--max-lines N] [--max-books N] [--keep-marks] [--no-positions]
 otzaria_demo semantic-search <index dir> --vectors <set dir | file.oxv> (--line N | --lines a,b,c | --query text)
                     [--k 10] [--books a,b] [--threads N] [--hybrid] [--repeat N] [--ort onnxruntime.dll] [--model dir]
+                    [--no-verify] [--chunking-identity N] (default: Otzaria's text check of every book; identity from model.json, else the set's)
                     [--query-file utf8.txt] (instead of --query: shells can mangle Hebrew arguments)
                     Otzaria's vector set opened read-only, its id:N books mapped onto seforim.db line ids;
                     query embedded with Otzaria's Meivin model (default model dir: Otzaria's install)
@@ -65,7 +66,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
     'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'pages', 'context', 'native', 'zstd', 'spacing', 'match',
     'match-count', 'exclude', 'exclude-scope', 'exclude-options', 'dictionary', 'acronyms', 'group', 'group-scan',
     'order', 'scope', 'lexical', 'max-books', 'books', 'k', 'ort', 'model', 'query-file', 'vectors', 'line', //
-    'lines', 'query', 'threads', 'repeat',
+    'lines', 'query', 'threads', 'repeat', 'chunking-identity',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -135,7 +136,9 @@ Future<void> main(List<String> args) async {
             books: ints(o['books']),
             threads: _int(o, 'threads') ?? 0,
             hybrid: o.containsKey('hybrid'),
-            repeat: _int(o, 'repeat') ?? 1);
+            repeat: _int(o, 'repeat') ?? 1,
+            verify: !o.containsKey('no-verify'),
+            chunkingIdentity: _int(o, 'chunking-identity'));
       default:
         stdout.write(_usage);
         exit(64);

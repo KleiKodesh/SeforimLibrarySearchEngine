@@ -263,6 +263,11 @@ namespace SeforimSearch.Engine.Native
                                                      ulong* lineIds, UIntPtr count);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_vectors_map_book_rows(IndexHandle index, byte* name, UIntPtr nameLen, ulong bookId,
+                                                             ulong* rowLineIds, UIntPtr rowCount, byte* content, UIntPtr contentLen,
+                                                             ulong* offsets, byte* notesJson, UIntPtr notesLen, ulong chunkingIdentity);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern int se_vectors_set_mapping(IndexHandle index, byte* maps, UIntPtr mapsLen, int replace);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

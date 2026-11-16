@@ -22,6 +22,24 @@ use crate::oxv::{chunk_of_window, OxvBookMap, OxvFile, ALIAS_WINDOW};
 use crate::scan::{self, BookSet, Link, ReverseLink, ScanPenalties, ScanRequest, ScanSegment, ScanSet, LINK_UNRESOLVED};
 use crate::{Error, Result};
 
+/// A mapped ordinal whose records failed the text check: no line.
+pub const UNVERIFIED: u64 = u64::MAX;
+
+/// What a book's text check did (JSON at the C ABI).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookVerify {
+    /// Lines of the book as Otzaria counts them (rows holding a newline split).
+    pub lines: u64,
+    /// Records of the book in the set.
+    pub records: u64,
+    /// Records whose line holds their key at their own ordinal.
+    pub verified: u64,
+    /// Records found at another line within 16 lines (remapped there).
+    pub moved: u64,
+    /// Records whose key no line near them holds (dropped, counted).
+    pub unverified: u64,
+}
+
 /// Otzaria's default window and alias penalty (config/profiles.rs).
 pub const DEFAULT_WINDOW_PENALTY: f32 = 0.04;
 
@@ -54,6 +72,8 @@ struct SetDocument {
     library_version: u32,
     library_release_tag: String,
     segments: Vec<SetSegment>,
+    #[serde(default)]
+    identity: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,7 +168,7 @@ impl LineMap {
 
     fn line(&self, book: &str, ordinal: u32) -> Option<(u64, u64)> {
         let (book_id, lines) = self.books.get(book)?;
-        lines.get(ordinal as usize).map(|&l| (l, *book_id))
+        lines.get(ordinal as usize).filter(|&&l| l != UNVERIFIED).map(|&l| (l, *book_id))
     }
 
     /// The Otzaria names of the host's books `ids`.
@@ -221,6 +241,8 @@ pub struct SegmentSet {
     links: Vec<Vec<Link>>,
     reverse: Vec<ReverseLink>,
     files: Vec<String>,
+    /// The model's `chunking_identity` from set.json (None: a single `.oxv`).
+    chunking: Option<u64>,
 }
 
 impl SegmentSet {
@@ -246,6 +268,7 @@ impl SegmentSet {
                 reverse: Vec::new(),
                 files: vec![path.to_string_lossy().into_owned()],
                 segments: vec![segment],
+                chunking: None,
             });
         }
         let current = read_pointer(path, CURRENT);
@@ -343,6 +366,7 @@ impl SegmentSet {
             links,
             reverse,
             files,
+            chunking: doc.identity.pointer("/model/chunking_identity").and_then(|v| v.as_u64()),
         })
     }
 
@@ -358,6 +382,147 @@ impl SegmentSet {
     pub fn is_live(&self, seg: u16, slot: u32) -> bool {
         self.segments.get(seg as usize).is_some_and(|s| slot < s.slot_count())
             && self.deleted[seg as usize].get(slot as usize / 64).is_none_or(|w| w & (1 << (slot % 64)) == 0)
+    }
+
+    /// The set's chunking identity (model.json `chunking_identity`, from set.json).
+    pub fn chunking_identity(&self) -> Option<u64> {
+        self.chunking
+    }
+
+    /// Every record of book `name` in the set as (ordinal, window, key to check):
+    /// live primary, extra and resolved foreign records, a key with an occurrence
+    /// snapshot taking the newest snapshot's rows of this book instead (an alias row
+    /// checks its anchor at window 0). Otzaria's `SegmentSet::book_occurrences`, every
+    /// record kept.
+    fn book_records(&self, name: &str) -> Vec<(u32, u8, crate::oxv::Key)> {
+        let mut plain: Vec<(crate::oxv::Key, u32, u8)> = Vec::new();
+        for (seg, segment) in self.segments.iter().enumerate() {
+            let Ok(b) = segment.books().binary_search_by(|x| x.name.as_str().cmp(name)) else { continue };
+            let book = &segment.books()[b];
+            for slot in book.slots.clone() {
+                if self.is_live(seg as u16, slot) {
+                    plain.push((segment.key(slot), segment.hint(slot), segment.slot_window(slot)));
+                }
+            }
+            for i in book.extras.clone() {
+                let (slot, hint) = segment.extra(i);
+                if self.is_live(seg as u16, slot) {
+                    plain.push((segment.key(slot), hint, segment.slot_window(slot)));
+                }
+            }
+            for i in book.foreign.clone() {
+                let (key, _, hint) = segment.foreign_record(i);
+                if let Some((ts, tslot)) = self.links[seg].get(i as usize).and_then(Link::target) {
+                    if self.is_live(ts, tslot) {
+                        plain.push((key, hint, self.segments[ts as usize].slot_window(tslot)));
+                    }
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(plain.len());
+        let mut snapped: HashSet<crate::oxv::Key> = HashSet::new();
+        for (key, hint, window) in plain {
+            match self.snapshot_of(&key) {
+                Some((segment, rows)) => {
+                    if !snapped.insert(key) {
+                        continue;
+                    }
+                    for r in rows {
+                        if segment.books().get(r.book as usize).is_some_and(|x| x.name == name) {
+                            if r.window == ALIAS_WINDOW {
+                                out.push((r.hint, 0, r.anchor));
+                            } else {
+                                out.push((r.hint, r.window, key));
+                            }
+                        }
+                    }
+                }
+                None => out.push((hint, window, key)),
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn snapshot_of(&self, key: &crate::oxv::Key) -> Option<(&OxvFile, Vec<crate::oxv::Occ>)> {
+        self.segments.iter().rev().find_map(|s| s.key_occurrences(key).map(|rows| (s, rows)))
+    }
+
+    /// The text check and the line split of one book (Otzaria's resolver,
+    /// semantic_resolver.rs): the book's lines are rebuilt from its raw rows
+    /// (`lineIndex, id` order, `row_line_ids[i]` the line id of row `i`) and its
+    /// `line_note` rows exactly as Otzaria indexes them (`chunker::book_lines`: a row
+    /// holding a newline gives several lines, each mapped to its row's line id), and
+    /// every record of the book is checked against the recomputed chunk key at the
+    /// stored width; a record whose ordinal no longer holds its key is looked for
+    /// within 16 lines (`chunker::locate`) and remapped there. An ordinal maps to a
+    /// line only when all its records agree; otherwise its records count as
+    /// unverified. `identity`: the chunking identity (None: the set's).
+    pub fn map_book_rows(
+        &self,
+        name: &str,
+        book_id: u64,
+        row_line_ids: &[u64],
+        rows: &[&[u8]],
+        notes: &[crate::chunker::BookNote],
+        identity: Option<u64>,
+    ) -> Result<(OxvBookMap, BookVerify)> {
+        use crate::chunker::{book_lines, holds, locate, BookLine, ChunkKey, Chunker, ChunkerConfig, LineRef};
+        if row_line_ids.len() != rows.len() {
+            return Err(Error::Invalid("one line id per row".into()));
+        }
+        let identity = identity
+            .or(self.chunking)
+            .ok_or_else(|| Error::Invalid("no chunking identity: pass the query model's chunking_identity".into()))?;
+        let config = ChunkerConfig::by_identity(identity)
+            .ok_or_else(|| Error::Invalid(format!("chunking identity {identity} is not a recipe this build implements")))?;
+        let chunker = Chunker::new(config).map_err(|e| Error::Invalid(e.0))?;
+        let lines = book_lines(rows, notes);
+        let refs: Vec<LineRef<'_>> = lines.iter().map(BookLine::as_ref).collect();
+        let records = self.book_records(name);
+        let mut v = BookVerify { lines: lines.len() as u64, records: records.len() as u64, ..Default::default() };
+        let max_hint = records.iter().map(|r| r.0 as usize + 1).max().unwrap_or(0);
+        let line_of = |p: usize| row_line_ids[lines[p].row];
+        let mut line_ids: Vec<u64> =
+            (0..max_hint.max(lines.len())).map(|p| if p < lines.len() { line_of(p) } else { UNVERIFIED }).collect();
+        let mut i = 0;
+        while i < records.len() {
+            let hint = records[i].0;
+            let mut j = i;
+            let mut target: Option<Option<usize>> = None;
+            let (mut ok, mut moved) = (0u64, 0u64);
+            while j < records.len() && records[j].0 == hint {
+                let (_, window, key) = records[j];
+                let found = if holds(&chunker, &refs, hint as usize, window, ChunkKey(key)) {
+                    ok += 1;
+                    Some(hint as usize)
+                } else {
+                    let p = locate(&chunker, &refs, hint as usize, window, &key);
+                    moved += p.is_some() as u64;
+                    p
+                };
+                target = match target {
+                    None => Some(found),
+                    Some(t) if t == found => Some(t),
+                    Some(_) => Some(None),
+                };
+                j += 1;
+            }
+            match target.flatten() {
+                Some(p) => {
+                    line_ids[hint as usize] = line_of(p);
+                    v.verified += ok;
+                    v.moved += moved;
+                }
+                None => {
+                    line_ids[hint as usize] = UNVERIFIED;
+                    v.unverified += (j - i) as u64;
+                }
+            }
+            i = j;
+        }
+        Ok((OxvBookMap { name: name.to_string(), book_id, line_ids }, v))
     }
 
     /// What the set holds; `map` (if given) counts the mapped books.

@@ -171,6 +171,27 @@ namespace SeforimSearch.Engine
         public IReadOnlyList<long> LineIds { get; set; } = Array.Empty<long>();
     }
 
+    /// <summary>One <c>line_note</c> row of a book (non-NULL body) for <see cref="SeforimSemantic.MapVectorBookRows"/>.</summary>
+    public sealed class VectorBookNote
+    {
+        /// <summary>The <c>lineIndex</c> of the note's line.</summary>
+        public long LineIndex { get; set; }
+        /// <summary><c>charPos</c>, -1 when absent.</summary>
+        public long CharPos { get; set; } = -1;
+        public bool HasMarker { get; set; }
+        public string Body { get; set; } = "";
+    }
+
+    /// <summary>The text check of one book (<see cref="SeforimSemantic.MapVectorBookRows"/>).</summary>
+    public sealed class VectorBookVerify
+    {
+        public long Lines { get; set; }
+        public long Records { get; set; }
+        public long Verified { get; set; }
+        public long Moved { get; set; }
+        public long Unverified { get; set; }
+    }
+
     /// <summary>
     /// Semantic search (issue #18), like Otzaria: the index opens Otzaria's own vector set
     /// read-only (a set directory such as <c>%APPDATA%\otzaria\vectors</c>, or one base <c>.oxv</c>)
@@ -215,6 +236,52 @@ namespace SeforimSearch.Engine
             fixed (byte* pn = n) fixed (ulong* pl = ids)
                 if (NativeMethods.se_vectors_map_book(index.Handle, pn, (UIntPtr)n.Length, (ulong)bookId, pl, (UIntPtr)ids.Length) != 0)
                     throw Interop.Fail(Interop.LastError());
+        }
+
+        /// <summary>Maps one book WITH Otzaria's text check: <paramref name="rows"/> = the book's raw rows
+        /// (UTF-8 content, seforim.db <c>lineIndex, id</c> order, NULL as empty), <paramref name="rowLineIds"/>
+        /// their line ids, <paramref name="notes"/> its <c>line_note</c> rows (lineIndex, noteIndex order).
+        /// Records whose recomputed chunk key fails are dropped and counted. <paramref name="chunkingIdentity"/>
+        /// 0 = the set's (a single .oxv needs the model's).</summary>
+        public static VectorBookVerify MapVectorBookRows(this SeforimIndex index, string name, ulong bookId, ulong[] rowLineIds,
+                                                         byte[][] rows, IReadOnlyList<VectorBookNote>? notes, ulong chunkingIdentity = 0)
+        {
+            if (index == null) throw new ArgumentNullException(nameof(index));
+            if (rowLineIds == null) throw new ArgumentNullException(nameof(rowLineIds));
+            if (rows == null) throw new ArgumentNullException(nameof(rows));
+            if (rows.Length != rowLineIds.Length) throw new ArgumentException("rows and rowLineIds differ in length", nameof(rows));
+            byte[] n = Interop.ToUtf8(name ?? throw new ArgumentNullException(nameof(name)));
+            var offsets = new ulong[rows.Length + 1];
+            long total = 0;
+            for (int i = 0; i < rows.Length; i++) { offsets[i] = (ulong)total; total += rows[i]?.Length ?? 0; }
+            offsets[rows.Length] = (ulong)total;
+            var content = new byte[Math.Max(1, total)];
+            for (int i = 0; i < rows.Length; i++)
+                if (rows[i] != null) Buffer.BlockCopy(rows[i], 0, content, (int)offsets[i], rows[i].Length);
+            var sb = new StringBuilder("[");
+            if (notes != null)
+                for (int i = 0; i < notes.Count; i++)
+                {
+                    var t = notes[i];
+                    sb.Append(i == 0 ? "{" : ",{")
+                      .Append("\"line_index\":").Append(t.LineIndex.ToString(CultureInfo.InvariantCulture))
+                      .Append(",\"char_pos\":").Append(t.CharPos.ToString(CultureInfo.InvariantCulture))
+                      .Append(",\"has_marker\":").Append(t.HasMarker ? "true" : "false")
+                      .Append(",\"body\":").Append(JsonString(t.Body ?? "")).Append('}');
+                }
+            byte[] nj = Interop.ToUtf8(sb.Append(']').ToString());
+            ulong[] ids = rowLineIds.Length == 0 ? new ulong[1] : rowLineIds;
+            fixed (byte* pn = n) fixed (ulong* pl = ids) fixed (byte* pc = content) fixed (ulong* po = offsets) fixed (byte* pj = nj)
+            {
+                var obj = (Dictionary<string, object?>)Json.Parse(Interop.TakeString(NativeMethods.se_vectors_map_book_rows(
+                    index.Handle, pn, (UIntPtr)n.Length, bookId, pl, (UIntPtr)rowLineIds.Length, pc, (UIntPtr)total, po,
+                    pj, (UIntPtr)nj.Length, chunkingIdentity)))!;
+                return new VectorBookVerify
+                {
+                    Lines = L(obj["lines"]), Records = L(obj["records"]), Verified = L(obj["verified"]),
+                    Moved = L(obj["moved"]), Unverified = L(obj["unverified"]),
+                };
+            }
         }
 
         /// <summary>Maps several books at once (each as <see cref="MapVectorBook"/>); <paramref name="replace"/>

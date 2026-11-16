@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -94,6 +95,39 @@ void main() {
     index.closeVectors();
     expect(index.vectorInfo(), isNull);
     index.close();
+  });
+
+  test('rows path: text check against real chunk keys (verified.oxv)', () async {
+    // seforim-vectors the_hosts_verified_fixture_is_current: book id:3, 8 dims, line p = axis p
+    final verified = '${File(oxv).parent.path}/verified.oxv';
+    final rows = [
+      '<h1>Title of the book</h1>',
+      'first line that is long enough to stand',
+      'second\nthird line long enough to stand alone too',
+      'fourth line long enough to stand alone here',
+    ].map((r) => Uint8List.fromList(utf8.encode(r))).toList();
+    const ids = [100, 101, 102, 103];
+    const identity = 320260894818558297;
+    Float32List axis(int a) => Float32List(8)..[a] = 1;
+    final index = SeforimIndex.open(tmp.path);
+    index.openVectors(verified);
+    final vb = index.mapVectorBookRows('id:3', 3, ids, rows, const [], identity);
+    expect([vb.lines, vb.records, vb.verified, vb.unverified], [5, 5, 5, 0]);
+    expect(index.semanticSearch(axis(3), const SemanticOptions(k: 1)).hits.single.lineId, 102);
+    rows[3] = Uint8List.fromList(utf8.encode('fourth line CHANGED enough to stand alone here'));
+    final vt = index.mapVectorBookRows('id:3', 3, ids, rows, const [], identity);
+    expect(vt.unverified, greaterThanOrEqualTo(1));
+    final r4 = index.semanticSearch(axis(4), const SemanticOptions(k: 1));
+    expect(r4.hits, isEmpty);
+    expect(r4.unmapped, 1);
+    index.closeVectors();
+    index.close();
+
+    final worker = await SearchWorker.spawn(tmp.path, nativePath: native);
+    await worker.openVectors(verified);
+    final wv = await worker.mapVectorBookRows('id:3', 3, ids, rows, const [], identity);
+    expect(wv.unverified, greaterThanOrEqualTo(1));
+    await worker.close();
   });
 
   test('async on a SearchWorker', () async {

@@ -3,7 +3,9 @@
 // (`id:<bookId>`) onto seforim.db line ids and embeds the query with
 // Otzaria's Meivin model. The model and SQLite stay here, never in the engine.
 
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:seforim_search/seforim_search.dart';
 
@@ -14,28 +16,23 @@ import 'seforim_db.dart';
 String _ms(num ms) => ms < 1000 ? '${ms.toStringAsFixed(ms < 100 ? 1 : 0)} ms' : '${(ms / 60000).toStringAsFixed(2)} min';
 
 /// Why a book of the vector set was not mapped.
-enum OxvSkip { badName, notInDb, moreLinesThanDb, rowWithNewline }
+enum OxvSkip { badName, notInDb, moreLinesThanDb }
 
-/// Maps one book of an Otzaria vector set onto the DB's line ids: the line
-/// id of each 0-based ordinal (`lineIndex, id` order). Null + [skip] when the
-/// book cannot be mapped exactly.
+int? _bookIdOf(String name) {
+  final m = RegExp(r'^id:(\d+)$').firstMatch(name);
+  return m == null ? null : int.parse(m.group(1)!);
+}
+
+/// Maps one book of an Otzaria vector set onto the DB's line ids WITHOUT the
+/// text check (`--no-verify`): the line id of each 0-based ordinal
+/// (`lineIndex, id` order). Null + [skip] when the book cannot be mapped.
 OxvBookMap? mapOxvBook(SeforimDb db, OxvBookInfo book, void Function(OxvSkip) skip) {
-  final m = RegExp(r'^id:(\d+)$').firstMatch(book.name);
-  if (m == null) {
+  final bookId = _bookIdOf(book.name);
+  if (bookId == null) {
     skip(OxvSkip.badName);
     return null;
   }
-  final bookId = int.parse(m.group(1)!);
-  final ids = <int>[];
-  for (final line in db.bookLines(bookId)) {
-    // Otzaria splits a row holding a newline into several lines: the
-    // ordinals of the set then no longer follow the DB rows
-    if (line.text.contains('\n')) {
-      skip(OxvSkip.rowWithNewline);
-      return null;
-    }
-    ids.add(line.id);
-  }
+  final ids = [for (final line in db.bookLines(bookId)) line.id];
   if (ids.isEmpty) {
     skip(OxvSkip.notInDb);
     return null;
@@ -45,6 +42,37 @@ OxvBookMap? mapOxvBook(SeforimDb db, OxvBookInfo book, void Function(OxvSkip) sk
     return null;
   }
   return OxvBookMap(book.name, bookId, ids);
+}
+
+/// The book's `line_note` rows with a body, in `lineIndex, noteIndex` order
+/// (empty when the DB has no `line_note`).
+List<VectorBookNote> bookNotes(SeforimDb db, int bookId) {
+  if (!db.hasNotes) return const [];
+  final cols = {for (final r in db.db.select('PRAGMA table_info(line_note)')) r['name'] as String};
+  final rs = db.db.select(
+      'SELECT l.lineIndex, ${cols.contains('charPos') ? 'n.charPos' : 'NULL'}, '
+      '${cols.contains('hasMarker') ? 'n.hasMarker' : '0'}, n.body FROM line_note n JOIN line l ON l.id = n.lineId'
+      ' WHERE l.bookId = ? AND n.body IS NOT NULL ORDER BY l.lineIndex, l.id, n.noteIndex',
+      [bookId]);
+  return [
+    for (final r in rs)
+      VectorBookNote(r.columnAt(0) as int,
+          switch (r.columnAt(3)) { final Uint8List b => utf8.decode(b, allowMalformed: true), final v => '$v' },
+          charPos: (r.columnAt(1) as int?) ?? -1, hasMarker: ((r.columnAt(2) as int?) ?? 0) != 0),
+  ];
+}
+
+/// The `chunking_identity` of `<model dir>/model.json`; 0 (= the set's) when absent.
+int modelChunkingIdentity(String modelDir) {
+  final f = File('$modelDir/model.json');
+  if (!f.existsSync()) return 0;
+  try {
+    final v = (jsonDecode(f.readAsStringSync()) as Map<String, dynamic>)['chunking_identity'];
+    return v is int ? v : v is String ? int.parse(v) : 0;
+  } on FormatException catch (e) {
+    stderr.writeln('model.json: chunking_identity not read ($e)');
+    return 0;
+  }
 }
 
 /// The books of an opened set (name -> line count), read from its segment
@@ -81,20 +109,60 @@ Map<String, OxvBookInfo> setBooks(String vectors, VectorSetInfo info) {
   return books;
 }
 
-/// Maps every `id:<bookId>` book of the opened set onto the DB (one
-/// [SemanticIndex.mapVectorBook] per book); returns the skip counts.
-Map<OxvSkip, int> mapVectorBooks(SeforimIndex index, SeforimDb db, String vectors, VectorSetInfo info) {
+/// Totals of the text check over every book ([mapVectorBooks]).
+final class VerifyTotals {
+  int books = 0, lines = 0, records = 0, verified = 0, moved = 0, unverified = 0;
+}
+
+/// Maps every `id:<bookId>` book of the opened set onto the DB. Default:
+/// Otzaria's text check ([SemanticIndex.mapVectorBookRows]: the book's raw
+/// rows in `lineIndex, id` order and its `line_note` rows; a row holding a
+/// newline gives several lines). [verify] false: the unchecked ordinal
+/// mapping ([SemanticIndex.mapVectorBook]). Returns the skip counts.
+Map<OxvSkip, int> mapVectorBooks(SeforimIndex index, SeforimDb db, String vectors, VectorSetInfo info,
+    {bool verify = true, int chunkingIdentity = 0, VerifyTotals? totals}) {
   final skips = {for (final s in OxvSkip.values) s: 0};
   for (final b in setBooks(vectors, info).values) {
-    final m = mapOxvBook(db, b, (s) => skips[s] = skips[s]! + 1);
-    if (m != null) index.mapVectorBook(m.name, m.bookId, m.lineIds);
+    if (!verify) {
+      final m = mapOxvBook(db, b, (s) => skips[s] = skips[s]! + 1);
+      if (m != null) {
+        index.mapVectorBook(m.name, m.bookId, m.lineIds);
+        totals?.books++;
+      }
+      continue;
+    }
+    final bookId = _bookIdOf(b.name);
+    if (bookId == null) {
+      skips[OxvSkip.badName] = skips[OxvSkip.badName]! + 1;
+      continue;
+    }
+    final ids = <int>[];
+    final rows = <Uint8List>[];
+    for (final line in db.bookLines(bookId)) {
+      ids.add(line.id);
+      rows.add(utf8.encode(line.text));
+    }
+    if (ids.isEmpty) {
+      skips[OxvSkip.notInDb] = skips[OxvSkip.notInDb]! + 1;
+      continue;
+    }
+    final v = index.mapVectorBookRows(b.name, bookId, ids, rows, bookNotes(db, bookId), chunkingIdentity);
+    if (totals != null) {
+      totals
+        ..books += 1
+        ..lines += v.lines
+        ..records += v.records
+        ..verified += v.verified
+        ..moved += v.moved
+        ..unverified += v.unverified;
+    }
   }
   return skips;
 }
 
 String _stripTags(String s) => s.replaceAll(RegExp(r'<[^>]*>'), ' ');
 
-/// `semantic-search <index dir> --vectors <set dir | file.oxv> (--line N | --lines a,b,c | --query text) [--k N] [--books a,b] [--threads N] [--hybrid] [--repeat N]`.
+/// `semantic-search <index dir> --vectors <set dir | file.oxv> (--line N | --lines a,b,c | --query text) [--k N] [--books a,b] [--threads N] [--hybrid] [--repeat N] [--no-verify] [--chunking-identity N]`.
 void semanticSearchCommand(SeforimDb db, String indexDir, String vectors,
     {required String modelDir,
     required String ortLibrary,
@@ -104,7 +172,9 @@ void semanticSearchCommand(SeforimDb db, String indexDir, String vectors,
     List<int>? books,
     int threads = 0,
     bool hybrid = false,
-    int repeat = 1}) {
+    int repeat = 1,
+    bool verify = true,
+    int? chunkingIdentity}) {
   final queries = <(int, String)>[];
   final texts = db.lineTexts(lines);
   for (final id in lines) {
@@ -127,11 +197,17 @@ void semanticSearchCommand(SeforimDb db, String indexDir, String vectors,
     var info = index.openVectors(vectors);
     stdout.writeln('open: ${_ms(sw.elapsedMicroseconds / 1000)}');
     sw.reset();
-    final skips = mapVectorBooks(index, db, vectors, info);
+    final totals = VerifyTotals();
+    final skips = mapVectorBooks(index, db, vectors, info,
+        verify: verify, chunkingIdentity: chunkingIdentity ?? modelChunkingIdentity(modelDir), totals: totals);
     info = index.vectorInfo()!;
-    stdout.writeln('mapping: ${_ms(sw.elapsedMicroseconds / 1000)}, books mapped ${info.booksMapped}, '
-        'unmapped ${info.booksUnmapped}; skipped: '
+    stdout.writeln('mapping + verify: ${_ms(sw.elapsedMicroseconds / 1000)}, books mapped ${totals.books} '
+        '(set: mapped ${info.booksMapped}, unmapped ${info.booksUnmapped}); skipped: '
         '${skips.entries.where((e) => e.value > 0).map((e) => '${e.key.name} ${e.value}').join(', ')}');
+    if (verify) {
+      stdout.writeln('text check: lines ${totals.lines}, records ${totals.records}, verified ${totals.verified}, '
+          'moved ${totals.moved}, unverified ${totals.unverified}');
+    }
     stdout.writeln('set: generation ${info.generation}, dims ${info.dims}, codec ${info.codec}, '
         'library ${info.libraryReleaseTag}, slots_live ${info.slotsLive}, slots_dead ${info.slotsDead}, '
         'books ${info.books}, ${(info.bytesOnDisk / 1048576).toStringAsFixed(0)} MB, ${info.segments.length} segments');

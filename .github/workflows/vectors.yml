@@ -3,7 +3,9 @@
 # it), for BOTH codecs: the QA491 i8 release and a rot192-i8i4 release. Per codec: download and
 # expand the release, open it read-only with the C# demo, map the full seforim.db's books, run
 # queries with Otzaria's Meivin query model at Otzaria's thread default (half the cores, at most
-# 8) and print own-line rank, mean / p95 search latency and the peak working set. Long runs go
+# 8) and print own-line rank, mean / p95 search latency and the peak working set. The mapping
+# runs Otzaria's text check on every book (rows rebuilt, keys recomputed): its time and the
+# verified / moved / unverified counts are printed too. Long runs go
 # here, not on a user PC.
 name: vectors
 
@@ -35,7 +37,32 @@ env:
   GH_TOKEN: ${{ github.token }}
 
 jobs:
+  # every seforim.db the matrix uses, downloaded once and cached (fullrun-setup restores it)
+  db:
+    strategy:
+      matrix:
+        db_tag: ["${{ inputs.i8_db_tag }}", "${{ inputs.rot_db_tag }}"]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: C:/bench/data/seforim-schema7.db.zst
+          key: seforim-db-${{ matrix.db_tag }}
+      - name: download seforim.db
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          printf 'OUT_DIR=/c/bench\nDB_TAG=%s\n' "${{ matrix.db_tag }}" > tools/bench/bench.local.env
+          tools/bench/run-all.sh --steps db
+          rm -f /c/bench/data/seforim.db
+
   latency:
+    needs: db
     strategy:
       fail-fast: false
       matrix:

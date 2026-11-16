@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 15;
+const int seforimAbiVersion = 16;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -217,6 +217,11 @@ final class SeforimNative {
         vectorsMapBook = lib.lookupFunction<
             Int32 Function(Pointer<Void>, Pointer<Uint8>, Size, Uint64, Pointer<Uint64>, Size),
             int Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint64>, int)>('se_vectors_map_book'),
+        vectorsMapBookRows = lib.lookupFunction<
+            Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, Size, Uint64, Pointer<Uint64>, Size, Pointer<Uint8>, Size,
+                Pointer<Uint64>, Pointer<Uint8>, Size, Uint64),
+            Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint64>, int, Pointer<Uint8>, int,
+                Pointer<Uint64>, Pointer<Uint8>, int, int)>('se_vectors_map_book_rows'),
         vectorsSetMapping = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint8>, Size, Int32),
             int Function(Pointer<Void>, Pointer<Uint8>, int, int)>('se_vectors_set_mapping'),
         oxvExpand = lib.lookupFunction<Int64 Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size),
@@ -332,6 +337,8 @@ final class SeforimNative {
   final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int) vectorsOpen;
   final int Function(Pointer<Void>) vectorsClose;
   final int Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint64>, int) vectorsMapBook;
+  final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint64>, int, Pointer<Uint8>, int,
+      Pointer<Uint64>, Pointer<Uint8>, int, int) vectorsMapBookRows;
   final int Function(Pointer<Void>, Pointer<Uint8>, int, int) vectorsSetMapping;
   final int Function(Pointer<Uint8>, int, Pointer<Uint8>, int) oxvExpand;
   final Pointer<Utf8> Function(Pointer<Uint8>, int) oxvInfo;

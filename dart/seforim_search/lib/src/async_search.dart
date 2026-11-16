@@ -139,6 +139,11 @@ final class SearchWorker {
   Future<void> mapVectorBook(String name, int bookId, List<int> lineIds) =>
       _call('mapVectorBook', name, (bookId, lineIds));
 
+  /// [SemanticIndex.mapVectorBookRows] on the worker.
+  Future<VectorBookVerify> mapVectorBookRows(String name, int bookId, List<int> rowLineIds, List<Uint8List> rows,
+          [List<VectorBookNote> notes = const [], int chunkingIdentity = 0]) =>
+      _call('mapVectorBookRows', name, (bookId, rowLineIds, rows), (notes, chunkingIdentity));
+
   /// [SemanticIndex.setVectorMapping] on the worker.
   Future<void> setVectorMapping(List<OxvBookMap> books, {bool replace = false}) =>
       _call('setVectorMapping', books, replace);
@@ -541,6 +546,10 @@ void _workerMain((SendPort, String, String?) args) {
         case 'mapVectorBook':
           final (bookId, lineIds) = b as (int, List<int>);
           index.mapVectorBook(a as String, bookId, lineIds);
+        case 'mapVectorBookRows':
+          final (bookId, rowLineIds, rows) = b as (int, List<int>, List<Uint8List>);
+          final (notes, identity) = c as (List<VectorBookNote>, int);
+          value = index.mapVectorBookRows(a as String, bookId, rowLineIds, rows, notes, identity);
         case 'setVectorMapping':
           index.setVectorMapping((a as List).cast<OxvBookMap>(), replace: b as bool);
         case 'vectorInfo':

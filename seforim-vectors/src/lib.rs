@@ -30,6 +30,7 @@
 //! retry) and then delete older generations (best effort: a file a reader
 //! still maps is retried at the next write).
 
+pub mod chunker;
 pub mod f16;
 pub mod fusion;
 pub mod oxv;

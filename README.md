@@ -2272,10 +2272,23 @@ downloaded `.oxv.zst`. Where Otzaria gets them: GitHub releases of
 `Otzaria/SeforimLibrary`, tag `vectors-<family>-v<library>-<stamp>`, asset
 `otzaria-vectors-<identity>-v<N>-base.oxv.zst` (+ manifest); the library
 version must match seforim.db's `schema_meta.db_version`, the family the
-query model. Not checked by the engine: that a line's text is still the one
-its vector was built from (Otzaria compares a SHA-256 key of its chunker
-text; porting the chunker is open), so import the release of the host's
-library edition.
+query model.
+
+**Text check (`seforim_vectors::chunker`).** A port of Otzaria's check that a
+line's text is still the one its vector was built from: `book_lines` builds
+a book's lines from its raw seforim.db rows (`lineIndex, id` order) and
+`line_note` rows exactly as Otzaria indexes them (footnote bodies put back,
+`data:` URIs removed, rows joined and split on `
+`, so a row holding a
+newline is several lines: each line keeps its row and sub-line;
+`normalize_text_for_indexing`; a line starting `<h` opens a section), the
+`Chunker` computes each line's embedded text and SHA-256 chunk key (Meivin
+round 2 recipe: short lines with neighbour context within the section,
+windows of long lines; families qa491 / qa491-windows by `chunking_identity`;
+pardes not ported), and `verify` / `holds` / `locate` (within 16 lines,
+Otzaria's `RECOMPUTE_REACH`) compare a stored key at its width (16 bytes in
+format 2, 8 in format 3). On 53 books of the v37 release vs seforim.db v37:
+63,730 of 63,730 records match. Not wired to the C ABI / hosts yet.
 
 **Downloading / updating a vector set (host, Dart `vector_download.dart`).**
 A port of Otzaria's app download step (release locator, download client,
@@ -2519,9 +2532,9 @@ every differing query.
   (user's decision) run end to end on small indexes only (78-91 books of the
   v37 release); the full-library import (7.2 M vectors), its time and sizes
   are unmeasured, and an import call took 1.5-5 min for 59-84 k vectors on a
-  loaded PC (graph build at background priority; to profile). Open: a
-  line-text check against Otzaria's chunk keys (needs its chunker), rows
-  holding a newline (skipped, not split), and the embedder's vectors checked
+  loaded PC (graph build at background priority; to profile). Open: wiring
+  the text check (`seforim_vectors::chunker`, built) into the C ABI and the
+  hosts' import mapping (rows holding a newline are still skipped there), and the embedder's vectors checked
   only by retrieval (Otzaria's golden vectors are for another graph).
 - Quoted phrases: a whole-query phrase may cross a line in our engine but
   not in FtsLib (no cross-line there), and the C# FtsLib facade locates the

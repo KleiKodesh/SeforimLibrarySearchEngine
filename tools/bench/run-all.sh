@@ -228,16 +228,16 @@ step_speed() {
   for s in $SPEED_SETS; do
     local Q; Q="$(qfile "$s")"
     inlist otz "$SPEED_ENGINES" && { done_ok "speed-$s-otz" || { run "speed-$s-otz" "sb-$s-otz" "$PY" -I "$(wp "$HERE/otz_report.py")" "$(wp "$OTZ")" "$DB" "$(wp "$IDX_OTZARIA")" "$Q" "$(wp "$OUT_DIR/sb-$s-otz")" "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-otz"; }; }
-    inlist pos "$SPEED_ENGINES" && { done_ok "speed-$s-pos" || { run "speed-$s-pos" "sb-$s-pos" "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_POS")" "$Q" "$(wp "$OUT_DIR/sb-$s-pos")" --db "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-pos"; }; }
-    inlist nopos "$SPEED_ENGINES" && { done_ok "speed-$s-nopos" || { run "speed-$s-nopos" "sb-$s-nopos" "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_NOPOS")" "$Q" "$(wp "$OUT_DIR/sb-$s-nopos")" --db "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-nopos"; }; }
-    inlist fts "$SPEED_ENGINES" && { done_ok "speed-$s-fts" || { run "speed-$s-fts" "sb-$s-fts" "$PY" -I tools/report/search_report.py "$FTS" "$(wp "$IDX_FTSLIB")" "$Q" "$(wp "$OUT_DIR/sb-$s-fts")" --ftslib "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-fts"; }; }
+    inlist pos "$SPEED_ENGINES" && { done_ok "speed-$s-pos" || { run "speed-$s-pos" "sb-$s-pos" "$PY" -I tools/report/search_report.py "$(wp "$DEMO")" "$(wp "$IDX_POS")" "$Q" "$(wp "$OUT_DIR/sb-$s-pos")" --db "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-pos"; }; }
+    inlist nopos "$SPEED_ENGINES" && { done_ok "speed-$s-nopos" || { run "speed-$s-nopos" "sb-$s-nopos" "$PY" -I tools/report/search_report.py "$(wp "$DEMO")" "$(wp "$IDX_NOPOS")" "$Q" "$(wp "$OUT_DIR/sb-$s-nopos")" --db "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-nopos"; }; }
+    inlist fts "$SPEED_ENGINES" && { done_ok "speed-$s-fts" || { run "speed-$s-fts" "sb-$s-fts" "$PY" -I tools/report/search_report.py "$(wp "$FTS")" "$(wp "$IDX_FTSLIB")" "$Q" "$(wp "$OUT_DIR/sb-$s-fts")" --ftslib "$DB" --runs "$RUNS" && [ $DRY = 0 ] && mark "speed-$s-fts"; }; }
   done
 }
 
 step_load() {
   resolve_db
   local Q; Q="$(qfile "$LOAD_SET")"
-  done_ok load || { run load sb-load-pos "$PY" -I tools/report/search_report.py "$DEMO" "$(wp "$IDX_POS")" "$Q" "$(wp "$OUT_DIR/sb-load-pos")" --db "$DB" --load "$LOAD_SEARCHERS" --rounds "$LOAD_ROUNDS" --commit-every "$LOAD_COMMIT_MS" --update-lines "$LOAD_UPDATE_LINES" && [ $DRY = 0 ] && mark load; }
+  done_ok load || { run load sb-load-pos "$PY" -I tools/report/search_report.py "$(wp "$DEMO")" "$(wp "$IDX_POS")" "$Q" "$(wp "$OUT_DIR/sb-load-pos")" --db "$DB" --load "$LOAD_SEARCHERS" --rounds "$LOAD_ROUNDS" --commit-every "$LOAD_COMMIT_MS" --update-lines "$LOAD_UPDATE_LINES" && [ $DRY = 0 ] && mark load; }
 }
 
 step_hitcount() {

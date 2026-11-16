@@ -38,6 +38,7 @@
 //!   - Rollback drops everything queued since the last commit (never seen by
 //!     searches); a crash before a commit loses only that queue.
 
+use seforim_engine::semantic::{HybridSession, HybridStep};
 use std::cell::RefCell;
 use std::ffi::{c_char, CString};
 use std::path::PathBuf;
@@ -88,7 +89,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 20; // 20: se_vectors_install report `needs_compaction` (Otzaria sidecar compaction policy, issue #18); 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 21; // 21: Otzaria's hybrid search session (se_hybrid_open, se_hybrid_page, se_hybrid_add_texts, se_hybrid_close; se_search_fuse_semantic removed, issue #18); 20: se_vectors_install report `needs_compaction` (Otzaria sidecar compaction policy, issue #18); 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -2204,45 +2205,106 @@ pub unsafe extern "C" fn se_semantic_search(
     })
 }
 
-/// Hybrid ranking: EVERY hit of the finished lexical search `search` fused
-/// with a semantic hit list (`semantic_json`: the `hits` array of
-/// `se_semantic_search`, or its whole result object). `query` is the
-/// lexical query text (the weighted fusion's alpha by query type).
-/// `fusion_json` (may be empty = weighted, alpha by query type):
-/// `{"strategy":"weighted","alpha":0.5|null,"bm25_k":10}` or
-/// `{"strategy":"rrf","k":60}`. Weighted needs the search in relevance
-/// order; a streamed search must be pulled to the end. Returns a JSON array
-/// `[{"line_id","book_id","position":N|null,"fused","lexical":x|null,
-/// "semantic":x|null,"source":"lexical"|"semantic"|"both"}]`, best first
-/// (ties by line id); null on error.
+/// Opens Otzaria's hybrid search session (issue #18): `query` (the lexical
+/// text) and `vector` (`dims` floats: the query's embedding by the host's
+/// query model; 0 dims or no open vector set = the lexical side alone).
+/// `options_json` (may be empty): `{"books":[..]|null,"fusion":{"strategy":
+/// "weighted","alpha":null,"bm25_k":10}|{"strategy":"rrf","k":60},"threads":0,
+/// "window_penalty":0.04,"alias_penalty":0.04}`. Pages come from
+/// `se_hybrid_page`; free with `se_hybrid_close`. Null on error.
 ///
 /// # Safety
-/// `search` a live session; each text valid for its length.
+/// `index` live; `query` valid UTF-8 for `query_len`; `vector` valid for
+/// `dims` floats; `options_json` valid for `options_len`.
 #[no_mangle]
-pub unsafe extern "C" fn se_search_fuse_semantic(
-    search: *const SearchResult,
+pub unsafe extern "C" fn se_hybrid_open(
+    index: *const LineIndex,
     query: *const u8,
     query_len: usize,
-    semantic_json: *const u8,
-    semantic_len: usize,
-    fusion_json: *const u8,
-    fusion_len: usize,
-) -> *mut c_char {
+    vector: *const f32,
+    dims: usize,
+    options_json: *const u8,
+    options_len: usize,
+) -> *mut HybridSession {
     guard(ptr::null_mut(), || {
-        let search = search.as_ref().ok_or("null search")?;
+        let index = index.as_ref().ok_or("null index")?;
         let query = str_arg(query, query_len)?;
-        let value: serde_json::Value = serde_json::from_str(str_arg(semantic_json, semantic_len)?).map_err(err)?;
-        let value = match value {
-            serde_json::Value::Object(mut o) => o.remove("hits").ok_or("semantic_json: no hits")?,
-            other => other,
-        };
-        let semantic: Vec<seforim_engine::semantic::SemanticHit> = serde_json::from_value(value).map_err(err)?;
-        let text = str_arg(fusion_json, fusion_len)?;
-        let fusion: seforim_engine::semantic::FusionOptions =
+        let vector = slice_arg(vector, dims, "vector")?;
+        let text = str_arg(options_json, options_len)?;
+        let options: seforim_engine::semantic::HybridOptions =
             if text.trim().is_empty() { Default::default() } else { serde_json::from_str(text).map_err(err)? };
-        let fused = search.fuse_semantic(query, &semantic, &fusion).map_err(err)?;
-        Ok(out_string(serde_json::to_string(&fused).map_err(err)?))
+        let session = index.hybrid_session(query, vector, options).map_err(err)?;
+        Ok(Box::into_raw(Box::new(session)))
     })
+}
+
+/// The results `offset .. offset + limit` of a hybrid session, as Otzaria
+/// pages them (its candidate window grows to hold one result past the
+/// page: `max(2 * (offset + limit) + 1, 2 * window)`, at most 10,000).
+/// Returns JSON `{"hits":[{"line_id","book_id","position":N|null,"fused",
+/// "lexical":x|null,"semantic":x|null,"source":"lexical"|"semantic"|"both"}],
+/// "more":bool,"window":N,"lexical_total":N,"exhausted":bool}`, or (an index
+/// without positions, a query of several words: the phrase is scored from
+/// the line texts) `{"need_texts":[line ids]}`: give them with
+/// `se_hybrid_add_texts` and ask again. Null on error. `token` null or live.
+///
+/// # Safety
+/// `session` from `se_hybrid_open`; `token` null or live.
+#[no_mangle]
+pub unsafe extern "C" fn se_hybrid_page(session: *mut HybridSession, offset: u32, limit: u32, token: *const CancelToken) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let session = session.as_mut().ok_or("null session")?;
+        let json = match session.page(offset, limit, token.as_ref()).map_err(err)? {
+            HybridStep::Page(p) => serde_json::to_string(&p).map_err(err)?,
+            HybridStep::NeedTexts(ids) => serde_json::json!({ "need_texts": ids }).to_string(),
+        };
+        Ok(out_string(json))
+    })
+}
+
+/// Gives a hybrid session the texts it asked for (`need_texts`): `count`
+/// lines, `line_ids[i]`'s text (UTF-8, as stored: the row's content) at
+/// `content[offsets[i] .. offsets[i + 1]]`. 0, or -1 on error.
+///
+/// # Safety
+/// `session` from `se_hybrid_open`; `line_ids` valid for `count`, `offsets`
+/// for `count + 1`, `content` for `content_len`.
+#[no_mangle]
+pub unsafe extern "C" fn se_hybrid_add_texts(
+    session: *mut HybridSession,
+    line_ids: *const u64,
+    count: usize,
+    content: *const u8,
+    content_len: usize,
+    offsets: *const u64,
+) -> i32 {
+    guard(-1, || {
+        let session = session.as_mut().ok_or("null session")?;
+        let ids = slice_arg(line_ids, count, "line_ids")?;
+        let bytes = slice_arg(content, content_len, "content")?;
+        let cuts = slice_arg(offsets, count + 1, "offsets")?;
+        let mut texts = Vec::with_capacity(count);
+        for (i, w) in cuts.windows(2).enumerate() {
+            let (a, b) = (w[0] as usize, w[1] as usize);
+            if a > b || b > bytes.len() {
+                return Err("offsets out of order or past content".into());
+            }
+            texts.push((ids[i], String::from_utf8_lossy(&bytes[a..b]).into_owned()));
+        }
+        session.add_texts(texts);
+        Ok(0)
+    })
+}
+
+/// Frees a hybrid session (null is a no-op).
+///
+/// # Safety
+/// `session` from `se_hybrid_open`, not used after.
+#[no_mangle]
+pub unsafe extern "C" fn se_hybrid_close(session: *mut HybridSession) {
+    if !session.is_null() {
+        drop(Box::from_raw(session));
+    }
 }
 
 /// Expands Otzaria's downloaded vector file (`.oxv.zst`, zstd) to a plain
@@ -2773,17 +2835,19 @@ mod tests {
             // wrong dims: an error
             assert!(se_semantic_search(index, q.as_ptr(), 2, ptr::null(), 0, ptr::null()).is_null());
 
-            // hybrid: the lexical search fused with the semantic hits
-            let req = r#"{"query":"abc","order":"relevance"}"#;
-            let search = se_search(index, req.as_ptr(), req.len());
-            assert!(!search.is_null(), "{}", se_last_error_message());
+            // hybrid: Otzaria's session, the lexical side fused with the semantic one
             let query = "abc";
-            let fused = take(se_search_fuse_semantic(search, query.as_ptr(), query.len(), sem.as_ptr(), sem.len(), ptr::null(), 0));
-            let f: serde_json::Value = serde_json::from_str(&fused).unwrap();
-            let one = f.as_array().unwrap().iter().find(|e| e["line_id"] == 1).unwrap();
-            assert_eq!(one["source"], "both", "{fused}");
-            assert!(f.as_array().unwrap().iter().any(|e| e["line_id"] == 3 && e["source"] == "semantic"), "{fused}");
-            se_search_close(search);
+            let h = se_hybrid_open(index, query.as_ptr(), query.len(), q.as_ptr(), 3, ptr::null(), 0);
+            assert!(!h.is_null(), "{}", se_last_error_message());
+            let page = take(se_hybrid_page(h, 0, 10, ptr::null()));
+            let f: serde_json::Value = serde_json::from_str(&page).unwrap();
+            let hits = f["hits"].as_array().unwrap();
+            assert_eq!(hits.iter().find(|e| e["line_id"] == 1).unwrap()["source"], "both", "{page}");
+            assert!(hits.iter().any(|e| e["line_id"] == 3 && e["source"] == "semantic"), "{page}");
+            assert_eq!((f["more"].as_bool(), f["window"].as_u64()), (Some(false), Some(21)), "{page}");
+            assert_eq!(se_hybrid_add_texts(h, ptr::null(), 0, ptr::null(), 0, [0u64].as_ptr()), 0);
+            se_hybrid_close(h);
+            se_hybrid_close(ptr::null_mut());
 
             // a set directory in Otzaria's layout opens the same way; closing forgets it
             let set = dir.join("vectors");

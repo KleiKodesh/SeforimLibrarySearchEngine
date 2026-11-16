@@ -275,6 +275,95 @@ final class FusionOptions {
       : {'strategy': 'weighted', 'bm25_k': bm25K, if (alpha != null) 'alpha': alpha};
 }
 
+/// A hybrid search request (Otzaria's hybrid session, issue #18).
+final class HybridOptions {
+  const HybridOptions(
+      {this.books, this.fusion = const FusionOptions(), this.threads = 0, this.windowPenalty = 0.04, this.aliasPenalty = 0.04});
+
+  /// Only these books (both sides); null = all.
+  final List<int>? books;
+  final FusionOptions fusion;
+
+  /// Semantic scan threads; 0 = Otzaria's default.
+  final int threads;
+  final double windowPenalty, aliasPenalty;
+
+  Map<String, Object?> toJson() => {
+        'books': books,
+        'fusion': fusion.toJson(),
+        'threads': threads,
+        'window_penalty': windowPenalty,
+        'alias_penalty': aliasPenalty,
+      };
+}
+
+/// One page of a [HybridSession].
+final class HybridPage {
+  const HybridPage(this.hits, this.more, this.window, this.lexicalTotal, this.exhausted);
+  final List<FusedHit> hits;
+
+  /// True when another page follows.
+  final bool more;
+
+  /// The candidate window fused last (Otzaria's).
+  final int window;
+
+  /// Lines the lexical query matches.
+  final int lexicalTotal;
+  final bool exhausted;
+}
+
+/// Otzaria's hybrid search session ([SemanticIndex.hybridSession]): pages of
+/// fused results, its candidate window growing as Otzaria's does. On an
+/// index without positions a query of several words is scored from the line
+/// texts: [page] asks [texts] for them (raw row content, as stored).
+final class HybridSession {
+  HybridSession._(this._h);
+  Pointer<Void> _h;
+
+  HybridPage page(int offset, int limit,
+      {Map<int, Uint8List> Function(List<int> lineIds)? texts, SearchCancelToken? cancel}) {
+    final n = SeforimNative.instance;
+    if (_h == nullptr) throw StateError('HybridSession is closed');
+    while (true) {
+      final j = jsonDecode(n.takeString(n.hybridPage(_h, offset, limit, cancel?.handle ?? nullptr))) as Map<String, dynamic>;
+      final need = j['need_texts'] as List?;
+      if (need == null) {
+        return HybridPage([for (final e in j['hits'] as List) FusedHit.fromJson(e as Map<String, dynamic>)],
+            j['more'] as bool, j['window'] as int, j['lexical_total'] as int, j['exhausted'] as bool);
+      }
+      if (texts == null) throw StateError('the hybrid session needs line texts: pass texts');
+      final ids = [for (final e in need) e as int];
+      final got = texts(ids);
+      using((al) {
+        final idp = al<Uint64>(ids.isEmpty ? 1 : ids.length);
+        idp.asTypedList(ids.length).setAll(0, ids);
+        final offsets = al<Uint64>(ids.length + 1);
+        final off = offsets.asTypedList(ids.length + 1);
+        var total = 0;
+        for (var i = 0; i < ids.length; i++) {
+          off[i] = total;
+          total += got[ids[i]]?.length ?? 0;
+        }
+        off[ids.length] = total;
+        final content = al<Uint8>(total == 0 ? 1 : total);
+        final ct = content.asTypedList(total);
+        for (var i = 0; i < ids.length; i++) {
+          final t = got[ids[i]];
+          if (t != null) ct.setAll(off[i], t);
+        }
+        if (n.hybridAddTexts(_h, idp, ids.length, content, total, offsets) != 0) throw n.error();
+      });
+    }
+  }
+
+  void close() {
+    if (_h == nullptr) return;
+    SeforimNative.instance.hybridClose(_h);
+    _h = nullptr;
+  }
+}
+
 /// One hybrid result.
 final class FusedHit {
   const FusedHit(this.lineId, this.bookId, this.position, this.fused, this.lexical, this.semantic, this.source);
@@ -303,7 +392,7 @@ final class FusedHit {
 /// Semantic search on an index (issue #18), like Otzaria: the index opens
 /// Otzaria's own vector set read-only and runs an exact integer scan; the
 /// host maps each book of the set (`id:<bookId>`) to its line ids. Hybrid:
-/// [SearchSession.fuseSemantic]. Blocking; [SearchWorker] has the async
+/// [SemanticIndex.hybridSession]. Blocking; [SearchWorker] has the async
 /// versions.
 extension SemanticIndex on SeforimIndex {
   /// Opens Otzaria's vector set read-only: a set directory (`CURRENT`,
@@ -406,5 +495,21 @@ extension SemanticIndex on SeforimIndex {
       return n.takeString(n.semanticSearch(handle, q, query.length, j, jl, token));
     });
     return SemanticResult.fromJsonText(text);
+  }
+
+  /// Opens Otzaria's hybrid search session for [query] (the lexical text)
+  /// and [vector] (its embedding by the query model; empty or no open set =
+  /// the lexical side alone). Close it with [HybridSession.close].
+  HybridSession hybridSession(String query, Float32List vector, [HybridOptions options = const HybridOptions()]) {
+    final n = SeforimNative.instance;
+    final h = using((al) {
+      final (q, ql) = utf8Native(query, al);
+      final v = al<Float>(vector.isEmpty ? 1 : vector.length);
+      v.asTypedList(vector.length).setAll(0, vector);
+      final (j, jl) = utf8Native(jsonEncode(options.toJson()), al);
+      return n.hybridOpen(handle, q, ql, v, vector.length, j, jl);
+    });
+    if (h == nullptr) throw n.error();
+    return HybridSession._(h);
   }
 }

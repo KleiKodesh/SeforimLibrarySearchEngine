@@ -10,7 +10,6 @@ import 'dart:typed_data';
 import 'package:seforim_search/seforim_search.dart';
 
 import 'meivin_embedder.dart';
-import 'otzaria_query.dart';
 import 'seforim_db.dart';
 
 String _ms(num ms) => ms < 1000 ? '${ms.toStringAsFixed(ms < 100 ? 1 : 0)} ms' : '${(ms / 60000).toStringAsFixed(2)} min';
@@ -290,22 +289,18 @@ void semanticSearchCommand(SeforimDb db, String indexDir, String vectors,
           stdout.writeln('  source line first: ${first ? 'yes' : 'no'}');
         }
         if (hybrid) {
-          final request = OtzariaSearch(query: text).toOptions(contextWords: 8)..order = ResultsOrder.relevance;
-          request.baseBooks.addAll(db.baseBooks());
-          if (books != null) request.books = books;
-          final session = index.search(request);
+          // Otzaria's hybrid session: its exact query's top window fused with the semantic one
+          final h = index.hybridSession(text, v, HybridOptions(books: books));
           try {
-            // a streamed search (positions index) is pulled to the end first
-            while (!session.pull(1 << 40)) {}
-            final fused = session.fuseSemantic(text, sem);
-            stdout.writeln('  hybrid (${session.hitCount} lexical hits):');
-            for (final (i, f) in fused.take(k).indexed) {
+            final page = h.page(0, k, texts: (ids) => db.rawContents(ids));
+            stdout.writeln('  hybrid (window ${page.window}, ${page.lexicalTotal} lexical matches):');
+            for (final (i, f) in page.hits.indexed) {
               stdout.writeln('    ${i + 1}. line ${f.lineId} book ${f.bookId} fused ${f.fused.toStringAsFixed(4)} '
                   'lexical ${f.lexical?.toStringAsFixed(4) ?? '-'} semantic ${f.semantic?.toStringAsFixed(4) ?? '-'} '
                   '(${f.source})');
             }
           } finally {
-            session.close();
+            h.close();
           }
         }
       }

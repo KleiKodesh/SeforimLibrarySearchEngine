@@ -1500,9 +1500,6 @@ pub struct SearchResult {
     stream: Option<crate::stream::HitStream>,
     /// See `SearchRequest::word_windows`: aligned with `hits`. None: not asked.
     windows: Option<Vec<WordWindow>>,
-    /// What hybrid fusion reads Otzaria's exact-query BM25 from (issue #18,
-    /// `SearchResult::fuse_semantic`). None: a result built without an index.
-    pub(crate) hybrid: Option<crate::relevance::HybridSource>,
 }
 
 /// How a search was served (see [`SearchResult::info`]).
@@ -1559,7 +1556,6 @@ impl SearchResult {
             order_stamp: String::new(),
             stream: None,
             windows: None,
-            hybrid: None,
         }
     }
 
@@ -2593,10 +2589,8 @@ impl LineIndex {
         if request.after_position.is_some() && request.resume_stamp.as_ref().is_some_and(|s| *s != stamp) {
             return Err(Error::StaleResume);
         }
-        let hybrid = self.hybrid_source(self.union_user(request).as_deref());
         let mut result = self.search_unstamped(request, cancel)?;
         result.order_stamp = stamp;
-        result.hybrid = Some(hybrid);
         // a streamed search (an index with positions) is complete on return
         result.pull(usize::MAX, None)?;
         Ok(result)
@@ -2619,10 +2613,8 @@ impl LineIndex {
         if request.after_position.is_some() && request.resume_stamp.as_ref().is_some_and(|s| *s != stamp) {
             return Err(Error::StaleResume);
         }
-        let hybrid = self.hybrid_source(self.union_user(request).as_deref());
         let mut result = self.search_unstamped(request, cancel)?;
         result.order_stamp = stamp;
-        result.hybrid = Some(hybrid);
         result.pull(1, None)?;
         Ok(result)
     }

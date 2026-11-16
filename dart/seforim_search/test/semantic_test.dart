@@ -80,11 +80,16 @@ void main() {
     final seven = index.semanticSearch(v([0, 0, 0, 1]), const SemanticOptions(k: 1));
     expect((seven.hits.single.lineId, seven.unmapped), (3, 0));
 
-    final s = index.search(SearchOptions('alpha', order: ResultsOrder.relevance));
-    final fused = s.fuseSemantic('alpha', sem);
-    expect((fused.first.lineId, fused.first.source), (1, 'both'));
-    expect(s.fuseSemantic('alpha', sem, const FusionOptions(strategy: FusionStrategy.rrf)).length, fused.length);
-    s.close();
+    // Otzaria's hybrid session: the lexical side (its exact query) fused with the semantic one
+    final h = index.hybridSession('alpha', v([0, 0, 1, 0]));
+    final page = h.page(0, 10);
+    expect((page.hits.first.lineId, page.hits.first.source), (1, 'both'));
+    expect((page.more, page.window, page.exhausted), (false, 21, true));
+    h.close();
+    final rrf = index.hybridSession('alpha', v([0, 0, 1, 0]), const HybridOptions(fusion: FusionOptions(strategy: FusionStrategy.rrf)));
+    // RRF (Otzaria's Fast profile) leaves out semantic lines under 0.55 normalized
+    expect(rrf.page(0, 10).hits.map((h) => h.lineId), contains(1));
+    rrf.close();
 
     final cancel = SearchCancelToken()..cancel();
     expect(() => index.semanticSearch(v([0, 0, 1, 0]), const SemanticOptions(), cancel),
@@ -139,10 +144,6 @@ void main() {
     expect((await worker.vectorInfo())!.booksMapped, 2);
     final sem = await worker.semanticSearch(v([0, 0, 1, 0]), const SemanticOptions(k: 1));
     expect(sem.hits.single.lineId, 1);
-    final session = await worker.search(SearchOptions('delta', order: ResultsOrder.relevance));
-    final fused = await session.fuseSemantic('delta', sem);
-    expect(fused.map((f) => f.lineId).toSet(), {1, 3});
-    await session.close();
     await worker.closeVectors();
     expect(await worker.vectorInfo(), isNull);
     await worker.close();

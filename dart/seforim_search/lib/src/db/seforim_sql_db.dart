@@ -473,6 +473,25 @@ class SeforimSqlDb implements SeforimDataSource {
   /// feed; the next query's LIMIT shrinks to what fit.
   static const bookLinesChunkBytes = 32000000;
 
+  /// The stored content of these real lines ([rawContent]), by line id (a
+  /// line not found is left out): what a hybrid session on an index without
+  /// positions scores a phrase from.
+  Map<int, Uint8List> rawContents(List<int> lineIds) {
+    final out = <int, Uint8List>{};
+    for (var i = 0; i < lineIds.length; i += 500) {
+      final chunk = lineIds.sublist(i, i + 500 > lineIds.length ? lineIds.length : i + 500);
+      final rows = _select(
+          'SELECT l.id, typeof($_contentCol), CAST($_contentCol AS BLOB) FROM line l$_contentJoin'
+          ' WHERE l.id IN (${List.filled(chunk.length, '?').join(',')})',
+          chunk);
+      for (final r in rows) {
+        final id = r[0] as int;
+        out[id] = rawContent(r[1] as String, r[2] as Uint8List?, id);
+      }
+    }
+    return out;
+  }
+
   /// A real book's rows as stored, in `lineIndex, id` order: (line id, raw
   /// content) with zstd frames decoded but nothing else touched (a leading BOM
   /// kept, unlike [bookLines]): what Otzaria's vector text check rebuilds the

@@ -1098,7 +1098,7 @@ impl Bm25StatisticsProvider for GroupStatistics<'_> {
     }
 }
 
-/// What hybrid fusion reads the index through ([`hybrid_bm25`]): the
+/// What hybrid fusion reads the index through ([`hybrid_lexical_window`]): the
 /// index's shared reader, not a snapshot, so a live result pins no segment
 /// (issue #40, `release_memory`); fusion takes the current snapshot and finds
 /// the hits there by line id.
@@ -1109,7 +1109,6 @@ pub(crate) struct HybridSource {
     /// scored over the union, as the search read them.
     pub user: Option<crate::index::SharedReader>,
     pub field: Field,
-    pub line_id: Field,
     pub marked_terms: bool,
     pub positions: bool,
 }
@@ -1120,7 +1119,6 @@ impl crate::LineIndex {
             reader: self.reader.clone(),
             user: user.map(|u| u.reader.clone()),
             field: self.fields.text,
-            line_id: self.fields.line_id,
             marked_terms: self.options.keep_marks,
             positions: self.options.positions,
         }
@@ -1131,32 +1129,115 @@ impl crate::LineIndex {
 /// phrase is a union of plain phrases.
 const MAX_SPELLING_PHRASES: usize = 16;
 
-/// The lexical side of Otzaria's hybrid search (issue #18): the BM25 score
-/// of Otzaria's exact query for `query` (`build_exact_query_with`) for each
-/// of `lines` (the search's hits) it matches, keyed by line id. Only those
-/// lines are scored (each found by its line id, the postings sought to it),
-/// so a book filter or a narrow search costs only its hits; the statistics
-/// (doc frequency, average field norm) are index-wide, as Otzaria's
-/// query computes them (tantivy's `Bm25Weight`). The query's words are the index tokenizer's
-/// (a word too long to index dropped, as Otzaria's `RemoveLongFilter`):
+// ---------------------------------------------------------------------------
+// Otzaria's hybrid lexical side (issue #18): its smart exact query, top window
+
+/// Otzaria's `smart_query::alternative` (the app's `holyNameForPlaceholderWord`):
+/// a placeholder spelling of the divine name, a whole word with up to two
+/// prefix letters (vav, bet, kaf, lamed, mem, shin, he, each with its marks),
+/// gives the full name with the word's marks kept. Port of its regex
+/// `^((?:[prefix]\p{Mn}*){0,2})yod(\p{Mn}*)([qof dalet])(\p{Mn}*)vav(\p{Mn}*)([qof dalet])(\p{Mn}*)$`
+/// with the two placeholder letters equal.
+pub(crate) fn placeholder_alternative(word: &str) -> Option<String> {
+    use unicode_general_category::{get_general_category, GeneralCategory};
+    let mn = |c: char| get_general_category(c) == GeneralCategory::NonspacingMark;
+    let chars: Vec<char> = word.chars().collect();
+    let marks = |mut i: usize| -> usize {
+        while i < chars.len() && mn(chars[i]) {
+            i += 1;
+        }
+        i
+    };
+    const PREFIX: [char; 7] = ['\u{05D5}', '\u{05D1}', '\u{05DB}', '\u{05DC}', '\u{05DE}', '\u{05E9}', '\u{05D4}'];
+    const PLACEHOLDER: [char; 2] = ['\u{05E7}', '\u{05D3}'];
+    // the rest after `start`: yod marks X marks vav marks X marks end
+    let tail = |start: usize| -> Option<String> {
+        let mut i = start;
+        if chars.get(i) != Some(&'\u{05D9}') {
+            return None;
+        }
+        let m1 = (i + 1, marks(i + 1));
+        i = m1.1;
+        let x = *chars.get(i).filter(|c| PLACEHOLDER.contains(c))?;
+        let m2 = (i + 1, marks(i + 1));
+        i = m2.1;
+        if chars.get(i) != Some(&'\u{05D5}') {
+            return None;
+        }
+        let m3 = (i + 1, marks(i + 1));
+        i = m3.1;
+        if chars.get(i) != Some(&x) {
+            return None;
+        }
+        let m4 = (i + 1, marks(i + 1));
+        if m4.1 != chars.len() {
+            return None;
+        }
+        let s = |r: (usize, usize)| chars[r.0..r.1].iter().collect::<String>();
+        let prefix: String = chars[..start].iter().collect();
+        Some(format!("{prefix}\u{05D9}{}\u{05D4}{}\u{05D5}{}\u{05D4}{}", s(m1), s(m2), s(m3), s(m4)))
+    };
+    // the prefix group: 0, 1 or 2 letters with marks (greedy, then shorter)
+    let mut ends = vec![0usize];
+    let mut i = 0;
+    for _ in 0..2 {
+        match chars.get(i) {
+            Some(c) if PREFIX.contains(c) => {
+                i = marks(i + 1);
+                ends.push(i);
+            }
+            _ => break,
+        }
+    }
+    ends.into_iter().rev().find_map(tail)
+}
+
+/// One lexical candidate of Otzaria's hybrid search.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LexicalCandidate {
+    pub line_id: u64,
+    pub book_id: u64,
+    pub position: u64,
+    pub bm25: Score,
+}
+
+/// What [`hybrid_lexical_window`] needs from the host on an index without
+/// positions: the texts of these lines (a phrase of several words is scored
+/// from the line text there, the user's decision).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NeedTexts(pub Vec<u64>);
+
+/// Otzaria's hybrid lexical side (`semantic_exact_lexical_candidates`,
+/// api/search_engine.rs, otzaria_search_engine 5babbce): its smart exact query
+/// (`build_smart_exact_query`, `cross_line = false`) collected with
+/// `TopDocs::with_limit(window).order_by_score()` over the whole index (the
+/// book filter for its facets), so the best `window` lines by BM25 (ties in
+/// doc order) and the count of every line the query matches.
 ///
-/// - one word: `quote_expansion::term_query`: the word's spellings (the word
-///   and every term that is it with quotes inserted) as one term, doc
-///   frequencies summed, scored without frequencies (term frequency 1, as
-///   its `IndexRecordOption::Basic` term query).
-/// - several words: `quote_expansion::phrase_query` slop 0: up to 16
-///   spelling combinations, the sum of each combination's phrase BM25
-///   (tantivy's `PhraseScorer`, a `BooleanQuery` of `Should` phrases), the
-///   spellings of a word sharing their doc frequency; more combinations: one
-///   phrase over each word's spellings (named deviation: Otzaria scores that
-///   case with its `RegexPhraseQuery`). Needs positions.
+/// The query: each word of the query (the index tokenizer's words) as its
+/// spellings (`quote_expansion::spelling_terms` of the word and, when it is a
+/// placeholder spelling of the divine name, of its full spelling
+/// ([`placeholder_alternative`]); a quoted word verbatim):
+/// - one word: one term over its spellings (`SpellingsTermQuery`, doc
+///   frequencies summed, `IndexRecordOption::Basic`: term frequency 1);
+/// - several words: the exact phrase (slop 0) over each word's spellings, up
+///   to 16 spelling combinations a union of phrases (their BM25s summed) with
+///   the spellings sharing their doc frequency, more: one phrase over every
+///   word's spellings (Otzaria's `RegexPhraseQuery`, scored with the first
+///   spellings' weight).
 ///
-/// Not ported (named): the cross-line variant of the phrase (a cross-line
-/// pair is no lexical candidate here) and the smart-alternatives query
-/// (`build_smart_exact_query` with alternatives). The words are scanned from
-/// the raw string (Otzaria's hybrid query is plain text): query syntax such
-/// as an exclude word or a wildcard's stem counts as a word (named).
-pub(crate) fn hybrid_bm25(source: &HybridSource, query: &str, lines: &[u64]) -> Result<HashMap<u64, Score>> {
+/// On an index without positions a phrase is counted from the line texts
+/// (the scanner's word positions, as the index has them): the lines holding
+/// every word are returned in [`NeedTexts`] first, then scored from `texts`.
+pub(crate) fn hybrid_lexical_window(
+    source: &HybridSource,
+    book_field: Field,
+    position_field: Field,
+    query: &str,
+    books: Option<&[u64]>,
+    window: usize,
+    texts: &HashMap<u64, String>,
+) -> Result<std::result::Result<(Vec<LexicalCandidate>, u64), NeedTexts>> {
     let searcher = &match &source.user {
         Some(u) => tantivy::Searcher::union(&[source.reader.searcher(), u.searcher()])?,
         None => source.reader.searcher(),
@@ -1168,32 +1249,41 @@ pub(crate) fn hybrid_bm25(source: &HybridSource, query: &str, lines: &[u64]) -> 
             words.push(w.to_string());
         }
     });
-    let mut out: HashMap<u64, Score> = HashMap::new();
-    if words.is_empty() || lines.is_empty() {
-        return Ok(out);
+    if words.is_empty() || window == 0 {
+        return Ok(Ok((Vec::new(), 0)));
     }
-    if words.len() > 1 && !positions {
-        return Err(Error::Unsupported("hybrid fusion of several words needs an index with positions (Otzaria's exact phrase)".into()));
+    // each word's spellings: the typed word's, then its alternative's (spelling_terms)
+    let mut spellings_of: Vec<Vec<String>> = Vec::with_capacity(words.len());
+    for w in &words {
+        let mut s = spellings(searcher, field, w, marked_terms)?;
+        if let Some(alt) = placeholder_alternative(w) {
+            for t in spellings(searcher, field, &alt, marked_terms)? {
+                if !s.contains(&t) {
+                    s.push(t);
+                }
+            }
+        }
+        spellings_of.push(s);
     }
-    let spellings: Vec<Vec<String>> =
-        words.iter().map(|w| spellings(searcher, field, w, marked_terms)).collect::<Result<_>>()?;
     let groups: Vec<Vec<Term>> =
-        spellings.iter().map(|s| s.iter().map(|t| Term::from_field_text(field, t)).collect()).collect();
+        spellings_of.iter().map(|s| s.iter().map(|t| Term::from_field_text(field, t)).collect()).collect();
     let stats = GroupStatistics { inner: searcher, groups: &groups };
-    // the phrases: each one a term per word (offsets 0..k) and its weight
+    // the phrases (several words): the spelling combinations and their weights
     let mut phrases: Vec<(Vec<Vec<String>>, Bm25Weight)> = Vec::new();
     let single = if words.len() == 1 {
         Some(Bm25Weight::for_terms(&stats, &groups[0][..1])?)
     } else {
-        let combinations =
-            spellings.iter().try_fold(1usize, |n, s| n.checked_mul(s.len())).filter(|&n| n <= MAX_SPELLING_PHRASES);
+        let combinations = spellings_of
+            .iter()
+            .try_fold(1usize, |n, s| n.checked_mul(s.len()))
+            .filter(|&n| n <= MAX_SPELLING_PHRASES);
         match combinations {
             Some(n) => {
                 for pick in 0..n {
                     let mut rest = pick;
-                    let mut slots = Vec::with_capacity(spellings.len());
-                    let mut terms = Vec::with_capacity(spellings.len());
-                    for s in &spellings {
+                    let mut slots = Vec::with_capacity(spellings_of.len());
+                    let mut terms = Vec::with_capacity(spellings_of.len());
+                    for s in &spellings_of {
                         let t = &s[rest % s.len()];
                         rest /= s.len();
                         slots.push(vec![t.clone()]);
@@ -1204,70 +1294,159 @@ pub(crate) fn hybrid_bm25(source: &HybridSource, query: &str, lines: &[u64]) -> 
             }
             None => {
                 let terms: Vec<Term> = groups.iter().map(|g| g[0].clone()).collect();
-                phrases.push((spellings.clone(), Bm25Weight::for_terms(&stats, &terms)?));
+                phrases.push((spellings_of.clone(), Bm25Weight::for_terms(&stats, &terms)?));
             }
         }
         None
     };
-    for segment in searcher.segment_readers() {
-        // the hits' live docs in this segment, ascending
-        let ids = segment.inverted_index(source.line_id)?;
+    let book_set: Option<std::collections::HashSet<u64>> = books.map(|b| b.iter().copied().collect());
+    // (score, segment ord, doc, line, book, position): every match, then the top window
+    let mut all: Vec<(Score, usize, DocId, u64, u64, u64)> = Vec::new();
+    let mut missing: Vec<u64> = Vec::new();
+    for (ord, segment) in searcher.segment_readers().iter().enumerate() {
         let alive = segment.alive_bitset();
-        let mut docs: Vec<(DocId, u64)> = Vec::new();
-        for &id in lines {
-            if let Some(mut p) = ids.read_postings(&Term::from_field_u64(source.line_id, id), IndexRecordOption::Basic)? {
-                let mut doc = p.doc();
-                while doc != tantivy::TERMINATED {
-                    if alive.is_none_or(|a| a.is_alive(doc)) {
-                        docs.push((doc, id));
-                    }
-                    doc = p.advance();
-                }
-            }
-        }
-        if docs.is_empty() {
-            continue;
-        }
-        docs.sort_unstable();
-        docs.dedup();
+        let fast = segment.fast_fields();
+        let line_ids = fast.u64("line_id")?;
+        let book_ids = fast.u64(searcher.schema().get_field_name(book_field))?;
+        let places = fast.u64(searcher.schema().get_field_name(position_field))?;
         let inverted = segment.inverted_index(field)?;
-        let mut add = |id: u64, score: Score| {
-            let e = out.entry(id).or_insert(0.0);
-            *e = e.max(score);
+        let fieldnorms = segment.get_fieldnorms_reader(field)?;
+        let keep = |doc: DocId| -> Option<(u64, u64, u64)> {
+            if alive.is_some_and(|a| !a.is_alive(doc)) {
+                return None;
+            }
+            let book = book_ids.first(doc).unwrap_or(0);
+            if book_set.as_ref().is_some_and(|s| !s.contains(&book)) {
+                return None;
+            }
+            Some((line_ids.first(doc).unwrap_or(0), book, places.first(doc).unwrap_or(0)))
         };
         if let Some(bm25) = &single {
-            let Some(mut union) = open_union(&inverted, field, &spellings[0], IndexRecordOption::Basic)? else {
+            let Some(mut union) = open_union(&inverted, field, &spellings_of[0], IndexRecordOption::Basic)? else {
                 continue;
             };
-            let fieldnorms = segment.get_fieldnorms_reader(field)?;
-            for &(doc, id) in &docs {
-                if holds(&mut union, doc) {
-                    add(id, bm25.score(fieldnorms.fieldnorm_id(doc), 1));
+            let mut doc = union.doc();
+            while doc != tantivy::TERMINATED {
+                if let Some((line, book, pos)) = keep(doc) {
+                    all.push((bm25.score(fieldnorms.fieldnorm_id(doc), 1), ord, doc, line, book, pos));
+                }
+                doc = union.advance();
+            }
+            continue;
+        }
+        if positions {
+            let mut sums: HashMap<DocId, Score> = HashMap::new();
+            for (slots, bm25) in &phrases {
+                let Some(Part::Phrase { mut scorer, .. }) = phrase_part(segment, &inverted, field, slots, Some(bm25.clone()), 0, None)? else {
+                    continue;
+                };
+                let mut doc = scorer.doc();
+                while doc != tantivy::TERMINATED {
+                    *sums.entry(doc).or_insert(0.0) += tantivy::query::Scorer::score(scorer.as_mut());
+                    doc = scorer.advance();
+                }
+            }
+            for (doc, score) in sums {
+                if let Some((line, book, pos)) = keep(doc) {
+                    all.push((score, ord, doc, line, book, pos));
                 }
             }
             continue;
         }
-        let mut sums: Vec<Option<Score>> = vec![None; docs.len()];
-        for (slots, bm25) in &phrases {
-            let Some(Part::Phrase { mut scorer, .. }) = phrase_part(segment, &inverted, field, slots, Some(bm25.clone()), 0, None)? else {
-                continue;
-            };
-            for (i, &(doc, _)) in docs.iter().enumerate() {
-                if scorer.doc() < doc {
-                    scorer.seek(doc);
-                }
-                if scorer.doc() == doc {
-                    *sums[i].get_or_insert(0.0) += tantivy::query::Scorer::score(scorer.as_mut());
+        // no positions: the lines holding every word, the phrase counted from their texts
+        let mut unions = Vec::with_capacity(spellings_of.len());
+        for s in &spellings_of {
+            match open_union(&inverted, field, s, IndexRecordOption::Basic)? {
+                Some(u) => unions.push(u),
+                None => {
+                    unions.clear();
+                    break;
                 }
             }
         }
-        for (&(_, id), sum) in docs.iter().zip(sums) {
-            if let Some(score) = sum {
-                add(id, score);
+        if unions.is_empty() {
+            continue;
+        }
+        let mut doc = unions[0].doc();
+        while doc != tantivy::TERMINATED {
+            let mut target = doc;
+            let mut agreed = true;
+            for u in unions.iter_mut().skip(1) {
+                let d = u.seek(target);
+                if d != target {
+                    target = d;
+                    agreed = false;
+                    break;
+                }
             }
+            if !agreed {
+                if target == tantivy::TERMINATED {
+                    break;
+                }
+                doc = unions[0].seek(target);
+                continue;
+            }
+            if let Some((line, book, pos)) = keep(doc) {
+                match texts.get(&line) {
+                    None => missing.push(line),
+                    Some(text) => {
+                        let counts = phrase_counts(text, &phrases, marked_terms);
+                        let score: Score = phrases
+                            .iter()
+                            .zip(&counts)
+                            .filter(|(_, &n)| n > 0)
+                            .map(|((_, bm25), &n)| bm25.score(fieldnorms.fieldnorm_id(doc), n))
+                            .sum();
+                        if counts.iter().any(|&n| n > 0) {
+                            all.push((score, ord, doc, line, book, pos));
+                        }
+                    }
+                }
+            }
+            doc = unions[0].advance();
         }
     }
-    Ok(out)
+    if !missing.is_empty() {
+        missing.sort_unstable();
+        missing.dedup();
+        return Ok(Err(NeedTexts(missing)));
+    }
+    let total = all.len() as u64;
+    // TopDocs order_by_score: the higher score first, ties in doc order
+    all.sort_by(|a, b| b.0.total_cmp(&a.0).then((a.1, a.2).cmp(&(b.1, b.2))));
+    all.truncate(window);
+    Ok(Ok((
+        all.into_iter().map(|(bm25, _, _, line_id, book_id, position)| LexicalCandidate { line_id, book_id, position, bm25 }).collect(),
+        total,
+    )))
+}
+
+/// Per phrase (its slots: the allowed terms of each word), how many times it
+/// occurs adjacent in `text` (the scanner's word positions, the terms as the
+/// index has them): tantivy's phrase frequency, read from the text.
+fn phrase_counts(text: &str, phrases: &[(Vec<Vec<String>>, Bm25Weight)], marked_terms: bool) -> Vec<u32> {
+    // position -> the terms there (a paired reading puts two at one position)
+    let mut at: Vec<Vec<String>> = Vec::new();
+    hebrew_fts::scanner::scan_with(text, marked_terms, |w, span| {
+        if at.len() <= span.position {
+            at.resize(span.position + 1, Vec::new());
+        }
+        if span.term_bytes < hebrew_fts::chars::MAX_TERM_BYTES {
+            at[span.position].push(w.to_string());
+        }
+    });
+    phrases
+        .iter()
+        .map(|(slots, _)| {
+            let k = slots.len();
+            if at.len() < k {
+                return 0;
+            }
+            (0..=at.len() - k)
+                .filter(|&p| slots.iter().enumerate().all(|(i, allowed)| at[p + i].iter().any(|t| allowed.contains(t))))
+                .count() as u32
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1626,45 +1805,6 @@ mod tests {
         assert_eq!(o.order, ResultsOrder::Catalog);
         let o: SearchOptions = serde_json::from_str(r#"{"query":"x"}"#).unwrap();
         assert_eq!(o.order, ResultsOrder::Catalog);
-    }
-
-    /// Issue #18 follow-up: the hybrid BM25 scores only the hits (a book
-    /// filter scores its lines as the unfiltered search does: index-wide
-    /// statistics), and a live result pins no snapshot (issue #40).
-    #[test]
-    fn hybrid_bm25_scores_the_hits_with_index_wide_statistics() {
-        use crate::semantic::FusionOptions;
-        let texts = [
-            (1u64, "alpha beta gamma"),
-            (1, "beta alpha"),
-            (2, "alpha beta alpha beta"),
-            (2, "alpha"),
-            (3, "gamma delta"),
-        ];
-        let (_dir, index) = build(IndexOptions::default(), &texts);
-        let lexical = |r: &crate::SearchResult, q: &str| -> HashMap<u64, Option<f32>> {
-            r.fuse_semantic(q, &[], &FusionOptions::default()).unwrap().into_iter().map(|f| (f.line_id, f.lexical)).collect()
-        };
-        for q in ["alpha", "alpha beta"] {
-            let all = index.search_options(&crate::SearchOptions { query: q.into(), ..Default::default() }).unwrap();
-            let book2 =
-                index.search_options(&crate::SearchOptions { query: q.into(), books: Some(vec![2]), ..Default::default() }).unwrap();
-            let (all_l, b2) = (lexical(&all, q), lexical(&book2, q));
-            assert!(!b2.is_empty() && b2.keys().all(|id| *id == 102 || *id == 103), "{q}: {b2:?}");
-            for (id, l) in &b2 {
-                assert_eq!(all_l[id], *l, "{q}: line {id}");
-            }
-            // only the hits are scored
-            let source = index.hybrid_source(None);
-            let only = hybrid_bm25(&source, q, &[102]).unwrap();
-            assert_eq!(only.keys().copied().collect::<Vec<_>>(), vec![102]);
-            assert_eq!(Some(only[&102]), all_l[&102]);
-        }
-        // a live result across release_memory: same numbers
-        let live = index.search_options(&crate::SearchOptions { query: "alpha".into(), ..Default::default() }).unwrap();
-        let before = lexical(&live, "alpha");
-        index.release_memory().unwrap();
-        assert_eq!(lexical(&live, "alpha"), before);
     }
 
     #[test]

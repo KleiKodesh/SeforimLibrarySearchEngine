@@ -396,6 +396,10 @@ results; never redo work. KitveiHakodesh is the sibling checkout `../KleiKodeshP
   accept a quote AFTER its pattern too (the wildcard missed it: 5 parity diffs).
 - With every script a word char the dictionary has ~280 chars: FM codes are 16-bit.
   FtsLib's `UnicodeTables.cs` is generated from Rust (`tools/unicode-tables/gen.rs`).
+- **Vector text check needs content AS STORED** (issue #18): note bodies are zstd frames like
+  line content (read as raw bytes they failed 10% of the full library), and Dart's `utf8.decode`
+  drops a leading BOM, which Otzaria's chunker keeps (the last 28 / 58 records). Hosts pass
+  `rawContent` bytes (`CAST(col AS BLOB)` + frame decode), never a decoded String.
 - **NetFree filter blocks requests ("API Error: 418 I'm a Teapot")**, killing agents twice.
   Rule (user's): keep Hebrew content out of prompts, reports and tool output where possible;
   refer to Hebrew by unicode escapes / hex / file+line, never paste Hebrew text or long Hebrew

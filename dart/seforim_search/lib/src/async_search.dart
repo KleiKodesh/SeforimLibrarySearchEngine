@@ -431,10 +431,6 @@ final class AsyncSearchSession {
   /// [SearchSession.counts].
   Future<HitCounts> counts() => _call('counts');
 
-  /// [SearchSession.fuseSemantic] on the worker (issue #18).
-  Future<List<FusedHit>> fuseSemantic(String query, SemanticResult semantic,
-          [FusionOptions fusion = const FusionOptions()]) =>
-      _call('fuseSemantic', (query, semantic, fusion));
 
   /// [SearchSession.info].
   Future<SearchInfo> info() => _call('info');
@@ -634,9 +630,6 @@ void _workerMain((SendPort, String, String?) args) {
           index.setVectorMapping((a as List).cast<OxvBookMap>(), replace: b as bool);
         case 'vectorInfo':
           value = index.vectorInfo();
-        case 'fuseSemantic':
-          final (query, semantic, fusion) = b as (String, SemanticResult, FusionOptions);
-          value = s().fuseSemantic(query, semantic, fusion);
         case 'openWriter':
           final wid = nextSession++;
           writers[wid] = index.openWriter(heapBytes: a as int, threads: b as int, lowPriority: c as bool);

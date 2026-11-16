@@ -805,6 +805,7 @@ dependencies = [
  "serde_json",
  "tantivy",
  "tempfile",
+ "unicode-general-category",
  "winapi",
 ]
 

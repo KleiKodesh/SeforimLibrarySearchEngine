@@ -1846,11 +1846,30 @@ mod tests {
         const C: &str = "\u{05D4}\u{05D5}";
         let texts: Vec<String> = vec![A.into(), B.into(), A_V.into(), B_V.into(), A.into(), C.into()];
         let docs: Vec<LineDoc> = texts.iter().enumerate().map(|(i, t)| xline(i as u64, 1, t, None, false)).collect();
+        // Every two-segment layout, deterministic (one indexing thread, one
+        // commit per segment). It was flaky with a 2-thread build: when lines
+        // 2 and 3 sat in different segments and line 3's segment held no
+        // first word, the AND never built the second slot's scorer there, so
+        // its marked term never reached the cross-line pass (fixed in
+        // `search_unstamped`: every slot walks every segment for cross-line).
         for positions in [true, false] {
-            let dir = tempfile::tempdir().unwrap();
-            let index = build(dir.path(), IndexOptions { positions, keep_marks: true }, &docs);
-            let o = SearchOptions { query: format!("{A} {B}"), match_nikud: true, cross_line: true, ..Default::default() };
-            assert_eq!(passing(&index, &o, &texts), vec![(2, true)], "positions={positions}");
+            // each doc in the first or the second segment (2 threads split a
+            // batch this way); mask 0 = one segment
+            for mask in 0u32..(1 << docs.len()) {
+                let dir = tempfile::tempdir().unwrap();
+                let index = LineIndex::create(dir.path(), IndexOptions { positions, keep_marks: true }).unwrap();
+                let mut w = index.writer(50_000_000, 1).unwrap();
+                for second in [false, true] {
+                    for (i, d) in docs.iter().enumerate() {
+                        if (mask >> i & 1 == 1) == second {
+                            w.add(d).unwrap();
+                        }
+                    }
+                    w.commit(None).unwrap();
+                }
+                let o = SearchOptions { query: format!("{A} {B}"), match_nikud: true, cross_line: true, ..Default::default() };
+                assert_eq!(passing(&index, &o, &texts), vec![(2, true)], "positions={positions} mask={mask:06b}");
+            }
         }
     }
 

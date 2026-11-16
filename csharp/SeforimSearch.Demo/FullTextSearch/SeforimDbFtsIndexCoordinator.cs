@@ -313,8 +313,21 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 foreach (var kv in _sessions)
                     try { kv.Value.Cts.Cancel(); } catch (ObjectDisposedException) { }
                 for (int i = 0; i < 50 && !_sessions.IsEmpty; i++) Thread.Sleep(100);
+                // One-shot searches (Search, LinesSearch) cannot be cancelled: wait for them to
+                // finish before the engine they read is closed (new ones are refused while the
+                // reset is in flight). Core disposes without waiting; this waits, logging once.
+                bool logged = false;
                 lock (_lock)
                 {
+                    while (_activeOneShotSearches > 0)
+                    {
+                        if (!logged && !Monitor.Wait(_lock, TimeSpan.FromSeconds(5)))
+                        {
+                            logged = true;
+                            _log(FtsIndexLogLevel.Warning, "FTS reset: waiting for " + _activeOneShotSearches + " one-shot search(es) to finish", null);
+                        }
+                        else if (logged) Monitor.Wait(_lock, TimeSpan.FromSeconds(1));
+                    }
                     _engine?.Dispose();
                     _engine = null;
                     _isReady = false;
@@ -370,7 +383,12 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             result.Ready = true;
             if (string.IsNullOrWhiteSpace(query)) return result;
 
-            lock (_lock) _activeOneShotSearches++;
+            // a reset in flight is about to close the engine: answer "not ready" instead
+            lock (_lock)
+            {
+                if (_resetInFlight) { result.Ready = false; return result; }
+                _activeOneShotSearches++;
+            }
             try
             {
                 var terms = new FtsTermTable();
@@ -399,7 +417,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             }
             finally
             {
-                lock (_lock) _activeOneShotSearches--;
+                lock (_lock) { _activeOneShotSearches--; Monitor.PulseAll(_lock); }
             }
             return result;
         }
@@ -416,7 +434,11 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             EnsureIndexing();
             var result = new FtsLinesSearchResult();
             if (!HasDb || !_isReady || string.IsNullOrWhiteSpace(query)) return result;
-            lock (_lock) _activeOneShotSearches++;
+            lock (_lock)
+            {
+                if (_resetInFlight) return result;
+                _activeOneShotSearches++;
+            }
             try
             {
                 var lineRanges = new List<(int, int, int)>(ranges.Count);
@@ -436,7 +458,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             }
             finally
             {
-                lock (_lock) _activeOneShotSearches--;
+                lock (_lock) { _activeOneShotSearches--; Monitor.PulseAll(_lock); }
             }
             return result;
         }

@@ -57,8 +57,35 @@ namespace SeforimSearch.Demo
             if (command == "load") return LoadCommand.Run(engine, args);
             if (command == "resort") return ResortCommand.Run(engine, db, index, args);
             if (command == "update") return UpdateCommand.Run(engine, db, args);
+            if (command == "substring") return SubstringDump(engine, args);
             Console.Error.WriteLine("unknown command " + command);
             return 2;
+        }
+
+        /// <summary><c>substring --cases file --out file</c> (issue G-K1 parity with FtsLib, the same
+        /// format as tools/parity FtsLibDump substring): each case line is
+        /// <c>query TAB book:first..last,book:first..last</c>; each output line is the query, TAB,
+        /// then DECLINED or the candidates as <c>book:lineIndex:lineId</c> joined by spaces, in
+        /// the answer's order (Core's SubstringCandidates).</summary>
+        private static int SubstringDump(SeforimDbFtsEngine engine, string[] args)
+        {
+            string cases = Option(args, "--cases") ?? throw new ArgumentException("--cases file");
+            string outPath = Option(args, "--out") ?? throw new ArgumentException("--out file");
+            using var w = new StreamWriter(outPath, false, new UTF8Encoding(false));
+            foreach (var raw in File.ReadAllLines(cases, Encoding.UTF8))
+            {
+                if (string.IsNullOrWhiteSpace(raw) || raw.StartsWith("#")) continue;
+                var parts = raw.Split('	');
+                var ranges = new List<(int, int, int)>();
+                foreach (var r in parts[1].Split(','))
+                {
+                    var bf = r.Split(':'); var fl = bf[1].Split(new[] { ".." }, StringSplitOptions.None);
+                    ranges.Add((int.Parse(bf[0]), int.Parse(fl[0]), int.Parse(fl[1])));
+                }
+                var found = engine.SubstringCandidates(parts[0], ranges);
+                w.WriteLine(parts[0] + "	" + (found == null ? "DECLINED" : string.Join(" ", found.Select(c => c.BookId + ":" + c.LineIndex + ":" + c.LineId))));
+            }
+            return 0;
         }
 
         private static int Build(SeforimDbFtsEngine engine, string[] args)

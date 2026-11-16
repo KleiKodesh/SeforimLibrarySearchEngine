@@ -916,8 +916,14 @@ changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
   `declined`) when a word has no indexable term or the index has no usable FM
   sidecar (an index of several segments, e.g. right after a per-book update
   until its background merge lands: the host then scans, as FtsLib did
-  without an FM-index). Over the cap, FtsLib counts distinct terms (on a
-  keep-marks index their mark-free forms) and declines before reading any.
+  without an FM-index). Over the cap: FtsLib's dictionary is quote- and
+  mark-free, so a term's quote- and mark-free form is what counts (a quoted
+  twin and its plain term count once). Parity with the real FtsLib:
+  `tools/parity/substring_fixture.py` (a 3,200-line fixture: acronyms, nikud,
+  maqaf, inline tags; 71 cases of one to 40 ranges) run through `FtsLibDump
+  substring` and `SeforimSearch.Demo substring`, compared by
+  `substring_compare.py`: identical on both index flavours (19 declined,
+  929 candidates).
 - **Decline instead of truncating** (issue G-K1): option `decline_over_cap`
   (C# `DeclineOverCap`, Dart `declineOverCap`): when any word's expansion
   exceeds its cap the search returns no hit and `declined` (C ABI
@@ -1830,7 +1836,14 @@ stay available):
   plumbing of Core's service): `SeforimDbReadiness` (waiting while another
   app writes the DB) and the old trial-folder cleanup. The demo CLI keeps a
   second constructor `(engine, log)` over an index its `build` command made.
-  Selftest: substring find, coordinator lifecycle, related forms.
+  Named differences from Core / FtsLib: a cap of 0 is uncapped (the engine's
+  rule; FtsLib's `maxTermsPerFragment = 0` declines any fragment with a term;
+  Core always passes 4000); FtsLib's `^` marker (spelling variants) becomes
+  the engine's per-word ktiv with FtsLib's rules on that typed word
+  (`TantivySeforimIndex.ApplyKetivMarkers`); a reset waits for one-shot
+  searches in flight (and refuses new ones) before it closes the engine,
+  where Core closes it under them.
+  Selftest: substring find, coordinator lifecycle, related forms, `^`.
 - **DB code**, copied from KitveiHakodesh Core with namespace renames only:
   - schema probe (3 DB shapes), zstd codec, catalog tree order, content
     fingerprint

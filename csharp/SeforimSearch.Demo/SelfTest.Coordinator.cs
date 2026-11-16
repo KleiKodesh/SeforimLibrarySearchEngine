@@ -163,6 +163,15 @@ namespace SeforimSearch.Demo
             Check(x.RewriteQuery(word + "=") == word + "= | " + syn, "synonyms only");
             Check(x.RewriteQuery(word + "+=") == word + "+= | " + form + " | " + syn, "both");
             Check(new SeforimDbFtsRelatedFormExpander(Path.Combine(dir, "none.db")).RewriteQuery(word + "+") == word + "+", "no artifact: unchanged");
+
+            // FtsLib's '^' marker: ktiv with FtsLib's rules on that typed word ('|' is no word)
+            var o = new SeforimSearch.Engine.SearchOptions("a | ^b c *^d e+");
+            global::FtsLib.Fts5.TantivySeforimIndex.ApplyKetivMarkers(o.Query, o);
+            Check(o.Words.Keys.OrderBy(k => k).SequenceEqual(new[] { 1, 3 }), "ketiv words: " + string.Join(",", o.Words.Keys));
+            Check(o.Words[1].KtivMaleHaser == true && o.Words[1].KtivRules == SeforimSearch.Engine.KtivRules.FtsLib, "ketiv options");
+            // end to end on the fixture: '^' finds what the ktiv walk finds, and is not dropped silently
+            using var engine = new SeforimDbFtsEngine(Path.Combine(dir, "index-substring"), db);
+            Check(engine.Index.Search("^beta").Count() == engine.Index.Search("beta").Count(), "a marked word still searches");
         }
     }
 }

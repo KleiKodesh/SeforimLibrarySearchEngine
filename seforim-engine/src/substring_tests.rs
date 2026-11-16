@@ -169,3 +169,13 @@ fn position_ranges_filter_a_line_regex_and_cross_line() {
     let cross_in = SearchOptions { position_ranges: Some(vec![(1, 1)]), ..cross };
     assert_eq!(ids(&ix, &cross_in), Some(vec![11]));
 }
+
+#[test]
+fn a_quoted_twin_counts_once_against_the_cap() {
+    // FtsLib's dictionary is quote-free: `ab"q` and `abq` are one term there
+    let lines = [line(1, 0, 1, "abq"), line(2, 1, 1, "ab\"q"), line(3, 2, 1, "xbqx")];
+    let (_d, ix) = index(true, true, &lines);
+    let o = |cap| SearchOptions { max_expanded_terms: cap, ..substring("bq") };
+    assert_eq!(ids(&ix, &o(2)), Some(vec![1, 2, 3]));
+    assert_eq!(ids(&ix, &o(1)), None);
+}

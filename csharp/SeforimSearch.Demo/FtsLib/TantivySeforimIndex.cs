@@ -284,7 +284,7 @@ namespace FtsLib.Fts5
         private static SearchOptions ToRequest(string query, TantivySearchOptions options)
         {
             var w = options.WordOptions ?? new WalkOptions();
-            return new SearchOptions(query)
+            var request = new SearchOptions(query)
             {
                 GrammarPrefixes = w.GrammarPrefixes,
                 GrammarSuffixes = w.GrammarSuffixes,
@@ -312,6 +312,30 @@ namespace FtsLib.Fts5
                 Order = options.Order,
                 MaxExpandedTerms = options.MaxExpandedTerms,
             };
+            ApplyKetivMarkers(query, request);
+            return request;
+        }
+
+        /// <summary>FtsLib's '^' marker (spelling variants, its KetivExpander) on a word: that
+        /// word gets ktiv male / haser with FtsLib's rules (the engine's per-word option, keyed by
+        /// the typed word's index: the query cut on whitespace and '|', '|' not a word). The '^'
+        /// itself is a transparent char to the engine's tokenizer.</summary>
+        internal static void ApplyKetivMarkers(string query, SearchOptions request)
+        {
+            if (query.IndexOf('^') < 0) return;
+            int index = 0;
+            foreach (string token in query.Replace("|", " | ").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (token == "|") continue;
+                global::FtsLib.Search.WordMarkers.Split(token, out bool ketiv, out _, out _, out _);
+                if (ketiv)
+                {
+                    if (!request.Words.TryGetValue(index, out var w)) request.Words[index] = w = new WordOptions();
+                    w.KtivMaleHaser = true;
+                    w.KtivRules = KtivRules.FtsLib;
+                }
+                index++;
+            }
         }
 
         /// <summary>

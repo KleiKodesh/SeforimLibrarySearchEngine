@@ -289,6 +289,13 @@ results; never redo work. KitveiHakodesh is the sibling checkout `../KleiKodeshP
   Run `SeforimSearch.Demo selftest` (both TFMs) after touching it.
 - Index MUST be merged to one segment after a build: every walk repeats per segment
   (*יצח* 4.8 s on 37 segments → 1.1 s on 1), and the FM-index sidecar needs one segment.
+- **A slot's terms come only from segments where its scorer was built**, and an AND skips
+  later clauses' scorers in a segment where an earlier one has no term. Cross-line (pairs
+  across segments) lost terms that way: a 1-in-2 flake on a 2-thread test build. Cross-line
+  now walks every slot in every segment first; tests that depend on the layout enumerate
+  layouts deterministically (one thread, a commit per segment), never a multi-thread build.
+- **FtsLib's dictionary is quote-free** (its FTS5 vocab and terms.db hold no `"` / `'`), so
+  term counts against FtsLib caps count quote- and mark-free forms.
 - **Deleted docs were hits.** Search collected through `weight.for_each_no_score`, which
   does NOT skip deleted docs (tantivy's collectors check `segment.alive_bitset()`
   themselves). An updated line (delete + add) came back in its old version too when its

@@ -3264,6 +3264,32 @@ impl LineIndex {
             session.unmarked = self.unmarked_terms(request, &searcher, walk)?;
         }
 
+        // Cross-line over several segments: a slot reports a term only from
+        // the segments where its scorer was built, and an AND skips the
+        // later clauses' scorers in a segment where an earlier one has no
+        // term. A pair whose lines sit in different segments (a per-book
+        // update, or a build's writer threads) then lost the slot's terms of
+        // the other segment. Walk every slot in every segment into its own
+        // sink first (the same walk: the same terms; only when it matters).
+        if cross && searcher.segment_readers().len() > 1 {
+            let walk_all = |group: &GroupSpec, sink: &MatchedTermsSink| -> Result<()> {
+                if let Some(q) = self.group_query(group, sink, &searcher, walk)? {
+                    let w = q.weight(tantivy::query::EnableScoring::disabled_from_searcher(&searcher))?;
+                    for segment in searcher.segment_readers() {
+                        let _ = w.scorer(segment, 1.0)?;
+                    }
+                }
+                Ok(())
+            };
+            for (group, sink) in main_slots.iter().zip(&sinks) {
+                walk_all(group, sink)?;
+            }
+            for ((alt_sinks, _), groups) in alternatives.iter().zip(&alternative_groups) {
+                for (group, sink) in groups.iter().zip(alt_sinks) {
+                    walk_all(group, sink)?;
+                }
+            }
+        }
         // The main query's matcher, if it can match at all.
         let mut group_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
         // every slot's terms, empty ones included (aligned with `main_slots`)

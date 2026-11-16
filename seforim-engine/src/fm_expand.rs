@@ -304,9 +304,9 @@ mod tests {
 /// dictionary term containing `fragment` at any place, of any length, read
 /// off the sidecar with no affix budget (`FmIndex.FindRowIds(fragment,
 /// false)`). The sidecar's text is quote- and mark-free, so the fragment is
-/// searched in that form. FtsLib counts distinct terms against the cap; on
-/// an index that keeps marks a term's mark-free form is the one counted
-/// (FtsLib's terms carry no marks). Over `cap`: the terms the walk's cap
+/// searched in that form. FtsLib counts its dictionary's terms, which are
+/// quote-free and mark-free: here a term's quote- and mark-free form is
+/// the one counted (a quoted twin and its plain term count once). Over `cap`: the terms the walk's cap
 /// keeps and `true` (the caller declines or flags truncation); with
 /// `decline` no term is returned once the count is over.
 pub fn expand_substring(
@@ -323,12 +323,11 @@ pub fn expand_substring(
         return Ok((Vec::new(), false));
     }
     let rows = fm.find_row_ids(&core, false);
-    // FtsLib declines on the COUNT, before a single term is read: the rows
-    // are distinct terms (on a marks-keeping index several may share one
-    // mark-free form, so they are read and counted).
-    if decline && !marked_terms && rows.len() > cap {
-        return Ok((Vec::new(), true));
-    }
+    // FtsLib's dictionary holds one quote-free (mark-free) term per form,
+    // so it counts forms: a quoted twin and its plain term are one, and
+    // the rows are read to count them. A row count within the cap is
+    // within it in forms too.
+    let zero_width = zero_width_chars(marked_terms);
     let mut buf = Vec::new();
     let mut kept: Vec<(u32, Vec<u8>)> = Vec::with_capacity(rows.len().min(cap.saturating_add(1)));
     let mut counted: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
@@ -338,11 +337,14 @@ pub fn expand_substring(
         if !term_of(dict, rowid, &mut buf)? {
             continue;
         }
-        let key = if marked_terms { strip_mark_bytes(&buf).into_owned() } else { buf.clone() };
+        let key = zero_width.strip(&buf).into_owned();
         counted.insert(key);
         kept.push((0, buf.clone()));
         if counted.len() > cap {
             over = true;
+            if decline {
+                return Ok((Vec::new(), true)); // declined: no term needed
+            }
         }
     }
     if !over {

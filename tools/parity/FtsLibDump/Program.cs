@@ -86,6 +86,31 @@ if (args.Length > 0 && args[0] == "search")
     return;
 }
 
+// FtsLibDump substring <seforim.db> <index dir> <cases file> <out file>
+//   Issue G-K1 parity: Core's SubstringCandidates (FtsLib FindSubstringCandidates) per case
+//   line "query TAB book:first..last,...", one output line per case: the query, TAB, then
+//   DECLINED or "book:lineIndex:lineId" candidates joined by spaces, in the answer's order
+//   (the same format as SeforimSearch.Demo substring).
+if (args.Length > 0 && args[0] == "substring")
+{
+    using var xengine = new SeforimDbFtsEngine(args[2], args[1]);
+    using var xw = new StreamWriter(args[4], false, new UTF8Encoding(false));
+    foreach (var raw in File.ReadAllLines(args[3], Encoding.UTF8))
+    {
+        if (string.IsNullOrWhiteSpace(raw) || raw.StartsWith("#")) continue;
+        var parts = raw.Split('	');
+        var ranges = new List<(int, int, int)>();
+        foreach (var r in parts[1].Split(','))
+        {
+            var bf = r.Split(':'); var fl = bf[1].Split(new[] { ".." }, StringSplitOptions.None);
+            ranges.Add((int.Parse(bf[0]), int.Parse(fl[0]), int.Parse(fl[1])));
+        }
+        var found = xengine.SubstringCandidates(parts[0], ranges);
+        xw.WriteLine(parts[0] + "	" + (found == null ? "DECLINED" : string.Join(" ", found.Select(c => c.BookId + ":" + c.LineIndex + ":" + c.LineId))));
+    }
+    return;
+}
+
 // --ketiv (anywhere): FtsLib's ketiv expansion on every word ('^' marker, KetivExpander variants).
 bool ketiv = args.Contains("--ketiv");
 args = args.Where(a => a != "--ketiv").ToArray();

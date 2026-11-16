@@ -45,6 +45,7 @@ namespace SeforimSearch.Demo
                 return 2;
             }
             if (command == "semantic-search") return SemanticCommand.Search(db, args);
+            if (command == "semantic-verify") return SemanticCommand.Verify(db, args);
             Console.Error.WriteLine($"db: {db}\nindex: {index}\nengine: {SeforimIndex.NativeVersion}  runtime: {System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}");
 
             using var engine = new SeforimDbFtsEngine(index, db);

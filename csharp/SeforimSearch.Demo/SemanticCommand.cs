@@ -30,7 +30,7 @@ namespace SeforimSearch.Demo
     /// </summary>
     internal static class SemanticCommand
     {
-        private static readonly string[] ValueOptions = { "--db", "--index", "--vectors", "--books", "--threads", "--repeat", "--query", "--line", "--lines", "--k", "--model", "--chunking-identity" };
+        private static readonly string[] ValueOptions = { "--db", "--index", "--vectors", "--books", "--threads", "--repeat", "--query", "--line", "--lines", "--k", "--model", "--chunking-identity", "--report" };
 
         private static List<string> Positional(string[] args)
         {
@@ -88,7 +88,8 @@ namespace SeforimSearch.Demo
         /// order plus its <c>line_note</c> rows; a row holding a newline gives several lines). With
         /// <paramref name="verify"/> false: the old unchecked ordinal mapping (<see cref="SeforimSemantic.MapVectorBook"/>).
         /// Returns the books skipped.</summary>
-        internal static long MapBooks(SeforimIndex index, SqliteConnection conn, string vectors, VectorSetInfo info, bool verify, ulong chunkingIdentity)
+        internal static long MapBooks(SeforimIndex index, SqliteConnection conn, string vectors, VectorSetInfo info, bool verify, ulong chunkingIdentity,
+                                      List<(long Book, int Rows, int Notes, VectorBookVerify V)>? perBook = null)
         {
             var schema = SeforimDbSchema.Probe(conn);
             using var codec = SeforimDbLineContentCodec.Create(conn);
@@ -112,6 +113,7 @@ namespace SeforimSearch.Demo
                 var notes = hasNotes ? ReadBookNotes(conn, noteCols, bookId) : new List<VectorBookNote>();
                 var v = index.MapVectorBookRows(kv.Key, (ulong)bookId, lineIds.Select(x => (ulong)x).ToArray(), rows!.ToArray(), notes, chunkingIdentity);
                 mapped++;
+                perBook?.Add((bookId, lineIds.Count, notes.Count, v));
                 tot.Lines += v.Lines; tot.Records += v.Records; tot.Verified += v.Verified; tot.Moved += v.Moved; tot.Unverified += v.Unverified;
             }
             Console.WriteLine($"books mapped {mapped:N0}; skipped: name not id:N {notIdName:N0}, missing from DB {missing:N0}" +
@@ -120,6 +122,32 @@ namespace SeforimSearch.Demo
                 Console.WriteLine($"text check: lines {tot.Lines:N0}, records {tot.Records:N0}, verified {tot.Verified:N0}, " +
                                   $"moved {tot.Moved:N0}, unverified {tot.Unverified:N0}");
             return notIdName + missing + tooFew;
+        }
+
+        /// <summary><c>semantic-verify &lt;scratch index dir&gt; --vectors &lt;set dir | .oxv&gt; [--chunking-identity N]
+        /// [--report N]</c>: maps every book of the set with Otzaria's text check and prints the totals, the
+        /// books with the most unverified records (rows, notes, lines, records, unverified) and the time.</summary>
+        internal static int Verify(string db, string[] args)
+        {
+            var pos = Positional(args);
+            string? vectors = Program.OptionOf(args, "--vectors");
+            if (pos.Count == 0 || vectors == null) { Console.Error.WriteLine("usage: semantic-verify <scratch index dir> --vectors <set dir | .oxv>"); return 2; }
+            int report = int.TryParse(Program.OptionOf(args, "--report"), out int rr) ? rr : 30;
+            string? ciArg = Program.OptionOf(args, "--chunking-identity");
+            ulong identity = ciArg != null ? ulong.Parse(ciArg) : 0;
+            using var index = Directory.Exists(pos[0]) && Directory.EnumerateFileSystemEntries(pos[0]).Any() ? SeforimIndex.Open(pos[0]) : SeforimIndex.Create(pos[0]);
+            var info = index.OpenVectors(vectors);
+            using var conn = SqliteConnectionFactory.OpenCorpusRead(db);
+            var per = new List<(long Book, int Rows, int Notes, VectorBookVerify V)>();
+            var sw = Stopwatch.StartNew();
+            MapBooks(index, conn, vectors, info, true, identity, per);
+            Console.WriteLine($"mapping + verify: {Time(sw.Elapsed)}, books {per.Count:N0}");
+            int bad = per.Count(b => b.V.Unverified > 0);
+            Console.WriteLine($"books with unverified records: {bad:N0}; all records unverified: {per.Count(b => b.V.Records > 0 && b.V.Unverified == b.V.Records):N0}");
+            foreach (var b in per.OrderByDescending(b => b.V.Unverified).Take(report))
+                Console.WriteLine($"  book {b.Book,6}: rows {b.Rows,7:N0} notes {b.Notes,6:N0} lines {b.V.Lines,7:N0} records {b.V.Records,7:N0} " +
+                                  $"verified {b.V.Verified,7:N0} moved {b.V.Moved,6:N0} unverified {b.V.Unverified,7:N0}");
+            return 0;
         }
 
         /// <summary>The book's line ids in <c>lineIndex, id</c> order and (when <paramref name="withRows"/>)

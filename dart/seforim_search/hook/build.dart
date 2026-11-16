@@ -19,6 +19,23 @@ void main(List<String> args) async {
     final hasSources = File.fromUri(workspace.uri.resolve('engine-ffi/Cargo.toml')).existsSync();
     final cargo = _findCargo();
 
+    // `optional: true`: a library that cannot be had (no file, no pinned
+    // prebuilt, no cargo) bundles nothing instead of failing the app's
+    // build; the app then must not load the engine (it is not there).
+    final optional = '${input.userDefines['optional']}' == 'true';
+    try {
+      await _bundle(input, output, code, target, cargo, hasSources);
+    } catch (e) {
+      if (!optional) rethrow;
+      stderr.writeln('seforim_search: no native library bundled (optional): $e');
+    }
+  });
+}
+
+Future<void> _bundle(BuildInput input, BuildOutputBuilder output, CodeConfig code, String target, String? cargo,
+    bool hasSources) async {
+  final workspace = Directory.fromUri(input.packageRoot.resolve('../../'));
+  {
     final source = NativeSource.resolve(
       userDefines: input.userDefines,
       target: target,
@@ -54,7 +71,7 @@ void main(List<String> args) async {
       linkMode: DynamicLoadingBundled(),
       file: library.uri,
     ));
-  });
+  }
 }
 
 String _packageVersion(Uri packageRoot) {

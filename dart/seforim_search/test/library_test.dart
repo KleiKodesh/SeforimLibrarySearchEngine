@@ -43,8 +43,8 @@ void main() {
     var id = 1;
     for (final b in [1, 2]) {
       for (var k = 0; k < 5; k++) {
-        w.execute('INSERT INTO line VALUES (?, ?, ?, ?, ?, NULL)',
-            [id++, b, k, 'w$k alpha beta gamma delta epsilon zeta eta theta alpha', 'ref $b:$k']);
+        w.execute('INSERT INTO line VALUES (?, ?, ?, ?, ?, ?)',
+            [id++, b, k, 'w$k alpha beta gamma delta epsilon zeta eta theta alpha', 'ref $b:$k', k < 3 ? 10 + b : null]);
       }
     }
     w.close();
@@ -89,6 +89,19 @@ void main() {
       expect(more.last.complete, isTrue);
       expect(more.last.counts!.total, 10);
       expect(more.last.counts!.byBook, {1: 5, 2: 5});
+
+      // matched terms for highlighting; all-matches marks every occurrence
+      final all = await lib.search(SearchOptions('alpha'), limit: 1, matchMode: SnippetMatchMode.allMatches).toList();
+      expect(all.expand((p) => p.terms), contains('alpha'));
+      expect(all.first.results.first.highlights.length, 2);
+
+      // grouping by section: book 2 lines 0-2 (section 12) are one group
+      final g = await lib.search(SearchOptions('alpha'), grouping: Grouping.sameSection, withCounts: true).toList();
+      final reps = [for (final p in g) ...p.results];
+      expect(g.last.groupCount, 6); // 2 sections + 4 lines without one
+      expect(reps.first.groupSize, 3);
+      expect(reps.first.siblings.map((x) => x.lineIndex), [1, 2]);
+      expect(g.last.counts!.total, 10);
 
       final c = await lib.counts(SearchOptions('alpha'));
       expect(c.exact, isTrue);

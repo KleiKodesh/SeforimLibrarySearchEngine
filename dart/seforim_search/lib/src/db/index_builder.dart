@@ -119,13 +119,19 @@ void buildIndexFromDb(SeforimDb db, String dir,
 /// first run and later DB changes.
 abstract final class SeforimIndexBuilder {
   /// True when [dir] holds no usable index for [dbPath]: missing, not
-  /// openable (an older index format), or built without a payload.
-  static bool needsBuild(String dir) {
+  /// openable (an older index format), built without a payload, or (with
+  /// [options]) built with other index options.
+  static bool needsBuild(String dir, {IndexOptions? options}) {
     if (!SeforimIndex.exists(dir)) return true;
     try {
       final i = SeforimIndex.open(dir);
       try {
-        final p = i.info().payload;
+        final info = i.info();
+        final p = info.payload;
+        // built with other options (positions / keep marks): rebuild
+        if (options != null && (info.positions != options.positions || info.keepMarks != options.keepMarks)) {
+          return true;
+        }
         return p == null || !p.contains('"lines"');
       } finally {
         i.close();
@@ -156,7 +162,7 @@ abstract final class SeforimIndexBuilder {
   /// (replaced DB without content hashes) rebuilds.
   static Stream<IndexBuildProgress> ensure(String dbPath, String dir,
       {IndexOptions options = const IndexOptions(), Future<void>? cancel, String? nativePath}) {
-    if (needsBuild(dir)) return build(dbPath, dir, options: options, cancel: cancel, nativePath: nativePath);
+    if (needsBuild(dir, options: options)) return build(dbPath, dir, options: options, cancel: cancel, nativePath: nativePath);
     return _run(cancel, nativePath, (send, isCancelled) {
       final db = SeforimDb.open(dbPath);
       try {

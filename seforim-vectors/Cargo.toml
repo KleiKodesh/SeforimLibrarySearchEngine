@@ -10,6 +10,7 @@ license = "MIT"
 memmap2 = "0.9"
 crc32fast = "1.3.2"
 sha2 = "0.10"
+regex = { version = "1", default-features = false, features = ["std", "unicode"] }
 zstd = { version = "0.14", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

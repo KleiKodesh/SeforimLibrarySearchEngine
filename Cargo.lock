@@ -814,6 +814,7 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "memmap2",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

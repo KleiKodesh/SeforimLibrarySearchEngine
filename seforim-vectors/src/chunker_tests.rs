@@ -1,0 +1,118 @@
+use super::*;
+
+fn refs(lines: &[(&'static str, u64)]) -> Vec<LineRef<'static>> {
+    lines.iter().map(|&(text, section)| LineRef { text, section }).collect()
+}
+
+fn hex(k: ChunkKey) -> String {
+    k.0.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The two families in use: qa491 (anchor) and qa491-windows (model.json values).
+#[test]
+fn identities_are_the_published_ones() {
+    let windows = ChunkerConfig::production();
+    assert_eq!(windows.identity(), 320_260_894_818_558_297);
+    assert_eq!(windows.anchor().identity(), 2_685_558_872_390_372_738);
+    assert_eq!(ChunkerConfig::by_identity(320_260_894_818_558_297), Some(windows.clone()));
+    assert_eq!(ChunkerConfig::by_identity(2_685_558_872_390_372_738), Some(windows.anchor()));
+    assert_eq!(ChunkerConfig::by_identity(1), None);
+}
+
+/// chunk_key.rs `a_key_is_the_sha256_prefix_python_computes`.
+#[test]
+fn key_is_the_sha256_prefix() {
+    let key = ChunkKey::of("[PASSAGE] a line that stands alone");
+    assert_eq!(hex(key), "0429557a367f9f5e6681647f940ff66e");
+    assert_eq!(key.column_value(), 299_864_833_585_553_246);
+    let narrow = key.narrowed();
+    assert!(narrow.same_text(key) && key.same_text(narrow) && !key.is_narrow());
+    let mut twin = key;
+    twin.0[15] ^= 1;
+    assert!(!twin.same_text(key) && twin.same_text(narrow));
+}
+
+/// chunker.rs `the_production_recipe_keys_a_fixed_book_as_python_does` (cap 30).
+#[test]
+fn fixed_book_keys() {
+    let chunker = Chunker::new(ChunkerConfig { max_chunk_chars: 30, ..ChunkerConfig::production().anchor() }).unwrap();
+    let lines = refs(&[
+        ("a line that stands alone", 1),
+        ("short", 1),
+        ("   ", 1),
+        ("abcdefghijklmnopqrstuvwxyz0123456789", 2),
+    ]);
+    let keys: Vec<_> = (0..4).map(|i| chunker.embedded_text(&lines, i).map(|t| ChunkKey::of(&t))).collect();
+    assert_eq!(hex(keys[0].unwrap()), "0429557a367f9f5e6681647f940ff66e");
+    assert_eq!(keys[1], Some(ChunkKey::of("[PASSAGE] a line that stands alone short")));
+    assert_eq!(keys[2], None);
+    assert_eq!(keys[3], Some(ChunkKey::of("[PASSAGE] abcdefghijklmnopqrstuvwxyz0123")));
+}
+
+/// chunker.rs `windows_snap_to_words_and_stop_at_six` (ASCII forms of its cases).
+#[test]
+fn windows_snap_and_cap() {
+    let chunker = Chunker::production();
+    let spans = |text: &str| -> Vec<(u32, u32)> {
+        chunker.embedded_windows(&[LineRef { text, section: 0 }], 0).iter().map(|w| (w.chars.start, w.chars.end)).collect()
+    };
+    assert_eq!(spans(&"x".repeat(512)), vec![(0, 512)]);
+    let words = "abc ".repeat(129);
+    let text = format!("{}z", &words[..512]);
+    assert_eq!(spans(&text), vec![(0, 512), (384, 513)]);
+    let word: String = (0..2000u32).map(|at| char::from_u32(0x61 + at * 7 % 26).unwrap()).collect();
+    assert_eq!(spans(&word), vec![(0, 512), (384, 896), (768, 1280), (1152, 1664), (1536, 2000)]);
+    let text = (0..1500).map(|i| format!("w{i:03}")).collect::<Vec<_>>().join(" ");
+    assert_eq!(spans(&text).len(), 6);
+}
+
+#[test]
+fn short_lines_borrow_their_section_only() {
+    let chunker = Chunker::production();
+    let lines = refs(&[("head line", 1), ("aaaaaa", 2), ("bbbbbb", 2), ("cccccc", 2), ("dddddd", 2), ("other", 3)]);
+    assert_eq!(chunker.embedded_text(&lines, 1).unwrap(), "[PASSAGE] aaaaaa bbbbbb cccccc");
+    assert_eq!(chunker.embedded_text(&lines, 3).unwrap(), "[PASSAGE] aaaaaa bbbbbb cccccc dddddd");
+    let key = ChunkKey::of(&chunker.embedded_text(&lines, 2).unwrap());
+    assert!(holds(&chunker, &lines, 2, 0, key));
+    assert!(holds(&chunker, &lines, 2, 0, key.narrowed()));
+    // Line 3 embeds the same four lines: it holds the key too.
+    assert!(holds(&chunker, &lines, 3, 0, key));
+    assert!(!holds(&chunker, &lines, 1, 0, key));
+    assert_eq!(locate(&chunker, &lines, 5, 0, &key.0), Some(3));
+    assert_eq!(verify(&chunker, &lines, &[StoredKey { ordinal: 2, window: 0, key: &key.0[..8] }]), vec![true]);
+}
+
+#[test]
+fn rows_with_newlines_and_sections() {
+    let rows: Vec<&[u8]> = vec![b"<h1>Title</h1>", b"one\ntwo<br>three", b"&nbsp; four  &amp; <b>x</b>y"];
+    let lines = book_lines(&rows, &[]);
+    let got: Vec<_> = lines.iter().map(|l| (l.row, l.sub, l.text.as_str(), l.section)).collect();
+    assert_eq!(
+        got,
+        vec![(0, 0, "Title", 1), (1, 0, "one", 1), (1, 1, "two three", 1), (2, 0, "four xy", 1)]
+    );
+}
+
+#[test]
+fn marks_and_presentation_forms_are_folded() {
+    // bet + dagesh (presentation form), shin + qamats (attached mark dropped), maqaf kept.
+    assert_eq!(normalize_text_for_indexing("\u{FB31}\u{05E9}\u{05B8}\u{05BE}x"), "\u{05D1}\u{05E9}\u{05BE}x");
+    // A sup around one letter inside a word is transparent; around digits it breaks.
+    assert_eq!(normalize_text_for_indexing("\u{05D0}<sup>\u{05D1}</sup>\u{05D2}"), "\u{05D0}\u{05D1}\u{05D2}");
+    assert_eq!(normalize_text_for_indexing("\u{05D0}<sup>30</sup>"), "\u{05D0} 30");
+}
+
+#[test]
+fn footnotes_are_put_back() {
+    let rows: Vec<&[u8]> = vec![b"word<sup class=\"footnote-marker\">1</sup> more"];
+    let notes = vec![BookNote { line_index: 0, char_pos: -1, has_marker: true, body: "note".into() }];
+    let lines = book_lines(&rows, &notes);
+    assert_eq!(lines[0].text, "word 1 note more");
+}
+
+#[test]
+fn data_uris_are_stripped() {
+    let payload = "A".repeat(64);
+    assert_eq!(strip_data_uris_for_index(&format!("a data:{payload} b")), "a  b");
+    assert_eq!(strip_data_uris_for_index("a data:AAAA b"), "a data:AAAA b");
+}

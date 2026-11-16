@@ -18,6 +18,7 @@
 //!
 //! [`fusion`] is the hybrid ranking (lexical + semantic lines).
 
+pub mod chunker;
 pub mod fusion;
 pub mod kernel;
 pub mod oxv;

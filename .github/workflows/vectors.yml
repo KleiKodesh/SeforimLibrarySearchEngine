@@ -115,7 +115,8 @@ jobs:
         run: |
           set -o pipefail
           demo=csharp/SeforimSearch.Demo/bin/Release/net10.0/SeforimSearch.Demo.exe
-          lines=$(python -I -c "import sqlite3,random;c=sqlite3.connect('file:C:/bench/data/seforim.db?mode=ro',uri=True);n=c.execute('select max(id) from line').fetchone()[0];random.seed(18);print(','.join(str(random.randint(1,n)) for _ in range(${{ inputs.queries }})))")
+          lines=$(python -I -c "import sqlite3;c=sqlite3.connect('file:C:/bench/data/seforim.db?mode=ro',uri=True);print(','.join(str(r[0]) for r in c.execute('select id from line order by (id * 2654435761) % 4294967296 limit ${{ inputs.queries }}')))")
+          echo "$lines" | cut -d, -f1 > C:/bench/logs/first-line.txt
           $demo semantic-search C:/bench/indexes/ours-pos --vectors D:/vectors/base.oxv --db C:/bench/data/seforim.db --model C:/bench/model --lines "$lines" --k 10 --repeat 2 2>&1 | sed 's/[^ -~]/?/g' | tee C:/bench/logs/latency-${{ matrix.codec }}.log
           echo "exit ${PIPESTATUS[0]}"
       - name: hybrid sample
@@ -123,7 +124,7 @@ jobs:
         shell: bash
         run: |
           demo=csharp/SeforimSearch.Demo/bin/Release/net10.0/SeforimSearch.Demo.exe
-          $demo semantic-search C:/bench/indexes/ours-pos --vectors D:/vectors/base.oxv --db C:/bench/data/seforim.db --model C:/bench/model --line 1000 --k 5 --hybrid 2>&1 | sed 's/[^ -~]/?/g' | tail -40
+          $demo semantic-search C:/bench/indexes/ours-pos --vectors D:/vectors/base.oxv --db C:/bench/data/seforim.db --model C:/bench/model --line $(cat C:/bench/logs/first-line.txt) --k 5 --hybrid 2>&1 | sed 's/[^ -~]/?/g' | tail -40
       - if: always()
         uses: actions/upload-artifact@v4
         with:

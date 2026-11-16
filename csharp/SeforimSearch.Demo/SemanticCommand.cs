@@ -285,6 +285,7 @@ namespace SeforimSearch.Demo
                     bool first = sem.Hits.Length > 0 && sem.Hits[0].LineId == line;
                     if (first) selfFirst++;
                     Console.WriteLine($"  source line first: {(first ? "yes" : "no")}");
+                    if (!first) ExplainMiss(index, conn, vector, line, text, sem, threads);
                 }
                 if (hybrid)
                 {
@@ -305,6 +306,38 @@ namespace SeforimSearch.Demo
             if (withLine > 0) Console.WriteLine($"source line ranked first: {selfFirst} of {withLine}");
             Console.WriteLine($"peak working set: {Process.GetCurrentProcess().PeakWorkingSet64 / 1048576.0:N0} MB");
             return 0;
+        }
+
+        /// <summary>Why a line's own text did not rank it first: the query length, the own line's
+        /// rank in the top 100 (all books) and in its own book's top 100 (absent there: its
+        /// record failed the text check or the line has no vector), the top hit's book / line
+        /// and whether its text equals the query (a tie: identical text elsewhere).</summary>
+        private static void ExplainMiss(SeforimIndex index, SqliteConnection conn, float[] vector, long line, string text,
+                                        SemanticResult sem, int threads)
+        {
+            static string Norm(string t) => string.Join(" ", t.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+            long ownBook;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT bookId FROM line WHERE id = $id";
+                cmd.Parameters.AddWithValue("$id", line);
+                ownBook = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
+            }
+            int RankIn(SemanticResult r) => Array.FindIndex(r.Hits, h => h.LineId == line) + 1;
+            var all = index.SemanticSearch(vector, new SemanticOptions { K = 100, Threads = threads });
+            var own = index.SemanticSearch(vector, new SemanticOptions { K = 100, Threads = threads, Books = new[] { ownBook } });
+            string query = Norm(text);
+            var top = sem.Hits.Length > 0 ? sem.Hits[0] : null;
+            bool same = top != null && Norm(LineText(conn, top.LineId)) == query;
+            int rankAll = RankIn(all), rankOwn = RankIn(own);
+            string verdict = same ? "tie (identical text elsewhere)"
+                : rankOwn == 0 ? "own line has no verified vector (text check failed or not embedded)"
+                : query.Length < 20 ? "short line (Otzaria embeds it with neighbour context)"
+                : query.Length > 512 ? "long line (windows; the query is the whole line)"
+                : "ranked below another text";
+            Console.WriteLine($"  miss: query {query.Length} chars; own rank {(rankAll > 0 ? rankAll.ToString() : ">100")} of all, " +
+                              $"{(rankOwn > 0 ? rankOwn.ToString() : "absent")} in own book {ownBook}; top hit book {top?.BookId} line {top?.LineId} " +
+                              $"same text {(same ? "yes" : "no")}; verdict: {verdict}");
         }
 
         private static string LineText(SqliteConnection conn, long lineId)

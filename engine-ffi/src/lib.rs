@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 19; // 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 20; // 20: se_vectors_install report `needs_compaction` (Otzaria sidecar compaction policy, issue #18); 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -265,10 +265,21 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 }
 
 /// A vector install error; a cancellation as the engine's (`se_last_error_cancelled`).
+/// An install / verify error for the host: cancelled as every cancelled call, else the
+/// message tagged with its kind (`vector install [<kind>]: ...`, seforim-vectors
+/// `install::Kind`), which the hosts map onto their own error kinds.
 fn install_err(e: seforim_vectors::Error) -> String {
-    match e {
-        seforim_vectors::Error::Cancelled => err(seforim_engine::Error::Cancelled),
-        e => err(e),
+    use seforim_vectors::install::error_kind;
+    match error_kind(&e) {
+        None => err(seforim_engine::Error::Cancelled),
+        Some(kind) => {
+            let text = e.to_string();
+            if text.contains(&format!("vector install [{}]", kind.tag())) {
+                err(e)
+            } else {
+                err(format!("vector install [{}]: {text}", kind.tag()))
+            }
+        }
     }
 }
 

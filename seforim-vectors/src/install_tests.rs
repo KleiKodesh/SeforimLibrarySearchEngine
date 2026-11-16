@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{install, install_with, sha256_hex, verify_segment, InstallOptions};
+use super::{compaction_wanted, error_kind, install, Kind, install_with, sha256_hex, verify_segment, InstallOptions};
 use crate::oxv::{self, OxvBookMap, OxvFile, TestBook, TestCodec, TestSegment, TestSlot};
 use crate::set::{self, LineMap, LineSearch, SegmentSet};
 
@@ -156,6 +156,7 @@ fn verify_checks_blocks_and_the_manifest() {
     fs::write(&bad, bytes).unwrap();
     let e = verify_segment(&bad, None);
     assert!(e.is_err(), "{e:?}");
+    assert_eq!(error_kind(&e.unwrap_err()), Some(Kind::Corrupt));
 }
 
 #[test]
@@ -164,13 +165,13 @@ fn base_then_delta_installs_as_otzaria_and_the_reader_opens_it() {
     let (b, x) = segments(tmp.path());
     let dir = tmp.path().join("vectors");
     // a delta first: refused
-    assert!(install(&dir, &x, &manifest(&x), None).is_err());
+    assert_eq!(error_kind(&install(&dir, &x, &manifest(&x), None).unwrap_err()), Some(Kind::Incompatible));
     // the base from incoming/ (moved), the delta from elsewhere (copied)
     fs::create_dir_all(dir.join("incoming")).unwrap();
     let inc = dir.join("incoming/base.oxv");
     let mb = manifest(&b);
     fs::copy(&b, &inc).unwrap();
-    assert!(install(&dir, &inc, &mb, Some(&"0".repeat(64))).is_err());
+    assert_eq!(error_kind(&install(&dir, &inc, &mb, Some(&"0".repeat(64))).unwrap_err()), Some(Kind::NotPublished));
     let r = install(&dir, &inc, &mb, Some(&sha256_hex(mb.as_bytes()))).unwrap();
     assert_eq!((r.kind.as_str(), r.generation, r.library_version, r.segments), ("base", 1, 1, 1));
     assert!(!inc.exists());
@@ -178,6 +179,12 @@ fn base_then_delta_installs_as_otzaria_and_the_reader_opens_it() {
     assert_eq!((r.generation, r.library_version, r.segments), (2, 2, 2));
     assert_eq!((r.tombstones_applied, r.duplicates_removed, r.foreign_unresolved), (1, 1, 1));
     assert!(install(&dir, &x, &manifest(&x), None).unwrap().already_applied);
+    // the report carries the sidecar's compaction rule on the installed set
+    let cur: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("CURRENT")).unwrap()).unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&fs::read(dir.join(cur["set"].as_str().unwrap())).unwrap()).unwrap();
+    let sizes: Vec<u64> = doc["segments"].as_array().unwrap().iter().map(|s| s["size"].as_u64().unwrap()).collect();
+    let want = compaction_wanted(&sizes, doc["stats"]["slots"].as_u64().unwrap(), doc["stats"]["slots_dead"].as_u64().unwrap());
+    assert_eq!(r.needs_compaction, want);
 
     let prev: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("PREVIOUS")).unwrap()).unwrap();
     assert_eq!(prev["generation"], 1);
@@ -334,13 +341,16 @@ fn the_model_identity_types_and_cancellation_are_checked() {
         install_with(&dir, seg, m, &InstallOptions { expected_model_json: model, cancel, ..Default::default() })
     };
     // the query model's model.json: another family or chunking is refused
-    let e = with(&b, &mb, Some(r#"{"family_id":"g","chunking_identity":7}"#), None).unwrap_err().to_string();
+    let e = with(&b, &mb, Some(r#"{"family_id":"g","chunking_identity":7}"#), None).unwrap_err();
+    assert_eq!(error_kind(&e), Some(Kind::Incompatible));
+    let e = e.to_string();
     assert!(e.contains("model.family_id"), "{e}");
     let e = with(&b, &mb, Some(r#"{"family_id":"f","chunking_identity":8}"#), None).unwrap_err().to_string();
     assert!(e.contains("model.chunking_identity"), "{e}");
     let e = with(&b, &mb, Some(r#"{"family_id":"f","chunking_identity":7,"query_packages":[{"checksum":"other","quantization":"int8"}]}"#), None);
     assert!(e.is_err());
-    assert!(with(&b, &mb, Some(r#"{"chunking_identity":7}"#), None).is_err(), "family_id required");
+    let e = with(&b, &mb, Some(r#"{"chunking_identity":7}"#), None).unwrap_err();
+    assert_eq!(error_kind(&e), Some(Kind::Invalid), "family_id required");
     assert!(!dir.join("CURRENT").exists());
     // a number written as text is refused, as the sidecar's typed identity does
     let texted = mb.replace("\"embedding_dim\":4", "\"embedding_dim\":\"4\"");
@@ -360,4 +370,15 @@ fn the_model_identity_types_and_cancellation_are_checked() {
     assert!(matches!(super::verify_segment_cancellable(&b, None, Some(&stop)), Err(crate::Error::Cancelled)));
     // not cancelled: it applies
     assert_eq!(with(&x, &mx, Some(model), None).unwrap().library_version, 2);
+}
+
+#[test]
+fn compaction_rule_is_the_sidecars_default_policy() {
+    assert!(!compaction_wanted(&[], 0, 0));
+    assert!(!compaction_wanted(&[1000, 100, 100], 100, 5));
+    assert!(compaction_wanted(&[1000, 150, 51], 100, 0)); // deltas over 20 % of the base
+    assert!(!compaction_wanted(&[1000, 200], 100, 0)); // exactly 20 %: not over
+    assert!(compaction_wanted(&[1000, 1, 1, 1, 1], 100, 0)); // 5 segments, more than 4
+    assert!(compaction_wanted(&[1000], 100, 6)); // over 5 % dead
+    assert!(!compaction_wanted(&[1000], 100, 5));
 }

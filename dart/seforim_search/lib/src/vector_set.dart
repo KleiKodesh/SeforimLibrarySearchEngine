@@ -68,6 +68,17 @@ VectorInstallReport installVectorSegment(String setDir, String segmentPath, Stri
   })) as Map<String, dynamic>);
 }
 
+/// Why the engine refused an install / verify ([installVectorSegment], [verifyOxv]),
+/// as Otzaria's sidecar classifies it for the app: `corrupt` (damaged package or set),
+/// `incompatible` (a sound release this set or build cannot take, a release of another
+/// model), `not_published` (not the published manifest), `busy` (the set's lock is
+/// held), `no_space`, `invalid` (a bad argument), `internal`. Null for anything that is
+/// not an install error (a cancellation is [SearchCancelledException]).
+String? vectorInstallErrorKind(Object error) {
+  if (error is! SeforimEngineException) return null;
+  return RegExp(r'vector install \[([a-z_]+)\]').firstMatch(error.message)?.group(1);
+}
+
 Pointer<Void> _token(SearchCancelToken? cancel, int? address) =>
     cancel?.handle ?? (address == null ? nullptr : Pointer<Void>.fromAddress(address));
 
@@ -87,9 +98,16 @@ class VectorInstallReport {
   /// Delta only (0 otherwise): older slots a tombstone retired, older copies of a
   /// key the delta ships again, foreign records no older live slot holds.
   final int tombstonesApplied, duplicatesRemoved, foreignUnresolved;
+
+  /// Otzaria's default compaction policy on the installed set: more than 4
+  /// segments, deltas over 20 % of the base's bytes, or over 5 % of slots dead.
+  final bool needsCompaction;
   const VectorInstallReport(this.kind, this.libraryVersion, this.generation, this.segments,
       this.slotsAdded, this.bytesOnDisk, this.alreadyApplied,
-      {this.tombstonesApplied = 0, this.duplicatesRemoved = 0, this.foreignUnresolved = 0});
+      {this.tombstonesApplied = 0,
+      this.duplicatesRemoved = 0,
+      this.foreignUnresolved = 0,
+      this.needsCompaction = false});
 
   factory VectorInstallReport.fromJson(Map<String, dynamic> j) => VectorInstallReport(
       j['kind'] as String,
@@ -101,7 +119,8 @@ class VectorInstallReport {
       j['already_applied'] as bool,
       tombstonesApplied: j['tombstones_applied'] as int,
       duplicatesRemoved: j['duplicates_removed'] as int,
-      foreignUnresolved: j['foreign_unresolved'] as int);
+      foreignUnresolved: j['foreign_unresolved'] as int,
+      needsCompaction: j['needs_compaction'] as bool);
 }
 
 /// A set directory as the sidecar lays it out. [install] goes through the

@@ -2388,7 +2388,15 @@ the expected model identity (`InstallExpectation`: the query model's model.json,
 each model field it names must be equal, its query packages accepted by the
 release), and cancellation (a cancel token, ABI 18: checked between blocks,
 hashed 1 MiB chunks and slot ranges; a cancelled install changes nothing the set
-names and `recover` clears what it staged). The Dart install
+names and `recover` clears what it staged). The report's `needs_compaction` (ABI 20)
+is the sidecar's default `CompactionPolicy`: more than 4 segments, deltas over 20 % of
+the base's bytes, or over 5 % of the slots dead. A refusal is tagged with its kind
+(`vector install [<kind>]: ...`; Dart `vectorInstallErrorKind`), classified as
+otzaria_search_engine's `semantic_errors.rs` classifies the sidecar's: `corrupt` (block
+CRC, header vs manifest, size / SHA-256, digests, a file that is not a segment),
+`incompatible` (format version, a delta that does not apply, another identity or query
+model, a segment id taken by other bytes), `not_published`, `busy` (the set's lock),
+`no_space`, `invalid` (a bad model.json), `internal`. The Dart install
 runs on a `SearchWorker` isolate when the writer is given one
 (`VectorSetWriter(dir, worker: w)`, `SearchWorker.installVectorSegment` /
 `verifyOxv`), else on the calling isolate. `VectorSetWriter(native: false)` (Dart) keeps a

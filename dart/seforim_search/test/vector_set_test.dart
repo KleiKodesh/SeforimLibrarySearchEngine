@@ -78,6 +78,12 @@ void main() {
     expect(Directory('$setDir/gen-000001').existsSync(), isFalse);
     final set = jsonDecode(File('$setDir/${cur['set']}').readAsStringSync());
     expect((set['stats']['slots'] as int) - (set['stats']['slots_dead'] as int), 3);
+    // Otzaria's compaction policy on this set: 3 segments, deltas vs base bytes, dead slots
+    final sizes = [for (final g in set['segments'] as List) g['size'] as int];
+    final deltas = sizes.skip(1).fold<int>(0, (a, b) => a + b);
+    final slots = set['stats']['slots'] as int, dead = set['stats']['slots_dead'] as int;
+    expect(r3.needsCompaction,
+        sizes.length > 4 || deltas > 0.2 * sizes.first || dead > 0.05 * slots);
   });
 
   test('a corrupted block is refused; the Dart writer installs a base without native', () async {
@@ -98,14 +104,17 @@ void main() {
     ].firstWhere((e) => h.getUint16(e, Endian.little) == 0x0012);
     bytes[h.getUint64(at + 8, Endian.little)] ^= 0x40;
     final bad = File('${tmp.path}/bad.oxv')..writeAsBytesSync(bytes);
-    expect(() => verifyOxv(bad.path), throwsA(isA<SeforimEngineException>()));
+    expect(() => verifyOxv(bad.path),
+        throwsA(predicate((Object e) => vectorInstallErrorKind(e) == 'corrupt')));
 
     // the release must be of the query model; a cancelled install leaves nothing
     final setDir = '${tmp.path}/n';
     expect(
         () => installVectorSegment(setDir, plain, manifestJson,
             expectedModelJson: '{"family_id":"g","chunking_identity":7}'),
-        throwsA(isA<SeforimEngineException>()));
+        throwsA(predicate((Object e) => vectorInstallErrorKind(e) == 'incompatible')));
+    expect(() => installVectorSegment(setDir, plain, manifestJson, publishedManifestSha256: '0' * 64),
+        throwsA(predicate((Object e) => vectorInstallErrorKind(e) == 'not_published')));
     final token = SearchCancelToken()..cancel();
     expect(() => installVectorSegment(setDir, plain, manifestJson, cancel: token),
         throwsA(isA<SearchCancelledException>()));

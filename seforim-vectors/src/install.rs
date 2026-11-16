@@ -42,8 +42,58 @@ const BLOCK_SIZE: usize = 1 << 20;
 const S_BLOCK_CRCS: u16 = 0x007F;
 const SECTION_BLOCKSUMMED: u16 = 2;
 
-fn bad(msg: impl Into<String>) -> Error {
-    Error::Format(format!("vector install: {}", msg.into()))
+/// Why an install or verify refused, as Otzaria's sidecar classifies its errors for the
+/// app (otzaria_search_engine `semantic_errors.rs` `artifact_kind` / `store_kind`): a
+/// damaged package or set (`corrupt`), a sound one this set or build cannot take
+/// (`incompatible`, also a release of another model, as the sidecar's IdentityMismatch),
+/// a manifest that is not the published one (`not_published`), the set's lock held
+/// (`busy`), a full disk (`no_space`), a bad argument (`invalid`), anything else
+/// (`internal`). The tag is in the message: `vector install [<kind>]: ...`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Corrupt,
+    Incompatible,
+    NotPublished,
+    Busy,
+    NoSpace,
+    Invalid,
+    Internal,
+}
+
+impl Kind {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Kind::Corrupt => "corrupt",
+            Kind::Incompatible => "incompatible",
+            Kind::NotPublished => "not_published",
+            Kind::Busy => "busy",
+            Kind::NoSpace => "no_space",
+            Kind::Invalid => "invalid",
+            Kind::Internal => "internal",
+        }
+    }
+}
+
+fn fail(kind: Kind, msg: impl Into<String>) -> Error {
+    Error::Format(format!("vector install [{}]: {}", kind.tag(), msg.into()))
+}
+
+/// The kind of an install / verify error: the tag of a [`fail`], a full disk or other
+/// I/O failure, and an untagged format error (a segment file that does not open as
+/// one) as damage, as the sidecar's `VectorStoreError::Corrupted` on a vector set.
+pub fn error_kind(e: &Error) -> Option<Kind> {
+    match e {
+        Error::Cancelled => None,
+        Error::Io(io) if io.kind() == std::io::ErrorKind::StorageFull => Some(Kind::NoSpace),
+        Error::Io(_) => Some(Kind::Internal),
+        Error::Invalid(_) => Some(Kind::Invalid),
+        Error::Format(m) => Some(
+            [Kind::Corrupt, Kind::Incompatible, Kind::NotPublished, Kind::Busy, Kind::NoSpace, Kind::Invalid, Kind::Internal]
+                .into_iter()
+                .find(|k| m.starts_with(&format!("vector install [{}]", k.tag())))
+                .unwrap_or(Kind::Corrupt),
+        ),
+    }
 }
 
 /// install.rs `ReleaseManifest` (the fields an install reads; identity and
@@ -173,7 +223,34 @@ pub struct InstallReport {
     pub duplicates_removed: u64,
     pub foreign_unresolved: u64,
     pub bytes_on_disk: u64,
+    /// The sidecar's `CompactionPolicy::default().wants`: more than 4 segments,
+    /// deltas over 20 % of the base's bytes, or more than 5 % of the slots dead.
+    pub needs_compaction: bool,
     pub already_applied: bool,
+}
+
+/// Otzaria's default compaction policy (segment_set/compact.rs `CompactionPolicy::default`).
+const COMPACT_MAX_SEGMENTS: usize = 4;
+const COMPACT_MAX_DELTA_RATIO: f64 = 0.20;
+const COMPACT_MAX_DEAD_RATIO: f64 = 0.05;
+
+/// `CompactionPolicy::default().wants(&info).is_some()` on the set's document.
+fn needs_compaction(d: &SetDocument) -> bool {
+    let sizes: Vec<u64> = d.segments.iter().map(|s| s.size).collect();
+    compaction_wanted(&sizes, d.stats.slots, d.stats.slots_dead)
+}
+
+/// The policy's rule on segment sizes (base first) and slot counts.
+pub(crate) fn compaction_wanted(sizes: &[u64], slots: u64, dead: u64) -> bool {
+    if sizes.len() > COMPACT_MAX_SEGMENTS {
+        return true;
+    }
+    let base = sizes.first().copied().unwrap_or(0);
+    let deltas: u64 = sizes.iter().skip(1).sum();
+    if base > 0 && deltas as f64 > COMPACT_MAX_DELTA_RATIO * base as f64 {
+        return true;
+    }
+    slots > 0 && dead as f64 > COMPACT_MAX_DEAD_RATIO * slots as f64
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -254,10 +331,10 @@ fn verify_blocks(b: &[u8], cancel: Option<&AtomicBool>) -> Result<u64> {
     }
     let blocks: u64 = summed.iter().map(|(_, r)| r.len().div_ceil(BLOCK_SIZE) as u64).sum();
     let Some((crcs, count)) = crcs else {
-        return Err(bad("the segment has no BLOCK_CRCS section"));
+        return Err(fail(Kind::Corrupt, "the segment has no BLOCK_CRCS section"));
     };
     if count != blocks || crcs.len() as u64 != blocks * 4 {
-        return Err(bad(format!("it carries {count} block CRC(s) for {blocks} block(s)")));
+        return Err(fail(Kind::Corrupt, format!("it carries {count} block CRC(s) for {blocks} block(s)")));
     }
     let crcs = &b[crcs];
     let mut index = 0;
@@ -266,7 +343,7 @@ fn verify_blocks(b: &[u8], cancel: Option<&AtomicBool>) -> Result<u64> {
             checkpoint(cancel)?;
             let (actual, expected) = (crc32fast::hash(block), u32_at(crcs, index * 4));
             if actual != expected {
-                return Err(bad(format!(
+                return Err(fail(Kind::Corrupt, format!(
                     "block {n} of section {kind:#06x} hashes to CRC {actual:08x}, and the segment declares {expected:08x}"
                 )));
             }
@@ -280,7 +357,7 @@ fn verify_blocks(b: &[u8], cancel: Option<&AtomicBool>) -> Result<u64> {
 fn check_header(m: &ReleaseManifest, seg: &OxvFile) -> Result<()> {
     let b = seg.bytes();
     let disagree = |what: &str, header: String, declared: String| {
-        Err(bad(format!("the segment's {what} is {header}, and its manifest declares {declared}")))
+        Err(fail(Kind::Corrupt, format!("the segment's {what} is {header}, and its manifest declares {declared}")))
     };
     if hex(&b[32..48]) != m.segment_id {
         return disagree("id", hex(&b[32..48]), m.segment_id.clone());
@@ -346,7 +423,7 @@ fn identity_value(identity: &Value, path: &str, pointer: &str) -> Result<Option<
     if path == "model.query_max_tokens" && v.is_none_or(Value::is_null) {
         return Ok(None);
     }
-    let missing = || bad(format!("its identity has no {path} of the type the sidecar reads"));
+    let missing = || fail(Kind::Corrupt, format!("its identity has no {path} of the type the sidecar reads"));
     let text = matches!(
         path,
         "model.family_id" | "model.tokenizer_checksum" | "model.pooling" | "store.backend_id" | "store.vector_precision"
@@ -396,7 +473,7 @@ fn package_digest(m: &ReleaseManifest) -> Result<String> {
 metadata_version=3
 ");
     identity_lines(&m.identity, &mut text)?;
-    let s = |p: &str| m.provenance.pointer(p).and_then(Value::as_str).map(str::to_string).ok_or_else(|| bad(format!("its provenance has no {p}")));
+    let s = |p: &str| m.provenance.pointer(p).and_then(Value::as_str).map(str::to_string).ok_or_else(|| fail(Kind::Corrupt, format!("its provenance has no {p}")));
     let c = &m.counts;
     text.push_str(&format!("kind={}
 ", m.kind));
@@ -459,13 +536,13 @@ fn recover(dir: &Path) -> Result<()> {
 /// release accepts (membership, by checksum). `family_id` and `chunking_identity`
 /// are required.
 fn check_expected_model(identity: &Value, model_json: &str) -> Result<()> {
-    let expected: Value = serde_json::from_str(model_json).map_err(|e| bad(format!("model.json: {e}")))?;
+    let expected: Value = serde_json::from_str(model_json).map_err(|e| fail(Kind::Invalid, format!("model.json: {e}")))?;
     let mut mismatches = Vec::new();
     for (path, _) in IDENTITY_FIELDS {
         let Some(key) = path.strip_prefix("model.") else { continue };
         let wanted = expected.get(key);
         if wanted.is_none() && matches!(key, "family_id" | "chunking_identity") {
-            return Err(bad(format!("model.json has no {key}")));
+            return Err(fail(Kind::Invalid, format!("model.json has no {key}")));
         }
         let Some(wanted) = wanted.filter(|w| !w.is_null()) else { continue };
         let artifact = identity.pointer(&format!("/model/{key}"));
@@ -482,30 +559,30 @@ fn check_expected_model(identity: &Value, model_json: &str) -> Result<()> {
     if mismatches.is_empty() {
         Ok(())
     } else {
-        Err(bad(format!("the release is not of the query model: {}", mismatches.join("; "))))
+        Err(fail(Kind::Incompatible, format!("the release is not of the query model: {}", mismatches.join("; "))))
     }
 }
 
 fn parse_manifest(json: &str) -> Result<ReleaseManifest> {
     let m: ReleaseManifest =
-        serde_json::from_str(json).map_err(|e| bad(format!("its release manifest is not one this build reads: {e}")))?;
+        serde_json::from_str(json).map_err(|e| fail(Kind::Incompatible, format!("its release manifest is not one this build reads: {e}")))?;
     if m.format != RELEASE_FORMAT || m.format_version != 1 {
-        return Err(bad(format!("it is {} version {}, and this build reads {RELEASE_FORMAT} version 1", m.format, m.format_version)));
+        return Err(fail(Kind::Incompatible, format!("it is {} version {}, and this build reads {RELEASE_FORMAT} version 1", m.format, m.format_version)));
     }
     if m.segment_id.len() != 32 || !m.segment_id.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
-        return Err(bad("a segment id is 32 lowercase hex digits"));
+        return Err(fail(Kind::Corrupt, "a segment id is 32 lowercase hex digits"));
     }
     let digest = identity_digest(&m.identity)?;
     if digest != m.identity_digest {
-        return Err(bad(format!("its identity digest is {}, and its identity's is {digest}", m.identity_digest)));
+        return Err(fail(Kind::Corrupt, format!("its identity digest is {}, and its identity's is {digest}", m.identity_digest)));
     }
     if package_digest(&m)? != m.package_digest {
-        return Err(bad("its package digest is not the digest of the package it describes"));
+        return Err(fail(Kind::Corrupt, "its package digest is not the digest of the package it describes"));
     }
     match m.kind.as_str() {
         "base" | "delta" => Ok(m),
-        "compacted" => Err(bad("a compacted segment is made on a device and never published")),
-        k => Err(bad(format!("kind {k}"))),
+        "compacted" => Err(fail(Kind::Incompatible, "a compacted segment is made on a device and never published")),
+        k => Err(fail(Kind::Incompatible, format!("kind {k}"))),
     }
 }
 
@@ -544,7 +621,7 @@ impl SetLock {
         match file.try_lock() {
             Ok(()) => Ok(SetLock(file)),
             Err(fs::TryLockError::WouldBlock) => {
-                Err(bad("another install or compaction of this vector set is running"))
+                Err(fail(Kind::Busy, "another install or compaction of this vector set is running"))
             }
             Err(fs::TryLockError::Error(e)) => Err(e.into()),
         }
@@ -617,7 +694,7 @@ fn next_generation(dir: &Path) -> Result<u64> {
             highest = highest.max(p.generation);
         }
     }
-    highest.checked_add(1).ok_or_else(|| bad("no generation number is left"))
+    highest.checked_add(1).ok_or_else(|| fail(Kind::Internal, "no generation number is left"))
 }
 
 /// install.rs `falls_back_to`: a host opening a set of `newer` can fall back to
@@ -714,7 +791,7 @@ fn install_locked(dir: &Path, segment: &Path, manifest_json: &str, opts: &Instal
     if let Some(p) = published_sha256 {
         let actual = sha256_hex(manifest_json.as_bytes());
         if actual != p {
-            return Err(bad(format!("the manifest is {actual}, and the published one {p}")));
+            return Err(fail(Kind::NotPublished, format!("the manifest is {actual}, and the published one {p}")));
         }
     }
     let m = parse_manifest(manifest_json)?;
@@ -728,19 +805,19 @@ fn install_locked(dir: &Path, segment: &Path, manifest_json: &str, opts: &Instal
         .filter_map(|p| p.ok().flatten())
         .find(|p| read_generation(dir, p).is_some());
     let current = match (&base_pointer, m.kind.as_str()) {
-        (None, "delta") => return Err(bad("a delta needs an installed base for it to apply to")),
+        (None, "delta") => return Err(fail(Kind::Incompatible, "a delta needs an installed base for it to apply to")),
         (Some(p), "delta") => Some((read_generation(dir, p).unwrap(), SegmentSet::open(dir)?)),
         _ => None,
     };
     if let Some((doc, set)) = &current {
         if set.generation() != doc.generation {
-            return Err(bad("the set opened another generation than its pointer names"));
+            return Err(fail(Kind::Internal, "the set opened another generation than its pointer names"));
         }
         if m.identity_digest != doc.identity_digest {
-            return Err(bad(format!("its identity digest is {}, and the set's is {}", m.identity_digest, doc.identity_digest)));
+            return Err(fail(Kind::Incompatible, format!("its identity digest is {}, and the set's is {}", m.identity_digest, doc.identity_digest)));
         }
         if m.codec_params_sha256 != doc.codec_params_sha256 {
-            return Err(bad(format!("it is of codec epoch {}, and the set of {}", m.codec_params_sha256, doc.codec_params_sha256)));
+            return Err(fail(Kind::Incompatible, format!("it is of codec epoch {}, and the set of {}", m.codec_params_sha256, doc.codec_params_sha256)));
         }
         if m.to_library_version <= doc.library_version {
             return Ok(InstallReport {
@@ -753,11 +830,12 @@ fn install_locked(dir: &Path, segment: &Path, manifest_json: &str, opts: &Instal
                 duplicates_removed: 0,
                 foreign_unresolved: 0,
                 bytes_on_disk: doc.stats.bytes,
+                needs_compaction: needs_compaction(&doc),
                 already_applied: true,
             });
         }
         if m.from_library_version != doc.library_version {
-            return Err(bad(format!(
+            return Err(fail(Kind::Incompatible, format!(
                 "it goes from version {} to {}, and the set stands at {}",
                 m.from_library_version, m.to_library_version, doc.library_version
             )));
@@ -782,11 +860,11 @@ fn install_locked(dir: &Path, segment: &Path, manifest_json: &str, opts: &Instal
     let checked = (|| -> Result<(String, OxvFile)> {
         let size = fs::metadata(&staged)?.len();
         if size != m.segment.size {
-            return Err(bad(format!("the segment is {size} bytes, and its manifest declares {}", m.segment.size)));
+            return Err(fail(Kind::Corrupt, format!("the segment is {size} bytes, and its manifest declares {}", m.segment.size)));
         }
         let sha = hash_file(&staged, cancel)?;
         if sha != m.segment.sha256 {
-            return Err(bad(format!("the segment hashes to {sha}, and its manifest declares {}", m.segment.sha256)));
+            return Err(fail(Kind::Corrupt, format!("the segment hashes to {sha}, and its manifest declares {}", m.segment.sha256)));
         }
         let new_seg = OxvFile::open(&staged)?;
         check_header(&m, &new_seg)?;
@@ -812,7 +890,7 @@ fn install_locked(dir: &Path, segment: &Path, manifest_json: &str, opts: &Instal
     if let Some((doc, set)) = &current {
         identity = doc.identity.clone();
         if doc.segments.iter().any(|s| s.id == m.segment_id) {
-            return Err(bad(format!("segment {} is in the generation already", m.segment_id)));
+            return Err(fail(Kind::Corrupt, format!("segment {} is in the generation already", m.segment_id)));
         }
         let (older, old_deleted, old_links) = set.parts();
         entries = doc.segments.clone();
@@ -831,7 +909,7 @@ fn install_locked(dir: &Path, segment: &Path, manifest_json: &str, opts: &Instal
         for slot in 0..new_seg.slot_count() {
             let want = wants.entry(new_seg.key(slot)).or_default();
             if want.shipped {
-                return Err(bad(format!("segment {} ships key {} twice", m.segment_id, hex(&new_seg.key(slot)))));
+                return Err(fail(Kind::Corrupt, format!("segment {} ships key {} twice", m.segment_id, hex(&new_seg.key(slot)))));
             }
             want.shipped = true;
         }
@@ -904,7 +982,7 @@ fn install_locked(dir: &Path, segment: &Path, manifest_json: &str, opts: &Instal
                 d.segments.iter().any(|s| s.id == m.segment_id && s.sha256 == held)
             });
             if live {
-                return Err(bad(format!("segment id {} is taken by other bytes ({held})", m.segment_id)));
+                return Err(fail(Kind::Incompatible, format!("segment id {} is taken by other bytes ({held})", m.segment_id)));
             }
         }
         fs::rename(&staged, &target)?;
@@ -954,7 +1032,7 @@ fn install_locked(dir: &Path, segment: &Path, manifest_json: &str, opts: &Instal
             stats,
             created_at: utc_timestamp(std::time::SystemTime::now()),
         };
-        let bytes = serde_json::to_vec_pretty(&document).map_err(|e| bad(e.to_string()))?;
+        let bytes = serde_json::to_vec_pretty(&document).map_err(|e| fail(Kind::Internal, e.to_string()))?;
         write_atomically(&gen_path.join("set.json"), &bytes)?;
         let pointer = Pointer { generation, set: format!("{gen_name}/set.json"), set_sha256: sha256_hex(&bytes) };
         let usable = |p: &Pointer| read_generation(dir, p).is_some_and(|older| falls_back_to(&document.identity, &older.identity));
@@ -1011,6 +1089,7 @@ fn report(m: &ReleaseManifest, d: &SetDocument, tombstones: u64, duplicates: u64
         duplicates_removed: duplicates,
         foreign_unresolved: unresolved,
         bytes_on_disk: d.stats.bytes,
+        needs_compaction: needs_compaction(d),
         already_applied: false,
     }
 }

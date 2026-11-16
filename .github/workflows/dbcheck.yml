@@ -1,0 +1,50 @@
+# Per-row content hashes of some books of a release seforim.db (manual): compares the CI copy
+# with a local one (tools/bench/row_hashes.py prints hashes only, no text).
+name: dbcheck
+
+on:
+  workflow_dispatch:
+    inputs:
+      db_tag:
+        description: Otzaria/SeforimLibrary release tag of seforim.db
+        default: v37-20261105163520
+      books:
+        description: comma-separated book ids
+        default: "1956,3231,3500,247,3007,3157,3160,3161"
+
+env:
+  PYTHONUTF8: "1"
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  hashes:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: C:/bench/data/seforim-schema7.db.zst
+          key: seforim-db-${{ inputs.db_tag }}
+      - name: download seforim.db
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          printf 'OUT_DIR=/c/bench\nDB_TAG=%s\n' "${{ inputs.db_tag }}" > tools/bench/bench.local.env
+          tools/bench/run-all.sh --steps db
+      - name: unpack
+        shell: bash
+        run: |
+          test -s C:/bench/data/seforim.db || python -I -c "import sys,shutil; from compression import zstd; shutil.copyfileobj(zstd.open(sys.argv[1]), open(sys.argv[2],'wb'), 1<<24)" C:/bench/data/seforim-schema7.db.zst C:/bench/data/seforim.db
+          ls -l C:/bench/data
+      - name: row hashes
+        shell: bash
+        run: |
+          set -o pipefail
+          python -I tools/bench/row_hashes.py C:/bench/data/seforim.db "${{ inputs.books }}" | tee hashes.txt | grep '^book'
+          python -I -c "import sqlite3;c=sqlite3.connect('file:C:/bench/data/seforim.db?mode=ro',uri=True);print(c.execute('select * from schema_meta').fetchall())"
+          echo "--- rows"
+          sed 's/^/ROW /' hashes.txt | grep -v '^ROW book'

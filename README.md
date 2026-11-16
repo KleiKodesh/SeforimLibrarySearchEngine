@@ -2331,8 +2331,9 @@ the lexical side is every hit of the search the exact query matches (Otzaria:
 its exact query's top hits); a hit the exact query misses (wildcard, fuzzy,
 words apart) is no lexical candidate, as for Otzaria: it fuses as
 semantic-only when the semantic list has it, else it is kept after every
-fused line (fused 0, no lexical score); the exact phrase's cross-line variant
-and Otzaria's smart-alternatives query are not ported; over 16 spelling
+fused line (fused 0, no lexical score); Otzaria's smart-alternatives query is
+not ported (its hybrid has no cross-line variant: it passes `cross_line =
+false`); over 16 spelling
 combinations one phrase over each word's spellings; several words need an
 index with positions. A streamed search must be pulled to the end first.
 Modes: lexical only (the default, unchanged), semantic only, hybrid.

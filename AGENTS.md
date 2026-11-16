@@ -46,3 +46,21 @@ often.
   hand-edit between the `SPECS:BEGIN` / `SPECS:END` markers.
 - **Hebrew text can trigger a network filter (HTTP 418):** keep Hebrew out of prompts and
   output; refer to it by unicode escapes or file:line.
+
+## Parallel agents: commit procedure
+
+Several agents work at once; committing from the shared tree or a stale index has silently
+reverted other agents' work. So:
+
+1. Work in your own worktree off the latest master: `git fetch origin && git worktree add <scratch>/wt-<topic> origin/master`
+   (then `git submodule update --init`). Never commit from the shared tree or the shared index;
+   no `GIT_INDEX_FILE` tricks.
+2. Stage explicit paths only. Before committing, check `git diff --cached --stat` (every file belongs
+   to your topic) and the removed lines (`git diff --cached | grep '^-'`): any removal of another
+   commit's lines must be part of your topic.
+3. Publish with `git fetch && git rebase origin/master`, rerun the quick tests, then
+   `git push origin HEAD:master`. Never force-push; on rejection fetch, rebase, retest.
+4. After pushing, check your range for reverts (blame the removed lines); restore anything outside
+   your topic.
+5. Remove your worktree when done. The shared tree is for viewing; only the main session syncs it.
+6. Merge conflicts: keep both sides' content; never take one side wholesale.

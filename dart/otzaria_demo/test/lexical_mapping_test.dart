@@ -1,7 +1,7 @@
 import 'dart:io';
 
 import 'package:otzaria_demo/otzaria_query.dart';
-import 'package:seforim_search/seforim_search.dart';
+import 'package:seforim_search_sqlite/seforim_search_sqlite.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:test/test.dart';
 

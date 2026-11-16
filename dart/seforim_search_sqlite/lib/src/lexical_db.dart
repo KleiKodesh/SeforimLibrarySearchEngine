@@ -2,8 +2,8 @@ import 'dart:collection';
 
 import 'package:sqlite3/sqlite3.dart';
 
-import 'lexicon_text.dart' show normalizeLexiconWord;
-import '../models.dart' show SearchOptions, WordOptions;
+import 'package:seforim_search/seforim_search.dart' show normalizeLexiconWord, SearchOptions, WordOptions;
+
 import 'lexical_blacklist.dart';
 
 /// Otzaria's lexical search expansion: a port of its `MagicDictionary`

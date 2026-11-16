@@ -1,4 +1,5 @@
 import 'package:seforim_search/seforim_search.dart';
+import 'package:seforim_search_sqlite/seforim_search_sqlite.dart';
 
 import 'acronym_lexicon.dart';
 

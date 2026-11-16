@@ -176,6 +176,49 @@ final class SearchWorker {
   /// [SeforimIndex.buildFmSidecar] on the worker.
   Future<bool> buildFmSidecar() => _call('index', 'buildFmSidecar');
 
+  // -- the user index (issue #44) --
+
+  /// Opens the user index at [directory] on the worker (with [create], a
+  /// fresh one: [SeforimIndex.createUser], WIPING the directory; else
+  /// [SeforimIndex.openUser]) and attaches it to the worker's library
+  /// index: searches then read both ([SearchOptions.sources]). A user index
+  /// already open is detached and closed first. [options] must equal the
+  /// library's.
+  Future<void> openUserIndex(String directory, {bool create = false, IndexOptions options = const IndexOptions()}) =>
+      _call('user', 'open', (directory, create, options));
+
+  /// Detaches and closes the user index (no-op without one).
+  Future<void> closeUserIndex() => _call('user', 'close');
+
+  /// True while a user index is attached.
+  Future<bool> hasUserIndex() => _call('user', 'has');
+
+  /// [SeforimIndex.documents] (the attached user index's documents).
+  Future<List<UserDocumentInfo>> documents() => _call('index', 'documents');
+
+  /// [SeforimIndex.lineSources]: key, locator and line number of user lines
+  /// (null for a library line).
+  Future<List<UserLineSource?>> lineSources(List<int> lineIds) => _call('index', 'lineSources', lineIds);
+
+  /// [SeforimIndex.lineTexts]: the stored texts of user lines (null for a
+  /// library line: those come from the host's database).
+  Future<List<String?>> lineTexts(List<int> lineIds) => _call('index', 'lineTexts', lineIds);
+
+  /// [openWriter] on the attached user index: [AsyncIndexWriter.putDocument]
+  /// / [AsyncIndexWriter.deleteDocuments], commit, then
+  /// [AsyncIndexWriter.mergeAndClose] and [buildUserFmSidecar] after a large
+  /// change. A commit is seen by the next search.
+  Future<AsyncIndexWriter> openUserWriter({int heapBytes = 0, int threads = 0, bool lowPriority = false}) async {
+    final id = await _call<int>('openUserWriter', heapBytes, threads, lowPriority);
+    return AsyncIndexWriter._(this, id);
+  }
+
+  /// [SeforimIndex.buildFmSidecar] on the user index (after its merge).
+  Future<bool> buildUserFmSidecar() => _call('user', 'buildFmSidecar');
+
+  /// [SeforimIndex.reload] on the user index.
+  Future<void> reloadUser() => _call('user', 'reload');
+
   /// [SeforimIndex.reload] on the worker.
   Future<void> reload() => _call('index', 'reload');
 
@@ -184,6 +227,9 @@ final class SearchWorker {
 
   /// [SeforimIndex.numLines] on the worker.
   Future<int> numLines() => _call('index', 'numLines');
+
+  /// [SeforimIndex.info] on the worker (positions, keep marks, payload).
+  Future<IndexInfo> info() => _call('index', 'info');
 
   /// [SeforimIndex.startBackgroundMerge] on the worker.
   Future<bool> startBackgroundMerge([List<int>? bookOrder]) => _call('index', 'startBackgroundMerge', bookOrder);
@@ -443,6 +489,13 @@ final class AsyncIndexWriter {
   /// [IndexWriter.delete].
   Future<void> delete(int lineId) => _call('delete', lineId);
 
+  /// [IndexWriter.putDocument] (a user index's writer: [SearchWorker.openUserWriter]).
+  Future<int> putDocument(String key, String stamp, List<UserDocumentLine> lines) =>
+      _call('putDocument', key, (stamp, lines));
+
+  /// [IndexWriter.deleteDocuments] (a user index's writer).
+  Future<int> deleteDocuments(List<String> keys) => _call('deleteDocuments', keys);
+
   /// [IndexWriter.deleteBook].
   Future<void> deleteBook(int bookId) => _call('deleteBook', bookId);
 
@@ -489,6 +542,15 @@ void _workerMain((SendPort, String, String?) args) {
   final sessions = <int, SearchSession>{};
   var nextSession = 1;
   final writers = <int, IndexWriter>{};
+  SeforimIndex? user;
+  void closeUser() {
+    final u = user;
+    if (u == null) return;
+    user = null;
+    index.attachUserIndex(null);
+    u.close();
+  }
+
   control.listen((m) {
     final (id, op, a, b, c) = m as (int, String, Object?, Object?, Object?);
     try {
@@ -579,6 +641,35 @@ void _workerMain((SendPort, String, String?) args) {
           final wid = nextSession++;
           writers[wid] = index.openWriter(heapBytes: a as int, threads: b as int, lowPriority: c as bool);
           value = wid;
+        case 'openUserWriter':
+          final u = user ?? (throw StateError('no user index is open (openUserIndex)'));
+          final wid = nextSession++;
+          writers[wid] = u.openWriter(heapBytes: a as int, threads: b as int, lowPriority: c as bool);
+          value = wid;
+        case 'user':
+          switch (a as String) {
+            case 'open':
+              final (dir, create, options) = b as (String, bool, IndexOptions);
+              closeUser();
+              final u = create ? SeforimIndex.createUser(dir, options) : SeforimIndex.openUser(dir);
+              try {
+                index.attachUserIndex(u);
+              } catch (_) {
+                u.close();
+                rethrow;
+              }
+              user = u;
+            case 'close':
+              closeUser();
+            case 'has':
+              value = user != null;
+            case 'buildFmSidecar':
+              value = (user ?? (throw StateError('no user index is open'))).buildFmSidecar();
+            case 'reload':
+              (user ?? (throw StateError('no user index is open'))).reload();
+            default:
+              throw StateError('unknown user op $a');
+          }
         case 'writer':
           final wid = a as int;
           final w = writers[wid] ?? (throw StateError('IndexWriter is closed'));
@@ -590,6 +681,11 @@ void _workerMain((SendPort, String, String?) args) {
               w.addAll((x as List).cast<LineDocument>());
             case 'delete':
               w.delete(x as int);
+            case 'putDocument':
+              final (stamp, lines) = y as (String, List<UserDocumentLine>);
+              value = w.putDocument(x as String, stamp, lines);
+            case 'deleteDocuments':
+              value = w.deleteDocuments((x as List).cast<String>());
             case 'deleteBook':
               w.deleteBook(x as int);
             case 'commit':
@@ -619,6 +715,14 @@ void _workerMain((SendPort, String, String?) args) {
               index.releaseMemory();
             case 'numLines':
               value = index.numLines;
+            case 'info':
+              value = index.info();
+            case 'documents':
+              value = index.documents();
+            case 'lineSources':
+              value = index.lineSources((b as List).cast<int>());
+            case 'lineTexts':
+              value = index.lineTexts((b as List).cast<int>());
             case 'startBackgroundMerge':
               value = index.startBackgroundMerge((b as List?)?.cast<int>());
             case 'recordBackgroundMerge':
@@ -643,6 +747,7 @@ void _workerMain((SendPort, String, String?) args) {
             s.close();
           }
           sessions.clear();
+          closeUser();
           index.close();
           control.close();
         default:

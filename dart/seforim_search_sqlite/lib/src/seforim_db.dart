@@ -2,9 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:seforim_search/seforim_db.dart';
 import 'package:sqlite3/sqlite3.dart';
 
-import 'note_ids.dart';
 import 'zstd.dart';
 
 /// Default DB path resolution (see repo CLAUDE.md): Otzaria, then Zayit.
@@ -22,16 +22,6 @@ String? defaultDbPath() {
   return null;
 }
 
-/// One line read from the DB.
-/// A line's book and line index ([SeforimDb.lineLocations]).
-typedef LineLocation = ({int bookId, int lineIndex});
-
-class DbLine {
-  DbLine(this.id, this.bookId, this.lineIndex, this.tocEntryId, this.text);
-  final int id, bookId, lineIndex, tocEntryId;
-  final String text;
-}
-
 /// Read-only access to seforim.db: schema probe, content codec, catalog
 /// order and the line feed.
 ///
@@ -45,14 +35,6 @@ class DbLine {
 /// calls ([bookLines] reads in chunks), so a reopen never closes the DB under
 /// a live cursor. [close] is idempotent. Single-isolate use: sqlite3 handles
 /// do not cross isolates.
-/// A snippet's TEXT (KitveiHakodesh Core's FtsSnippetText): the matched line
-/// and, for a short window only, the plain context before and after it.
-class SnippetText {
-  SnippetText(this.lineId, this.text, this.before, this.after);
-  final int lineId;
-  final String text, before, after;
-}
-
 /// How reading one line's text went (issue #13): found, no text row, or a row
 /// that cannot be decoded ([error] names the line id, issue #8).
 enum LineStatus { found, missing, unreadable }
@@ -73,7 +55,7 @@ class LineRead {
   final Object? error;
 }
 
-class SeforimDb {
+class SeforimDb implements SeforimDataSource {
   SeforimDb._(this.path, this._zstdLib, _Open o)
       : _db = o.db,
         splitContent = o.split,
@@ -99,6 +81,7 @@ class SeforimDb {
 
   /// Schema 7: the DB has `line_note`; its notes are indexed as virtual notes
   /// books (issue #13, ids in note_ids.dart).
+  @override
   bool hasNotes;
 
   /// Line ids whose row could not be decoded on a lenient (search-path) read:
@@ -113,6 +96,10 @@ class SeforimDb {
   final _statements = <String, PreparedStatement>{};
 
   static SeforimDb open(String path, {String? zstdLib}) => SeforimDb._(path, zstdLib, _open(path, zstdLib));
+
+  /// A [SeforimDataSourceOpener] for [path] (an index build opens its own
+  /// connection on its isolate).
+  static SeforimDataSourceOpener opener(String path, {String? zstdLib}) => () => SeforimDb.open(path, zstdLib: zstdLib);
 
   static String _fileStamp(String path) {
     String one(String p) {
@@ -350,6 +337,7 @@ class SeforimDb {
   /// Book ids in catalog order: categories by (orderIndex<0, orderIndex),
   /// in each folder its base books first, then subfolders, then the rest
   /// (books by orderIndex). Books outside the tree go last.
+  @override
   List<int> catalogBookOrder() {
     final hasCatOrder = db.select('PRAGMA table_info(category)').any((r) => r['name'] == 'orderIndex');
     final hasBase = db.select('PRAGMA table_info(book)').any((r) => r['name'] == 'isBaseBook');
@@ -407,6 +395,7 @@ class SeforimDb {
 
   /// The index build's loud guard (issue #13): throws, naming the id, when a
   /// real line / book id or a note does not fit the virtual id scheme.
+  @override
   void checkNoteIds() {
     if (!hasNotes) return;
     final l = _select('SELECT max(id) FROM line').first.columnAt(0) as int?;
@@ -421,6 +410,7 @@ class SeforimDb {
   }
 
   /// How many lines [bookId] feeds (a notes book: its notes).
+  @override
   int bookLineCount(int bookId) {
     final src = sourceBookOf(bookId);
     if (src == null) return _select('SELECT COUNT(*) FROM line WHERE bookId = ?', [bookId]).first.columnAt(0) as int;
@@ -459,6 +449,7 @@ class SeforimDb {
   /// it is yielded: no statement or cursor stays open between items, so an
   /// early stop (`take`, `break`, an exception in the consumer) leaks nothing
   /// and a reopen between chunks never closes the DB under a live cursor.
+  @override
   Iterable<DbLine> bookLines(int bookId) sync* {
     final src = sourceBookOf(bookId);
     if (src != null) {
@@ -531,6 +522,7 @@ class SeforimDb {
   /// A line with no text row is absent (callers read it as empty). A virtual
   /// notes line reads its note body. An unreadable row is absent too and recorded in
   /// [unreadableLineIds]; with [strict] it throws instead (naming the line id).
+  @override
   Map<int, String> lineTexts(Iterable<int> ids, {bool strict = false}) {
     final all = ids.toList();
     final out = _noteTexts(all.where(isVirtualId), strict);
@@ -562,6 +554,7 @@ class SeforimDb {
   /// A line with no text row is absent. A virtual notes line is its note
   /// alone. An unreadable row (each neighbour checked by its OWN line id) is
   /// read as empty and recorded in [unreadableLineIds].
+  @override
   Map<int, SnippetText> snippetTexts(Iterable<int> lineIds, Iterable<int> shortLineIds) {
     // a notes line is its note alone: no neighbour context
     final notes = _noteTexts({...lineIds, ...shortLineIds}.where(isVirtualId), false);
@@ -626,6 +619,7 @@ class SeforimDb {
   /// Each line's section (TOC entry) for grouping, straight from the DB: the
   /// engine only returns line ids. `line_toc` is the authoritative map
   /// (`line.tocEntryId` is NULL for most lines). Lines without one are absent.
+  @override
   Map<int, int> sectionsOf(Iterable<int> ids) => _readSnapshot(() {
         final hasLineToc =
             _select("SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_toc'").isNotEmpty;
@@ -647,6 +641,7 @@ class SeforimDb {
   /// Where each line sits: its book and its `lineIndex` (the host opens the
   /// book at that line). A notes line (issue #13) sits in its virtual notes
   /// book at its note index. Unknown ids are absent.
+  @override
   Map<int, LineLocation> lineLocations(Iterable<int> ids) {
     final list = ids.toList();
     if (list.isEmpty) return {};
@@ -673,6 +668,7 @@ class SeforimDb {
 
   /// heRef of line ids, read in chunks of at most 900 ids inside one read
   /// transaction (one snapshot for every chunk).
+  @override
   Map<int, String> heRefs(Iterable<int> ids) {
     final list = ids.toList();
     if (list.isEmpty) return {};
@@ -693,6 +689,7 @@ class SeforimDb {
 
   /// Book titles; a notes book is titled with the Hebrew word for notes + its
   /// book's title (issue #13).
+  @override
   Map<int, String> bookTitles() {
     final out = {for (final r in _select('SELECT id, title FROM book')) r['id'] as int: r['title'] as String};
     for (final b in booksWithNotes()) {
@@ -714,15 +711,41 @@ class SeforimDb {
     return {for (final r in rs) r.columnAt(0) as int};
   }
 
+  @override
+  Map<int, int>? bookContentHashes() => _readSnapshot(() {
+        final has = _select('PRAGMA table_info(book)').any((r) => r['name'] == 'contentHash');
+        if (!has) return null;
+        return {
+          for (final r in _select('SELECT id, contentHash FROM book')) r['id'] as int: (r['contentHash'] as int?) ?? 0
+        };
+      });
+
+  @override
+  Map<int, int> bookLineCounts() => _readSnapshot(() {
+        final counts = {
+          for (final r in _select('SELECT bookId, COUNT(*) AS n FROM line GROUP BY bookId'))
+            r['bookId'] as int: r['n'] as int
+        };
+        if (hasNotes) {
+          for (final r in _select(
+              'SELECT l.bookId AS b, COUNT(*) AS n FROM line_note n JOIN line l ON l.id = n.lineId GROUP BY l.bookId')) {
+            counts[notesBookId(r['b'] as int)] = r['n'] as int;
+          }
+        }
+        return counts;
+      });
+
   int countLines() => _select('SELECT COUNT(*) FROM line').first.columnAt(0) as int;
 
   /// File identity, stored as the index payload to detect a replaced DB.
+  @override
   String fingerprint() {
     final s = File(path).statSync();
     return '${s.size}|${s.modified.toUtc().toIso8601String()}';
   }
 
   /// Closes the connection, statements and codec; idempotent.
+  @override
   void close() {
     if (_closed) return;
     _closed = true;

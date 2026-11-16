@@ -3,7 +3,7 @@
 // find in a book, line locations.
 import 'dart:io';
 
-import 'package:seforim_search/seforim_db.dart';
+import 'package:seforim_search_sqlite/seforim_search_sqlite.dart';
 import 'package:seforim_search/seforim_search.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:test/test.dart';
@@ -58,18 +58,18 @@ void main() {
 
   test('build with progress, then search, counts, find in book', () async {
     expect(SeforimLibrary.needsBuild(idx), isTrue);
-    final progress = await SeforimLibrary.buildOrUpdateIndex(dbPath, idx, nativePath: native).toList();
+    final progress = await SeforimLibrary.buildOrUpdateIndex(SeforimDb.opener(dbPath), idx, nativePath: native).toList();
     expect(progress.last.stage, IndexBuildStage.done);
     expect(progress.last.done, 10);
     expect(progress.any((p) => p.stage == IndexBuildStage.indexing && p.total == 10), isTrue);
     expect(SeforimLibrary.needsBuild(idx), isFalse);
 
     // nothing changed: the update path, no rebuild
-    final again = await SeforimLibrary.buildOrUpdateIndex(dbPath, idx, nativePath: native).toList();
+    final again = await SeforimLibrary.buildOrUpdateIndex(SeforimDb.opener(dbPath), idx, nativePath: native).toList();
     expect(again.first.stage, IndexBuildStage.updating);
     expect(again.last.stage, IndexBuildStage.done);
 
-    final lib = await SeforimLibrary.open(idx, dbPath: dbPath, nativePath: native);
+    final lib = await openSeforimLibrary(idx, dbPath: dbPath, nativePath: native);
     try {
       final pages = await lib.search(SearchOptions('w3'), pageSize: 1).toList();
       final hits = [for (final p in pages) ...p.results];
@@ -112,7 +112,35 @@ void main() {
       expect(found.map((m) => m.lineIndex), [0, 1, 2, 3, 4]);
       expect(found.first.matches.length, 2);
 
-      expect(lib.db.lineLocations([7]), {7: (bookId: 2, lineIndex: 1)});
+      expect(lib.source.lineLocations([7]), {7: (bookId: 2, lineIndex: 1)});
+
+      // user documents (issue #44): a text file and a PDF's pages, searched
+      // with the library, texts and pages from the user index
+      await lib.openUserIndex('${tmp.path}/user', create: true);
+      final txt = UserDocuments.fromText('c:/notes.txt', 'first line\nomega alpha here\n<h2>head</h2>\nlast');
+      final pdf = UserDocuments.fromPdfPages('c:/a.pdf', 's1',
+          const [PdfPageText(0, 'cover page'), PdfPageText(4, 'x\nomega on page five')]);
+      await lib.updateUserDocuments(put: [txt, pdf]);
+      final docs = await lib.documents();
+      expect(docs.map((d) => d.key), containsAll(['c:/notes.txt', 'c:/a.pdf']));
+      final u = [for (final p in await lib.search(SearchOptions('omega')).toList()) ...p.results];
+      expect(u.length, 2);
+      expect(u.every((h) => h.userSource != null), isTrue);
+      final onPdf = u.firstWhere((h) => h.userSource!.key == 'c:/a.pdf');
+      expect(onPdf.userSource!.locator, 4);
+      expect(onPdf.text, 'omega on page five');
+      expect(onPdf.bookTitle, 'c:/a.pdf');
+      expect(onPdf.highlights, [(0, 5)]);
+      final onTxt = u.firstWhere((h) => h.userSource!.key == 'c:/notes.txt');
+      expect(onTxt.lineIndex, 1);
+      expect(onTxt.before, 'first line'); // short row: same-document context
+      final libOnly = [for (final p in await lib.search(SearchOptions('omega', sources: SearchSources.library)).toList()) ...p.results];
+      expect(libOnly, isEmpty);
+      await lib.updateUserDocuments(delete: ['c:/notes.txt']);
+      final left = [for (final p in await lib.search(SearchOptions('omega')).toList()) ...p.results];
+      expect(left.single.userSource!.key, 'c:/a.pdf');
+      final mixed = await lib.counts(SearchOptions('alpha'));
+      expect(mixed.total, 10); // the deleted document is gone
     } finally {
       await lib.close();
     }

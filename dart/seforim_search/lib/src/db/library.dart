@@ -1,14 +1,16 @@
 // The ready-made host API: a few direct calls a screen makes (open, search
 // -> ready results with text, snippet and highlights, counts, find in a book,
-// build or update the index), with the engine on a worker isolate and
-// seforim.db read by line id. Everything below it stays public for hosts that
-// need the low-level calls.
+// build or update the index, user documents), with the engine on a worker
+// isolate and seforim.db read by line id through the host's
+// SeforimDataSource. Everything below it stays public for hosts that need the
+// low-level calls.
 import 'dart:async';
 
 import '../../seforim_search.dart';
+import 'data_source.dart';
 import 'grouping.dart';
 import 'index_builder.dart';
-import 'seforim_db.dart';
+import 'user_documents.dart';
 
 /// One ready result: where it is, its text and the highlighted snippet.
 final class SearchHit {
@@ -26,6 +28,7 @@ final class SearchHit {
     this.nextLineId,
     this.groupSize = 1,
     this.siblings = const [],
+    this.userSource,
   });
 
   /// The hit's place in the search's order (catalog order by default).
@@ -52,6 +55,12 @@ final class SearchHit {
   /// [mergedSiblingsCap] of the others.
   final int groupSize;
   final List<GroupSibling> siblings;
+
+  /// A user document's line ([SeforimIndex.isUserId]): its document key,
+  /// locator (e.g. a PDF page) and line number; null for a library line.
+  /// [bookTitle] is then the document key, [lineIndex] the line number and
+  /// [reference] empty (the host names its documents).
+  final UserLineSource? userSource;
 
   /// The highlighted words as (start, end) ranges into [text].
   List<(int, int)> get highlights => [for (final m in snippet?.marks ?? const <SnippetMark>[]) (m.start, m.start + m.length)];
@@ -91,46 +100,198 @@ final class BookMatch {
   final List<TextMatch> matches;
 }
 
-/// seforim.db + its index, ready to search.
+/// seforim.db + its index, ready to search; optionally a user index of host
+/// documents beside it (issue #44).
 final class SeforimLibrary {
-  SeforimLibrary._(this.db, this.worker, this.indexDir);
+  SeforimLibrary._(this.source, this.worker, this.indexDir, this._ownsSource);
 
-  /// The open database (titles, refs, texts by line id).
-  final SeforimDb db;
+  /// The host's database access (titles, refs, texts by line id).
+  final SeforimDataSource source;
+  final bool _ownsSource;
 
   /// The engine's worker isolate (low-level calls).
   final SearchWorker worker;
   final String indexDir;
   Map<int, String>? _titles;
+  Map<int, String>? _userTitles;
 
   /// Builds the index when missing or stale, else applies the per-book
-  /// update; progress until [IndexBuildStage.done]. Call before [open] on a
-  /// first run, and on a DB change (close the library first: a rebuild
-  /// replaces the directory; then [open] again).
-  static Stream<IndexBuildProgress> buildOrUpdateIndex(String dbPath, String indexDir,
+  /// update; progress until [IndexBuildStage.done]. [open] opens the host's
+  /// [SeforimDataSource] on the build isolate. Call before
+  /// [SeforimLibrary.open] on a first run, and on a DB change (close the
+  /// library first: a rebuild replaces the directory; then open again).
+  static Stream<IndexBuildProgress> buildOrUpdateIndex(SeforimDataSourceOpener open, String indexDir,
           {IndexOptions options = const IndexOptions(), Future<void>? cancel, String? nativePath}) =>
-      SeforimIndexBuilder.ensure(dbPath, indexDir, options: options, cancel: cancel, nativePath: nativePath);
+      SeforimIndexBuilder.ensure(open, indexDir, options: options, cancel: cancel, nativePath: nativePath);
 
   /// True when [indexDir] needs [buildOrUpdateIndex] before [open].
   static bool needsBuild(String indexDir, {IndexOptions? options}) =>
       SeforimIndexBuilder.needsBuild(indexDir, options: options);
 
-  /// Opens the DB ([dbPath], default: the usual install locations) and the
-  /// index at [indexDir] on a worker isolate.
-  static Future<SeforimLibrary> open(String indexDir, {String? dbPath, String? nativePath}) async {
-    final path = dbPath ?? defaultDbPath();
-    if (path == null) throw StateError('seforim.db not found');
-    final db = SeforimDb.open(path);
-    try {
-      return SeforimLibrary._(db, await SearchWorker.spawn(indexDir, nativePath: nativePath), indexDir);
-    } catch (_) {
-      db.close();
-      rethrow;
+  /// Opens the index at [indexDir] on a worker isolate, reading the database
+  /// through [source] (the host's own data layer). [closeSource]: [close]
+  /// also closes [source]. [userIndexDir]: also opens (with
+  /// [createUserIndex], creates) that user index and attaches it
+  /// ([openUserIndex]).
+  static Future<SeforimLibrary> open(String indexDir,
+      {required SeforimDataSource source,
+      bool closeSource = false,
+      String? userIndexDir,
+      bool createUserIndex = false,
+      String? nativePath}) async {
+    final worker = await SearchWorker.spawn(indexDir, nativePath: nativePath);
+    final lib = SeforimLibrary._(source, worker, indexDir, closeSource);
+    if (userIndexDir != null) {
+      try {
+        await lib.openUserIndex(userIndexDir, create: createUserIndex);
+      } catch (_) {
+        await worker.close();
+        rethrow;
+      }
     }
+    return lib;
   }
 
   /// Book titles by id (virtual notes books included), cached.
-  Map<int, String> get bookTitles => _titles ??= db.bookTitles();
+  Future<Map<int, String>> bookTitles() async => _titles ??= await source.bookTitles();
+
+  // -- user documents (issue #44) --
+
+  /// Opens the user index at [directory] (with [create], a fresh one with the
+  /// library's index options, WIPING the directory) and attaches it:
+  /// searches read both by default ([SearchOptions.sources]).
+  Future<void> openUserIndex(String directory, {bool create = false}) async {
+    var options = const IndexOptions();
+    if (create) {
+      final i = await worker.info();
+      options = IndexOptions(positions: i.positions, keepMarks: i.keepMarks);
+    }
+    _userTitles = null;
+    await worker.openUserIndex(directory, create: create, options: options);
+  }
+
+  /// Detaches and closes the user index.
+  Future<void> closeUserIndex() {
+    _userTitles = null;
+    return worker.closeUserIndex();
+  }
+
+  /// The user index's documents (key, stamp, book id, line count).
+  Future<List<UserDocumentInfo>> documents() => worker.documents();
+
+  /// Where user lines come from (null for a library line).
+  Future<List<UserLineSource?>> lineSources(List<int> lineIds) => worker.lineSources(lineIds);
+
+  /// The stored texts of user lines (null for a library line).
+  Future<List<String?>> userLineTexts(List<int> lineIds) => worker.lineTexts(lineIds);
+
+  /// Adds or replaces the documents [put] (by key) and deletes the documents
+  /// [delete] in ONE commit of the user index; with [merge] (default) then
+  /// merges it to one segment and rebuilds its FM sidecar (leading `*`,
+  /// fuzzy). Returns how many of [delete] were indexed.
+  Future<int> updateUserDocuments(
+      {List<UserDocument> put = const [], List<String> delete = const [], bool merge = true}) async {
+    _userTitles = null;
+    final w = await worker.openUserWriter();
+    var deleted = 0;
+    try {
+      if (delete.isNotEmpty) deleted = await w.deleteDocuments(delete);
+      for (final d in put) {
+        await w.putDocument(d.key, d.stamp, d.lines);
+      }
+      await w.commit();
+    } catch (_) {
+      await w.close();
+      rethrow;
+    }
+    if (merge) {
+      await w.mergeAndClose();
+      await worker.reloadUser();
+      await worker.buildUserFmSidecar();
+    } else {
+      await w.close();
+    }
+    return deleted;
+  }
+
+  Future<Map<int, String>> _userBookTitles() async =>
+      _userTitles ??= {for (final d in await worker.documents()) d.bookId: d.key};
+
+  /// The texts of [ids]: library lines from [source], user lines from the
+  /// user index (it stores them).
+  Future<Map<int, String>> _texts(Iterable<int> ids) async {
+    final user = <int>[], lib = <int>[];
+    for (final id in ids) {
+      (_isUser(id) ? user : lib).add(id);
+    }
+    final out = lib.isEmpty ? <int, String>{} : Map<int, String>.of(await source.lineTexts(lib));
+    if (user.isNotEmpty) {
+      final t = await worker.lineTexts(user);
+      for (var i = 0; i < user.length; i++) {
+        if (t[i] case final x?) out[user[i]] = x;
+      }
+    }
+    return out;
+  }
+
+  /// Book and line index of [ids] (a user line: its document's book id and
+  /// line number), and the user lines' sources.
+  Future<(Map<int, LineLocation>, Map<int, UserLineSource>)> _locations(Iterable<int> ids) async {
+    final user = <int>[], lib = <int>[];
+    for (final id in ids) {
+      (_isUser(id) ? user : lib).add(id);
+    }
+    final where = lib.isEmpty ? <int, LineLocation>{} : Map<int, LineLocation>.of(await source.lineLocations(lib));
+    final sources = <int, UserLineSource>{};
+    if (user.isNotEmpty) {
+      final s = await worker.lineSources(user);
+      for (var i = 0; i < user.length; i++) {
+        if (s[i] case final x?) {
+          sources[user[i]] = x;
+          where[user[i]] = (bookId: _userBookOf(user[i]), lineIndex: x.line);
+        }
+      }
+    }
+    return (where, sources);
+  }
+
+  // the user id range (SeforimIndex.userIdBase, README "User index"): a
+  // constant here, so an id check needs no native call on this isolate
+  static const _userBase = 1 << 51;
+  static bool _isUser(int id) => id >= _userBase && id < 2 * _userBase;
+
+  // user ids: book 2^51 + n, line 2^51 + (n << 24) + line (README "User index")
+  static int _userBookOf(int lineId) => _userBase + ((lineId - _userBase) >> 24);
+
+  /// The sameSection key of a user line: its document + locator (e.g. one
+  /// PDF page). Negative, so it never meets a library TOC entry id.
+  static int _userSectionKey(int lineId, int locator) =>
+      -1 - ((((lineId - _userBase) >> 24) << 32) | (locator & 0xffffffff));
+
+  static const _neighbourRadius = 2;
+
+  /// Snippet context of short user rows: the non-empty lines of the same
+  /// document within 2 lines on each side, joined by single spaces in
+  /// document order (the library's rule, [SeforimDataSource.snippetTexts]).
+  Future<Map<int, SnippetText>> _userContext(List<int> ids, Map<int, String> texts) async {
+    bool sameDoc(int a, int b) => a >= 0 && a >> 24 == b >> 24;
+    final want = <int>{
+      for (final id in ids)
+        for (var d = -_neighbourRadius; d <= _neighbourRadius; d++)
+          if (d != 0 && sameDoc(id + d, id) && !texts.containsKey(id + d)) id + d
+    };
+    final more = want.isEmpty ? const <int, String>{} : await _texts(want);
+    String side(int id, int from, int to) => [
+          for (var d = from; d <= to; d++)
+            if (sameDoc(id + d, id))
+              if ((texts[id + d] ?? more[id + d]) case final t? when t.isNotEmpty) t
+        ].join(' ');
+    return {
+      for (final id in ids)
+        if (texts[id] case final t?)
+          id: SnippetText(id, t, side(id, -_neighbourRadius, -1), side(id, 1, _neighbourRadius)),
+    };
+  }
 
   /// Runs [options] and streams ready pages of [pageSize] results in the
   /// search's order: the first page as soon as it is decided, then on
@@ -220,15 +381,29 @@ final class SeforimLibrary {
       all.addAll(await s.hits(at, 65536));
     }
     final ids = [for (final h in all) h.lineId];
-    final sections = grouping == Grouping.sameSection ? db.sectionsOf(ids) : const <int, int>{};
-    final texts = grouping == Grouping.identicalText ? db.lineTexts(ids) : const <int, String>{};
+    final sections = <int, int>{};
+    if (grouping == Grouping.sameSection) {
+      final lib = [for (final id in ids) if (!_isUser(id)) id];
+      if (lib.isNotEmpty) sections.addAll(await source.sectionsOf(lib));
+      // a user line's section is its document + locator (e.g. one PDF page);
+      // negative keys never meet a library TOC entry id
+      final user = [for (final id in ids) if (_isUser(id)) id];
+      if (user.isNotEmpty) {
+        final (_, src) = await _locations(user);
+        for (final id in user) {
+          if (src[id] case final x?) sections[id] = _userSectionKey(id, x.locator);
+        }
+      }
+    }
+    final texts = grouping == Grouping.identicalText ? await _texts(ids) : const <int, String>{};
     final groups = groupInOrder<PlacedHit>(
         all,
         (h) => groupKey(grouping,
             tocEntryId: sections[h.lineId] ?? 0, lineId: h.lineId, text: texts[h.lineId]));
     final counts = withCounts ? await _exactCounts(s) : null;
     final end = limit > 0 && offset + limit < groups.length ? offset + limit : groups.length;
-    final titles = bookTitles;
+    final titles = await bookTitles();
+    final userTitles = await _userBookTitles();
     var at = offset;
     if (at >= end) {
       out.add(ResultPage(const [], s.hitCount, true, counts: counts, groupCount: groups.length));
@@ -240,8 +415,8 @@ final class SeforimLibrary {
       final reps = await _ready(s, [for (final g in page) g.members.first], contextWords);
       final sib = [for (final g in page) g.members.skip(1).take(mergedSiblingsCap).toList()];
       final sibIds = [for (final l in sib) for (final h in l) h.lineId];
-      final where = db.lineLocations(sibIds);
-      final refs = db.heRefs(sibIds);
+      final (where, _) = await _locations(sibIds);
+      final refs = await source.heRefs([for (final id in sibIds) if (!_isUser(id)) id]);
       final done = at >= end;
       out.add(ResultPage([
         for (var i = 0; i < reps.length; i++)
@@ -260,9 +435,10 @@ final class SeforimLibrary {
             groupSize: page[i].members.length,
             siblings: [
               for (final h in sib[i])
-                GroupSibling(h.lineId, h.bookId, titles[h.bookId] ?? '', where[h.lineId]?.lineIndex ?? 0,
-                    refs[h.lineId] ?? ''),
+                GroupSibling(h.lineId, h.bookId, titles[h.bookId] ?? userTitles[h.bookId] ?? '',
+                    where[h.lineId]?.lineIndex ?? 0, refs[h.lineId] ?? ''),
             ],
+            userSource: reps[i].userSource,
           ),
       ], s.hitCount, done, counts: done ? counts : null, terms: await s.takeNewTerms(), groupCount: groups.length));
     }
@@ -271,7 +447,7 @@ final class SeforimLibrary {
   Future<List<SearchHit>> _ready(AsyncSearchSession s, List<PlacedHit> placed, int contextWords) async {
     if (placed.isEmpty) return const [];
     final ids = <int>{for (final h in placed) h.lineId, for (final h in placed) ?h.nextLineId};
-    final texts = db.lineTexts(ids);
+    final texts = await _texts(ids);
     final pairs = placed.any((h) => h.nextLineId != null);
     final lineTexts = [for (final h in placed) texts[h.lineId] ?? ''];
     final snippets = pairs
@@ -281,17 +457,24 @@ final class SeforimLibrary {
       for (var i = 0; i < placed.length; i++)
         if (placed[i].nextLineId == null && (snippets[i]?.isShort(contextWords) ?? false)) placed[i].lineId
     ];
-    final context = short.isEmpty ? const <int, SnippetText>{} : db.snippetTexts(short, short);
-    final where = db.lineLocations(placed.map((h) => h.lineId));
-    final refs = db.heRefs(placed.map((h) => h.lineId));
-    final titles = bookTitles;
+    final shortLib = [for (final id in short) if (!_isUser(id)) id];
+    final shortUser = [for (final id in short) if (_isUser(id)) id];
+    final context = <int, SnippetText>{
+      if (shortLib.isNotEmpty) ...await source.snippetTexts(shortLib, shortLib),
+      if (shortUser.isNotEmpty) ...await _userContext(shortUser, texts),
+    };
+    final (where, userSources) = await _locations(placed.map((h) => h.lineId));
+    final libIds = [for (final h in placed) if (!_isUser(h.lineId)) h.lineId];
+    final refs = libIds.isEmpty ? const <int, String>{} : await source.heRefs(libIds);
+    final titles = await bookTitles();
+    final userTitles = userSources.isEmpty ? const <int, String>{} : await _userBookTitles();
     return [
       for (var i = 0; i < placed.length; i++)
         SearchHit(
           position: placed[i].position,
           lineId: placed[i].lineId,
           bookId: placed[i].bookId,
-          bookTitle: titles[placed[i].bookId] ?? '',
+          bookTitle: titles[placed[i].bookId] ?? userTitles[placed[i].bookId] ?? '',
           lineIndex: where[placed[i].lineId]?.lineIndex ?? 0,
           reference: refs[placed[i].lineId] ?? '',
           text: placed[i].nextLineId == null
@@ -301,6 +484,7 @@ final class SeforimLibrary {
           before: context[placed[i].lineId]?.before ?? '',
           after: context[placed[i].lineId]?.after ?? '',
           nextLineId: placed[i].nextLineId,
+          userSource: userSources[placed[i].lineId],
         ),
     ];
   }
@@ -323,7 +507,7 @@ final class SeforimLibrary {
     if (await s.countNeedsText) {
       for (var offset = 0; offset < s.hitCount; offset += 2048) {
         final page = await s.hits(offset, 2048);
-        final texts = db.lineTexts({for (final h in page) h.lineId, for (final h in page) ?h.nextLineId});
+        final texts = await _texts({for (final h in page) h.lineId, for (final h in page) ?h.nextLineId});
         final lines = [for (final h in page) texts[h.lineId] ?? ''];
         if (page.any((h) => h.nextLineId != null)) {
           await s.countBatchPairs(lines, [for (final h in page) h.nextLineId == null ? null : texts[h.nextLineId]]);
@@ -353,8 +537,8 @@ final class SeforimLibrary {
     await for (final b in worker.searchStream(SearchOptions(query, books: [bookId]), cancel: cancel)) {
       ids.addAll(b.hits.map((h) => h.lineId));
     }
-    final texts = db.lineTexts(ids);
-    final where = db.lineLocations(ids);
+    final texts = await _texts(ids);
+    final (where, _) = await _locations(ids);
     final out = <BookMatch>[];
     for (final id in ids) {
       final t = texts[id];
@@ -385,6 +569,6 @@ final class SeforimLibrary {
 
   Future<void> close() async {
     await worker.close();
-    db.close();
+    if (_ownsSource) source.close();
   }
 }

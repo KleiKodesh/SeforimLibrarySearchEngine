@@ -1,10 +1,11 @@
 # Dart side
 
-Two packages:
+Three packages:
 
 | Folder | What |
 |---|---|
-| `seforim_search/` | `dart:ffi` binding to `seforim_search_native` (the C ABI in `engine-ffi/src/lib.rs`). Mirrors the C# `SeforimSearch.Engine` package. |
+| `seforim_search/` | `dart:ffi` binding to `seforim_search_native` (the C ABI in `engine-ffi/src/lib.rs`). Mirrors the C# `SeforimSearch.Engine` package. Also the host layer (`seforim_db.dart`) over a pluggable `SeforimDataSource`: no SQLite dependency. |
+| `seforim_search_sqlite/` | The ready-made sqlite side: `SeforimDb` (seforim.db reader implementing `SeforimDataSource`, zstd), `defaultDbPath`, `openSeforimLibrary`, and `LexicalDb` (Otzaria's lexical.db). Depends on `seforim_search` and `package:sqlite3`. |
 | `otzaria_demo/` | A console app that does what Otzaria's full-text search does, on this engine. It reads seforim.db with `package:sqlite3` and decodes zstd through `libzstd`. |
 
 ## Build and run
@@ -71,8 +72,8 @@ s.close(); index.close();
   (`expectedModelJson`). `VectorSetWriter(dir, worker: w)`
   runs the install on a `SearchWorker` isolate (`w.installVectorSegment`, `w.verifyOxv`); without a worker
   it runs on the calling isolate (it hashes the whole segment).
-- **Lexical search expansion** (Otzaria's lexical.db / MagicDictionary, in the package, `LexicalDb`;
-  SQLite through `package:sqlite3`, never in the engine): `LexicalDb.open(path)` / `tryOpen` (null when
+- **Lexical search expansion** (Otzaria's lexical.db / MagicDictionary, `LexicalDb` in
+  `seforim_search_sqlite`; SQLite through `package:sqlite3`, never in the engine): `LexicalDb.open(path)` / `tryOpen` (null when
   missing or not a lexical.db) opens Otzaria's `lexical.db` read-only (Otzaria ships it next to seforim.db
   and loads it when present; the host passes the path). `recallForms(word)` (searched) and
   `highlightForms(word)` (blacklisted lemmas left out) give Otzaria's forms, at most 32 per word;
@@ -91,16 +92,29 @@ s.close(); index.close();
 
 ## Host API (`package:seforim_search/seforim_db.dart`)
 
-The ready-made layer a screen calls directly; seforim.db is read here, by
-line id (the engine itself stays free of SQLite):
+The ready-made layer a screen calls directly; seforim.db is read by line id
+through a `SeforimDataSource` (the engine itself stays free of SQLite, and so
+does this package). A host with its own database layer implements the
+interface over it (one connection, its own sqlite library); otherwise
+`package:seforim_search_sqlite` gives `SeforimDb` and `openSeforimLibrary`.
+
+`SeforimDataSource` members: display reads (`FutureOr`, caller's isolate)
+`lineTexts`, `snippetTexts` (short rows: +-2 non-empty same-book neighbours),
+`lineLocations`, `heRefs`, `bookTitles`, `sectionsOf`; build reads
+(synchronous, on the build isolate) `catalogBookOrder`, `bookLineCount`,
+`bookLineCounts`, `bookLines`, `hasNotes`, `checkNoteIds`, `fingerprint`,
+`bookContentHashes`; `close`. A build gets a `SeforimDataSourceOpener` (a
+sendable function that opens the source on the build isolate, e.g.
+`SeforimDb.opener(path)`).
 
 ```dart
 if (SeforimLibrary.needsBuild(indexDir)) {
-  await for (final p in SeforimLibrary.buildOrUpdateIndex(dbPath, indexDir)) {
+  await for (final p in SeforimLibrary.buildOrUpdateIndex(SeforimDb.opener(dbPath), indexDir)) {
     print(p); // stage (indexing / merging / fmSidecar / updating / done), done / total lines
   }
 }
-final lib = await SeforimLibrary.open(indexDir, dbPath: dbPath);
+final lib = await SeforimLibrary.open(indexDir, source: myDataSource);
+// or: await openSeforimLibrary(indexDir, dbPath: dbPath) (seforim_search_sqlite)
 await for (final page in lib.search(SearchOptions(query))) {
   // page.results: SearchHit = book title, line index, ref, text, snippet + highlights,
   // short-row context; page.hitCount (total once page.complete)
@@ -125,11 +139,50 @@ await lib.close();
 - `optional: true` (hook user-define): when no native library can be had
   (no file, no pinned prebuilt, no cargo) the build bundles nothing instead of
   failing; the app then must not load the engine.
-- Below it, public for hosts that need them: `SeforimDb` (schema probe, zstd,
-  `lineTexts`, `snippetTexts`, `lineLocations`, `sectionsOf`, `heRefs`,
-  `catalogBookOrder`), `SnippetTextCache`, the note id scheme,
-  `updateChangedBooks`, `buildIndexFromDb`. Moved here from the demo, which
-  re-exports them.
+- Below it, public for hosts that need them: `SnippetTextCache`, the note id
+  scheme, `updateChangedBooks`, `buildIndexFromDb` (all over
+  `SeforimDataSource`); `SeforimDb` (schema probe, zstd) in
+  `seforim_search_sqlite`, which the demo re-exports.
+
+### User documents (issue #44)
+
+A user index beside the library holds host documents (text files, PDFs):
+
+```dart
+await lib.openUserIndex(userDir, create: true);    // or SeforimLibrary.open(..., userIndexDir:)
+final txt = await UserDocuments.fromTextFile(path); // key = path, stamp = fileStamp
+var pdf = UserDocuments.fromPdfPages(pdfPath, UserDocuments.fileStamp(pdfPath), pagesFromApp);
+if (pdf.isEmpty) {                                  // scanned: Otzaria's OCR sidecar
+  pdf = UserDocuments.fromPdfPages(pdfPath, pdf.stamp, await UserDocuments.pdfSidecarPages(pdfPath));
+}
+await lib.updateUserDocuments(put: [txt, pdf], delete: removedPaths); // one commit, merge, FM sidecar
+final docs = await lib.documents();                 // key, stamp, book id, lines (indexed paths + stamps)
+// searches read both (SearchOptions.sources: all / library / user);
+// a user hit has userSource (key, locator = PDF page, line), its text and
+// snippet from the user index, short-row context from the same document
+```
+
+- `UserDocuments.textLines` (Otzaria add_text_book): split on `\n` (a final
+  `\r` dropped), text kept as is; a `<h` line opens the next section and is
+  no-cross; locator = line number.
+- `fromPdfPages` (Otzaria add_pdf_book): each page split on `\n`, every line
+  `normalizePdfTextForIndexing` (port: HTML strip with Otzaria's sup/sub rule,
+  invisibles, presentation forms, marks, whitespace) and dropped when
+  `isProbablyGarbagePdfText` (port; needs the native library for the
+  paired-readings step); locator = page index, section = page index + 1 (our
+  sections start at 1), a line next to a dropped one is no-cross. No lines:
+  `pdfSidecarPages` (`<pdf>.txt` or `.txt` for the extension, split on form
+  feed), else the host records the empty book (Otzaria's marker is app
+  bookkeeping).
+- Stamps: `contentFingerprint` / `contentFingerprintBytes` = Otzaria's
+  `textHash` (FNV-1a 64 over the raw UTF-8, never 0; `fingerprintHex`);
+  `fileStamp` = FNV-1a of path, size and mtime. The stamp is the host's
+  string; compare it with `documents()` to find changed files.
+- Worker level (`SearchWorker`): `openUserIndex`, `closeUserIndex`,
+  `hasUserIndex`, `documents`, `lineSources`, `lineTexts`, `openUserWriter`
+  (`AsyncIndexWriter.putDocument` / `deleteDocuments`, commit,
+  `mergeAndClose`), `buildUserFmSidecar`, `reloadUser`, `info`.
+- sameSection grouping keys a user line by document + locator (one PDF page).
 
 ## Otzaria → engine mapping
 

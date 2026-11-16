@@ -11,7 +11,7 @@ import 'package:ffi/ffi.dart';
 import '../../seforim_search.dart';
 import 'book_updates.dart';
 import 'note_ids.dart';
-import 'seforim_db.dart';
+import 'data_source.dart';
 
 /// The stage of an index build.
 enum IndexBuildStage { indexing, merging, fmSidecar, updating, done }
@@ -43,7 +43,7 @@ class IndexBuildCancelled implements Exception {
 /// [updateChangedBooks] and [SeforimIndexBuilder.needsBuild] read).
 /// Synchronous: call it on a background isolate (or use [SeforimIndexBuilder]).
 /// A cancelled or failed build deletes the half-built directory.
-void buildIndexFromDb(SeforimDb db, String dir,
+void buildIndexFromDb(SeforimDataSource db, String dir,
     {IndexOptions options = const IndexOptions(),
     void Function(IndexBuildProgress)? onProgress,
     bool Function()? cancelled,
@@ -118,7 +118,7 @@ void buildIndexFromDb(SeforimDb db, String dir,
 /// Background-isolate index build / update from seforim.db for a host's
 /// first run and later DB changes.
 abstract final class SeforimIndexBuilder {
-  /// True when [dir] holds no usable index for [dbPath]: missing, not
+  /// True when [dir] holds no usable index: missing, not
   /// openable (an older index format), built without a payload, or (with
   /// [options]) built with other index options.
   static bool needsBuild(String dir, {IndexOptions? options}) {
@@ -141,14 +141,16 @@ abstract final class SeforimIndexBuilder {
     }
   }
 
-  /// Builds [dir] from [dbPath] on a new isolate; the stream reports
-  /// progress and closes after [IndexBuildStage.done] (or with the error,
-  /// [IndexBuildCancelled] after [cancel] completes). [nativePath]: the
-  /// native library for the isolate (default: the package's own).
-  static Stream<IndexBuildProgress> build(String dbPath, String dir,
+  /// Builds [dir] on a new isolate from the database [open] opens there
+  /// (the host's own [SeforimDataSource]; closed after the build); the
+  /// stream reports progress and closes after [IndexBuildStage.done] (or with
+  /// the error, [IndexBuildCancelled] after [cancel] completes).
+  /// [nativePath]: the native library for the isolate (default: the
+  /// package's own).
+  static Stream<IndexBuildProgress> build(SeforimDataSourceOpener open, String dir,
           {IndexOptions options = const IndexOptions(), Future<void>? cancel, int maxBooks = 0, String? nativePath}) =>
       _run(cancel, nativePath, (send, isCancelled) {
-        final db = SeforimDb.open(dbPath);
+        final db = open();
         try {
           buildIndexFromDb(db, dir,
               options: options, onProgress: send, cancelled: isCancelled, maxBooks: maxBooks);
@@ -160,11 +162,11 @@ abstract final class SeforimIndexBuilder {
   /// Builds when [needsBuild], otherwise runs the per-book update
   /// ([updateChangedBooks]); an update that cannot serve the change
   /// (replaced DB without content hashes) rebuilds.
-  static Stream<IndexBuildProgress> ensure(String dbPath, String dir,
+  static Stream<IndexBuildProgress> ensure(SeforimDataSourceOpener open, String dir,
       {IndexOptions options = const IndexOptions(), Future<void>? cancel, String? nativePath}) {
-    if (needsBuild(dir, options: options)) return build(dbPath, dir, options: options, cancel: cancel, nativePath: nativePath);
+    if (needsBuild(dir, options: options)) return build(open, dir, options: options, cancel: cancel, nativePath: nativePath);
     return _run(cancel, nativePath, (send, isCancelled) {
-      final db = SeforimDb.open(dbPath);
+      final db = open();
       try {
         final index = SeforimIndex.open(dir);
         BookUpdateReport r;

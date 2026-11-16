@@ -7,10 +7,10 @@
 // already read them to locate), every later row asks for its text by line id,
 // at most [snippetFetchBatch] ids per request, and a SHORT row (fewer words
 // than the context) gets its +-2 neighbour lines in the same request (one SQL
-// statement, SeforimDb.snippetTexts). Host code: it knows seforim.db.
+// statement, SeforimDataSource.snippetTexts). Host code: it knows seforim.db.
 import 'dart:async';
 
-import 'seforim_db.dart';
+import 'data_source.dart';
 
 /// Leading hits whose texts ride along with the search (Core's
 /// `SeedSnippetTextHitCount`): about a screenful or two.
@@ -26,7 +26,7 @@ const snippetTextCacheCapacity = 1500;
 const snippetLookAhead = 60, snippetLookBehind = 20;
 
 /// Reads the texts of [lineIds], with neighbour context for [shortLineIds]
-/// (SeforimDb.snippetTexts). A line with no text row is absent.
+/// ([SeforimDataSource.snippetTexts]). A line with no text row is absent.
 typedef SnippetTextFetch = FutureOr<Map<int, SnippetText>> Function(List<int> lineIds, List<int> shortLineIds);
 
 /// A row that needs its snippet text: the line and whether its window is short.

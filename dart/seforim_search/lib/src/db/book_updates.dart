@@ -4,7 +4,7 @@ import 'dart:convert';
 import '../../seforim_search.dart';
 
 import 'note_ids.dart';
-import 'seforim_db.dart';
+import 'data_source.dart';
 
 /// [updateChangedBooks] stopped by its `cancelled` callback (the books not
 /// committed yet are redone by the next call).
@@ -71,30 +71,6 @@ String _orderStamp(List<int> order) {
   return h.toRadixString(16);
 }
 
-/// Each book's `book.contentHash` (NULL reads as 0); null when the column is
-/// missing (a DB without it can only be rebuilt whole).
-Map<int, int>? bookContentHashes(SeforimDb db) {
-  final has = db.db.select('PRAGMA table_info(book)').any((r) => r['name'] == 'contentHash');
-  if (!has) return null;
-  return {
-    for (final r in db.db.select('SELECT id, contentHash FROM book')) r['id'] as int: (r['contentHash'] as int?) ?? 0
-  };
-}
-
-/// Line counts per book id as the build feeds them (a notes book: its notes).
-Map<int, int> _lineCounts(SeforimDb db) {
-  final counts = {
-    for (final r in db.db.select('SELECT bookId, COUNT(*) AS n FROM line GROUP BY bookId')) r['bookId'] as int: r['n'] as int
-  };
-  if (db.hasNotes) {
-    for (final r in db.db.select(
-        'SELECT l.bookId AS b, COUNT(*) AS n FROM line_note n JOIN line l ON l.id = n.lineId GROUP BY l.bookId')) {
-      counts[notesBookId(r['b'] as int)] = r['n'] as int;
-    }
-  }
-  return counts;
-}
-
 /// The per-book update (issue #29, Otzaria's rule): compares each book's
 /// `book.contentHash` with the hashes the index recorded in its payload, then
 /// for every changed, new or removed book deletes all its lines (and its
@@ -114,7 +90,7 @@ Map<int, int> _lineCounts(SeforimDb db) {
 /// first; each commit holds whole books only, with their new hashes; the
 /// next call redoes what is left. Counts stay "exact" meanwhile (Otzaria's
 /// behaviour, no stale flag).
-BookUpdateReport updateChangedBooks(SeforimIndex index, SeforimDb db,
+BookUpdateReport updateChangedBooks(SeforimIndex index, SeforimDataSource db,
     {void Function(String)? log, int linesPerCommit = 20000, bool Function()? cancelled}) {
   final report = BookUpdateReport();
   BookUpdateReport notApplicable(String why) => report
@@ -123,12 +99,12 @@ BookUpdateReport updateChangedBooks(SeforimIndex index, SeforimDb db,
 
   final payload = _Payload.parse(index.info().payload);
   if (payload == null) return notApplicable('no built index');
-  final hashes = bookContentHashes(db);
+  final hashes = db.bookContentHashes();
   if (hashes == null) return notApplicable('the database has no book.contentHash');
   final fingerprint = db.fingerprint();
   final dbChanged = payload.json['db'] != fingerprint;
   final order = db.catalogBookOrder();
-  final counts = _lineCounts(db);
+  final counts = db.bookLineCounts();
   final first = <int, int>{}; // engine positions, from 0
   var next = 0;
   for (final b in order) {

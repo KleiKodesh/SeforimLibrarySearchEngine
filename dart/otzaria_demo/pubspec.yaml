@@ -11,6 +11,8 @@ dependencies:
   sqlite3: any
   seforim_search:
     path: ../seforim_search
+  seforim_search_sqlite:
+    path: ../seforim_search_sqlite
   unorm_dart: ^0.3.3
 
 dev_dependencies:

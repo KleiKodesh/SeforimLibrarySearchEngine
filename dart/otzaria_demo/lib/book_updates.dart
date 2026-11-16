@@ -1,12 +1,12 @@
-// Issue #29: the per-book update now lives in package:seforim_search/seforim_db.dart;
+// Issue #29: the per-book update now lives in package:seforim_search_sqlite/seforim_search_sqlite.dart;
 // the demo keeps its `update` command here.
 import 'dart:async';
 import 'dart:io';
 
 import 'package:seforim_search/seforim_search.dart';
-import 'package:seforim_search/seforim_db.dart';
+import 'package:seforim_search_sqlite/seforim_search_sqlite.dart';
 
-export 'package:seforim_search/seforim_db.dart';
+export 'package:seforim_search_sqlite/seforim_search_sqlite.dart';
 
 /// The demo's `update [--wait] [--watch]` command: one update, optionally
 /// waiting for the background merge; `--watch` polls the DB file stamp

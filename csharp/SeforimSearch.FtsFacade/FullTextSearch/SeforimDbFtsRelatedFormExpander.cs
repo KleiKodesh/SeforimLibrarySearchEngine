@@ -3,7 +3,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
-using Microsoft.Data.Sqlite;
 using SeforimSearch.Demo.Common;
 
 namespace SeforimSearch.Demo.SeforimDbFullTextSearch
@@ -47,14 +46,6 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// NOT a result cap; results are never capped.</summary>
         public const int PerTermLimit = 5;
 
-        // Two one-line statements — consts here, not a SQL file (rule 9 threshold).
-        private const string LookupLemmasSql =
-            "SELECT lemma, weight FROM fold WHERE surface = @s ORDER BY weight DESC, lemma";
-        private const string LookupLemmasNoWeightSql =
-            "SELECT lemma, 1.0 FROM fold WHERE surface = @s ORDER BY lemma";
-        private const string LookupFormsSql =
-            "SELECT form, channel, source FROM exp WHERE lemma = @l ORDER BY rank";
-
         // Query-shape bounds, mirroring the engine's own token rules — see the drop-guard note
         // inside RewriteCore.
         private const int MinBareLength = 2;
@@ -64,32 +55,18 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// the surface's ONLY reading, which is always kept.</summary>
         private const double MinReadingWeight = 0.15;
 
-        /// <summary>fold has a weight column (multi-lemma artifact). Read from the schema once,
-        /// on first use — never per query.</summary>
-        private bool? _foldHasWeight;
+        private readonly ISeforimDbRelatedFormLexicon? _lexicon;
 
-        private readonly string? _databasePath;
-
-        /// <summary>Finds the artifact where the app keeps it.</summary>
-        public SeforimDbFtsRelatedFormExpander()
-            : this(FindNextToApp(Path.Combine("SearchExpansion", "expansion-routed.db")))
+        /// <param name="lexicon">The artifact as the host reads it (the facade holds no SQLite;
+        /// default: SeforimSearch.SeforimDb's SeforimDbSqliteRelatedFormLexicon, which also finds
+        /// it next to the app), or null for "not installed": the expander is then inert rather
+        /// than broken.</param>
+        public SeforimDbFtsRelatedFormExpander(ISeforimDbRelatedFormLexicon? lexicon)
         {
+            _lexicon = lexicon;
         }
 
-        /// <param name="databasePath">The artifact, or null for "not installed" — the expander
-        /// is then inert rather than broken.</param>
-        public SeforimDbFtsRelatedFormExpander(string? databasePath)
-        {
-            _databasePath = databasePath;
-        }
-
-        private static string? FindNextToApp(string relative)
-        {
-            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, relative);
-            return File.Exists(path) ? path : null;
-        }
-
-        public bool IsAvailable => !string.IsNullOrWhiteSpace(_databasePath) && File.Exists(_databasePath);
+        public bool IsAvailable => _lexicon != null && _lexicon.IsAvailable;
 
         /// <summary>
         /// Rewrites <paramref name="query"/> so each plain Hebrew word gains its related forms
@@ -148,14 +125,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             var rewritten = new StringBuilder(query.Length * 2);
             bool changed = false;
 
-            using var connection = SqliteConnectionFactory.OpenCorpusRead(_databasePath!);
-            _foldHasWeight ??= FoldHasWeightColumn(connection);
-            using var lemmaCommand = connection.CreateCommand();
-            lemmaCommand.CommandText = _foldHasWeight.Value ? LookupLemmasSql : LookupLemmasNoWeightSql;
-            var surfaceParameter = lemmaCommand.Parameters.Add("@s", SqliteType.Text);
-            using var formsCommand = connection.CreateCommand();
-            formsCommand.CommandText = LookupFormsSql;
-            var lemmaParameter = formsCommand.Parameters.Add("@l", SqliteType.Text);
+            using var lookup = _lexicon!.Open();
 
             foreach (string token in tokens)
             {
@@ -188,8 +158,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                     continue;
                 }
 
-                surfaceParameter.Value = bare;
-                var readings = ReadLemmas(lemmaCommand, bare);
+                var readings = ReadLemmas(lookup, bare);
                 // Readings past the budget never get a slot — don't query their forms.
                 if (perTerm > 0 && readings.Count > perTerm) readings.RemoveRange(perTerm, readings.Count - perTerm);
 
@@ -199,33 +168,26 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 var candidates = new List<List<string>>(readings.Count);
                 foreach (var (lemma, _) in readings)
                 {
-                    lemmaParameter.Value = lemma;
                     var forms = new List<string>(perReading);
-                    using (var reader = formsCommand.ExecuteReader())
+                    foreach (var (form, channel, source) in lookup.Forms(lemma))
                     {
-                        while (reader.Read() && forms.Count < perReading)
-                        {
-                            string form = reader.GetString(0);
-                            string channel = reader.GetString(1);
-                            string source = reader.GetString(2);
+                        if (forms.Count >= perReading) break;
+                        if (!ChannelRequested(channel, inflections, synonyms)) continue;
+                        // The artifact's trust policy (see SynonymSourceTrusted).
+                        if (channel == "syn" && !SynonymSourceTrusted(source, affixAllowed)) continue;
+                        if (form == bare || forms.Contains(form)) continue;
 
-                            if (!ChannelRequested(channel, inflections, synonyms)) continue;
-                            // The artifact's trust policy (see SynonymSourceTrusted).
-                            if (channel == "syn" && !SynonymSourceTrusted(source, affixAllowed)) continue;
-                            if (form == bare || forms.Contains(form)) continue;
+                        // DROP-GUARD. A form the query parser would itself drop — too short or
+                        // long, non-Hebrew, whitespace — must never reach the query string: a
+                        // dropped OR-alternative silently merges the NEXT query word into this
+                        // OR group (parser quirk), turning the user's AND into an OR. So a form
+                        // must pass the same shape rules as the tokens being expanded.
+                        string bareForm = BareHebrew(form);
+                        if (bareForm.Length < MinBareLength
+                            || bareForm.Length > MaxBareLength
+                            || bareForm.Length != form.Length) continue;
 
-                            // DROP-GUARD. A form the query parser would itself drop — too short or
-                            // long, non-Hebrew, whitespace — must never reach the query string: a
-                            // dropped OR-alternative silently merges the NEXT query word into this
-                            // OR group (parser quirk), turning the user's AND into an OR. So a form
-                            // must pass the same shape rules as the tokens being expanded.
-                            string bareForm = BareHebrew(form);
-                            if (bareForm.Length < MinBareLength
-                                || bareForm.Length > MaxBareLength
-                                || bareForm.Length != form.Length) continue;
-
-                            forms.Add(form);
-                        }
+                        forms.Add(form);
                     }
                     candidates.Add(forms);
                 }
@@ -243,26 +205,16 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             return changed ? rewritten.ToString() : query;
         }
 
-        private static bool FoldHasWeightColumn(SqliteConnection connection)
-        {
-            using var command = connection.CreateCommand();
-            command.CommandText = "SELECT 1 FROM pragma_table_info('fold') WHERE name = 'weight'";
-            return command.ExecuteScalar() != null;
-        }
-
         /// <summary>
         /// The surface's readings, heaviest first, minus noise readings (below
         /// <see cref="MinReadingWeight"/>) unless that would leave none. No fold row means the
         /// word is its own lemma, a single reading at weight 1.
         /// </summary>
-        private static List<(string Lemma, double Weight)> ReadLemmas(SqliteCommand lemmaCommand, string bare)
+        private static List<(string Lemma, double Weight)> ReadLemmas(ISeforimDbRelatedFormLookup lookup, string bare)
         {
             var all = new List<(string Lemma, double Weight)>(2);
-            using (var reader = lemmaCommand.ExecuteReader())
-            {
-                while (reader.Read())
-                    all.Add((reader.IsDBNull(0) ? bare : reader.GetString(0), reader.IsDBNull(1) ? 1.0 : reader.GetDouble(1)));
-            }
+            foreach (var (lemma, weight) in lookup.Lemmas(bare))
+                all.Add((lemma ?? bare, weight ?? 1.0));
             if (all.Count == 0) { all.Add((bare, 1.0)); return all; }
             if (all.Count == 1) return all;
 

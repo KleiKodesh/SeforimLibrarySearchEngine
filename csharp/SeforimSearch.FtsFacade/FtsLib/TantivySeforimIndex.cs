@@ -151,16 +151,17 @@ namespace FtsLib.Fts5
         public const string IndexFormatVersion = "tantivy17"; // 17: a one-letter <sup> / <sub> between letters is transparent without a mark (presentation forms count; bidi / CGJ / inline tags skipped); a footnote-marker tag always splits, issue #37; 16: 64-bit notes ids (R = 2^52), issue #13; 15: a line flag for a word too long to be a term (a line regex always reads the line), issue #15; 14: footnotes (line_note) indexed as virtual notes books, issue #13; 13: catalog order (= position) counts a base text by the isBaseBook flag only (no title-equals-folder rule; issue #6); 12: a <sup> holding a vocalized Hebrew letter mid-word is transparent (the word continues through it); a keep_marks term drops U+034F (combining grapheme joiner); 11: doc order = catalog order (index sorted by position; search skips its sort on the merged segment); 10: an unterminated '<' is a plain separator (the rest of the line is indexed, as Otzaria); per-line content edges (line_first / line_last, edge-enumerator flags) replace the word count, so cross-line matching skips enumerators like (x) {x} (49); 9: per-line word count, line flags (headings: no cross-line phrase) and section id (TOC entry); 2: trailing quotes dropped from terms; 3: bare-minimum schema (no line_index/toc_entry_id); 5: one-letter (and 30+ letter) words indexed with positions; 6: FtsLib word model = Otzaria's (digit runs are words, ב5 one word); 7: Otzaria's remaining tokenizer rules (. [ ] bidi chars join, no script split, geresh kept as ', trailing geresh, quote and presentation-form folding, paired readings share a position, a term of 128 bytes or more not indexed); 8: a keep_marks index keeps marks in canonical order, flags the lines carrying a mark, measures the 128-byte limit without marks
 
         private readonly string _indexPath;
-        private readonly Func<SeforimDbFtsCorpus> _openCorpus;
-        private readonly string _seforimDbPath;
+        private readonly Func<ISeforimDbFtsCorpus> _openCorpus;
+        private readonly ISeforimDbFtsDataSource _source;
         private SeforimIndex? _index;
         private readonly object _openLock = new object();
 
-        public TantivySeforimIndex(string indexPath, string seforimDbPath, Func<SeforimDbFtsCorpus> openCorpus)
+        /// <param name="source">seforim.db as the host reads it (the facade holds no SQLite).</param>
+        public TantivySeforimIndex(string indexPath, ISeforimDbFtsDataSource source)
         {
             _indexPath = indexPath ?? throw new ArgumentNullException(nameof(indexPath));
-            _seforimDbPath = seforimDbPath ?? throw new ArgumentNullException(nameof(seforimDbPath));
-            _openCorpus = openCorpus ?? throw new ArgumentNullException(nameof(openCorpus));
+            _source = source ?? throw new ArgumentNullException(nameof(source));
+            _openCorpus = source.OpenCorpus;
         }
 
         /// <summary>The index keeps word positions: hits and their windows are decided during
@@ -603,7 +604,7 @@ namespace FtsLib.Fts5
         private void BuildLinesCore(Action<long, long>? onProgress, CancellationToken ct, IndexOptions? indexOptions,
                                     int linesPerCommit, long heapBytes, long maxLines)
         {
-            string fingerprint = SeforimSearch.Demo.SeforimDb.SeforimDbContentFingerprint.Compute(_seforimDbPath, IndexFormatVersion);
+            string fingerprint = _source.ContentFingerprint(IndexFormatVersion);
             var state = ReadBuildState();
             if (state != null && state.Fingerprint == fingerprint && state.Complete)
             {

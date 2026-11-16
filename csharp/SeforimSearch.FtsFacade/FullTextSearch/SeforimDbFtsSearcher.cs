@@ -140,8 +140,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             // The verification fetch reads the matched lines' text only (withPlacement: false):
             // the book id is read afterwards, for the hits that
             // pass, over this one corpus kept for the whole search (opened on first need).
-            SeforimDbFtsCorpus? corpus = null;
-            SeforimDbFtsCorpus Corpus() => corpus ??= engine.OpenCorpus();
+            ISeforimDbFtsCorpus? corpus = null;
+            ISeforimDbFtsCorpus Corpus() => corpus ??= engine.OpenCorpus();
             // Undecodable rows are skipped as empty and counted, never abort the search (issue
             // #13, Core 02236a02). The scope is entered around each pull only, never across a yield.
             unreadable ??= new SeforimDbFtsUnreadableRows();
@@ -200,7 +200,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// </summary>
         private static SeforimDbFtsHitBatch BuildBatch(
             TantivySeforimIndex index,
-            Func<SeforimDbFtsCorpus> corpus,
+            Func<ISeforimDbFtsCorpus> corpus,
             IReadOnlyList<SearchResult> results,
             bool requireOrdered,
             int contextWords,
@@ -278,11 +278,11 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 
         /// <summary>
         /// The book id of every hit of the batch that passed the locate, read in one query
-        /// (<see cref="SeforimDbFtsCorpus.FetchPlacements"/>) and set on the hits. A line with
+        /// (<see cref="ISeforimDbFtsCorpus.FetchPlacements"/>) and set on the hits. A line with
         /// no `line` row keeps book id 0.
         /// </summary>
         private static void FetchPassingBookIds(
-            Func<SeforimDbFtsCorpus> corpus, IReadOnlyList<SearchResult> results, FtsHit?[] built)
+            Func<ISeforimDbFtsCorpus> corpus, IReadOnlyList<SearchResult> results, FtsHit?[] built)
         {
             var passingIds = new List<long>(results.Count);
             for (int i = 0; i < built.Length; i++)
@@ -297,11 +297,11 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// <summary>
         /// Snippet texts for the seeded hits: a plain hit's text is the content the batch
         /// already fetched (no read); the SHORT ones are read with their neighbour context in
-        /// one statement (<see cref="SeforimDbFtsCorpus.FetchSnippetTexts"/>) — the same read
+        /// one statement (<see cref="ISeforimDbFtsCorpus.FetchSnippetTexts"/>) — the same read
         /// the page makes for every later row.
         /// </summary>
         private static List<FtsSnippetText> SeedSnippetTexts(
-            Func<SeforimDbFtsCorpus> corpus, IReadOnlyList<SearchResult> results, FtsHit?[] built, List<int> seeded)
+            Func<ISeforimDbFtsCorpus> corpus, IReadOnlyList<SearchResult> results, FtsHit?[] built, List<int> seeded)
         {
             var texts = new List<FtsSnippetText>(seeded.Count);
             List<long>? shortIds = null;

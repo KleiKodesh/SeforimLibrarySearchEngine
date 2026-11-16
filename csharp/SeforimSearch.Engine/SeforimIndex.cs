@@ -16,113 +16,7 @@ namespace SeforimSearch.Engine
     public sealed unsafe class SeforimIndex : IDisposable
     {
         private readonly IndexHandle _handle;
-        /// <summary>A user index's own handle (null for a library index).</summary>
-        private readonly UserIndexHandle? _user;
-
         private SeforimIndex(IndexHandle handle) { _handle = handle; }
-
-        private SeforimIndex(UserIndexHandle user)
-        {
-            _user = user;
-            _handle = new IndexHandle(NativeMethods.se_user_index_handle(user));
-        }
-
-        /// <summary>The first id of the user range (2^51): a line id from here to 2^52 is a
-        /// user document's line (issue #44).</summary>
-        public static long UserIdBase { get { NativeAbi.EnsureLoaded(); return (long)NativeMethods.se_user_id_base(); } }
-
-        /// <summary>True for an id of the user range.</summary>
-        public static bool IsUserId(long id) { long b = UserIdBase; return id >= b && id < 2 * b; }
-
-        /// <summary>True for a user index (<see cref="CreateUser"/>).</summary>
-        public bool IsUserIndex => _user != null;
-
-        /// <summary>Creates a fresh USER index in <paramref name="directory"/>, WIPING it
-        /// (issue #44): host documents that are not in the library (text files, PDFs, attached
-        /// libraries), each with its own key, stamp and per-line locator, written with
-        /// <see cref="SeforimIndexWriter.PutDocument"/>. The options must equal the library's.
-        /// Attach it with <see cref="AttachUserIndex"/>.</summary>
-        public static SeforimIndex CreateUser(string directory, IndexOptions? options = null)
-        {
-            NativeAbi.EnsureLoaded();
-            byte[] dir = Interop.ToUtf8(directory);
-            byte[] opts = Interop.ToUtf8((options ?? new IndexOptions()).ToJson());
-            fixed (byte* d = dir)
-            fixed (byte* o = opts)
-                return new SeforimIndex(Interop.Check(
-                    NativeMethods.se_user_index_create(d, (UIntPtr)dir.Length, o, (UIntPtr)opts.Length)));
-        }
-
-        /// <summary>Opens an existing user index (throws for a library index).</summary>
-        public static SeforimIndex OpenUser(string directory)
-        {
-            NativeAbi.EnsureLoaded();
-            byte[] dir = Interop.ToUtf8(directory);
-            fixed (byte* d = dir)
-                return new SeforimIndex(Interop.Check(NativeMethods.se_user_index_open(d, (UIntPtr)dir.Length)));
-        }
-
-        /// <summary>Attaches a user index to this library index (null detaches): a search with
-        /// <see cref="SearchSources.All"/> (the default) reads both, library hits first, as one
-        /// search (one expansion cap, exact counts); <see cref="SearchSources.Library"/> /
-        /// <see cref="SearchSources.User"/> read one. The library keeps the user index open
-        /// until detached or disposed.</summary>
-        public void AttachUserIndex(SeforimIndex? user)
-        {
-            if (user != null && user._user == null) throw new ArgumentException("not a user index (CreateUser / OpenUser)", nameof(user));
-            Interop.Check(user == null
-                ? NativeMethods.se_index_attach_user(_handle, IntPtr.Zero)
-                : NativeMethods.se_index_attach_user(_handle, user._user));
-        }
-
-        /// <summary>The user documents (of this user index, or of the attached one), by book id.</summary>
-        public IReadOnlyList<UserDocumentInfo> GetDocuments()
-        {
-            var list = (List<object?>)Json.Parse(Interop.TakeString(NativeMethods.se_index_documents(_handle)))!;
-            var result = new List<UserDocumentInfo>(list.Count);
-            foreach (var o in list)
-            {
-                var d = (Dictionary<string, object?>)o!;
-                result.Add(new UserDocumentInfo((string)d["key"]!, (string)d["stamp"]!, (long)(double)d["book_id"]!, (long)(double)d["lines"]!));
-            }
-            return result;
-        }
-
-        /// <summary>Where each line comes from: the user document key, locator and line number,
-        /// or null for a library line / unknown id.</summary>
-        public IReadOnlyList<UserLineSource?> GetLineSources(IReadOnlyList<long> lineIds)
-        {
-            var ids = new ulong[lineIds.Count];
-            for (int i = 0; i < ids.Length; i++) ids[i] = (ulong)lineIds[i];
-            string json;
-            fixed (ulong* p = ids)
-                json = Interop.TakeString(NativeMethods.se_index_line_sources(_handle, p, (UIntPtr)ids.Length));
-            var list = (List<object?>)Json.Parse(json)!;
-            var result = new List<UserLineSource?>(list.Count);
-            foreach (var o in list)
-            {
-                if (o is Dictionary<string, object?> d)
-                    result.Add(new UserLineSource((string)d["key"]!, (long)(double)d["locator"]!, (long)(double)d["line"]!));
-                else
-                    result.Add(null);
-            }
-            return result;
-        }
-
-        /// <summary>The stored texts of user lines (the user index keeps them); null for a line
-        /// the user index does not hold (library texts come from seforim.db).</summary>
-        public IReadOnlyList<string?> GetLineTexts(IReadOnlyList<long> lineIds)
-        {
-            var ids = new ulong[lineIds.Count];
-            for (int i = 0; i < ids.Length; i++) ids[i] = (ulong)lineIds[i];
-            string json;
-            fixed (ulong* p = ids)
-                json = Interop.TakeString(NativeMethods.se_index_line_texts(_handle, p, (UIntPtr)ids.Length));
-            var list = (List<object?>)Json.Parse(json)!;
-            var result = new List<string?>(list.Count);
-            foreach (var o in list) result.Add(o as string);
-            return result;
-        }
 
         internal IndexHandle Handle => _handle;
 
@@ -465,7 +359,6 @@ namespace SeforimSearch.Engine
         public void Dispose()
         {
             _handle.Dispose();
-            _user?.Dispose();
         }
     }
 
@@ -530,58 +423,6 @@ namespace SeforimSearch.Engine
         /// <summary>Queues deletion of every line of a book (issue #29, a per-book update: delete
         /// the book, add its new lines, then ONE commit). Lines added after this call are kept.</summary>
         public void DeleteBook(long bookId) => Interop.Check(NativeMethods.se_writer_delete_book(_handle, (ulong)bookId));
-
-        /// <summary>Adds or replaces the user document <paramref name="key"/> (a user index's
-        /// writer only; issue #44). Visible after <see cref="Commit"/>, which writes the documents
-        /// list atomically with the lines. Returns the document's book id (kept on a replace).</summary>
-        public long PutDocument(string key, string stamp, IReadOnlyList<UserDocumentLine> lines)
-        {
-            var inv = System.Globalization.CultureInfo.InvariantCulture;
-            var sb = new System.Text.StringBuilder("{\"key\":");
-            Json.WriteString(sb, key ?? throw new ArgumentNullException(nameof(key)));
-            sb.Append(",\"stamp\":");
-            Json.WriteString(sb, stamp ?? "");
-            sb.Append(",\"lines\":[");
-            for (int i = 0; i < lines.Count; i++)
-            {
-                var l = lines[i];
-                if (i > 0) sb.Append(',');
-                sb.Append("{\"text\":");
-                Json.WriteString(sb, l.Text ?? "");
-                sb.Append(",\"locator\":").Append(l.Locator.ToString(inv));
-                if (l.SectionId.HasValue) sb.Append(",\"section_id\":").Append(l.SectionId.Value.ToString(inv));
-                if (l.NoCross) sb.Append(",\"no_cross\":true");
-                sb.Append('}');
-            }
-            sb.Append("]}");
-            byte[] json = Interop.ToUtf8(sb.ToString());
-            long book;
-            fixed (byte* p = json)
-                book = NativeMethods.se_writer_put_document(_handle, p, (UIntPtr)json.Length);
-            if (book < 0) Interop.Check(-1);
-            return book;
-        }
-
-        /// <summary>Deletes the user documents with these keys (unknown keys skipped); returns
-        /// how many were indexed. Visible after <see cref="Commit"/>.</summary>
-        public long DeleteDocuments(IEnumerable<string> keys)
-        {
-            var sb = new System.Text.StringBuilder("[");
-            bool first = true;
-            foreach (var k in keys)
-            {
-                if (!first) sb.Append(',');
-                first = false;
-                Json.WriteString(sb, k);
-            }
-            sb.Append(']');
-            byte[] json = Interop.ToUtf8(sb.ToString());
-            long n;
-            fixed (byte* p = json)
-                n = NativeMethods.se_writer_delete_documents(_handle, p, (UIntPtr)json.Length);
-            if (n < 0) Interop.Check(-1);
-            return n;
-        }
 
         /// <summary>Commits; <paramref name="payload"/> is stored atomically with the
         /// documents (read back via <see cref="SeforimIndex.GetInfo"/>).</summary>

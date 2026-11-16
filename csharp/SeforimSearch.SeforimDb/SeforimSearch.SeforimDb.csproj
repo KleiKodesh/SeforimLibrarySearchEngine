@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The DEFAULT seforim.db data source for the facade (SeforimSearch.FtsFacade): schema probe,
+    zstd line content, catalog order, footnotes, provenance fingerprint, the pooled corpus and
+    the related-forms lexicon reader, all on Microsoft.Data.Sqlite. Used by the demo CLI and
+    the selftest. A host with its own seforim.db code (KitveiHakodesh Core) does NOT take this
+    project: it implements the facade's interfaces on its own layer, so the app ships one SQLite.
+
+    Builds on both .NET 10 and .NET Framework 4.8.
+  -->
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net48</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>SeforimSearch.Demo</RootNamespace>
+    <!-- CS0436: the net48 polyfills are linked into each project and visible through
+         InternalsVisibleTo; the local copy wins, as intended. -->
+    <NoWarn>$(NoWarn);CS0436;CS1591;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SeforimSearch.FtsFacade\SeforimSearch.FtsFacade.csproj" />
+    <InternalsVisibleTo Include="SeforimSearch.Demo" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Compile Include="..\SeforimSearch.FtsFacade\Compat\NetFrameworkPolyfills.cs" Link="Compat\NetFrameworkPolyfills.cs" />
+    <Using Include="SeforimSearch.Demo.Compat" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.14" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+  </ItemGroup>
+
+</Project>

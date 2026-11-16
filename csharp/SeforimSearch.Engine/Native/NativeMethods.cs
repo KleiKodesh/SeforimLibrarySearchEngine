@@ -56,42 +56,6 @@ namespace SeforimSearch.Engine.Native
         public static extern IndexHandle se_index_open(byte* dir, UIntPtr dirLen);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern ulong se_user_id_base();
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern UserIndexHandle se_user_index_create(byte* dir, UIntPtr dirLen, byte* options, UIntPtr optionsLen);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern UserIndexHandle se_user_index_open(byte* dir, UIntPtr dirLen);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_user_index_handle(UserIndexHandle user);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern void se_user_index_close(IntPtr user);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int se_index_attach_user(IndexHandle index, UserIndexHandle user);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int se_index_attach_user(IndexHandle index, IntPtr user);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern long se_writer_put_document(WriterHandle writer, byte* json, UIntPtr jsonLen);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern long se_writer_delete_documents(WriterHandle writer, byte* json, UIntPtr jsonLen);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_index_documents(IndexHandle index);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_index_line_sources(IndexHandle index, ulong* ids, UIntPtr count);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_index_line_texts(IndexHandle index, ulong* ids, UIntPtr count);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern int se_index_exists(byte* dir, UIntPtr dirLen);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
@@ -286,49 +250,5 @@ namespace SeforimSearch.Engine.Native
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern void se_search_close(IntPtr search);
-
-        // semantic search (issue #18)
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_vectors_open(IndexHandle index, byte* path, UIntPtr pathLen);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int se_vectors_close(IndexHandle index);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int se_vectors_map_book(IndexHandle index, byte* name, UIntPtr nameLen, ulong bookId,
-                                                     ulong* lineIds, UIntPtr count);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_vectors_map_book_rows(IndexHandle index, byte* name, UIntPtr nameLen, ulong bookId,
-                                                             ulong* rowLineIds, UIntPtr rowCount, byte* content, UIntPtr contentLen,
-                                                             ulong* offsets, byte* notesJson, UIntPtr notesLen, ulong chunkingIdentity);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int se_vectors_set_mapping(IndexHandle index, byte* maps, UIntPtr mapsLen, int replace);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern long se_oxv_expand(byte* src, UIntPtr srcLen, byte* dst, UIntPtr dstLen);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_oxv_info(byte* path, UIntPtr pathLen);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_oxv_verify(byte* path, UIntPtr pathLen, byte* manifest, UIntPtr manifestLen, CancelTokenHandle token);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_vectors_install(byte* setDir, UIntPtr setDirLen, byte* segment, UIntPtr segmentLen,
-            byte* manifest, UIntPtr manifestLen, byte* publishedSha256, UIntPtr publishedSha256Len,
-            byte* modelJson, UIntPtr modelJsonLen, CancelTokenHandle token);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_vectors_info(IndexHandle index);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_semantic_search(IndexHandle index, float* query, UIntPtr dims, byte* options,
-                                                       UIntPtr optionsLen, CancelTokenHandle token);
-
-        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr se_search_fuse_semantic(SearchHandle search, byte* query, UIntPtr queryLen,
-                                                            byte* semantic, UIntPtr semanticLen, byte* fusion, UIntPtr fusionLen);
     }
 }

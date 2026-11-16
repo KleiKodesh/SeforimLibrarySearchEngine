@@ -46,12 +46,9 @@ namespace SeforimSearch.Demo
                 ("native ABI check (issue #17): loaded = expected, mismatch names both and the path", AbiCheck),
                 ("notes books (issue #13): ids, order, search, snippet, hit -> source, unreadable, BOM, guard", NotesBooks),
                 ("per-book update (issue #29): changed / grown / removed books, crash mid-update, background merge", BookUpdates),
-                ("semantic search (issue #18): Otzaria vector set, line mapping, unmapped, book filter, hybrid, cancel", Semantic),
-                ("vector set download / update (issue #18): fake releases, resume, base, delta chain, block check", VectorDownload),
                 ("substring find (issue G-K1): FtsLib FindSubstringCandidates order, ranges, decline", SubstringFind),
                 ("coordinator (Core drop-in): build, progress, status, search, lines, reset, DB change", CoordinatorLifecycle),
                 ("related forms (Core's '+' / '=' rewrite): artifact lookup, markers", RelatedForms),
-                ("user index (issue #44): documents, attach, sources, replace, delete, line sources / texts", UserIndex),
             };
             int failed = 0;
             foreach (var (name, body) in tests)
@@ -116,7 +113,7 @@ namespace SeforimSearch.Demo
             // book 1 with line 2 (index 1) turned into a beta line
             List<long> Book1() { var b = Beta(1); b.Insert(1, 2); return b; }
 
-            using (var engine = new SeforimDbFtsEngine(index, db))
+            using (var engine = new SeforimDbFtsEngine(index, new SeforimDbSqliteDataSource(db)))
             {
                 engine.Index.BuildLines(linesPerCommit: 500, heapBytes: 60_000_000);
                 var r = engine.Index.UpdateChangedBooks();
@@ -140,7 +137,7 @@ namespace SeforimSearch.Demo
             // book 2 (first in the catalog) grows by two lines: repack, book 1 renumbered
             Sql($"INSERT INTO line (id, bookId, lineIndex, content, heRef) VALUES (9001, 2, {LinesPerBook}, 'psi beta', ''), (9002, 2, {LinesPerBook + 1}, 'psi', '');" +
                 "UPDATE book SET contentHash = 2001 WHERE id = 2;");
-            using (var engine = new SeforimDbFtsEngine(index, db))
+            using (var engine = new SeforimDbFtsEngine(index, new SeforimDbSqliteDataSource(db)))
             {
                 var r = engine.Index.UpdateChangedBooks();
                 Check(r.Changed == 1 && r.Repack && r.MergeStarted, "grown book: " + r);
@@ -179,137 +176,6 @@ namespace SeforimSearch.Demo
                 Check(Hits(engine, "beta").SequenceEqual(Book1()), "book 1 alone");
                 Resumes(engine, Book1());
             }
-        }
-
-        /// <summary>The Rust-written fixture seforim-vectors/tests/data/synthetic.oxv (4 dims): book id:5 =
-        /// ordinal 0 with windows 0 (axis 1) and 1 (axis 2), ordinal 1 (axis 0); book id:7 ordinal 0 (axis 3).</summary>
-        private static void UserIndex(string db, string dir)
-        {
-            string root = Path.Combine(dir, "user-index-test");
-            using var lib = SeforimSearch.Engine.SeforimIndex.Create(Path.Combine(root, "lib"));
-            using (var w = lib.OpenWriter(30_000_000, 1))
-            {
-                w.Add(new SeforimSearch.Engine.LineDocument { LineId = 5, Position = 0, BookId = 1, Text = "alpha beta" });
-                w.Commit();
-            }
-            using var user = SeforimSearch.Engine.SeforimIndex.CreateUser(Path.Combine(root, "user"));
-            long b = SeforimSearch.Engine.SeforimIndex.UserIdBase;
-            using (var w = user.OpenWriter(30_000_000, 1))
-            {
-                Check(w.PutDocument("c:/a.pdf", "h1", new[] { new SeforimSearch.Engine.UserDocumentLine("gamma", 1), new SeforimSearch.Engine.UserDocumentLine("alpha", 2) }) == b, "first document = base");
-                w.PutDocument("c:/b.txt", "h2", new[] { new SeforimSearch.Engine.UserDocumentLine("alpha delta") });
-                w.Commit();
-            }
-            lib.AttachUserIndex(user);
-            long[] Ids(SeforimSearch.Engine.SearchSources s)
-            {
-                using var r = lib.Search(new SeforimSearch.Engine.SearchOptions { Query = "alpha", Sources = s });
-                return r.GetHits(0, 100).Select(h => h.LineId).ToArray();
-            }
-            long a1 = b + 1, b0 = b + (1L << 24);
-            Check(Ids(SeforimSearch.Engine.SearchSources.All).SequenceEqual(new[] { 5L, a1, b0 }), "all: library first");
-            Check(Ids(SeforimSearch.Engine.SearchSources.Library).SequenceEqual(new[] { 5L }), "library only");
-            Check(Ids(SeforimSearch.Engine.SearchSources.User).SequenceEqual(new[] { a1, b0 }), "user only");
-            var src = lib.GetLineSources(new[] { a1, 5L });
-            Check(src[0]!.Key == "c:/a.pdf" && src[0]!.Locator == 2 && src[0]!.Line == 1 && src[1] == null, "line sources");
-            Check(lib.GetLineTexts(new[] { a1, 5L }).SequenceEqual(new[] { "alpha", null }), "line texts");
-            using (var w = user.OpenWriter(30_000_000, 1))
-            {
-                Check(w.DeleteDocuments(new[] { "c:/b.txt", "none" }) == 1, "delete by key");
-                w.PutDocument("c:/a.pdf", "h3", new[] { new SeforimSearch.Engine.UserDocumentLine("zeta", 7) });
-                w.Commit();
-            }
-            var docs = lib.GetDocuments();
-            Check(docs.Count == 1 && docs[0].Key == "c:/a.pdf" && docs[0].Stamp == "h3" && docs[0].BookId == b && docs[0].Lines == 1, "documents list");
-            Check(Ids(SeforimSearch.Engine.SearchSources.All).SequenceEqual(new[] { 5L }), "replaced and deleted documents gone");
-            lib.AttachUserIndex(null);
-        }
-
-        private static void Semantic(string db, string dir)
-        {
-            string? oxv = null;
-            for (var d0 = new DirectoryInfo(AppContext.BaseDirectory); d0 != null && oxv == null; d0 = d0.Parent)
-            {
-                string f = Path.Combine(d0.FullName, "seforim-vectors", "tests", "data", "synthetic.oxv");
-                if (File.Exists(f)) oxv = f;
-            }
-            Check(oxv != null, "fixture found");
-            var oxvInfo = SeforimSemantic.ReadOxvInfo(oxv!);
-            Check(oxvInfo.Dims == 4 && oxvInfo.Books.Count == 2 && oxvInfo.Books[0].Name == "id:5", "oxv info");
-            string d = Path.Combine(dir, "semantic");
-            using var index = SeforimIndex.Create(d);
-            var w = index.OpenWriter(30_000_000, 1);
-            w.Add(new LineDocument { LineId = 1, Position = 0, BookId = 5, Text = "alpha beta" });
-            w.Add(new LineDocument { LineId = 2, Position = 1, BookId = 5, Text = "gamma" });
-            w.Add(new LineDocument { LineId = 3, Position = 2, BookId = 6, Text = "delta" });
-            w.MergeAndClose();
-            Check(index.VectorInfo() == null, "no vector set yet");
-            Check(index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }).Hits.Length == 0, "no set: no hits");
-            var info = index.OpenVectorsAsync(oxv!).GetAwaiter().GetResult();
-            Check(info.Dims == 4 && info.Books == 2 && info.BooksMapped == 0 && info.Segments.Count == 1, "set info");
-            index.MapVectorBook("id:5", 5, new long[] { 1, 2 });
-            Check(index.VectorInfo()!.BooksMapped == 1 && index.VectorInfo()!.BooksUnmapped == 1, "id:5 mapped, id:7 not");
-            var sem = index.SemanticSearchAsync(new[] { 0f, 0f, 1f, 0f }, new SemanticOptions { K = 2 }).GetAwaiter().GetResult();
-            Check(sem.Hits.Length >= 1 && sem.Hits[0].LineId == 1 && sem.Hits[0].BookId == 5 && sem.Hits[0].Chunk == 1
-                  && Math.Abs(sem.Hits[0].Score - 0.96f) < 1e-3, "found by its second window");
-            var none = index.SemanticSearch(new[] { 0f, 0f, 0f, 1f }, new SemanticOptions { K = 1 });
-            Check(none.Hits.Length == 0 && none.Unmapped == 1, "unmapped book: no hit, counted");
-            var axis0 = index.SemanticSearch(new[] { 1f, 0f, 0f, 0f }, new SemanticOptions { K = 1 });
-            Check(axis0.Hits.Length == 1 && axis0.Hits[0].LineId == 2, "ordinal 1 = line 2");
-            Check(index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }, new SemanticOptions { K = 5, Books = new long[] { 6 } }).Hits.Length == 0,
-                  "book filter excludes");
-            Check(index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }, new SemanticOptions { K = 5, Books = new long[] { 5 } }).Hits.All(h => h.BookId == 5),
-                  "book filter keeps");
-            index.SetVectorMapping(new[] { new OxvBookMap { Name = "id:7", BookId = 6, LineIds = new long[] { 3 } } }, false);
-            var seven = index.SemanticSearch(new[] { 0f, 0f, 0f, 1f }, new SemanticOptions { K = 1 });
-            Check(seven.Hits.Length == 1 && seven.Hits[0].LineId == 3 && seven.Unmapped == 0, "JSON mapping adds a book");
-            using (var s = index.Search(new SearchOptions("alpha") { Order = ResultsOrder.Relevance }))
-            {
-                var fused = s.FuseSemanticAsync("alpha", sem).GetAwaiter().GetResult();
-                Check(fused.Length >= 1 && fused[0].LineId == 1 && fused[0].Source == "both", "hybrid: lexical and semantic");
-                var rrf = s.FuseSemantic("alpha", sem, new FusionOptions { Strategy = FusionStrategy.Rrf });
-                Check(rrf.Length == fused.Length, "rrf");
-                // issue #40: release the caches with this session open; it and new searches go on
-                index.ReleaseMemory();
-                Check(s.GetHits(0, 10).Length == 1, "session after ReleaseMemory");
-                var sem2 = index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }, new SemanticOptions { K = 2 });
-                Check(sem2.Hits.Length >= 1 && sem2.Hits[0].LineId == 1, "semantic after ReleaseMemory");
-            }
-            using (var cts = new CancellationTokenSource())
-            {
-                cts.Cancel();
-                Check(Throws<OperationCanceledException>(() => index.SemanticSearch(new[] { 0f, 0f, 1f, 0f }, null, cts.Token)), "cancelled");
-            }
-            Check(Throws<SeforimEngineException>(() => index.SemanticSearch(new[] { 1f, 0f }, null)), "wrong dims");
-            index.SetVectorMapping(new OxvBookMap[0], true);
-            Check(index.VectorInfo()!.BooksMapped == 0, "replace drops the mapping");
-            index.CloseVectors();
-            Check(index.VectorInfo() == null, "closed");
-
-            // the text check (rows path): seforim-vectors/tests/data/verified.oxv, book id:3, real chunk keys, 8 dims
-            string verified = Path.Combine(Path.GetDirectoryName(oxv!)!, "verified.oxv");
-            Check(File.Exists(verified), "verified fixture found");
-            index.OpenVectors(verified);
-            var rows = new[]
-            {
-                "<h1>Title of the book</h1>",
-                "first line that is long enough to stand",
-                "second\nthird line long enough to stand alone too",
-                "fourth line long enough to stand alone here",
-            }.Select(System.Text.Encoding.UTF8.GetBytes).ToArray();
-            ulong[] rowIds = { 100, 101, 102, 103 };
-            const ulong identity = 320260894818558297;
-            var vb = index.MapVectorBookRows("id:3", 3, rowIds, rows, null, identity);
-            Check(vb.Lines == 5 && vb.Records == 5 && vb.Verified == 5 && vb.Unverified == 0, "rows verified");
-            float[] Axis(int a) { var v = new float[8]; v[a] = 1f; return v; }
-            var r3 = index.SemanticSearch(Axis(3), new SemanticOptions { K = 1 });
-            Check(r3.Hits.Length == 1 && r3.Hits[0].LineId == 102, "newline row: second line maps to its row id");
-            rows[3] = System.Text.Encoding.UTF8.GetBytes("fourth line CHANGED enough to stand alone here");
-            var vt = index.MapVectorBookRows("id:3", 3, rowIds, rows, new List<VectorBookNote>(), identity);
-            Check(vt.Unverified >= 1, "tampered row unverified");
-            var r4 = index.SemanticSearch(Axis(4), new SemanticOptions { K = 1 });
-            Check(r4.Hits.Length == 0 && r4.Unmapped == 1, "tampered record dropped, counted");
-            index.CloseVectors();
         }
 
         private static void AsyncOpen(string db, string dir)
@@ -395,7 +261,7 @@ namespace SeforimSearch.Demo
             string index = Path.Combine(dir, "load-index");
             string queries = Path.Combine(dir, "load-queries.txt");
             File.WriteAllText(queries, "beta\nalpha beta\t3\n");
-            using var engine = new SeforimDbFtsEngine(index, db);
+            using var engine = new SeforimDbFtsEngine(index, new SeforimDbSqliteDataSource(db));
             engine.Index.BuildLines(linesPerCommit: 500, heapBytes: 60_000_000);
             int before = engine.Index.Search("beta").Count();
             int code = LoadCommand.Run(engine, new[] { "load", "--queries", queries, "--searchers", "3", "--rounds", "4",
@@ -671,7 +537,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
         private static void EndToEnd(string db, string dir)
         {
             string index = Path.Combine(dir, "index");
-            using var engine = new SeforimDbFtsEngine(index, db);
+            using var engine = new SeforimDbFtsEngine(index, new SeforimDbSqliteDataSource(db));
             engine.Index.BuildLines(linesPerCommit: 500, heapBytes: 60_000_000);
             Check(engine.Index.IsBuilt, "built");
             string meta = File.ReadAllText(Path.Combine(index, "meta.json"));
@@ -785,7 +651,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
         private static void Stream(string db, string dir)
         {
             string index = Path.Combine(dir, "index-stream");
-            using var engine = new SeforimDbFtsEngine(index, db);
+            using var engine = new SeforimDbFtsEngine(index, new SeforimDbSqliteDataSource(db));
             var notBuilt = StreamAll(new SeforimDbFtsIndexCoordinator(engine), "beta");
             Check(notBuilt.Count == 1 && !notBuilt[0].Ready && notBuilt[0].Done, "unbuilt index: one Ready=false Done frame");
             engine.Index.BuildLines(linesPerCommit: 500, heapBytes: 60_000_000);
@@ -928,7 +794,7 @@ INSERT INTO book (id, categoryId, title, orderIndex) VALUES (1, 1, 'book one', 2
             }
 
             string index = Path.Combine(dir, "index-notes");
-            using (var engine = new SeforimDbFtsEngine(index, db))
+            using (var engine = new SeforimDbFtsEngine(index, new SeforimDbSqliteDataSource(db)))
             {
                 engine.Index.BuildLines(linesPerCommit: 500, heapBytes: 60_000_000);
                 Check(engine.Index.IsBuilt, "index build with notes");

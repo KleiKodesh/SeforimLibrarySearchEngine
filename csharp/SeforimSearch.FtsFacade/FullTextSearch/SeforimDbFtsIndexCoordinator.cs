@@ -25,7 +25,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// </summary>
     public sealed class SeforimDbFtsIndexCoordinator
     {
-        private readonly string? _dbPath;
+        private readonly ISeforimDbFtsDataSource? _source;
         private readonly string _indexPath;
         private readonly bool _external;
         private readonly Action<FtsIndexLogLevel, string, Exception?> _log;
@@ -49,7 +49,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         private volatile int _total;
         private volatile IndexBuildReason? _lastBuildReason;
 
-        /// <param name="databasePath">The seforim DB to index and search; null when none was found.</param>
+        /// <param name="dataSource">The seforim DB to index and search, through the host's own
+        /// database layer (the facade holds no SQLite); null when none was found.</param>
         /// <param name="indexPath">Where the index lives.</param>
         /// <param name="indexIsExternal">True when the host was handed an index to use as-is:
         /// never built into, never wiped.</param>
@@ -57,11 +58,11 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// <param name="relatedFormExpander">Rewrites a query with related forms when a word asks
         /// for '+' or '='; null leaves queries unexpanded.</param>
         public SeforimDbFtsIndexCoordinator(
-            string? databasePath, string indexPath, bool indexIsExternal,
+            ISeforimDbFtsDataSource? dataSource, string indexPath, bool indexIsExternal,
             Action<FtsIndexLogLevel, string, Exception?> log,
             SeforimDbFtsRelatedFormExpander? relatedFormExpander = null)
         {
-            _dbPath = databasePath;
+            _source = dataSource;
             _indexPath = indexPath ?? throw new ArgumentNullException(nameof(indexPath));
             _external = indexIsExternal;
             _log = log ?? ((_, _, _) => { });
@@ -85,7 +86,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         /// --prefixes etc.). Null = Core's behaviour (FtsLib's ketiv rules, quotes ignored).</summary>
         public SeforimSearch.Engine.WalkOptions? WordOptions { get; set; }
 
-        public bool HasDb => _dbPath == null ? _engine != null : !string.IsNullOrWhiteSpace(_dbPath) && File.Exists(_dbPath);
+        public bool HasDb => _source == null ? _engine != null : _source.IsAvailable;
 
         /// <summary>True while background work runs (a build or update, or a live search): the
         /// idle memory trimmer must not run then.</summary>
@@ -105,7 +106,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             lock (_lock)
             {
                 if (_isIndexing || !_sessions.IsEmpty || _activeOneShotSearches > 0) return false;
-                if (_engine == null || _dbPath == null) return false;   // a handed-in engine is not ours
+                if (_engine == null || _source == null) return false;   // a handed-in engine is not ours
                 _engine.Dispose();
                 _engine = null;
                 return true;
@@ -117,8 +118,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             lock (_lock)
             {
                 if (_engine != null) return _engine;
-                if (_dbPath == null) throw new InvalidOperationException("no database");
-                return _engine = new SeforimDbFtsEngine(_indexPath, _dbPath);
+                if (_source == null) throw new InvalidOperationException("no database");
+                return _engine = new SeforimDbFtsEngine(_indexPath, _source);
             }
         }
 
@@ -154,7 +155,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 try
                 {
                     var state = engine.Index.ReadBuildState();
-                    string fingerprint = SeforimDbContentFingerprint.Compute(_dbPath!, TantivySeforimIndex.IndexFormatVersion);
+                    string fingerprint = _source!.ContentFingerprint(TantivySeforimIndex.IndexFormatVersion);
                     if (state != null && state.Complete && state.Fingerprint == fingerprint)
                     {
                         _isReady = true;
@@ -163,7 +164,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                     }
                     reason = state == null ? "no index yet"
                         : state.Fingerprint == fingerprint ? "resuming an interrupted build"
-                        : "stale index: " + (SeforimDbContentFingerprint.DescribeChange(state.Fingerprint, fingerprint) ?? "built from another database or format");
+                        : "stale index: " + (_source!.DescribeFingerprintChange(state.Fingerprint, fingerprint) ?? "built from another database or format");
                 }
                 catch (Exception ex)
                 {
@@ -254,9 +255,9 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 {
                     var state = GetEngine().Index.ReadBuildState();
                     if (state == null || !state.Complete) return false;
-                    string fingerprint = SeforimDbContentFingerprint.Compute(_dbPath!, TantivySeforimIndex.IndexFormatVersion);
+                    string fingerprint = _source!.ContentFingerprint(TantivySeforimIndex.IndexFormatVersion);
                     if (state.Fingerprint == fingerprint) return false;
-                    change = SeforimDbContentFingerprint.DescribeChange(state.Fingerprint, fingerprint) ?? "changed";
+                    change = _source!.DescribeFingerprintChange(state.Fingerprint, fingerprint) ?? "changed";
                 }
                 catch { return false; }
                 StartBackground("changed while running: " + change, (engine, ct) =>

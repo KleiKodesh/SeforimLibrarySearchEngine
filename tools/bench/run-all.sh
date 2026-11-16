@@ -76,7 +76,7 @@ if [ "$PLAT" = windows ]; then FTS_TFM=net10.0-windows; else FTS_TFM=net10.0; fi
 FTS="$ROOT/tools/parity/FtsLibDump/bin/Release/$FTS_TFM/FtsLibDump$EXE_SUF"
 OTZ="$HERE/otzaria-driver/target/release/otzaria-driver$EXE_SUF"
 
-FMT_OURS="$(grep -o 'IndexFormatVersion = "[a-z0-9]*"' csharp/SeforimSearch.Demo/FtsLib/TantivySeforimIndex.cs | cut -d'"' -f2)"
+FMT_OURS="$(grep -o 'IndexFormatVersion = "[a-z0-9]*"' csharp/SeforimSearch.FtsFacade/FtsLib/TantivySeforimIndex.cs | cut -d'"' -f2)"
 FMT_FTS="$(grep -o 'IndexFormatVersion = "[a-z0-9]*"' "$KITVEI_DIR/CSharpBackend/KitveiHakodesh.Core/SeforimDbFullTextSearch/SeforimDbFtsIndexer.cs" 2>/dev/null | cut -d'"' -f2)"
 FMT_OTZ="otzaria-5babbce"
 

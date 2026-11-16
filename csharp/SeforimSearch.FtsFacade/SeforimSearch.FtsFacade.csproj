@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The FtsLib-shaped facade over the engine package (KitveiHakodesh Core's names:
+    SeforimDbFtsIndexCoordinator, SeforimDbFtsEngine, SeforimDbFtsSearcher, TantivySeforimIndex,
+    LinesSearch, snippets, index build / update), so an app on FtsLib can switch with minimal
+    changes.
+
+    NO SQLite and NO zstd here, on purpose (user's rule: one SQLite per host app). The facade
+    reaches seforim.db only through ISeforimDbFtsDataSource (and the related-forms lexicon
+    through ISeforimDbRelatedFormLexicon): a host implements them on its OWN database layer
+    (KitveiHakodesh Core on its existing code); SeforimSearch.SeforimDb is the default
+    implementation, used by the demo CLI and the selftest.
+
+    Builds on both .NET 10 and .NET Framework 4.8.
+  -->
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net48</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>SeforimSearch.Demo</RootNamespace>
+    <NoWarn>$(NoWarn);CS1591;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SeforimSearch.Engine\SeforimSearch.Engine.csproj" />
+    <InternalsVisibleTo Include="SeforimSearch.Demo" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Using Include="SeforimSearch.Demo.Compat" />
+    <PackageReference Include="System.Text.Json" Version="10.0.5" />
+  </ItemGroup>
+
+</Project>

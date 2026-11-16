@@ -1,11 +1,12 @@
 # Full-library semantic search latency on GitHub Actions (manual, issue #18): semantic search
 # like Otzaria, an exact scan over Otzaria's own vector release (no import, nothing built from
 # it), for BOTH codecs: the QA491 i8 release and a rot192-i8i4 release. Per codec: download and
-# expand the release, open it read-only with the C# demo, map the full seforim.db's books, run
+# expand the release, open it read-only with the Dart demo (dart/otzaria_demo; the C# side keeps only
+# KitveiHakodesh's FTS ops), map the full seforim.db's books, run
 # queries with Otzaria's Meivin query model at Otzaria's thread default (half the cores, at most
 # 8) and print own-line rank, mean / p95 search latency and the peak working set. The mapping
 # runs Otzaria's text check on every book (rows rebuilt, keys recomputed): its time and the
-# verified / moved / unverified counts are printed too. Long runs go
+# verified / moved / unverified totals are printed too. Long runs go
 # here, not on a user PC.
 name: vectors
 
@@ -110,33 +111,33 @@ jobs:
           echo "expand: $(( $(date +%s) - t0 )) s"; ls -l D:/vectors
           gh release download "${{ inputs.model_tag }}" -R Otzaria/otzaria-semantic-search -D C:/bench/model -p query.int8.onnx -p tokenizer.json -p model.json -p INFERENCE_CONTRACT.json
           ls -l C:/bench/model
+      - uses: dart-lang/setup-dart@v1
+      - name: Dart demo + onnxruntime (Microsoft.ML.OnnxRuntime 1.28.0, the version Otzaria's golden vectors used)
+        shell: bash
+        run: |
+          (cd dart/otzaria_demo && dart pub get)
+          mkdir -p C:/bench/ort
+          curl -sSL -o C:/bench/ort/ort.zip https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime/1.28.0
+          python -I -c "import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); open(sys.argv[2],'wb').write(z.read('runtimes/win-x64/native/onnxruntime.dll'))" C:/bench/ort/ort.zip C:/bench/ort/onnxruntime.dll
+          ls -l C:/bench/ort target/release/seforim_search_native.dll
       - name: latency (Otzaria's exact scan, Meivin query model)
         shell: bash
         run: |
           set -o pipefail
-          demo=csharp/SeforimSearch.Demo/bin/Release/net10.0/SeforimSearch.Demo.exe
+          demo="dart run dart/otzaria_demo/bin/otzaria_demo.dart"; libs="--native target/release/seforim_search_native.dll --ort C:/bench/ort/onnxruntime.dll"
           # the release's own chunking identity (its manifest), not the query model's: the text check keys
           ci=$(python -I -c "import json,glob;print(json.load(open(glob.glob('D:/vectors/*base.manifest.json')[0]))['identity']['model']['chunking_identity'])")
           echo "chunking identity $ci"
           lines=$(python -I -c "import sqlite3;c=sqlite3.connect('file:C:/bench/data/seforim.db?mode=ro',uri=True);print(','.join(str(r[0]) for r in c.execute('select id from line order by (id * 2654435761) % 4294967296 limit ${{ inputs.queries }}')))")
           echo "$lines" | cut -d, -f1 > C:/bench/logs/first-line.txt
-          $demo semantic-search C:/bench/indexes/ours-pos --vectors D:/vectors/base.oxv --db C:/bench/data/seforim.db --model C:/bench/model --chunking-identity $ci --lines "$lines" --k 10 --repeat 2 2>&1 | sed 's/[^ -~]/?/g' | tee C:/bench/logs/latency-${{ matrix.codec }}.log
-          echo "exit ${PIPESTATUS[0]}"
-      - name: text check per book (books with the most unverified records)
-        if: always()
-        shell: bash
-        run: |
-          set -o pipefail
-          demo=csharp/SeforimSearch.Demo/bin/Release/net10.0/SeforimSearch.Demo.exe
-          ci=$(python -I -c "import json,glob;print(json.load(open(glob.glob('D:/vectors/*base.manifest.json')[0]))['identity']['model']['chunking_identity'])")
-          $demo semantic-verify D:/verify-index --vectors D:/vectors/base.oxv --db C:/bench/data/seforim.db --chunking-identity $ci --report 40 2>&1 | sed 's/[^ -~]/?/g' | tee C:/bench/logs/verify-${{ matrix.codec }}.log
+          $demo semantic-search C:/bench/indexes/ours-pos $libs --vectors D:/vectors/base.oxv --db C:/bench/data/seforim.db --model C:/bench/model --chunking-identity $ci --lines "$lines" --k 10 --repeat 2 2>&1 | sed 's/[^ -~]/?/g' | tee C:/bench/logs/latency-${{ matrix.codec }}.log
           echo "exit ${PIPESTATUS[0]}"
       - name: hybrid sample
         if: always()
         shell: bash
         run: |
-          demo=csharp/SeforimSearch.Demo/bin/Release/net10.0/SeforimSearch.Demo.exe
-          $demo semantic-search C:/bench/indexes/ours-pos --vectors D:/vectors/base.oxv --db C:/bench/data/seforim.db --model C:/bench/model --chunking-identity $(python -I -c "import json,glob;print(json.load(open(glob.glob('D:/vectors/*base.manifest.json')[0]))['identity']['model']['chunking_identity'])") --line $(cat C:/bench/logs/first-line.txt) --k 5 --hybrid 2>&1 | sed 's/[^ -~]/?/g' | tail -40
+          demo="dart run dart/otzaria_demo/bin/otzaria_demo.dart"; libs="--native target/release/seforim_search_native.dll --ort C:/bench/ort/onnxruntime.dll"
+          $demo semantic-search C:/bench/indexes/ours-pos $libs --vectors D:/vectors/base.oxv --db C:/bench/data/seforim.db --model C:/bench/model --chunking-identity $(python -I -c "import json,glob;print(json.load(open(glob.glob('D:/vectors/*base.manifest.json')[0]))['identity']['model']['chunking_identity'])") --line $(cat C:/bench/logs/first-line.txt) --k 5 --hybrid 2>&1 | sed 's/[^ -~]/?/g' | tail -40
       - if: always()
         uses: actions/upload-artifact@v4
         with:

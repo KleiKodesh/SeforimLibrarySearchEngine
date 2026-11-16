@@ -6,7 +6,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// <summary>
     /// The rows a SEARCH could not decode (issue #13): one bad row must not abort the search,
     /// and must not vanish silently either ("0 hits" that are really "0 readable hits"). While a
-    /// search runs its reads inside <see cref="Enter"/>, <see cref="SeforimDbFtsCorpus"/> reads
+    /// search runs its reads inside <see cref="Enter"/>, <see cref="ISeforimDbFtsCorpus"/> reads
     /// an undecodable line or note as empty and records it here with its id; the search result
     /// carries the count and ids. Outside a scope (the index build) every read stays strict and
     /// throws the error naming the line (issue #8).
@@ -25,7 +25,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         private int _taken;
 
         /// <summary>The scope of the current thread; null = strict reads.</summary>
-        internal static SeforimDbFtsUnreadableRows? Current => t_current;
+        public static SeforimDbFtsUnreadableRows? Current => t_current;
 
         /// <summary>Distinct unreadable rows so far.</summary>
         public int Count { get { lock (_lock) return _lineIds.Count; } }
@@ -47,7 +47,8 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             }
         }
 
-        internal void Add(long lineId, string message)
+        /// <summary>A data source reports a line it could not decode (skipped by the read).</summary>
+        public void Report(long lineId, string message)
         {
             lock (_lock)
             {

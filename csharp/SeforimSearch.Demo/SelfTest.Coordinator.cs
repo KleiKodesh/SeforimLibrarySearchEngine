@@ -18,7 +18,7 @@ namespace SeforimSearch.Demo
         private static void SubstringFind(string db, string dir)
         {
             string index = Path.Combine(dir, "index-substring");
-            using var engine = new SeforimDbFtsEngine(index, db);
+            using var engine = new SeforimDbFtsEngine(index, new SeforimDbSqliteDataSource(db));
             engine.Index.BuildLines(linesPerCommit: 500, heapBytes: 60_000_000);
             var books = engine.BookPositions();
             long b1 = books[1].First, b2 = books[2].First;
@@ -80,8 +80,8 @@ namespace SeforimSearch.Demo
             File.Copy(db, copy, overwrite: true);
             string index = Path.Combine(dir, "index-coordinator");
             var logs = new List<string>();
-            var c = new SeforimDbFtsIndexCoordinator(copy, index, false, (level, msg, ex) => { lock (logs) logs.Add(level + " " + msg); });
-            Check(new SeforimDbFtsIndexCoordinator(Path.Combine(dir, "missing.db"), index + "-x", false, (_, _, _) => { }).Status().DbMissing,
+            var c = new SeforimDbFtsIndexCoordinator(new SeforimDbSqliteDataSource(copy), index, false, (level, msg, ex) => { lock (logs) logs.Add(level + " " + msg); });
+            Check(new SeforimDbFtsIndexCoordinator(new SeforimDbSqliteDataSource(Path.Combine(dir, "missing.db")), index + "-x", false, (_, _, _) => { }).Status().DbMissing,
                   "no DB: DbMissing");
 
             var early = c.Search("beta", 0, int.MaxValue, false, 8);   // starts the build; may not be ready yet
@@ -156,13 +156,13 @@ namespace SeforimSearch.Demo
                 cmd.Parameters.AddWithValue("$s", syn);
                 cmd.ExecuteNonQuery();
             }
-            var x = new SeforimDbFtsRelatedFormExpander(artifact);
+            var x = new SeforimDbFtsRelatedFormExpander(new SeforimDbSqliteRelatedFormLexicon(artifact));
             Check(x.IsAvailable && SeforimDbFtsRelatedFormExpander.HasRelatedMarker(word + "+"), "marker");
             Check(!SeforimDbFtsRelatedFormExpander.HasRelatedMarker(word), "no marker");
             Check(x.RewriteQuery(word + "+") == word + "+ | " + form, "inflections only");
             Check(x.RewriteQuery(word + "=") == word + "= | " + syn, "synonyms only");
             Check(x.RewriteQuery(word + "+=") == word + "+= | " + form + " | " + syn, "both");
-            Check(new SeforimDbFtsRelatedFormExpander(Path.Combine(dir, "none.db")).RewriteQuery(word + "+") == word + "+", "no artifact: unchanged");
+            Check(new SeforimDbFtsRelatedFormExpander(new SeforimDbSqliteRelatedFormLexicon(Path.Combine(dir, "none.db"))).RewriteQuery(word + "+") == word + "+", "no artifact: unchanged");
 
             // FtsLib's '^' marker: ktiv with FtsLib's rules on that typed word ('|' is no word)
             var o = new SeforimSearch.Engine.SearchOptions("a | ^b c *^d e+");
@@ -170,7 +170,7 @@ namespace SeforimSearch.Demo
             Check(o.Words.Keys.OrderBy(k => k).SequenceEqual(new[] { 1, 3 }), "ketiv words: " + string.Join(",", o.Words.Keys));
             Check(o.Words[1].KtivMaleHaser == true && o.Words[1].KtivRules == SeforimSearch.Engine.KtivRules.FtsLib, "ketiv options");
             // end to end on the fixture: '^' finds what the ktiv walk finds, and is not dropped silently
-            using var engine = new SeforimDbFtsEngine(Path.Combine(dir, "index-substring"), db);
+            using var engine = new SeforimDbFtsEngine(Path.Combine(dir, "index-substring"), new SeforimDbSqliteDataSource(db));
             Check(engine.Index.Search("^beta").Count() == engine.Index.Search("beta").Count(), "a marked word still searches");
         }
     }

@@ -60,7 +60,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// <summary>
     /// A snippet's TEXT (Core's FtsSnippetText): the matched line's own text and, for a short
     /// window only, the plain context around it - the same book's non-empty lines up to
-    /// <see cref="SeforimDbFtsCorpus.SnippetNeighbourLineRadius"/> before and after, each side
+    /// <see cref="SeforimDbFtsSnippets.NeighbourLineRadius"/> before and after, each side
     /// joined by single spaces in document order. Empty sides for a line that is not short.
     /// </summary>
     public sealed class FtsSnippetText
@@ -147,19 +147,24 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// </summary>
     public sealed class SeforimDbFtsEngine : System.IDisposable
     {
-        /// <summary>The seforim.db kept open across searches (see SeforimDbFtsCorpusPool).</summary>
-        private readonly SeforimDbFtsCorpusPool _corpora;
+        /// <summary>seforim.db as the host reads it (the facade holds no SQLite).</summary>
+        private readonly ISeforimDbFtsDataSource _source;
 
-        public SeforimDbFtsEngine(string indexPath, string seforimDbPath)
+        /// <param name="source">The host's seforim.db layer (default: SeforimSearch.SeforimDb's
+        /// SeforimDbSqliteDataSource). Not owned: Dispose only releases its idle connections.</param>
+        public SeforimDbFtsEngine(string indexPath, ISeforimDbFtsDataSource source)
         {
-            _corpora = new SeforimDbFtsCorpusPool(seforimDbPath);
-            Index = new TantivySeforimIndex(indexPath, seforimDbPath, OpenCorpus);
+            _source = source ?? throw new System.ArgumentNullException(nameof(source));
+            Index = new TantivySeforimIndex(indexPath, source);
         }
+
+        /// <summary>The data source this engine reads.</summary>
+        public ISeforimDbFtsDataSource Source => _source;
 
         public TantivySeforimIndex Index { get; }
 
-        /// <summary>An open corpus from the pool; Dispose returns it (the database stays open).</summary>
-        public SeforimDbFtsCorpus OpenCorpus() => _corpora.Rent();
+        /// <summary>A lease on the database; Dispose ends it (a pooling source keeps the database open).</summary>
+        public ISeforimDbFtsCorpus OpenCorpus() => _source.OpenCorpus();
 
         private readonly object _lock = new object();
         private System.Collections.Generic.Dictionary<long, (long First, long Count)>? _bookPositions;
@@ -172,7 +177,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         }
 
         /// <summary>
-        /// The index position of a line (<see cref="SeforimDbFtsCorpus.PositionOfLine"/>), to
+        /// The index position of a line (<see cref="ISeforimDbFtsCorpus.PositionOfLine"/>), to
         /// resume a search after it. Null when the line cannot be placed (gone from the library,
         /// or a book this index does not hold): the caller then starts over. (Core 277de7a9.)
         /// </summary>
@@ -281,7 +286,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
         public void Dispose()
         {
             Index.Dispose();
-            _corpora.Dispose();
+            _source.ReleaseIdle();
         }
     }
 

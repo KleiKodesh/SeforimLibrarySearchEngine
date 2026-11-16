@@ -1,11 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    The seforim.db side: everything that reads the database (schema probe,
-    zstd content, catalog order, provenance) plus a FtsLib-shaped facade over
-    the engine package (TantivySeforimIndex ~ Fts5SeforimIndex,
-    SeforimDbFtsSearcher.SearchInBatches, FtsHit, SnippetDescriptor), so an
-    app on FtsLib can switch with minimal changes.
+    The demo CLI and selftest: the FtsLib-shaped facade (SeforimSearch.FtsFacade, no SQLite)
+    over its default seforim.db data source (SeforimSearch.SeforimDb).
 
     Builds and runs on both .NET 10 and .NET Framework 4.8.
   -->
@@ -21,31 +18,24 @@
     <PlatformTarget Condition="'$(OS)' == 'Windows_NT'">x64</PlatformTarget>
     <RuntimeIdentifier Condition="'$(TargetFramework)' == 'net48'">win-x64</RuntimeIdentifier>
     <RootNamespace>SeforimSearch.Demo</RootNamespace>
-    <NoWarn>$(NoWarn);CS1591;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625</NoWarn>
+    <!-- CS0436: the net48 polyfills are linked into each project and visible through
+         InternalsVisibleTo; the local copy wins, as intended. -->
+    <NoWarn>$(NoWarn);CS0436;CS1591;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\SeforimSearch.Engine\SeforimSearch.Engine.csproj" />
+    <ProjectReference Include="..\SeforimSearch.FtsFacade\SeforimSearch.FtsFacade.csproj" />
+    <ProjectReference Include="..\SeforimSearch.SeforimDb\SeforimSearch.SeforimDb.csproj" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Compile Include="..\SeforimSearch.FtsFacade\Compat\NetFrameworkPolyfills.cs" Link="Compat\NetFrameworkPolyfills.cs" />
     <Using Include="SeforimSearch.Demo.Compat" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
-    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.14" />
-    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
-    <!-- Query embedding with Otzaria's Meivin model (semantic-search command, issue #18):
-         the model runs in the host, never in the engine. 1.28.0 = the ONNX Runtime Otzaria's
-         golden vectors were generated with. -->
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.28.0" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
     <PackageReference Include="System.Text.Json" Version="10.0.5" />
-    <!-- HttpClient in the engine package's vector download API (issue #18). -->
-    <Reference Include="System.Net.Http" />
   </ItemGroup>
 
 </Project>

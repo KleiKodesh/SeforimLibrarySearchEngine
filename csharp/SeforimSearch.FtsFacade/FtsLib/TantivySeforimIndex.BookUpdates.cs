@@ -66,8 +66,8 @@ namespace FtsLib.Fts5
 
             var state = ReadBuildState();
             if (state == null || !state.Complete) return NotApplicable("no complete index");
-            string fingerprint = SeforimDbContentFingerprint.Compute(_seforimDbPath, IndexFormatVersion);
-            string? change = SeforimDbContentFingerprint.DescribeChange(state.Fingerprint, fingerprint);
+            string fingerprint = _source.ContentFingerprint(IndexFormatVersion);
+            string? change = _source.DescribeFingerprintChange(state.Fingerprint, fingerprint);
             if (change != null && !change.StartsWith("seforim DB content changed", StringComparison.Ordinal))
                 return NotApplicable(change);
 

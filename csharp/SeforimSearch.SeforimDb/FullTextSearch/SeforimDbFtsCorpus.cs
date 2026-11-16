@@ -33,7 +33,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
     /// queries and wrong for an indexing scan that streams millions of rows over one handle.
     /// Different lifetime, different class.
     /// </summary>
-    public sealed class SeforimDbFtsCorpus : IDisposable
+    public sealed class SeforimDbFtsCorpus : ISeforimDbFtsCorpus
     {
         private readonly SeforimDbCorpusConnection _c;
         private readonly SeforimDbFtsCorpusPool? _pool;
@@ -113,7 +113,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
 
         /// <summary>How many lines per side a SHORT snippet's context reaches (same book only;
         /// Core's SeforimDbFtsCorpus.SnippetNeighbourLineRadius).</summary>
-        public const int SnippetNeighbourLineRadius = 2;
+        public const int SnippetNeighbourLineRadius = SeforimDbFtsSnippets.NeighbourLineRadius;
         public IDictionary<long, (string Previous, string Next)> FetchNeighbourText(IReadOnlyList<long> ids, int radius) =>
             C.FetchNeighbourText(ids, radius);
 
@@ -918,7 +918,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             {
                 if (lineId >= 0)
                 {
-                    SeforimDbFtsUnreadableRows.Current?.Add(lineId, exception.Message);
+                    SeforimDbFtsUnreadableRows.Current?.Report(lineId, exception.Message);
                     unreadable?.Add(lineId);
                 }
                 return string.Empty;
@@ -933,7 +933,7 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
             catch (SeforimDbContentCodecException exception)
                 when (unreadable != null || SeforimDbFtsUnreadableRows.Current != null)
             {
-                SeforimDbFtsUnreadableRows.Current?.Add(virtualId, exception.Message);
+                SeforimDbFtsUnreadableRows.Current?.Report(virtualId, exception.Message);
                 unreadable?.Add(virtualId);
                 return string.Empty;
             }
@@ -1052,6 +1052,19 @@ namespace SeforimSearch.Demo.SeforimDbFullTextSearch
                 _idle.Push(connection);
                 return true;
             }
+        }
+
+        /// <summary>Closes the idle connections and keeps the pool usable (the next rent
+        /// opens a fresh one): the engine's idle memory release.</summary>
+        public void ReleaseIdle()
+        {
+            SeforimDbCorpusConnection[] idle;
+            lock (_lock)
+            {
+                idle = _idle.ToArray();
+                _idle.Clear();
+            }
+            foreach (var c in idle) c.Close();
         }
 
         public void Dispose()

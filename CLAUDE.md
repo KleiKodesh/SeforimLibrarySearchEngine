@@ -95,7 +95,8 @@ in one or two lines. Remove entries that turn out to be wrong.
   FtsLib: `CSharpBackend\FtsLib-Csharp\FtsLib`. Core: `CSharpBackend\KitveiHakodesh.Core`.
   Check on-disk vs git HEAD (`git status`) first; files were once deleted on disk.
 - **No database code in Rust / tantivy.** Anything that needs SQLite or knows the
-  seforim.db schema lives in the C# demo (`csharp/SeforimSearch.Demo`). The engine is
+  seforim.db schema lives in the C# host side (`csharp/SeforimSearch.SeforimDb`, the facade's
+  default data source; the facade itself has no SQLite). The engine is
   fed lines and texts by the host. This includes a short snippet's neighbour
   context: "it has to do with the seforim db", so no neighbour helper in Rust; the
   host reads the neighbours and shows them as plain context (user's rule).
@@ -140,6 +141,13 @@ in one or two lines. Remove entries that turn out to be wrong.
 - **Keep README.md current automatically**: every commit that adds, changes or
   removes a feature, option, layout item, known difference or open item updates
   README.md in the SAME commit. Never leave it for later; don't wait to be asked.
+- **One SQLite per host app** (user, 2026-11-16): the C# facade (`SeforimSearch.FtsFacade`) and
+  package hold no SQLite / zstd; they reach seforim.db through `ISeforimDbFtsDataSource`, which
+  KitveiHakodesh Core implements on its own DB code. Only the demo uses `SeforimSearch.SeforimDb`.
+- **C# = only what KitveiHakodesh's UI uses** (user, 2026-11-16): Core's FTS ops (search, stream,
+  snippet texts, status, progress, reset, lines / in-book search, index build / update). No
+  semantic search, vectors, downloader or user index in C# (deleted, not hidden); the C ABI keeps
+  them for Dart, `NativeAbi.Expected` stays in sync.
 - **C ABI version (issue #17):** every C ABI change (function added / removed / renamed,
   signature, struct layout, JSON shape, enum / flag value) bumps engine-ffi `SE_ABI_VERSION`,
   Dart `seforimAbiVersion` and C# `NativeAbi.Expected` together, in the same commit;
@@ -175,7 +183,11 @@ engine-ffi/           C ABI → seforim_search_native.dll
    ↑
 csharp/SeforimSearch.Engine/   netstandard2.0 P/Invoke package
    ↑
-csharp/SeforimSearch.Demo/     seforim.db code (copied from Core) + FtsLib-shaped facade
+csharp/SeforimSearch.FtsFacade/  FtsLib-shaped facade, NO sqlite (ISeforimDbFtsDataSource seam)
+   ↑
+csharp/SeforimSearch.SeforimDb/  default data source: seforim.db code (copied from Core), sqlite + zstd
+   ↑
+csharp/SeforimSearch.Demo/     CLI + selftest
 ```
 
 Search flow: the query string goes through `QueryParser` (FtsLib rules) and becomes

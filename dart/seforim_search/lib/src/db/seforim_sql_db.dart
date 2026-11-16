@@ -239,6 +239,15 @@ class SeforimSqlDb implements SeforimDataSource {
     return v.toString();
   }
 
+  /// A frame's decompressed bytes, unchanged (no UTF-8 round trip).
+  Uint8List _frameBytes(Uint8List frame, int lineId) {
+    try {
+      return _db.decodeFrame(frame);
+    } on FormatException catch (e) {
+      throw FormatException('line $lineId: compressed content cannot be decoded: ${e.message}');
+    }
+  }
+
   String _decodeFrame(Uint8List frame, int? lineId) {
     final Uint8List bytes;
     try {
@@ -461,9 +470,19 @@ class SeforimSqlDb implements SeforimDataSource {
       if (raw == null) {
         yield (id, Uint8List(0));
       } else if (r[1] == 'blob') {
-        yield (id, Uint8List.fromList(utf8.encode(_decodeFrame(raw, id))));
+        // the frame's own bytes: utf8.decode would drop a leading BOM
+        yield (id, _frameBytes(raw, id));
       } else if (compressed && raw.length >= 8 && raw[0] == 0x4B && raw[1] == 0x4C && raw[2] == 0x55 && raw[3] == 0x76) {
-        yield (id, Uint8List.fromList(utf8.encode(_decodeRaw(utf8.decode(raw), id)))); // "KLUv": base64 text of a frame
+        // "KLUv": base64 text of a frame (or text that only looks like one)
+        final Uint8List frame;
+        try {
+          frame = base64.decode(ascii.decode(raw));
+          zstdFrameDictionaryId(frame);
+        } on FormatException {
+          yield (id, raw);
+          continue;
+        }
+        yield (id, _frameBytes(frame, id));
       } else {
         yield (id, raw);
       }

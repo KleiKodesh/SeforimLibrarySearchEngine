@@ -231,6 +231,27 @@ void main() {
     db.close();
   });
 
+  test('db: bookRawRows keeps the leading BOM of a compressed row (vector text check)', () {
+    final path = '${dir.path}/raw.db';
+    final w = create(path, dicts: [d1]);
+    final bom = [0xEF, 0xBB, 0xBF, ...utf8.encode('alpha')];
+    final rows = <int, Object>{
+      1: zw.compress(d1, bom), // blob frame
+      2: base64.encode(zw.compress(d1, bom)), // base64 text of a frame
+      3: 'KLUv is how it starts', // text that only looks like a frame
+    };
+    rows.forEach((id, v) => w.execute("INSERT INTO line VALUES (?, 1, ?, ?, '', 0)", [id, id, v]));
+    w.close();
+    final db = SeforimDb.open(path);
+    final raw = db.bookRawRows(1).toList();
+    expect(raw.map((r) => r.$1), [1, 2, 3]);
+    expect(raw[0].$2, bom);
+    expect(raw[1].$2, bom);
+    expect(raw[2].$2, utf8.encode('KLUv is how it starts'));
+    expect(db.lineTexts([1]), {1: 'alpha'}); // the display read still drops it
+    db.close();
+  });
+
   test('db: heRefs and sectionsOf over 33000+ ids read in chunks (issue #9 CB08)', () {
     final path = '${dir.path}/big.db';
     final w = create(path);

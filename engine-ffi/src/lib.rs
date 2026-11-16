@@ -88,7 +88,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 18; // 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 19; // 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -291,7 +291,14 @@ pub unsafe extern "C" fn se_index_create(
 ) -> *mut LineIndex {
     guard(ptr::null_mut(), || {
         let dir = PathBuf::from(str_arg(dir, dir_len)?);
-        let json = str_arg(options_json, options_len)?;
+        let options = se_index_options(str_arg(options_json, options_len)?)?;
+        let index = LineIndex::create(&dir, options).map_err(err)?;
+        Ok(Box::into_raw(Box::new(index)))
+    })
+}
+
+/// The index options of `se_index_create` / `se_user_index_create`.
+fn se_index_options(json: &str) -> Result<IndexOptions, String> {
         #[derive(serde::Deserialize, Default)]
         #[serde(default, deny_unknown_fields)]
         struct Opts {
@@ -313,9 +320,7 @@ pub unsafe extern "C" fn se_index_create(
             positions: o.positions.unwrap_or(defaults.positions),
             keep_marks: o.keep_marks.unwrap_or(defaults.keep_marks),
         };
-        let index = LineIndex::create(&dir, options).map_err(err)?;
-        Ok(Box::into_raw(Box::new(index)))
-    })
+        Ok(options)
 }
 
 /// Opens an existing index.
@@ -351,7 +356,7 @@ pub unsafe extern "C" fn se_index_close(index: *mut LineIndex) {
     }
 }
 
-/// JSON: `{"num_lines":N,"positions":bool,"keep_marks":bool,"line_data":bool,"payload":string|null}`
+/// JSON: `{"num_lines":N,"positions":bool,"keep_marks":bool,"line_data":bool,"user_index":bool,"payload":string|null}`
 /// (`line_data`: the per-line content edges, flags and section id exist, for
 /// cross-line matching and the same-section scope).
 /// The payload is what the host committed with its last commit.
@@ -368,6 +373,7 @@ pub unsafe extern "C" fn se_index_info(index: *const LineIndex) -> *mut c_char {
             "positions": options.positions,
             "keep_marks": options.keep_marks,
             "line_data": index.has_line_data(),
+            "user_index": index.is_user_index(),
             "payload": index.committed_payload().map_err(err)?,
         });
         Ok(out_string(info.to_string()))
@@ -2338,6 +2344,56 @@ mod tests {
     use std::ffi::CStr;
 
     #[test]
+    fn user_index_through_c_abi() {
+        let base = std::env::temp_dir().join(format!("se_ffi_user_{}", std::process::id()));
+        let (l, u) = (base.join("lib").to_string_lossy().into_owned(), base.join("user").to_string_lossy().into_owned());
+        let s = |p: *mut c_char| -> String {
+            assert!(!p.is_null(), "{:?}", unsafe { CStr::from_ptr(se_last_error()) });
+            let v = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+            unsafe { se_string_free(p) };
+            v
+        };
+        unsafe {
+            let lib = se_index_create(l.as_ptr(), l.len(), ptr::null(), 0);
+            let w = se_writer_open(lib, 30_000_000, 1);
+            let text = "alpha beta";
+            assert_eq!(se_writer_add(w, 1, 0, 1, text.as_ptr(), text.len()), 0);
+            assert_eq!(se_writer_put_document(w, b"{}".as_ptr(), 2), -1); // a library takes no documents
+            assert_eq!(se_writer_commit(w, ptr::null(), 0), 0);
+            se_writer_close(w);
+            let user = se_user_index_create(u.as_ptr(), u.len(), ptr::null(), 0);
+            assert!(!user.is_null());
+            let uh = se_user_index_handle(user);
+            let w = se_writer_open(uh, 30_000_000, 1);
+            let doc = r#"{"key":"c:/a.pdf","stamp":"h1","lines":[{"text":"gamma","locator":1},{"text":"alpha","locator":2}]}"#;
+            assert_eq!(se_writer_put_document(w, doc.as_ptr(), doc.len()), se_user_id_base() as i64);
+            assert_eq!(se_writer_commit(w, ptr::null(), 0), 0);
+            se_writer_close(w);
+            assert_eq!(se_index_attach_user(lib, user), 0);
+            se_user_index_close(user); // the library keeps it
+            let docs = s(se_index_documents(lib));
+            assert!(docs.contains("\"key\":\"c:/a.pdf\"") && docs.contains("\"stamp\":\"h1\""), "{docs}");
+            for (sources, want) in [("all", vec![1, se_user_id_base() + 1]), ("user", vec![se_user_id_base() + 1]), ("library", vec![1])] {
+                let q = format!(r#"{{"query":"alpha","sources":"{sources}"}}"#);
+                let r = se_search(lib, q.as_ptr(), q.len());
+                assert!(!r.is_null(), "{:?}", CStr::from_ptr(se_last_error()));
+                let n = se_search_hit_count(r);
+                let mut out = vec![0u64; n as usize * 3];
+                se_search_copy_hits(r, 0, n, out.as_mut_ptr());
+                let ids: Vec<u64> = out.chunks(3).map(|c| c[1]).collect();
+                assert_eq!(ids, want, "{sources}");
+                se_search_close(r);
+            }
+            let ids = [se_user_id_base() + 1, 1];
+            let src = s(se_index_line_sources(lib, ids.as_ptr(), 2));
+            assert_eq!(src, r#"[{"key":"c:/a.pdf","locator":2,"line":1},null]"#);
+            assert_eq!(s(se_index_line_texts(lib, ids.as_ptr(), 2)), r#"["alpha",null]"#);
+            se_index_close(lib);
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn roundtrip_through_c_abi() {
         let dir = std::env::temp_dir().join(format!("se_ffi_{}", std::process::id()));
         let d = dir.to_string_lossy().into_owned();
@@ -2870,4 +2926,184 @@ mod tests {
         assert_eq!((info.library_version, info.segments.len()), (3, 3));
         let _ = std::fs::remove_dir_all(&tmp);
     }
+}
+
+// ── User documents (issue #44) ──────────────────────────────────────────
+
+/// A user index (host documents that are not in the library: text files,
+/// PDFs, attached libraries) in its own directory. Its documents are
+/// written with `se_writer_put_document` / `se_writer_delete_documents` on a
+/// writer of `se_user_index_handle(user)`; every other index call (writer,
+/// info, FM sidecar, background merge, search alone) takes that handle too.
+/// Ids: book `2^51 + n`, line and position `2^51 + (n << 24) + line`; the
+/// library's ids stay below 2^51 (`se_user_id_base`).
+pub struct UserIndex(std::sync::Arc<LineIndex>);
+
+/// The first id of the user range (2^51): a hit with a line id from here to
+/// 2^52 is a user document's line.
+#[no_mangle]
+pub extern "C" fn se_user_id_base() -> u64 {
+    seforim_engine::USER_ID_BASE
+}
+
+/// Creates a fresh user index in `dir` (wiping it). `options_json` as in
+/// `se_index_create`: it must equal the library's options to be attached.
+///
+/// # Safety
+/// Pointers must be valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn se_user_index_create(
+    dir: *const u8,
+    dir_len: usize,
+    options_json: *const u8,
+    options_len: usize,
+) -> *mut UserIndex {
+    guard(ptr::null_mut(), || {
+        // the options are parsed (and checked) exactly as se_index_create does
+        let probe = se_index_options(str_arg(options_json, options_len)?)?;
+        let dir = PathBuf::from(str_arg(dir, dir_len)?);
+        let index = LineIndex::create_user(&dir, probe).map_err(err)?;
+        Ok(Box::into_raw(Box::new(UserIndex(std::sync::Arc::new(index)))))
+    })
+}
+
+/// Opens an existing user index (an error for a library index).
+///
+/// # Safety
+/// Pointers must be valid for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn se_user_index_open(dir: *const u8, dir_len: usize) -> *mut UserIndex {
+    guard(ptr::null_mut(), || {
+        let dir = PathBuf::from(str_arg(dir, dir_len)?);
+        let index = LineIndex::open(&dir).map_err(err)?;
+        if !index.is_user_index() {
+            return Err(format!("{} is a library index, not a user index", dir.display()));
+        }
+        Ok(Box::into_raw(Box::new(UserIndex(std::sync::Arc::new(index)))))
+    })
+}
+
+/// The user index as an index handle for every other index call. Valid
+/// while `user` is open; never pass it to `se_index_close`.
+///
+/// # Safety
+/// `user` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_user_index_handle(user: *const UserIndex) -> *const LineIndex {
+    match user.as_ref() {
+        Some(u) => std::sync::Arc::as_ptr(&u.0),
+        None => ptr::null(),
+    }
+}
+
+/// Closes the host's handle (an index it is attached to keeps it open until
+/// detached or closed).
+///
+/// # Safety
+/// `user` must come from `se_user_index_create/open`, closed once.
+#[no_mangle]
+pub unsafe extern "C" fn se_user_index_close(user: *mut UserIndex) {
+    if !user.is_null() {
+        drop(Box::from_raw(user));
+    }
+}
+
+/// Attaches a user index to a library index (null `user` detaches): a search
+/// with `"sources":"all"` (the default) reads both, library hits first, as
+/// one search (one expansion cap, exact counts); `"library"` and `"user"`
+/// read one. Same options and fields required. 0 = ok, -1 on error.
+///
+/// # Safety
+/// `index` and `user` (or null) must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_attach_user(index: *const LineIndex, user: *const UserIndex) -> i32 {
+    guard(-1, || {
+        let index = index.as_ref().ok_or("null index")?;
+        index.attach_user_index(user.as_ref().map(|u| u.0.clone())).map_err(err)?;
+        Ok(0)
+    })
+}
+
+/// Adds or replaces a user document (visible after `se_writer_commit`, which
+/// writes the documents list atomically with the lines). JSON:
+/// `{"key":"c:/a.pdf","stamp":"<host hash>","lines":[{"text":"...","locator":3,
+/// "section_id":null,"no_cross":false}]}` (`locator`, e.g. a page, defaults to 0).
+/// Returns the document's book id (kept on a replace), -1 on error (a library
+/// index's writer included).
+///
+/// # Safety
+/// `writer` must be live; the JSON valid for its length.
+#[no_mangle]
+pub unsafe extern "C" fn se_writer_put_document(writer: *mut LineWriter, json: *const u8, json_len: usize) -> i64 {
+    guard(-1, || {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Doc {
+            key: String,
+            #[serde(default)]
+            stamp: String,
+            lines: Vec<seforim_engine::DocLine>,
+        }
+        let d: Doc = serde_json::from_str(str_arg(json, json_len)?).map_err(|e| format!("invalid document: {e}"))?;
+        let w = writer.as_mut().ok_or("null writer")?;
+        Ok(w.put_document(&d.key, &d.stamp, &d.lines).map_err(err)? as i64)
+    })
+}
+
+/// Deletes the user documents with these keys (JSON array of strings;
+/// unknown keys skipped). Returns how many were indexed, -1 on error.
+///
+/// # Safety
+/// `writer` must be live; the JSON valid for its length.
+#[no_mangle]
+pub unsafe extern "C" fn se_writer_delete_documents(writer: *mut LineWriter, keys_json: *const u8, keys_len: usize) -> i64 {
+    guard(-1, || {
+        let keys: Vec<String> = serde_json::from_str(str_arg(keys_json, keys_len)?).map_err(|e| format!("invalid keys: {e}"))?;
+        let w = writer.as_mut().ok_or("null writer")?;
+        Ok(w.delete_documents(&keys).map_err(err)? as i64)
+    })
+}
+
+/// The user documents of a user index, or of the user index attached to a
+/// library index (none: `[]`), by book id: JSON
+/// `[{"key":"...","stamp":"...","book_id":N,"lines":N}]`.
+///
+/// # Safety
+/// `index` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_documents(index: *const LineIndex) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        Ok(out_string(serde_json::to_string(&index.documents().map_err(err)?).map_err(err)?))
+    })
+}
+
+/// Where each line comes from: JSON array, one entry per id,
+/// `{"key":"...","locator":N,"line":N}` for a user line, null for a library
+/// line or an unknown id.
+///
+/// # Safety
+/// `index` must be live; `ids` valid for `count` values.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_line_sources(index: *const LineIndex, ids: *const u64, count: usize) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        let ids = if count == 0 { &[][..] } else { std::slice::from_raw_parts(ids, count) };
+        Ok(out_string(serde_json::to_string(&index.line_sources(ids).map_err(err)?).map_err(err)?))
+    })
+}
+
+/// The stored texts of user lines (the user index keeps them; library
+/// texts come from the host's database): JSON array of strings, null for a
+/// line the user index does not hold.
+///
+/// # Safety
+/// `index` must be live; `ids` valid for `count` values.
+#[no_mangle]
+pub unsafe extern "C" fn se_index_line_texts(index: *const LineIndex, ids: *const u64, count: usize) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let index = index.as_ref().ok_or("null index")?;
+        let ids = if count == 0 { &[][..] } else { std::slice::from_raw_parts(ids, count) };
+        Ok(out_string(serde_json::to_string(&index.line_texts(ids).map_err(err)?).map_err(err)?))
+    })
 }

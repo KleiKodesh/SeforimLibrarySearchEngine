@@ -92,12 +92,97 @@ final class ResortProgressCell implements Finalizable {
 /// Native memory is released by [close], or by a finalizer if the object is
 /// garbage-collected first. Never both: [close] detaches the finalizer.
 final class SeforimIndex implements Finalizable {
-  SeforimIndex._(this._handle) {
+  SeforimIndex._(this._handle) : _user = nullptr {
     _n.indexCloseFinalizer.attach(this, _handle, detach: this);
+  }
+
+  SeforimIndex._ofUser(Pointer<Void> user)
+      : _user = user,
+        _handle = _n.userIndexHandle(user) {
+    _n.userIndexCloseFinalizer.attach(this, user, detach: this);
   }
 
   static SeforimNative get _n => SeforimNative.instance;
   Pointer<Void> _handle;
+
+  /// A user index's own handle (nullptr for a library index).
+  Pointer<Void> _user;
+
+  /// The first id of the user range (2^51): a line id from here to 2^52 is
+  /// a user document's line (issue #44).
+  static int get userIdBase => _n.userIdBase();
+
+  /// True for an id of the user range.
+  static bool isUserId(int id) => id >= userIdBase && id < 2 * userIdBase;
+
+  /// True for a user index ([createUser]).
+  bool get isUserIndex => _user != nullptr;
+
+  /// Creates a fresh USER index in [directory], WIPING it (issue #44): host
+  /// documents that are not in the library (text files, PDFs, attached
+  /// libraries), each with a key, a stamp and per-line locators, written
+  /// with [IndexWriter.putDocument]. [options] must equal the library's.
+  /// Attach it with [attachUserIndex].
+  static SeforimIndex createUser(String directory, [IndexOptions options = const IndexOptions()]) {
+    return using((a) {
+      final (d, dl) = utf8Native(directory, a);
+      final (o, ol) = utf8Native(jsonEncode(options.toJson()), a);
+      return SeforimIndex._ofUser(_n.checkPtr(_n.userIndexCreate(d, dl, o, ol)));
+    });
+  }
+
+  /// Opens an existing user index (throws for a library index).
+  static SeforimIndex openUser(String directory) {
+    return using((a) {
+      final (d, dl) = utf8Native(directory, a);
+      return SeforimIndex._ofUser(_n.checkPtr(_n.userIndexOpen(d, dl)));
+    });
+  }
+
+  /// Attaches a user index to this library index (null detaches): a search
+  /// with [SearchSources.all] (the default) reads both, library hits first,
+  /// as one search (one expansion cap, exact counts); [SearchSources.library]
+  /// and [SearchSources.user] read one. The library keeps the user index
+  /// open until detached or closed.
+  void attachUserIndex(SeforimIndex? user) {
+    if (user != null && !user.isUserIndex) throw ArgumentError('not a user index (createUser / openUser)');
+    if (user != null) user.handle; // throws when closed
+    _n.checkStatus(_n.indexAttachUser(handle, user?._user ?? nullptr));
+  }
+
+  /// The user documents (of this user index, or of the attached one), by book id.
+  List<UserDocumentInfo> documents() => [
+        for (final d in jsonDecode(_n.takeString(_n.indexDocuments(handle))) as List)
+          UserDocumentInfo.fromJson(d as Map<String, dynamic>)
+      ];
+
+  /// Where each line comes from: the user document key, locator and line
+  /// number, or null for a library line / unknown id.
+  List<UserLineSource?> lineSources(List<int> lineIds) {
+    final json = using((a) {
+      final p = a<Uint64>(lineIds.isEmpty ? 1 : lineIds.length);
+      p.asTypedList(lineIds.length).setAll(0, lineIds);
+      return _n.takeString(_n.indexLineSources(handle, p, lineIds.length));
+    });
+    return [
+      for (final o in jsonDecode(json) as List)
+        o == null
+            ? null
+            : UserLineSource(
+                key: o['key'] as String, locator: (o['locator'] as num).toInt(), line: (o['line'] as num).toInt())
+    ];
+  }
+
+  /// The stored texts of user lines (the user index keeps them); null for a
+  /// line the user index does not hold (library texts come from seforim.db).
+  List<String?> lineTexts(List<int> lineIds) {
+    final json = using((a) {
+      final p = a<Uint64>(lineIds.isEmpty ? 1 : lineIds.length);
+      p.asTypedList(lineIds.length).setAll(0, lineIds);
+      return _n.takeString(_n.indexLineTexts(handle, p, lineIds.length));
+    });
+    return [for (final o in jsonDecode(json) as List) o as String?];
+  }
 
   Pointer<Void> get handle {
     if (_handle == nullptr) throw StateError('SeforimIndex is closed');
@@ -340,8 +425,14 @@ final class SeforimIndex implements Finalizable {
   /// Frees the index. Close writers and sessions first.
   void close() {
     if (_handle == nullptr) return;
-    _n.indexCloseFinalizer.detach(this);
-    _n.indexClose(_handle);
+    if (_user != nullptr) {
+      _n.userIndexCloseFinalizer.detach(this);
+      _n.userIndexClose(_user);
+      _user = nullptr;
+    } else {
+      _n.indexCloseFinalizer.detach(this);
+      _n.indexClose(_handle);
+    }
     _handle = nullptr;
   }
 }
@@ -419,6 +510,35 @@ final class IndexWriter implements Finalizable {
   /// delete the book, add its new lines, then ONE commit). Lines added after
   /// this call are kept.
   void deleteBook(int bookId) => _n.checkStatus(_n.writerDeleteBook(_h, bookId));
+
+  /// Adds or replaces the user document [key] (a user index's writer only;
+  /// issue #44). Visible after [commit], which writes the documents list
+  /// atomically with the lines. Returns the document's book id (kept on a
+  /// replace).
+  int putDocument(String key, String stamp, List<UserDocumentLine> lines) {
+    final json = jsonEncode({
+      'key': key,
+      'stamp': stamp,
+      'lines': [for (final l in lines) l.toJson()],
+    });
+    return using((a) {
+      final (j, jl) = utf8Native(json, a);
+      final r = _n.writerPutDocument(_h, j, jl);
+      if (r < 0) _n.checkStatus(-1);
+      return r;
+    });
+  }
+
+  /// Deletes the user documents with these keys (unknown keys skipped);
+  /// returns how many were indexed. Visible after [commit].
+  int deleteDocuments(List<String> keys) {
+    return using((a) {
+      final (j, jl) = utf8Native(jsonEncode(keys), a);
+      final r = _n.writerDeleteDocuments(_h, j, jl);
+      if (r < 0) _n.checkStatus(-1);
+      return r;
+    });
+  }
 
   /// Commits; [payload] is stored atomically with the documents.
   void commit([String? payload]) {

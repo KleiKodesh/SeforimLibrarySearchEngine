@@ -35,6 +35,50 @@ namespace SeforimSearch.Engine
     }
 
     /// <summary>The state of an open index.</summary>
+    /// <summary>Which indexes a search reads (issue #44).</summary>
+    public enum SearchSources
+    {
+        /// <summary>The library and the attached user index, library hits first (the
+        /// library alone when none is attached).</summary>
+        All,
+        /// <summary>The library index only.</summary>
+        Library,
+        /// <summary>The attached user index only.</summary>
+        User,
+    }
+
+    /// <summary>One line of a user document (issue #44).</summary>
+    public readonly struct UserDocumentLine
+    {
+        public UserDocumentLine(string text, long locator = 0, long? sectionId = null, bool noCross = false)
+        { Text = text; Locator = locator; SectionId = sectionId; NoCross = noCross; }
+        public string Text { get; }
+        /// <summary>The host's locator of the line, e.g. a PDF page.</summary>
+        public long Locator { get; }
+        public long? SectionId { get; }
+        public bool NoCross { get; }
+    }
+
+    /// <summary>A user document of the user index.</summary>
+    public sealed class UserDocumentInfo
+    {
+        public UserDocumentInfo(string key, string stamp, long bookId, long lines) { Key = key; Stamp = stamp; BookId = bookId; Lines = lines; }
+        public string Key { get; }
+        public string Stamp { get; }
+        public long BookId { get; }
+        public long Lines { get; }
+    }
+
+    /// <summary>Where a user line comes from.</summary>
+    public sealed class UserLineSource
+    {
+        public UserLineSource(string key, long locator, long line) { Key = key; Locator = locator; Line = line; }
+        public string Key { get; }
+        public long Locator { get; }
+        /// <summary>The line's number in its document (0-based).</summary>
+        public long Line { get; }
+    }
+
     public sealed class IndexInfo
     {
         public long NumLines { get; internal set; }
@@ -420,6 +464,9 @@ namespace SeforimSearch.Engine
         /// back (empty list = no hits). Null = every book.</summary>
         public List<long>? Books { get; set; }
 
+        /// <summary>Which indexes the search reads (issue #44).</summary>
+        public SearchSources Sources { get; set; }
+
         internal string ToJson()
         {
             var sb = new StringBuilder();
@@ -466,6 +513,7 @@ namespace SeforimSearch.Engine
                 sb.Append(",\"exclude\":");
                 Exclude.WriteJson(sb);
             }
+            SearchOptions.AppendSources(sb, Sources);
             sb.Append('}');
             return sb.ToString();
         }
@@ -662,6 +710,16 @@ namespace SeforimSearch.Engine
         /// budget), all on one line. A superset: the host confirms the substring on the text.
         /// Word options, distance and order do not apply.</summary>
         public bool Substring { get; set; }
+
+        /// <summary>Which indexes the search reads (issue #44): the library, the attached user
+        /// index, or both (default).</summary>
+        public SearchSources Sources { get; set; }
+
+        internal static void AppendSources(StringBuilder sb, SearchSources sources)
+        {
+            if (sources == SearchSources.Library) sb.Append(",\"sources\":\"library\"");
+            else if (sources == SearchSources.User) sb.Append(",\"sources\":\"user\"");
+        }
         /// <summary>Whole phrases ORed with the query (Otzaria's acronym expansion).</summary>
         public List<PhraseOptions> PhraseAlternatives { get; } = new List<PhraseOptions>();
         /// <summary>Otzaria's user regex: a query wrapped in /.../ is a regex. Off (the
@@ -779,6 +837,7 @@ namespace SeforimSearch.Engine
             }
             if (DeclineOverCap) sb.Append(",\"decline_over_cap\":true");
             if (Substring) sb.Append(",\"substring\":true");
+            AppendSources(sb, Sources);
             if (PhraseAlternatives.Count > 0)
             {
                 sb.Append(",\"phrase_alternatives\":[");

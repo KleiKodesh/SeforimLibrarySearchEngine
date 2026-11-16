@@ -56,6 +56,42 @@ namespace SeforimSearch.Engine.Native
         public static extern IndexHandle se_index_open(byte* dir, UIntPtr dirLen);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ulong se_user_id_base();
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern UserIndexHandle se_user_index_create(byte* dir, UIntPtr dirLen, byte* options, UIntPtr optionsLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern UserIndexHandle se_user_index_open(byte* dir, UIntPtr dirLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_user_index_handle(UserIndexHandle user);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void se_user_index_close(IntPtr user);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_index_attach_user(IndexHandle index, UserIndexHandle user);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int se_index_attach_user(IndexHandle index, IntPtr user);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern long se_writer_put_document(WriterHandle writer, byte* json, UIntPtr jsonLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern long se_writer_delete_documents(WriterHandle writer, byte* json, UIntPtr jsonLen);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_index_documents(IndexHandle index);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_index_line_sources(IndexHandle index, ulong* ids, UIntPtr count);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr se_index_line_texts(IndexHandle index, ulong* ids, UIntPtr count);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern int se_index_exists(byte* dir, UIntPtr dirLen);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

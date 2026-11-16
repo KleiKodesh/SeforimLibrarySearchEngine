@@ -18,6 +18,62 @@ class IndexOptions {
 }
 
 /// The state of an open index.
+/// Which indexes a search reads (issue #44).
+enum SearchSources {
+  /// The library and the attached user index, library hits first (the
+  /// library alone when none is attached).
+  all,
+
+  /// The library index only.
+  library,
+
+  /// The attached user index only.
+  user,
+}
+
+/// One line of a user document (issue #44).
+class UserDocumentLine {
+  const UserDocumentLine(this.text, {this.locator = 0, this.sectionId, this.noCross = false});
+  final String text;
+
+  /// The host's locator of the line, e.g. a PDF page.
+  final int locator;
+  final int? sectionId;
+  final bool noCross;
+
+  Map<String, Object?> toJson() => {
+        'text': text,
+        'locator': locator,
+        if (sectionId != null) 'section_id': sectionId,
+        if (noCross) 'no_cross': true,
+      };
+}
+
+/// A user document of the user index.
+class UserDocumentInfo {
+  const UserDocumentInfo({required this.key, required this.stamp, required this.bookId, required this.lines});
+  final String key;
+  final String stamp;
+  final int bookId;
+  final int lines;
+
+  factory UserDocumentInfo.fromJson(Map<String, dynamic> j) => UserDocumentInfo(
+      key: j['key'] as String,
+      stamp: j['stamp'] as String,
+      bookId: (j['book_id'] as num).toInt(),
+      lines: (j['lines'] as num).toInt());
+}
+
+/// Where a user line comes from.
+class UserLineSource {
+  const UserLineSource({required this.key, required this.locator, required this.line});
+  final String key;
+  final int locator;
+
+  /// The line's number in its document (0-based).
+  final int line;
+}
+
 class IndexInfo {
   const IndexInfo({required this.numLines, required this.positions, required this.keepMarks, this.payload});
   final int numLines;
@@ -325,13 +381,17 @@ class SearchRequest {
       this.proximity,
       this.exclude,
       List<List<QueryGroup>>? phraseAlternatives,
-      this.books})
+      this.books,
+      this.sources = SearchSources.all})
       : groups = groups ?? [],
         phraseAlternatives = phraseAlternatives ?? [];
 
   /// Filtered search by book: only lines whose book id is in this list come
   /// back (empty list = no hits). Null = every book.
   List<int>? books;
+
+  /// Which indexes the search reads (issue #44).
+  SearchSources sources;
 
   /// Whole-phrase alternatives ORed with [groups] (Otzaria's acronym
   /// expansion: רמב"ם ↔ רבי משה בן מיימון). Each phrase's words are adjacent,
@@ -381,6 +441,7 @@ class SearchRequest {
         if (proximity != null) 'proximity': proximity!.toJson(),
         if (exclude != null) 'exclude': exclude!.toJson(),
         if (books != null) 'books': books,
+        if (sources != SearchSources.all) 'sources': sources.name,
         if (phraseAlternatives.isNotEmpty)
           'phrase_alternatives': [
             for (final p in phraseAlternatives) [for (final g in p) g.toJson()]
@@ -618,6 +679,7 @@ class SearchOptions {
     this.positionRanges,
     this.declineOverCap = false,
     this.substring = false,
+    this.sources = SearchSources.all,
   })  : words = words ?? {},
         phraseAlternatives = phraseAlternatives ?? [],
         bookGenerations = bookGenerations ?? {},
@@ -738,6 +800,10 @@ class SearchOptions {
   /// substring on the text. Word options, distance and order do not apply.
   bool substring;
 
+  /// Which indexes the search reads (issue #44): the library, the attached
+  /// user index, or both (default).
+  SearchSources sources;
+
   /// Whole phrases ORed with the query (Otzaria's acronym expansion).
   final List<PhraseOptions> phraseAlternatives;
 
@@ -779,6 +845,7 @@ class SearchOptions {
         if (proximity != null) 'proximity': proximity!.toJson(),
         if (exclude != null) 'exclude': exclude!.toJson(),
         if (books != null) 'books': books,
+        if (sources != SearchSources.all) 'sources': sources.name,
         if (positionRanges != null) 'position_ranges': [for (final r in positionRanges!) [r.$1, r.$2]],
         if (declineOverCap) 'decline_over_cap': true,
         if (substring) 'substring': true,

@@ -51,6 +51,7 @@ namespace SeforimSearch.Demo
                 ("substring find (issue G-K1): FtsLib FindSubstringCandidates order, ranges, decline", SubstringFind),
                 ("coordinator (Core drop-in): build, progress, status, search, lines, reset, DB change", CoordinatorLifecycle),
                 ("related forms (Core's '+' / '=' rewrite): artifact lookup, markers", RelatedForms),
+                ("user index (issue #44): documents, attach, sources, replace, delete, line sources / texts", UserIndex),
             };
             int failed = 0;
             foreach (var (name, body) in tests)
@@ -182,6 +183,48 @@ namespace SeforimSearch.Demo
 
         /// <summary>The Rust-written fixture seforim-vectors/tests/data/synthetic.oxv (4 dims): book id:5 =
         /// ordinal 0 with windows 0 (axis 1) and 1 (axis 2), ordinal 1 (axis 0); book id:7 ordinal 0 (axis 3).</summary>
+        private static void UserIndex(string db, string dir)
+        {
+            string root = Path.Combine(dir, "user-index-test");
+            using var lib = SeforimSearch.Engine.SeforimIndex.Create(Path.Combine(root, "lib"));
+            using (var w = lib.OpenWriter(30_000_000, 1))
+            {
+                w.Add(new SeforimSearch.Engine.LineDocument { LineId = 5, Position = 0, BookId = 1, Text = "alpha beta" });
+                w.Commit();
+            }
+            using var user = SeforimSearch.Engine.SeforimIndex.CreateUser(Path.Combine(root, "user"));
+            long b = SeforimSearch.Engine.SeforimIndex.UserIdBase;
+            using (var w = user.OpenWriter(30_000_000, 1))
+            {
+                Check(w.PutDocument("c:/a.pdf", "h1", new[] { new SeforimSearch.Engine.UserDocumentLine("gamma", 1), new SeforimSearch.Engine.UserDocumentLine("alpha", 2) }) == b, "first document = base");
+                w.PutDocument("c:/b.txt", "h2", new[] { new SeforimSearch.Engine.UserDocumentLine("alpha delta") });
+                w.Commit();
+            }
+            lib.AttachUserIndex(user);
+            long[] Ids(SeforimSearch.Engine.SearchSources s)
+            {
+                using var r = lib.Search(new SeforimSearch.Engine.SearchOptions { Query = "alpha", Sources = s });
+                return r.GetHits(0, 100).Select(h => h.LineId).ToArray();
+            }
+            long a1 = b + 1, b0 = b + (1L << 24);
+            Check(Ids(SeforimSearch.Engine.SearchSources.All).SequenceEqual(new[] { 5L, a1, b0 }), "all: library first");
+            Check(Ids(SeforimSearch.Engine.SearchSources.Library).SequenceEqual(new[] { 5L }), "library only");
+            Check(Ids(SeforimSearch.Engine.SearchSources.User).SequenceEqual(new[] { a1, b0 }), "user only");
+            var src = lib.GetLineSources(new[] { a1, 5L });
+            Check(src[0]!.Key == "c:/a.pdf" && src[0]!.Locator == 2 && src[0]!.Line == 1 && src[1] == null, "line sources");
+            Check(lib.GetLineTexts(new[] { a1, 5L }).SequenceEqual(new[] { "alpha", null }), "line texts");
+            using (var w = user.OpenWriter(30_000_000, 1))
+            {
+                Check(w.DeleteDocuments(new[] { "c:/b.txt", "none" }) == 1, "delete by key");
+                w.PutDocument("c:/a.pdf", "h3", new[] { new SeforimSearch.Engine.UserDocumentLine("zeta", 7) });
+                w.Commit();
+            }
+            var docs = lib.GetDocuments();
+            Check(docs.Count == 1 && docs[0].Key == "c:/a.pdf" && docs[0].Stamp == "h3" && docs[0].BookId == b && docs[0].Lines == 1, "documents list");
+            Check(Ids(SeforimSearch.Engine.SearchSources.All).SequenceEqual(new[] { 5L }), "replaced and deleted documents gone");
+            lib.AttachUserIndex(null);
+        }
+
         private static void Semantic(string db, string dir)
         {
             string? oxv = null;

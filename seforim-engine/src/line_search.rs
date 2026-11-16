@@ -284,7 +284,7 @@ impl LineIndex {
         cancel: Option<CancelToken>,
     ) -> Result<SearchResult> {
         let plan = Arc::new(hebrew_fts::user_regex::parse_line(pattern).map_err(|e| Error::Unsupported(e.to_string()))?);
-        let searcher = self.reader.searcher();
+        let searcher = self.request_searcher(self.union_user(request).as_deref())?;
         let books = crate::search::HitScope::of(request);
         let candidates = if self.options.keep_marks {
             None

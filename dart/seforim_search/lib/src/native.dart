@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 18;
+const int seforimAbiVersion = 19;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -368,6 +368,40 @@ final class SeforimNative {
   final SeBuffer Function(Pointer<Void>, Pointer<Uint64>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) lineScanBatch;
   final int Function(Pointer<Void>, int, int, Pointer<Uint64>) copyLineHits;
   final NativeFinalizer indexCloseFinalizer;
+
+  // User index (issue #44).
+  late final int Function() userIdBase =
+      lib.lookupFunction<Uint64 Function(), int Function()>('se_user_id_base');
+  late final Pointer<Void> Function(Pointer<Uint8>, int, Pointer<Uint8>, int) userIndexCreate = lib.lookupFunction<
+      Pointer<Void> Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size),
+      Pointer<Void> Function(Pointer<Uint8>, int, Pointer<Uint8>, int)>('se_user_index_create');
+  late final Pointer<Void> Function(Pointer<Uint8>, int) userIndexOpen =
+      lib.lookupFunction<Pointer<Void> Function(Pointer<Uint8>, Size), Pointer<Void> Function(Pointer<Uint8>, int)>(
+          'se_user_index_open');
+  late final Pointer<Void> Function(Pointer<Void>) userIndexHandle =
+      lib.lookupFunction<Pointer<Void> Function(Pointer<Void>), Pointer<Void> Function(Pointer<Void>)>(
+          'se_user_index_handle');
+  late final void Function(Pointer<Void>) userIndexClose = lib.lookupFunction<_CloseC, _CloseD>('se_user_index_close');
+  late final NativeFinalizer userIndexCloseFinalizer =
+      NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_user_index_close').cast());
+  late final int Function(Pointer<Void>, Pointer<Void>) indexAttachUser =
+      lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Void>), int Function(Pointer<Void>, Pointer<Void>)>(
+          'se_index_attach_user');
+  late final int Function(Pointer<Void>, Pointer<Uint8>, int) writerPutDocument = lib.lookupFunction<
+      Int64 Function(Pointer<Void>, Pointer<Uint8>, Size),
+      int Function(Pointer<Void>, Pointer<Uint8>, int)>('se_writer_put_document');
+  late final int Function(Pointer<Void>, Pointer<Uint8>, int) writerDeleteDocuments = lib.lookupFunction<
+      Int64 Function(Pointer<Void>, Pointer<Uint8>, Size),
+      int Function(Pointer<Void>, Pointer<Uint8>, int)>('se_writer_delete_documents');
+  late final Pointer<Utf8> Function(Pointer<Void>) indexDocuments =
+      lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>), Pointer<Utf8> Function(Pointer<Void>)>(
+          'se_index_documents');
+  late final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, int) indexLineSources = lib.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, Size),
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, int)>('se_index_line_sources');
+  late final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, int) indexLineTexts = lib.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, Size),
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, int)>('se_index_line_texts');
   final NativeFinalizer writerCloseFinalizer;
   final NativeFinalizer searchCloseFinalizer;
   final void Function(Pointer<Void>) indexClose;

@@ -32,6 +32,7 @@ pub(crate) mod positioned;
 pub(crate) mod stream;
 pub mod search;
 pub mod semantic;
+pub mod user_docs;
 
 pub use fm_index::FmIndex;
 /// Otzaria's `keep_second_of_paired_readings` (its query sanitizer): every
@@ -40,6 +41,7 @@ pub use fm_index::FmIndex;
 pub use hebrew_fts::word_rule::keep_second_of_paired_readings as reduce_paired_readings;
 /// Otzaria's user-regex kind of a query (see `hebrew_fts::user_regex::classify`).
 pub use hebrew_fts::user_regex::classify as user_regex_kind;
+pub use user_docs::{DocInfo, DocLine, LineSource, Sources, USER_ID_BASE};
 pub use index::{IndexOptions, LineDoc, LineIndex, LineWriter, LINE_FLAG_NO_CROSS};
 pub use line_search::LineRegexStatus;
 pub use options::{ExcludeOptions, PhraseOptions, ProximityBase, SearchOptions, WordMatchSpec, WordOptions};

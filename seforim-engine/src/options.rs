@@ -168,6 +168,10 @@ pub struct SearchOptions {
     /// alternatives and user regex do not apply. The hits are a superset:
     /// the host confirms the exact substring on the text.
     pub substring: bool,
+    /// Which indexes the search reads (issue #44): the library, the
+    /// attached user index, or both (default; the library alone when no
+    /// user index is attached).
+    pub sources: crate::user_docs::Sources,
 }
 
 impl Default for SearchOptions {
@@ -218,6 +222,7 @@ impl Default for SearchOptions {
             position_ranges: None,
             decline_over_cap: false,
             substring: false,
+            sources: Default::default(),
         }
     }
 }
@@ -357,6 +362,12 @@ impl SearchOptions {
     /// vocalized when the global flags are on (Otzaria passes the global
     /// flags to both builds).
     pub fn to_request(&self, keep_marks: bool) -> Result<SearchRequest> {
+        let mut request = self.to_request_inner(keep_marks)?;
+        request.sources = self.sources;
+        Ok(request)
+    }
+
+    fn to_request_inner(&self, keep_marks: bool) -> Result<SearchRequest> {
         // FtsLib's substring query: one slot per indexer term of every word.
         if self.substring {
             let _ = keep_marks; // a fragment's marks are stripped (the sidecar's text is mark-free)
@@ -634,6 +645,7 @@ impl SearchOptions {
             resume_stamp: self.resume_stamp.clone(),
             max_expanded_terms: self.max_expanded_terms,
             lexical_fuzzy: self.lexical_fuzzy,
+            sources: self.sources,
         })
     }
 }

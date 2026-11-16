@@ -87,6 +87,10 @@ pub struct LineFields {
     /// The host's section id (same-section scope); absent on a line = a
     /// section of its own.
     pub section_id: Option<Field>,
+    /// A user index only ([`LineIndex::create_user`]): the stored line text
+    /// of its documents (no database holds them). Added after every other
+    /// field, so a user index's segments search together with a library's.
+    pub doc_text: Option<Field>,
 }
 
 /// Line flag: no phrase continues into or out of this line (Otzaria: a
@@ -146,6 +150,7 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
             line_last: Some(line_last),
             line_flags: Some(line_flags),
             section_id: Some(section_id),
+            doc_text: None,
         },
     )
 }
@@ -208,6 +213,10 @@ pub struct LineIndex {
     pub(crate) bg: std::sync::Arc<crate::background_merge::Scheduler>,
     /// The vector sidecar (semantic search, issue #18), opened on first use.
     pub(crate) vectors: crate::semantic::VectorCache,
+    /// The attached user index (issue #44), searched with this one.
+    pub(crate) user: std::sync::RwLock<Option<std::sync::Arc<LineIndex>>>,
+    /// The parsed documents registry and the commit opstamp it was read at.
+    pub(crate) docs_cache: std::sync::Mutex<Option<(u64, std::sync::Arc<crate::user_docs::Registry>)>>,
 }
 
 impl Drop for LineIndex {
@@ -224,6 +233,19 @@ impl Drop for LineIndex {
 impl LineIndex {
     /// Creates a fresh index in `dir`, wiping whatever it held.
     pub fn create(dir: &Path, options: IndexOptions) -> Result<LineIndex> {
+        Self::create_with(dir, options, false)
+    }
+
+    /// Creates a fresh USER index in `dir` (issue #44, see
+    /// [`crate::user_docs`]): the library's schema plus the stored document
+    /// text. Its documents are written with [`LineWriter::put_document`] and
+    /// it is searched together with a library through
+    /// [`LineIndex::attach_user_index`]. `options` must be the library's.
+    pub fn create_user(dir: &Path, options: IndexOptions) -> Result<LineIndex> {
+        Self::create_with(dir, options, true)
+    }
+
+    fn create_with(dir: &Path, options: IndexOptions, user: bool) -> Result<LineIndex> {
         if dir.exists() {
             for entry in fs::read_dir(dir)? {
                 let path = entry?.path();
@@ -236,7 +258,17 @@ impl LineIndex {
         } else {
             fs::create_dir_all(dir)?;
         }
-        let (schema, fields) = line_schema(options);
+        let (schema, mut fields) = line_schema(options);
+        let schema = if user {
+            let mut b = tantivy::schema::SchemaBuilder::new();
+            for (_, entry) in schema.fields() {
+                b.add_field(entry.clone());
+            }
+            fields.doc_text = Some(b.add_text_field("doc_text", tantivy::schema::STORED));
+            b.build()
+        } else {
+            schema
+        };
         // Doc order = catalog order: every segment is sorted by `position`
         // when it is written and the merge keeps that order, so the merged
         // single segment needs no sort at search time (see
@@ -279,6 +311,8 @@ impl LineIndex {
             test_only_no_scan: std::sync::atomic::AtomicBool::new(false),
             bg: crate::background_merge::scheduler_for(dir),
             vectors: Default::default(),
+            user: Default::default(),
+            docs_cache: Default::default(),
         })
     }
 
@@ -299,6 +333,7 @@ impl LineIndex {
         fields.line_last = schema.get_field("line_last").ok();
         fields.line_flags = schema.get_field("line_flags").ok();
         fields.section_id = schema.get_field("section_id").ok();
+        fields.doc_text = schema.get_field("doc_text").ok();
         let index = Self::wrap(index, fields, options, dir)?;
         // issue #29: an update's merge that did not finish (the process
         // ended) restarts in the background (unit tests start it explicitly)
@@ -307,6 +342,122 @@ impl LineIndex {
             let _ = index.resume_background_merge();
         }
         Ok(index)
+    }
+
+    /// The committed documents registry (empty on an index with none).
+    pub(crate) fn registry(&self) -> Result<std::sync::Arc<crate::user_docs::Registry>> {
+        let metas = self.index.load_metas()?;
+        let mut cache = self.docs_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((stamp, r)) = cache.as_ref() {
+            if *stamp == metas.opstamp {
+                return Ok(r.clone());
+            }
+        }
+        let r = std::sync::Arc::new(crate::user_docs::split_payload(metas.payload)?.1.unwrap_or_default());
+        *cache = Some((metas.opstamp, r.clone()));
+        Ok(r)
+    }
+
+    /// True for a user index ([`Self::create_user`]).
+    pub fn is_user_index(&self) -> bool {
+        self.fields.doc_text.is_some()
+    }
+
+    /// The user index holding the documents: this one, or the attached one.
+    fn docs_holder(&self) -> Option<DocsHolder<'_>> {
+        if self.is_user_index() {
+            Some(DocsHolder::Own(self))
+        } else {
+            self.user_index().map(DocsHolder::Attached)
+        }
+    }
+
+    /// The user documents (issue #44), by book id: of this index when it is
+    /// a user index, else of the attached one (none attached: empty).
+    pub fn documents(&self) -> Result<Vec<crate::user_docs::DocInfo>> {
+        match self.docs_holder() {
+            Some(h) => Ok(h.get().registry()?.infos()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Where each line comes from: the user document key and locator for an
+    /// id of the user range, None for a library line or an unknown id.
+    pub fn line_sources(&self, line_ids: &[u64]) -> Result<Vec<Option<crate::user_docs::LineSource>>> {
+        let reg = match self.docs_holder() {
+            Some(h) => Some(h.get().registry()?),
+            None => None,
+        };
+        Ok(line_ids.iter().map(|&id| reg.as_ref().and_then(|r| r.resolve(id))).collect())
+    }
+
+    /// The stored texts of user lines, None for a line the user index does
+    /// not hold (e.g. a library line: the host reads those itself).
+    pub fn line_texts(&self, line_ids: &[u64]) -> Result<Vec<Option<String>>> {
+        let Some(holder) = self.docs_holder() else { return Ok(vec![None; line_ids.len()]) };
+        let ix = holder.get();
+        let field = ix.fields.doc_text.expect("user index");
+        let searcher = ix.reader.searcher();
+        let mut out = Vec::with_capacity(line_ids.len());
+        for &id in line_ids {
+            let mut text = None;
+            if crate::user_docs::is_user_id(id) {
+                let term = Term::from_field_u64(ix.fields.line_id, id);
+                'segments: for (ord, segment) in searcher.segment_readers().iter().enumerate() {
+                    let inverted = segment.inverted_index(ix.fields.line_id)?;
+                    let Some(mut postings) = inverted.read_postings(&term, IndexRecordOption::Basic)? else { continue };
+                    let alive = segment.alive_bitset();
+                    let mut doc = tantivy::DocSet::doc(&postings);
+                    while doc != tantivy::TERMINATED {
+                        if alive.is_none_or(|a| a.is_alive(doc)) {
+                            use tantivy::schema::Value;
+                            let d: tantivy::TantivyDocument = searcher.doc(tantivy::DocAddress::new(ord as u32, doc))?;
+                            text = d.get_first(field).and_then(|v| v.as_str()).map(str::to_string);
+                            break 'segments;
+                        }
+                        doc = tantivy::DocSet::advance(&mut postings);
+                    }
+                }
+            }
+            out.push(text);
+        }
+        Ok(out)
+    }
+
+    /// The attached user index (never set on a user index).
+    pub fn user_index(&self) -> Option<std::sync::Arc<LineIndex>> {
+        self.user.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Attaches a user index (issue #44; None detaches): searches with
+    /// [`crate::user_docs::Sources::All`] (the default) then read both,
+    /// library hits first, and [`crate::user_docs::Sources::User`] reads it
+    /// alone. It must have this index's options, and its fields must extend
+    /// this index's.
+    pub fn attach_user_index(&self, user: Option<std::sync::Arc<LineIndex>>) -> Result<()> {
+        if self.is_user_index() {
+            return Err(crate::Error::Unsupported("a user index cannot hold another user index".into()));
+        }
+        if let Some(u) = &user {
+            if !u.is_user_index() {
+                return Err(crate::Error::Unsupported("the attached index is not a user index (create_user)".into()));
+            }
+            if u.options != self.options {
+                return Err(crate::Error::Unsupported(format!(
+                    "the user index was built with {:?}, the library with {:?}",
+                    u.options, self.options
+                )));
+            }
+            let (lib, usr) = (self.index.schema(), u.index.schema());
+            let mut theirs = usr.fields();
+            if !lib.fields().all(|f| theirs.next() == Some(f)) {
+                return Err(crate::Error::Unsupported(
+                    "the library index was built by an older engine (its fields differ from the user index's): rebuild it".into(),
+                ));
+            }
+        }
+        *self.user.write().unwrap_or_else(|e| e.into_inner()) = user;
+        Ok(())
     }
 
     /// Builds the FM-index sidecar over the term dictionary (FtsLib's
@@ -442,7 +593,7 @@ impl LineIndex {
     /// and provenance stamp). Committed atomically with the documents, so it
     /// always describes exactly what the index holds.
     pub fn committed_payload(&self) -> Result<Option<String>> {
-        Ok(self.index.load_metas()?.payload)
+        Ok(crate::user_docs::split_payload(self.index.load_metas()?.payload)?.0)
     }
 
     /// The index's shared reader (for tools and statistics; see the
@@ -604,6 +755,7 @@ impl WriterParts {
             _repair: self.fm_repair.writer_guard(),
             fm: self.fm.clone(),
             dir: self.dir.clone(),
+            docs: None,
         };
         // files a previous merge could not delete (still mapped then)
         writer.collect_garbage();
@@ -629,6 +781,7 @@ impl WriterParts {
             _repair: self.fm_repair.writer_guard(),
             fm: self.fm.clone(),
             dir: self.dir.clone(),
+            docs: None,
         };
         writer.collect_garbage();
         Ok(writer)
@@ -650,6 +803,9 @@ pub struct LineWriter {
     /// The index's sidecar cache and directory, for [`Self::collect_garbage`].
     fm: std::sync::Arc<crate::fm_sidecar::FmCache>,
     dir: PathBuf,
+    /// The documents registry with this writer's queued changes (a user
+    /// index; loaded on the first document call, written by the commit).
+    docs: Option<crate::user_docs::Registry>,
 }
 
 /// The index's one reader (issue #22), shared by the index and its writers.
@@ -708,6 +864,16 @@ impl SharedReader {
 impl LineWriter {
     /// Queues a line. Not visible until `commit`.
     pub fn add(&mut self, line: &LineDoc) -> Result<()> {
+        if crate::user_docs::is_user_id(line.line_id) || crate::user_docs::is_user_id(line.book_id) {
+            return Err(crate::Error::Unsupported(format!(
+                "line {} / book {}: ids from 2^51 to 2^52 are the user index's (put_document)",
+                line.line_id, line.book_id
+            )));
+        }
+        self.add_doc(line, None)
+    }
+
+    fn add_doc(&mut self, line: &LineDoc, stored: Option<&str>) -> Result<()> {
         let f = self.fields;
         let mut document = doc!(
             f.line_id => line.line_id,
@@ -741,8 +907,68 @@ impl LineWriter {
         if let (Some(field), Some(section)) = (f.section_id, line.section_id) {
             document.add_u64(field, section);
         }
+        if let (Some(field), Some(text)) = (f.doc_text, stored) {
+            document.add_text(field, text);
+        }
         self.writer.add_document(document)?;
         Ok(())
+    }
+
+    /// The registry with this writer's queued document changes.
+    fn docs_mut(&mut self) -> Result<&mut crate::user_docs::Registry> {
+        if self.fields.doc_text.is_none() {
+            return Err(crate::Error::Unsupported(
+                "documents go into a user index (LineIndex::create_user), never into the library".into(),
+            ));
+        }
+        if self.docs.is_none() {
+            let raw = self.writer.index().load_metas()?.payload;
+            self.docs = Some(crate::user_docs::split_payload(raw)?.1.unwrap_or_default());
+        }
+        Ok(self.docs.as_mut().expect("loaded"))
+    }
+
+    /// Adds or replaces the user document `key` (issue #44, see
+    /// [`crate::user_docs`]): its old lines are deleted and `lines` added,
+    /// with `stamp` recorded for [`LineIndex::documents`]. Returns the
+    /// document's book id (kept when it replaces). Visible after `commit`,
+    /// which writes the registry atomically with the lines. User index only.
+    pub fn put_document(&mut self, key: &str, stamp: &str, lines: &[crate::user_docs::DocLine]) -> Result<u64> {
+        use crate::user_docs::{line_id, USER_ID_BASE};
+        let (no, replaced) = self.docs_mut()?.put(key, stamp, lines)?;
+        let book = USER_ID_BASE + no;
+        if replaced {
+            self.delete_book(book)?;
+        }
+        for (i, l) in lines.iter().enumerate() {
+            let id = line_id(no, i as u64);
+            let doc = LineDoc {
+                line_id: id,
+                position: id,
+                book_id: book,
+                text: l.text.clone(),
+                section_id: l.section_id,
+                no_cross: l.no_cross,
+            };
+            self.add_doc(&doc, Some(&l.text))?;
+        }
+        Ok(book)
+    }
+
+    /// Deletes the user documents with these keys (unknown keys are
+    /// skipped); returns how many were indexed. Visible after `commit`.
+    pub fn delete_documents(&mut self, keys: &[String]) -> Result<usize> {
+        let mut gone = Vec::new();
+        let docs = self.docs_mut()?;
+        for k in keys {
+            if let Some(no) = docs.remove(k) {
+                gone.push(no);
+            }
+        }
+        for &no in &gone {
+            self.delete_book(crate::user_docs::USER_ID_BASE + no)?;
+        }
+        Ok(gone.len())
     }
 
     /// Queues the deletion of every doc with this line id. An update is a
@@ -776,11 +1002,18 @@ impl LineWriter {
         // a commit is waited for (readers reload after it): normal priority
         // even when the calling thread opted into background mode
         let _normal = tantivy::indexer::NormalPrioritySection::enter();
+        let docs = match self.docs.clone() {
+            Some(d) => Some(d),
+            None => crate::user_docs::split_payload(self.writer.index().load_metas()?.payload)?.1,
+        };
+        let payload = crate::user_docs::join_payload(payload, docs.as_ref());
         let mut prepared = self.writer.prepare_commit()?;
-        if let Some(p) = payload {
+        if let Some(p) = payload.as_deref() {
             prepared.set_payload(p);
         }
         prepared.commit()?;
+        // committed: the next document call reloads the registry
+        self.docs = None;
         self.reader.after_write();
         self.collect_garbage();
         Ok(())
@@ -808,6 +1041,7 @@ impl LineWriter {
     /// Drops everything queued since the last commit (the shared reader is
     /// reloaded as after [`Self::commit`], same failure rule).
     pub fn rollback(&mut self) -> Result<()> {
+        self.docs = None;
         self.writer.rollback()?;
         self.reader.after_write();
         self.collect_garbage();
@@ -869,6 +1103,10 @@ impl LineWriter {
         cancel: Option<crate::CancelToken>,
         progress: Option<crate::resort::ResortProgressFn>,
     ) -> Result<u64> {
+        if self.fields.doc_text.is_some() {
+            // a user index's positions ARE its line ids (issue #44)
+            return Err(crate::Error::Unsupported("a user index keeps its document order: it is never re-sorted".into()));
+        }
         use crate::resort::ResortStage;
         let report = |stage: ResortStage, done: u64, total: u64| {
             if let Some(p) = &progress {
@@ -876,7 +1114,7 @@ impl LineWriter {
             }
         };
         crate::search::CancelToken::check(cancel.as_ref())?;
-        let payload = self.writer.index().load_metas()?.payload;
+        let payload = crate::user_docs::split_payload(self.writer.index().load_metas()?.payload)?.0;
         self.commit(payload.as_deref())?;
         self.writer.set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
         let flag = cancel.clone().unwrap_or_default();
@@ -960,7 +1198,7 @@ impl LineWriter {
     /// collected by the caller with a new writer (the merge lands while this
     /// one waits).
     pub(crate) fn merge_all_in_background(mut self) -> Result<()> {
-        let payload = self.writer.index().load_metas()?.payload;
+        let payload = crate::user_docs::split_payload(self.writer.index().load_metas()?.payload)?.0;
         self.writer.set_merge_policy(Box::new(MergeEverything));
         self.commit(payload.as_deref())?;
         let reader = self.reader.clone();
@@ -984,7 +1222,7 @@ impl LineWriter {
     /// FtsLib do), keeping the last committed payload, so nothing queued is
     /// lost when the writer closes.
     pub fn merge_all(mut self) -> Result<()> {
-        let payload = self.writer.index().load_metas()?.payload;
+        let payload = crate::user_docs::split_payload(self.writer.index().load_metas()?.payload)?.0;
         self.commit(payload.as_deref())?;
         self.writer
             .set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
@@ -1043,6 +1281,21 @@ fn read_options(dir: &Path) -> Result<IndexOptions> {
     })?;
     serde_json::from_str(&text)
         .map_err(|e| crate::Error::Unsupported(format!("malformed index options {}: {e}", path.display())))
+}
+
+/// The user index a call reads: the index itself or its attached one.
+enum DocsHolder<'a> {
+    Own(&'a LineIndex),
+    Attached(std::sync::Arc<LineIndex>),
+}
+
+impl DocsHolder<'_> {
+    fn get(&self) -> &LineIndex {
+        match self {
+            DocsHolder::Own(ix) => ix,
+            DocsHolder::Attached(ix) => ix,
+        }
+    }
 }
 
 /// The index's schema must be the one its recorded options build: same

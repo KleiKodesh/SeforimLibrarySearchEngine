@@ -508,6 +508,8 @@ pub struct SearchRequest {
     /// slots' own. Off: its plain fuzzy builder's score.
     #[serde(default)]
     pub lexical_fuzzy: bool,
+    /// Which indexes the search reads (issue #44, see [`crate::user_docs`]).
+    pub sources: crate::user_docs::Sources,
 }
 
 impl Default for SearchRequest {
@@ -539,6 +541,7 @@ impl Default for SearchRequest {
             resume_stamp: None,
             max_expanded_terms: hebrew_fts::DEFAULT_MAX_EXPANDED_TERMS,
             lexical_fuzzy: false,
+            sources: Default::default(),
         }
     }
 }
@@ -2012,25 +2015,59 @@ struct Walk<'a> {
 /// with no leading-`*` or fuzzy word never touches the sidecar, so it never
 /// waits for another search's open of it.
 struct FmSlot<'a> {
-    index: &'a LineIndex,
-    searcher: &'a tantivy::Searcher,
+    /// One part per index the search reads (the library, and the attached
+    /// user index on a search over both, issue #44): each has its own
+    /// segment and sidecar.
+    parts: Vec<FmPart<'a>>,
     cancel: Option<&'a CancelToken>,
+}
+
+struct FmPart<'a> {
+    index: &'a LineIndex,
+    /// The index's snapshot (the search's searcher is these, or their union).
+    searcher: tantivy::Searcher,
     /// The sidecar, and whether a sidecar file exists but is unusable.
     found: std::sync::OnceLock<(Option<Arc<FmIndex>>, bool)>,
 }
 
 impl<'a> FmSlot<'a> {
-    /// The sidecar (looked up once per search). [`Error::Cancelled`] when
-    /// the token was cancelled, e.g. while waiting for another open.
-    fn get(&self) -> Result<Option<&FmIndex>> {
-        let found = self.found.get_or_init(|| self.index.fm_sidecar_for(self.searcher, self.cancel));
-        CancelToken::check(self.cancel)?;
-        Ok(found.0.as_deref())
+    fn new(index: &'a LineIndex, user: Option<&'a LineIndex>, cancel: Option<&'a CancelToken>) -> Self {
+        let part = |index: &'a LineIndex| FmPart { index, searcher: index.reader.searcher(), found: Default::default() };
+        FmSlot { parts: std::iter::once(index).chain(user).map(part).collect(), cancel }
     }
 
-    /// Whether the lookup (if one ran) met an unusable sidecar file.
+    /// The search's searcher: the one index's, or the union of the parts'.
+    fn searcher(&self) -> Result<tantivy::Searcher> {
+        if let [one] = self.parts.as_slice() {
+            return Ok(one.searcher.clone());
+        }
+        let all: Vec<_> = self.parts.iter().map(|p| p.searcher.clone()).collect();
+        Ok(tantivy::Searcher::union(&all)?)
+    }
+
+    /// Whether every part has a usable sidecar (looked up once per search).
+    fn all_ready(&self) -> Result<bool> {
+        for p in &self.parts {
+            if p.get(self.cancel)?.is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether a lookup (if one ran) met an unusable sidecar file.
     fn unusable(&self) -> bool {
-        self.found.get().is_some_and(|f| f.1)
+        self.parts.iter().any(|p| p.found.get().is_some_and(|f| f.1))
+    }
+}
+
+impl FmPart<'_> {
+    /// The sidecar (looked up once per search). [`Error::Cancelled`] when
+    /// the token was cancelled, e.g. while waiting for another open.
+    fn get(&self, cancel: Option<&CancelToken>) -> Result<Option<&FmIndex>> {
+        let found = self.found.get_or_init(|| self.index.fm_sidecar_for(&self.searcher, cancel));
+        CancelToken::check(cancel)?;
+        Ok(found.0.as_deref())
     }
 }
 
@@ -2399,13 +2436,25 @@ impl LineIndex {
     fn fm_terms(
         &self,
         walk: Walk<'_>,
-        searcher: &tantivy::Searcher,
+        _searcher: &tantivy::Searcher,
         group: &GroupSpec,
     ) -> Result<Option<(Vec<Vec<u8>>, bool)>> {
         // 0 = uncapped (the FM expansion takes a count).
         let cap = if walk.cap == 0 { usize::MAX } else { walk.cap };
         let field = self.fields.text;
-        let dict = || -> Result<_> { Ok(searcher.segment_readers()[0].inverted_index(field)?) };
+        // Every index the search reads (the library, and the user index on a
+        // search over both, issue #44) expands through its own sidecar over
+        // its own dictionary; one cap ranks them together (doc counts summed).
+        // None: a part has no usable sidecar, so the group walks.
+        let sidecars = || -> Result<Option<Vec<(&FmIndex, Arc<tantivy::InvertedIndexReader>)>>> {
+            let mut out = Vec::new();
+            for part in &walk.fm.parts {
+                let Some(fm) = part.get(walk.cancel)? else { return Ok(None) };
+                let inverted = part.searcher.segment_readers()[0].inverted_index(field)?;
+                out.push((fm, inverted));
+            }
+            Ok(Some(out))
+        };
         match group {
             GroupSpec::Wildcard { pattern, ignore_quotes } => {
                 let Some((core, suffix_only)) = fm_expand::fm_wildcard_shape(pattern, *ignore_quotes) else {
@@ -2418,11 +2467,10 @@ impl LineIndex {
                 };
                 // A rejected pattern is rejected on both paths (the slot is skipped).
                 let Ok(q) = parsed else { return Ok(None) };
-                let Some(fm) = walk.fm.get()? else { return Ok(None) };
-                let inverted = dict()?;
+                let Some(sidecars) = sidecars()? else { return Ok(None) };
+                let parts: Vec<_> = sidecars.iter().map(|(fm, inv)| (*fm, inv.terms())).collect();
                 let terms = fm_expand::expand_wildcard(
-                    fm,
-                    inverted.terms(),
+                    &parts,
                     &q.automaton(),
                     &core,
                     suffix_only,
@@ -2439,12 +2487,11 @@ impl LineIndex {
                 let mut q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
                 q.set_ignore_quotes(*ignore_quotes);
                 q.set_marked_terms(self.options.keep_marks);
-                let Some(fm) = walk.fm.get()? else { return Ok(None) };
-                let inverted = dict()?;
+                let Some(sidecars) = sidecars()? else { return Ok(None) };
+                let parts: Vec<_> = sidecars.iter().map(|(fm, inv)| (*fm, inv.terms())).collect();
                 let terms = if *ignore_quotes {
                     fm_expand::expand_fuzzy_quote_free(
-                        fm,
-                        inverted.terms(),
+                        &parts,
                         q.word(),
                         q.distance_limit(),
                         cap,
@@ -2453,8 +2500,7 @@ impl LineIndex {
                     )?
                 } else {
                     fm_expand::expand_fuzzy(
-                        fm,
-                        inverted.terms(),
+                        &parts,
                         &q.automaton(),
                         q.word(),
                         q.distance_limit(),
@@ -2467,11 +2513,10 @@ impl LineIndex {
             }
             GroupSpec::Substring { fragment } => {
                 // checked by `substring_declined` before any slot is built
-                let Some(fm) = walk.fm.get()? else { return Ok(Some((Vec::new(), true))) };
-                let inverted = dict()?;
+                let Some(sidecars) = sidecars()? else { return Ok(Some((Vec::new(), true))) };
+                let parts: Vec<_> = sidecars.iter().map(|(fm, inv)| (*fm, inv.terms())).collect();
                 Ok(Some(fm_expand::expand_substring(
-                    fm,
-                    inverted.terms(),
+                    &parts,
                     fragment,
                     cap,
                     self.options.keep_marks,
@@ -2505,7 +2550,7 @@ impl LineIndex {
         if fragments.iter().any(|f| crate::fm_sidecar::text_form(f).is_empty()) {
             return Ok(true);
         }
-        Ok(fm.get()?.is_none())
+        Ok(!fm.all_ready()?)
     }
 
     /// Runs a search given as [`SearchOptions`] (the public API): the query
@@ -2538,14 +2583,17 @@ impl LineIndex {
     /// [`search`](Self::search) with a cancel token (see
     /// [`search_options_cancellable`](Self::search_options_cancellable)).
     pub fn search_cancellable(&self, request: &SearchRequest, cancel: Option<CancelToken>) -> Result<SearchResult> {
+        if let Some((user, request)) = self.user_only(request)? {
+            return user.search_cancellable(&request, cancel);
+        }
         // Resume guard (issue #12): positions are only comparable within
         // one order identity. (A commit landing between this stamp and the
         // search's own snapshot is caught by the next page's check.)
-        let stamp = self.order_stamp()?;
+        let stamp = self.order_stamp_for(request)?;
         if request.after_position.is_some() && request.resume_stamp.as_ref().is_some_and(|s| *s != stamp) {
             return Err(Error::StaleResume);
         }
-        let hybrid = self.hybrid_source();
+        let hybrid = self.hybrid_source(self.union_user(request).as_deref());
         let mut result = self.search_unstamped(request, cancel)?;
         result.order_stamp = stamp;
         result.hybrid = Some(hybrid);
@@ -2564,11 +2612,14 @@ impl LineIndex {
     /// index without positions (and with cross-line matching) the result is
     /// complete at once, as from [`search`](Self::search).
     pub fn search_streaming(&self, request: &SearchRequest, cancel: Option<CancelToken>) -> Result<SearchResult> {
-        let stamp = self.order_stamp()?;
+        if let Some((user, request)) = self.user_only(request)? {
+            return user.search_streaming(&request, cancel);
+        }
+        let stamp = self.order_stamp_for(request)?;
         if request.after_position.is_some() && request.resume_stamp.as_ref().is_some_and(|s| *s != stamp) {
             return Err(Error::StaleResume);
         }
-        let hybrid = self.hybrid_source();
+        let hybrid = self.hybrid_source(self.union_user(request).as_deref());
         let mut result = self.search_unstamped(request, cancel)?;
         result.order_stamp = stamp;
         result.hybrid = Some(hybrid);
@@ -2601,6 +2652,47 @@ impl LineIndex {
             eat(&segment.delete_opstamp().map_or(u64::MAX, |o| o).to_le_bytes());
         }
         Ok(format!("{h:016x}"))
+    }
+
+    /// For [`Sources::User`](crate::user_docs::Sources::User): the attached
+    /// user index and the request it runs alone (an error when none is
+    /// attached). None: the search runs here.
+    fn user_only(&self, request: &SearchRequest) -> Result<Option<(Arc<LineIndex>, SearchRequest)>> {
+        if request.sources != crate::user_docs::Sources::User || self.is_user_index() {
+            return Ok(None);
+        }
+        let user = self.user_index().ok_or_else(|| Error::Unsupported("no user index is attached".into()))?;
+        let mut alone = request.clone();
+        alone.sources = crate::user_docs::Sources::Library;
+        Ok(Some((user, alone)))
+    }
+
+    /// The user index a search over both reads with this one (None: this
+    /// index alone).
+    pub(crate) fn union_user(&self, request: &SearchRequest) -> Option<Arc<LineIndex>> {
+        match request.sources {
+            crate::user_docs::Sources::All => self.user_index(),
+            _ => None,
+        }
+    }
+
+    /// The searcher of `request`: this index's, or the union of this
+    /// index's and the attached user index's segments.
+    pub(crate) fn request_searcher(&self, user: Option<&LineIndex>) -> Result<tantivy::Searcher> {
+        let own = self.reader.searcher();
+        match user {
+            Some(u) => Ok(tantivy::Searcher::union(&[own, u.reader.searcher()])?),
+            None => Ok(own),
+        }
+    }
+
+    /// [`Self::order_stamp`] of the indexes `request` reads.
+    fn order_stamp_for(&self, request: &SearchRequest) -> Result<String> {
+        let own = self.order_stamp()?;
+        match self.union_user(request) {
+            Some(u) => Ok(format!("{own}+{}", u.order_stamp()?)),
+            None => Ok(own),
+        }
     }
 
     fn search_unstamped(&self, request: &SearchRequest, cancel: Option<CancelToken>) -> Result<SearchResult> {
@@ -2686,8 +2778,9 @@ impl LineIndex {
             session.max_word_distance = usize::MAX;
         }
 
-        let searcher = self.reader.searcher();
-        let fm = FmSlot { index: self, searcher: &searcher, cancel: cancel.as_ref(), found: Default::default() };
+        let user = self.union_user(request);
+        let fm = FmSlot::new(self, user.as_deref(), cancel.as_ref());
+        let searcher = fm.searcher()?;
         let walk = Walk { fm: &fm, cap: request.max_expanded_terms, cancel: cancel.as_ref(), decline: request.decline_over_cap };
         if self.substring_declined(request, &fm)? {
             let notices = if fm.unusable() {

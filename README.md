@@ -448,6 +448,11 @@ delete sharing does not block), and on Windows retries access-denied / sharing
 errors for about 500 ms before a clear error; a failed commit keeps the pending
 changes, so the host can retry it (issue #7 A12, as Otzaria's index directory).
 
+**`Searcher::union`** (issue #44): one searcher over the segments of several
+searchers whose schemas start with the first one's fields (a part may add
+fields after them). The user index searches together with the library this
+way: every query, collector and statistic sees one index with more segments.
+
 ### hebrew-fts
 - **Divine-name placeholder spellings** (`divine_names.rs`, issue #39; FtsLib
   `DivineNames.cs`, same table): two classes. Tetragrammaton: the full spelling
@@ -2173,6 +2178,41 @@ probe) plus fetching all those texts from seforim.db. The in-order query's
 78,061 hits now equal the in-order proximity's, as they should. Memory: no
 per-hit arena; the peak moves by a few MB (a chunk's positions) and drops
 for the 2M-hit word.
+
+## User index: documents outside the library (issue #44)
+
+A host can index documents that are not in seforim.db (a user's text files,
+PDFs, attached libraries) in a SEPARATE user index with its own directory.
+The library index stays prebuilt and keeps its own updates (per-book updates
+by `contentHash` + background merge); user documents never write it. Nothing
+about PDFs or file formats is in the engine: the host extracts the text and
+feeds lines.
+
+- **Create / open:** `LineIndex::create_user(dir, options)` / `open` (C ABI
+  `se_user_index_create` / `se_user_index_open`, `se_user_index_handle` for
+  every other index call; C# `SeforimIndex.CreateUser` / `OpenUser`; Dart
+  `SeforimIndex.createUser` / `openUser`). The options must equal the library's.
+  Its schema is the library's plus a stored `doc_text` field: the user index
+  keeps its line texts (no database holds them; `line_texts`).
+- **Documents:** `LineWriter::put_document(key, stamp, lines)` adds or replaces
+  a document by its host key (e.g. a file path) with a host stamp (e.g. a
+  metadata hash) and per-line locators (e.g. a PDF page);
+  `delete_documents(keys)`; `LineIndex::documents()` lists key, stamp, book id,
+  line count. The registry is stored in the user index's commit payload, so it
+  lands atomically with the lines (the host payload is kept beside it).
+- **Ids:** book `2^51 + n`, line id and position `2^51 + (n << 24) + line`
+  (16M lines per document); library ids must stay below 2^51 (adding one in the
+  range is an error), so a hit's id says where it comes from and user documents
+  sort after the library. `line_sources(ids)` gives key, locator and line number.
+- **Search:** `attach_user_index` on the library; the search option `sources`
+  (`all` default, `library`, `user`) picks the indexes. "all" is ONE search over
+  the union of both indexes' segments (tantivy `Searcher::union`): every option,
+  filter, per-book count and order works as on one index, one expansion cap.
+  Leading-`*`, fuzzy and substring expand through each index's own FM sidecar
+  over its own dictionary, and ONE cap ranks the candidates of both as the walk
+  does (FM rank, zero-width length, doc count summed over both, pinned typed
+  word); hybrid BM25 scores over the union too. A user index is never re-sorted
+  (its positions are its ids). Semantic search reads the library only.
 
 ## Semantic search (issue #18)
 

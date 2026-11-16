@@ -8,8 +8,19 @@ namespace SeforimSearch.Engine.Native
     internal sealed class IndexHandle : SafeHandle
     {
         public IndexHandle() : base(IntPtr.Zero, true) { }
+        /// <summary>A handle the native side owns elsewhere (a user index's index handle):
+        /// never closed by this object.</summary>
+        public IndexHandle(IntPtr borrowed) : base(IntPtr.Zero, false) { SetHandle(borrowed); }
         public override bool IsInvalid => handle == IntPtr.Zero;
         protected override bool ReleaseHandle() { NativeMethods.se_index_close(handle); return true; }
+    }
+
+    /// <summary>Owns a native user index pointer (issue #44); freed exactly once.</summary>
+    internal sealed class UserIndexHandle : SafeHandle
+    {
+        public UserIndexHandle() : base(IntPtr.Zero, true) { }
+        public override bool IsInvalid => handle == IntPtr.Zero;
+        protected override bool ReleaseHandle() { NativeMethods.se_user_index_close(handle); return true; }
     }
 
     /// <summary>Owns a native writer pointer; freed exactly once.</summary>

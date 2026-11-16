@@ -1105,6 +1105,9 @@ impl Bm25StatisticsProvider for GroupStatistics<'_> {
 #[derive(Clone)]
 pub(crate) struct HybridSource {
     pub reader: crate::index::SharedReader,
+    /// The user index searched with the library (issue #44): its lines are
+    /// scored over the union, as the search read them.
+    pub user: Option<crate::index::SharedReader>,
     pub field: Field,
     pub line_id: Field,
     pub marked_terms: bool,
@@ -1112,9 +1115,10 @@ pub(crate) struct HybridSource {
 }
 
 impl crate::LineIndex {
-    pub(crate) fn hybrid_source(&self) -> HybridSource {
+    pub(crate) fn hybrid_source(&self, user: Option<&crate::LineIndex>) -> HybridSource {
         HybridSource {
             reader: self.reader.clone(),
+            user: user.map(|u| u.reader.clone()),
             field: self.fields.text,
             line_id: self.fields.line_id,
             marked_terms: self.options.keep_marks,
@@ -1153,7 +1157,10 @@ const MAX_SPELLING_PHRASES: usize = 16;
 /// the raw string (Otzaria's hybrid query is plain text): query syntax such
 /// as an exclude word or a wildcard's stem counts as a word (named).
 pub(crate) fn hybrid_bm25(source: &HybridSource, query: &str, lines: &[u64]) -> Result<HashMap<u64, Score>> {
-    let searcher = &source.reader.searcher();
+    let searcher = &match &source.user {
+        Some(u) => tantivy::Searcher::union(&[source.reader.searcher(), u.searcher()])?,
+        None => source.reader.searcher(),
+    };
     let (field, marked_terms, positions) = (source.field, source.marked_terms, source.positions);
     let mut words: Vec<String> = Vec::new();
     hebrew_fts::scanner::scan_with(query, false, |w, span| {
@@ -1648,7 +1655,7 @@ mod tests {
                 assert_eq!(all_l[id], *l, "{q}: line {id}");
             }
             // only the hits are scored
-            let source = index.hybrid_source();
+            let source = index.hybrid_source(None);
             let only = hybrid_bm25(&source, q, &[102]).unwrap();
             assert_eq!(only.keys().copied().collect::<Vec<_>>(), vec![102]);
             assert_eq!(Some(only[&102]), all_l[&102]);

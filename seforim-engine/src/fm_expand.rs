@@ -68,12 +68,17 @@ fn term_of(dict: &TermDictionary, rowid: u32, buf: &mut Vec<u8>) -> Result<bool>
 /// `capped_terms`. Also returns whether the cap left out a matching term
 /// (the walk's truncation flag).
 fn cap_like_the_walk(
-    dict: &TermDictionary,
+    parts: &[(&FmIndex, &TermDictionary)],
     mut ranked: Vec<(u32, Vec<u8>)>,
     cap: usize,
     marked_terms: bool,
     pinned: &[Vec<u8>],
 ) -> Result<(Vec<Vec<u8>>, bool)> {
+    // several indexes (issue #44): a term found in more than one keeps its best rank
+    if parts.len() > 1 {
+        ranked.sort_unstable_by(|a, b| (&a.1, a.0).cmp(&(&b.1, b.0)));
+        ranked.dedup_by(|a, b| a.1 == b.1);
+    }
     let zero_width = zero_width_chars(marked_terms);
     let mut forms: std::collections::HashMap<Vec<u8>, (u32, usize, u64, Vec<Vec<u8>>)> =
         std::collections::HashMap::new();
@@ -93,7 +98,9 @@ fn cap_like_the_walk(
     for (form, (rank, chars, _, terms)) in forms {
         let mut doc_freq = 0u64;
         for t in &terms {
-            doc_freq += u64::from(dict.get(t)?.map(|i| i.doc_freq).unwrap_or(0));
+            for (_, dict) in parts {
+                doc_freq += u64::from(dict.get(t)?.map(|i| i.doc_freq).unwrap_or(0));
+            }
         }
         slots.push((rank, chars, Reverse(doc_freq), form, terms));
     }
@@ -134,8 +141,7 @@ fn check_cancel(i: usize, cancel: Option<&CancelToken>) -> Result<()> {
 /// the walk reads it through `MarkFree`; a vocalized pattern's automaton
 /// reads the marks itself, so it verifies the marked term).
 pub fn expand_wildcard(
-    fm: &FmIndex,
-    dict: &TermDictionary,
+    parts: &[(&FmIndex, &TermDictionary)],
     automaton: &WildcardAutomaton,
     core: &str,
     suffix_only: bool,
@@ -145,21 +151,23 @@ pub fn expand_wildcard(
 ) -> Result<(Vec<Vec<u8>>, bool)> {
     let mut buf = Vec::new();
     let mut kept = Vec::new();
-    for (i, rowid) in fm.find_row_ids(core, suffix_only).into_iter().enumerate() {
-        check_cancel(i, cancel)?;
-        if !term_of(dict, rowid, &mut buf)? {
-            continue;
-        }
-        let ok = if marked_terms && !automaton.requires_marks() {
-            automaton.accepts(&strip_mark_bytes(&buf))
-        } else {
-            automaton.accepts(&buf)
-        };
-        if ok {
-            kept.push((0u32, buf.clone()));
+    for &(fm, dict) in parts {
+        for (i, rowid) in fm.find_row_ids(core, suffix_only).into_iter().enumerate() {
+            check_cancel(i, cancel)?;
+            if !term_of(dict, rowid, &mut buf)? {
+                continue;
+            }
+            let ok = if marked_terms && !automaton.requires_marks() {
+                automaton.accepts(&strip_mark_bytes(&buf))
+            } else {
+                automaton.accepts(&buf)
+            };
+            if ok {
+                kept.push((0u32, buf.clone()));
+            }
         }
     }
-    cap_like_the_walk(dict, kept, cap, marked_terms, &[])
+    cap_like_the_walk(parts, kept, cap, marked_terms, &[])
 }
 
 /// FtsLib `ExpandFuzzy`, verified: the terms within `max_distance` edits of
@@ -170,8 +178,7 @@ pub fn expand_wildcard(
 /// are a superset of the walk's; the DFA then gives each its real distance
 /// (on the mark-free form when the DFA was built for a marks-keeping index).
 pub fn expand_fuzzy(
-    fm: &FmIndex,
-    dict: &TermDictionary,
+    parts: &[(&FmIndex, &TermDictionary)],
     dfa: &LevenshteinDfa,
     word: &str,
     max_distance: u8,
@@ -181,20 +188,22 @@ pub fn expand_fuzzy(
 ) -> Result<(Vec<Vec<u8>>, bool)> {
     let mut buf = Vec::new();
     let mut kept = Vec::new();
-    for (i, (rowid, _)) in fm.find_fuzzy(&text_form(word), max_distance as usize).into_iter().enumerate() {
-        check_cancel(i, cancel)?;
-        if !term_of(dict, rowid, &mut buf)? {
-            continue;
-        }
-        if let Distance::Exact(d) = dfa.distance(&buf) {
-            // a vocalized word: typo variants only (as the walk's DFA)
-            if d <= max_distance && d >= dfa.min_distance() {
-                kept.push((d as u32, buf.clone()));
+    for &(fm, dict) in parts {
+        for (i, (rowid, _)) in fm.find_fuzzy(&text_form(word), max_distance as usize).into_iter().enumerate() {
+            check_cancel(i, cancel)?;
+            if !term_of(dict, rowid, &mut buf)? {
+                continue;
+            }
+            if let Distance::Exact(d) = dfa.distance(&buf) {
+                // a vocalized word: typo variants only (as the walk's DFA)
+                if d <= max_distance && d >= dfa.min_distance() {
+                    kept.push((d as u32, buf.clone()));
+                }
             }
         }
     }
     let pinned = hebrew_fts::marks::exact_forms(&strip_term_marks(word));
-    cap_like_the_walk(dict, kept, cap, marked_terms, &pinned)
+    cap_like_the_walk(parts, kept, cap, marked_terms, &pinned)
 }
 
 /// Edit distance over chars (insert, delete, substitute, and a swap of two
@@ -234,8 +243,7 @@ pub fn levenshtein_within(a: &[char], b: &[char], max: usize) -> Option<usize> {
 /// the quote-free forms, exactly FtsLib's `Levenshtein.Distance` on its
 /// quote-free terms; distance up to 3 as FtsLib. Capped like the walk.
 pub fn expand_fuzzy_quote_free(
-    fm: &FmIndex,
-    dict: &TermDictionary,
+    parts: &[(&FmIndex, &TermDictionary)],
     word: &str,
     max_distance: u8,
     cap: usize,
@@ -247,20 +255,22 @@ pub fn expand_fuzzy_quote_free(
     let min_distance = usize::from(word.chars().any(hebrew_fts::chars::is_term_mark));
     let mut buf = Vec::new();
     let mut kept = Vec::new();
-    for (i, (rowid, _)) in fm.find_fuzzy(&text_form(word), max_distance as usize).into_iter().enumerate() {
-        check_cancel(i, cancel)?;
-        if !term_of(dict, rowid, &mut buf)? {
-            continue;
-        }
-        let Ok(term) = std::str::from_utf8(&buf) else { continue };
-        let form: Vec<char> = text_form(term).chars().collect();
-        let d = levenshtein_within(&form, &query, max_distance as usize);
-        if let Some(d) = d.filter(|&d| d >= min_distance) {
-            kept.push((d as u32, buf.clone()));
+    for &(fm, dict) in parts {
+        for (i, (rowid, _)) in fm.find_fuzzy(&text_form(word), max_distance as usize).into_iter().enumerate() {
+            check_cancel(i, cancel)?;
+            if !term_of(dict, rowid, &mut buf)? {
+                continue;
+            }
+            let Ok(term) = std::str::from_utf8(&buf) else { continue };
+            let form: Vec<char> = text_form(term).chars().collect();
+            let d = levenshtein_within(&form, &query, max_distance as usize);
+            if let Some(d) = d.filter(|&d| d >= min_distance) {
+                kept.push((d as u32, buf.clone()));
+            }
         }
     }
     let pinned = hebrew_fts::marks::exact_forms(&strip_term_marks(word));
-    cap_like_the_walk(dict, kept, cap, marked_terms, &pinned)
+    cap_like_the_walk(parts, kept, cap, marked_terms, &pinned)
 }
 
 #[cfg(test)]
@@ -310,8 +320,7 @@ mod tests {
 /// keeps and `true` (the caller declines or flags truncation); with
 /// `decline` no term is returned once the count is over.
 pub fn expand_substring(
-    fm: &FmIndex,
-    dict: &TermDictionary,
+    parts: &[(&FmIndex, &TermDictionary)],
     fragment: &str,
     cap: usize,
     marked_terms: bool,
@@ -322,35 +331,37 @@ pub fn expand_substring(
     if core.is_empty() {
         return Ok((Vec::new(), false));
     }
-    let rows = fm.find_row_ids(&core, false);
     // FtsLib's dictionary holds one quote-free (mark-free) term per form,
     // so it counts forms: a quoted twin and its plain term are one, and
     // the rows are read to count them. A row count within the cap is
     // within it in forms too.
     let zero_width = zero_width_chars(marked_terms);
     let mut buf = Vec::new();
-    let mut kept: Vec<(u32, Vec<u8>)> = Vec::with_capacity(rows.len().min(cap.saturating_add(1)));
+    let mut kept: Vec<(u32, Vec<u8>)> = Vec::new();
     let mut counted: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
     let mut over = false;
-    for (i, rowid) in rows.into_iter().enumerate() {
-        check_cancel(i, cancel)?;
-        if !term_of(dict, rowid, &mut buf)? {
-            continue;
-        }
-        let key = zero_width.strip(&buf).into_owned();
-        counted.insert(key);
-        kept.push((0, buf.clone()));
-        if counted.len() > cap {
-            over = true;
-            if decline {
-                return Ok((Vec::new(), true)); // declined: no term needed
+    for &(fm, dict) in parts {
+        for (i, rowid) in fm.find_row_ids(&core, false).into_iter().enumerate() {
+            check_cancel(i, cancel)?;
+            if !term_of(dict, rowid, &mut buf)? {
+                continue;
+            }
+            let key = zero_width.strip(&buf).into_owned();
+            counted.insert(key);
+            kept.push((0, buf.clone()));
+            if counted.len() > cap {
+                over = true;
+                if decline {
+                    return Ok((Vec::new(), true)); // declined: no term needed
+                }
             }
         }
     }
     if !over {
         kept.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+        kept.dedup_by(|a, b| a.1 == b.1);
         return Ok((kept.into_iter().map(|(_, t)| t).collect(), false));
     }
-    let (terms, _) = cap_like_the_walk(dict, kept, cap, marked_terms, &[])?;
+    let (terms, _) = cap_like_the_walk(parts, kept, cap, marked_terms, &[])?;
     Ok((terms, true))
 }

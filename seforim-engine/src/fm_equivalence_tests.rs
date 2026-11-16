@@ -375,13 +375,13 @@ fn cancel_stops_an_fm_expansion() {
     token.cancel();
     let core = s(&[SHIN, LAMED]);
     let q = hebrew_fts::wildcard::HebrewWildcardQuery::new(index.fields.text, &format!("*{core}*")).unwrap();
-    let r = crate::fm_expand::expand_wildcard(&fm, inverted.terms(), &q.automaton(), &core, false, 2000, false, Some(&token));
+    let r = crate::fm_expand::expand_wildcard(&[(&fm, inverted.terms())], &q.automaton(), &core, false, 2000, false, Some(&token));
     assert!(matches!(r, Err(Error::Cancelled)));
     let word = s(&[ALEF, BET, SHIN, LAMED, ALEF]);
-    let r = crate::fm_expand::expand_fuzzy_quote_free(&fm, inverted.terms(), &word, 1, 2000, false, Some(&token));
+    let r = crate::fm_expand::expand_fuzzy_quote_free(&[(&fm, inverted.terms())], &word, 1, 2000, false, Some(&token));
     assert!(matches!(r, Err(Error::Cancelled)));
     // uncancelled, the same expansion runs
-    let r = crate::fm_expand::expand_wildcard(&fm, inverted.terms(), &q.automaton(), &core, false, 2000, false, None);
+    let r = crate::fm_expand::expand_wildcard(&[(&fm, inverted.terms())], &q.automaton(), &core, false, 2000, false, None);
     assert!(!r.unwrap().0.is_empty());
     // and a search cancelled up front stops on the FM path too
     let o = SearchOptions { query: format!("*{core}*"), ..Default::default() };

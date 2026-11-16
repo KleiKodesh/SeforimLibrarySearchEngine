@@ -55,15 +55,21 @@ List<VectorBookNote> bookNotes(SeforimDb db, int bookId) {
   final cols = {for (final r in db.db.select('PRAGMA table_info(line_note)')) r['name'] as String};
   final rs = db.db.select(
       'SELECT l.lineIndex, ${cols.contains('charPos') ? 'n.charPos' : 'NULL'}, '
-      '${cols.contains('hasMarker') ? 'n.hasMarker' : '0'}, n.body FROM line_note n JOIN line l ON l.id = n.lineId'
+      '${cols.contains('hasMarker') ? 'n.hasMarker' : '0'}, typeof(n.body), CAST(n.body AS BLOB), n.lineId FROM line_note n JOIN line l ON l.id = n.lineId'
       ' WHERE l.bookId = ? AND n.body IS NOT NULL ORDER BY l.lineIndex, l.id, n.noteIndex',
       [bookId]);
   return [
     for (final r in rs)
       VectorBookNote(r.columnAt(0) as int,
-          db.decode(r.columnAt(3)),
+          _keepBom(db.rawContent(r.columnAt(3) as String, r.columnAt(4) as Uint8List?, r.columnAt(5) as int)),
           charPos: (r.columnAt(1) as int?) ?? -1, hasMarker: ((r.columnAt(2) as int?) ?? 0) != 0),
   ];
+}
+
+/// UTF-8 [bytes] as a String with a leading BOM kept (utf8.decode drops it).
+String _keepBom(Uint8List bytes) {
+  final bom = bytes.length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+  return bom ? '﻿${utf8.decode(bytes.sublist(3), allowMalformed: true)}' : utf8.decode(bytes, allowMalformed: true);
 }
 
 /// The `chunking_identity` of `<model dir>/model.json`; 0 (= the set's) when absent.

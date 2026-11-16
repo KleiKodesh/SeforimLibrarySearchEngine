@@ -239,6 +239,25 @@ class SeforimSqlDb implements SeforimDataSource {
     return v.toString();
   }
 
+  /// Stored content as Otzaria reads it, from `typeof(col)` and `CAST(col AS
+  /// BLOB)`: a TEXT value's own bytes, a frame's decompressed bytes (a "KLUv"
+  /// text holding a base64 frame too), empty for NULL; never through a String
+  /// (Dart's utf8.decode drops a leading BOM). [lineId] names a bad frame.
+  Uint8List rawContent(String typeOf, Uint8List? raw, int lineId) {
+    if (raw == null) return Uint8List(0);
+    if (typeOf == 'blob') return _frameBytes(raw, lineId);
+    if (compressed && raw.length >= 8 && raw[0] == 0x4B && raw[1] == 0x4C && raw[2] == 0x55 && raw[3] == 0x76) {
+      try {
+        final frame = base64.decode(ascii.decode(raw));
+        zstdFrameDictionaryId(frame);
+        return _frameBytes(frame, lineId);
+      } on FormatException {
+        return raw; // text that only looks like a frame
+      }
+    }
+    return raw;
+  }
+
   /// A frame's decompressed bytes, unchanged (no UTF-8 round trip).
   Uint8List _frameBytes(Uint8List frame, int lineId) {
     try {
@@ -466,26 +485,7 @@ class SeforimSqlDb implements SeforimDataSource {
         [bookId]);
     for (final r in rows) {
       final id = r[0] as int;
-      final raw = r[2] as Uint8List?;
-      if (raw == null) {
-        yield (id, Uint8List(0));
-      } else if (r[1] == 'blob') {
-        // the frame's own bytes: utf8.decode would drop a leading BOM
-        yield (id, _frameBytes(raw, id));
-      } else if (compressed && raw.length >= 8 && raw[0] == 0x4B && raw[1] == 0x4C && raw[2] == 0x55 && raw[3] == 0x76) {
-        // "KLUv": base64 text of a frame (or text that only looks like one)
-        final Uint8List frame;
-        try {
-          frame = base64.decode(ascii.decode(raw));
-          zstdFrameDictionaryId(frame);
-        } on FormatException {
-          yield (id, raw);
-          continue;
-        }
-        yield (id, _frameBytes(frame, id));
-      } else {
-        yield (id, raw);
-      }
+      yield (id, rawContent(r[1] as String, r[2] as Uint8List?, id));
     }
   }
 

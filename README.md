@@ -2417,6 +2417,11 @@ the unchecked mapping, `--chunking-identity N`, default the model's
 `model.json`), then prints open time, mapping + verify time and the
 verified / moved / unverified counts, per query the embed and search latency and the top hits, the
 mean / p95 search latency and the peak working set.
+`semantic-verify <scratch index> --vectors <set> [--chunking-identity N] [--report N]` runs
+the text check alone and lists the books with the most unverified records. The
+host reads note bodies with the DB's codec (zstd frames, like line content):
+read as raw bytes they failed the check of about 10% of the full library's
+records (every book with footnotes).
 
 **Full-library latency on CI.** `.github/workflows/vectors.yml` (manual)
 downloads a vector release per codec (the QA491 i8 release and a rot release),

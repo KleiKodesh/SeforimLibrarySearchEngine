@@ -1108,4 +1108,4 @@ fn is_word_internal_script(source: &str, lt: usize, gt: usize) -> bool {
 
 #[cfg(test)]
 #[path = "chunker_tests.rs"]
-mod tests;
+pub(crate) mod tests;

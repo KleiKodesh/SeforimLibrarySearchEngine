@@ -132,6 +132,15 @@ jobs:
           echo "$lines" | cut -d, -f1 > C:/bench/logs/first-line.txt
           $demo semantic-search C:/bench/indexes/ours-pos $libs --vectors D:/vectors/base.oxv --db C:/bench/data/seforim.db --model C:/bench/model --chunking-identity $ci --lines "$lines" --k 10 --repeat 2 2>&1 | sed 's/[^ -~]/?/g' | tee C:/bench/logs/latency-${{ matrix.codec }}.log
           echo "exit ${PIPESTATUS[0]}"
+      - name: text check per book (books with the most unverified records)
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          demo="dart run dart/otzaria_demo/bin/otzaria_demo.dart"; libs="--native target/release/seforim_search_native.dll"
+          ci=$(python -I -c "import json,glob;print(json.load(open(glob.glob('D:/vectors/*base.manifest.json')[0]))['identity']['model']['chunking_identity'])")
+          $demo semantic-verify D:/verify-index $libs --vectors D:/vectors/base.oxv --db C:/bench/data/seforim.db --chunking-identity $ci --report 40 2>&1 | sed 's/[^ -~]/?/g' | tee C:/bench/logs/verify-${{ matrix.codec }}.log
+          echo "exit ${PIPESTATUS[0]}"
       - name: hybrid sample
         if: always()
         shell: bash

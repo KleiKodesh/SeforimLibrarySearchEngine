@@ -46,6 +46,10 @@ OxvBookMap? mapOxvBook(SeforimDb db, OxvBookInfo book, void Function(OxvSkip) sk
 
 /// The book's `line_note` rows with a body, in `lineIndex, noteIndex` order
 /// (empty when the DB has no `line_note`).
+/// Bodies are stored like line content (zstd frames with a dictionary on
+/// Otzaria 6+): decoded with the DB's codec, never read as raw UTF-8 bytes
+/// (that turned every note into binary noise and failed the text check of
+/// about 10% of the records: the books with footnotes).
 List<VectorBookNote> bookNotes(SeforimDb db, int bookId) {
   if (!db.hasNotes) return const [];
   final cols = {for (final r in db.db.select('PRAGMA table_info(line_note)')) r['name'] as String};
@@ -57,7 +61,7 @@ List<VectorBookNote> bookNotes(SeforimDb db, int bookId) {
   return [
     for (final r in rs)
       VectorBookNote(r.columnAt(0) as int,
-          switch (r.columnAt(3)) { final Uint8List b => utf8.decode(b, allowMalformed: true), final v => '$v' },
+          db.decode(r.columnAt(3)),
           charPos: (r.columnAt(1) as int?) ?? -1, hasMarker: ((r.columnAt(2) as int?) ?? 0) != 0),
   ];
 }
@@ -112,6 +116,9 @@ Map<String, OxvBookInfo> setBooks(String vectors, VectorSetInfo info) {
 /// Totals of the text check over every book ([mapVectorBooks]).
 final class VerifyTotals {
   int books = 0, lines = 0, records = 0, verified = 0, moved = 0, unverified = 0;
+
+  /// Per mapped book: (book id, DB rows, notes, the check's counts).
+  final perBook = <(int, int, int, VectorBookVerify)>[];
 }
 
 /// Maps every `id:<bookId>` book of the opened set onto the DB. Default:
@@ -146,8 +153,10 @@ Map<OxvSkip, int> mapVectorBooks(SeforimIndex index, SeforimDb db, String vector
       skips[OxvSkip.notInDb] = skips[OxvSkip.notInDb]! + 1;
       continue;
     }
-    final v = index.mapVectorBookRows(b.name, bookId, ids, rows, bookNotes(db, bookId), chunkingIdentity);
+    final notes = bookNotes(db, bookId);
+    final v = index.mapVectorBookRows(b.name, bookId, ids, rows, notes, chunkingIdentity);
     if (totals != null) {
+      totals.perBook.add((bookId, ids.length, notes.length, v));
       totals
         ..books += 1
         ..lines += v.lines
@@ -158,6 +167,35 @@ Map<OxvSkip, int> mapVectorBooks(SeforimIndex index, SeforimDb db, String vector
     }
   }
   return skips;
+}
+
+/// `semantic-verify <scratch index dir> --vectors <set dir | file.oxv> [--chunking-identity N] [--report N]`:
+/// Otzaria's text check over every `id:N` book of the set, the totals, the time and the
+/// [report] books with the most unverified records (DB rows, notes, lines, records, unverified).
+void semanticVerifyCommand(SeforimDb db, String indexDir, String vectors, {int chunkingIdentity = 0, int report = 30}) {
+  final dir = Directory(indexDir);
+  final index = dir.existsSync() && dir.listSync().isNotEmpty ? SeforimIndex.open(indexDir) : SeforimIndex.create(indexDir);
+  try {
+    final info = index.openVectors(vectors);
+    final totals = VerifyTotals();
+    final sw = Stopwatch()..start();
+    final skips = mapVectorBooks(index, db, vectors, info, chunkingIdentity: chunkingIdentity, totals: totals);
+    final ms = sw.elapsedMilliseconds;
+    stdout.writeln('mapping + verify: ${ms < 1000 ? '$ms ms' : '${(ms / 60000).toStringAsFixed(2)} min'}, '
+        'books ${totals.books}, skipped ${skips.entries.where((e) => e.value > 0).map((e) => '${e.key.name} ${e.value}').join(', ')}');
+    stdout.writeln('text check: lines ${totals.lines}, records ${totals.records}, verified ${totals.verified}, '
+        'moved ${totals.moved}, unverified ${totals.unverified}');
+    final bad = totals.perBook.where((b) => b.$4.unverified > 0).length;
+    final all = totals.perBook.where((b) => b.$4.records > 0 && b.$4.unverified == b.$4.records).length;
+    stdout.writeln('books with unverified records: $bad; all records unverified: $all');
+    final worst = [...totals.perBook]..sort((a, b) => b.$4.unverified.compareTo(a.$4.unverified));
+    for (final (book, rows, notes, v) in worst.take(report)) {
+      stdout.writeln('  book $book: rows $rows notes $notes lines ${v.lines} records ${v.records} '
+          'verified ${v.verified} moved ${v.moved} unverified ${v.unverified}');
+    }
+  } finally {
+    index.close();
+  }
 }
 
 String _stripTags(String s) => s.replaceAll(RegExp(r'<[^>]*>'), ' ');

@@ -183,7 +183,7 @@ fn real_data_match_rate() {
     println!("TOTAL records {all} match {ok} ({:.3}%)", 100.0 * ok as f64 / all.max(1) as f64);
 }
 
-fn b64(s: &str) -> Vec<u8> {
+pub(crate) fn b64(s: &str) -> Vec<u8> {
     let val = |c: u8| match c {
         b'A'..=b'Z' => c - b'A',
         b'a'..=b'z' => c - b'a' + 26,

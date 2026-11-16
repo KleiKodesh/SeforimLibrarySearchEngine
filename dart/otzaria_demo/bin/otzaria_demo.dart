@@ -20,6 +20,8 @@ otzaria_demo semantic-search <index dir> --vectors <set dir | file.oxv> (--line 
                     [--query-file utf8.txt] (instead of --query: shells can mangle Hebrew arguments)
                     Otzaria's vector set opened read-only, its id:N books mapped onto seforim.db line ids;
                     query embedded with Otzaria's Meivin model (default model dir: Otzaria's install)
+otzaria_demo semantic-verify <scratch index dir> --vectors <set dir | file.oxv> [--chunking-identity N] [--report 30]
+                    Otzaria's text check over every book of the set; the books with the most unverified records
 otzaria_demo search [--db path] [--index dir] [options] <query>
 otzaria_demo update [--db path] [--index dir] [--wait] [--watch]
                     per-book update by book.contentHash, then the background merge
@@ -64,7 +66,7 @@ Map<String, String?> _parse(List<String> args, List<String> rest) {
     'distance', 'fuzzy-distance', 'book', 'limit', 'offset', 'pages', 'context', 'native', 'zstd', 'spacing', 'match',
     'match-count', 'exclude', 'exclude-scope', 'exclude-options', 'dictionary', 'acronyms', 'group', 'group-scan',
     'order', 'scope', 'lexical', 'max-books', 'books', 'k', 'ort', 'model', 'query-file', 'vectors', 'line', //
-    'lines', 'query', 'threads', 'repeat', 'chunking-identity',
+    'lines', 'query', 'threads', 'repeat', 'chunking-identity', 'report',
   };
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -116,6 +118,9 @@ Future<void> main(List<String> args) async {
           stderr.writeln('${db.unreadableLineIds.length} rows unreadable (line ids: $ids'
               '${db.unreadableLineIds.length > 20 ? ', ...' : ''})');
         }
+      case 'semantic-verify' when rest.length == 1 && o['vectors'] != null:
+        semanticVerifyCommand(db, rest[0], o['vectors']!,
+            chunkingIdentity: _int(o, 'chunking-identity') ?? 0, report: _int(o, 'report') ?? 30);
       case 'semantic-search' when rest.length == 1 && o['vectors'] != null:
         final model = o['model'] ?? defaultMeivinDir();
         final ort = o['ort'] ?? Platform.environment['OTZARIA_ONNX_RUNTIME'];

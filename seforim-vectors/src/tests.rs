@@ -478,3 +478,34 @@ fn the_hosts_verified_fixture_is_current() {
     let (_, v) = set.map_book_rows("id:3", 3, &[100, 101, 102, 103], &rows, &[], Some(identity)).unwrap();
     assert_eq!((v.lines, v.records, v.verified, v.unverified), (5, 5, 5, 0));
 }
+
+/// Real data (read-only): `map_book_rows` on the books dumped by `dump_books.py`
+/// (`SE_CHUNKER_BOOKS`) against a real set / `.oxv` (`SE_CHUNKER_OXV`), the counts
+/// per book (the chunker's own real-data test checks the keys alone).
+#[test]
+#[ignore]
+fn real_map_book_rows() {
+    let books = std::env::var("SE_CHUNKER_BOOKS").expect("SE_CHUNKER_BOOKS");
+    let set = SegmentSet::open(Path::new(&std::env::var("SE_CHUNKER_OXV").expect("SE_CHUNKER_OXV"))).unwrap();
+    let identity: u64 = std::env::var("SE_CHUNKING_IDENTITY").map_or(2_685_558_872_390_372_738, |v| v.parse().unwrap());
+    let dump: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(books).unwrap()).unwrap();
+    for book in dump.as_array().unwrap() {
+        let id = book["book_id"].as_u64().unwrap();
+        let rows: Vec<Vec<u8>> = book["rows"].as_array().unwrap().iter().map(|r| crate::chunker::tests::b64(r["b64"].as_str().unwrap())).collect();
+        let ids: Vec<u64> = book["rows"].as_array().unwrap().iter().map(|r| r["id"].as_u64().unwrap()).collect();
+        let notes: Vec<crate::chunker::BookNote> = book["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| crate::chunker::BookNote {
+                line_index: n[0].as_i64().unwrap(),
+                char_pos: n[2].as_i64().unwrap(),
+                has_marker: n[3].as_i64().unwrap() == 1,
+                body: String::from_utf8_lossy(&crate::chunker::tests::b64(n[4].as_str().unwrap())).into_owned(),
+            })
+            .collect();
+        let refs: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
+        let (_, v) = set.map_book_rows(&format!("id:{id}"), id, &ids, &refs, &notes, Some(identity)).unwrap();
+        println!("book {id}: {v:?}");
+    }
+}

@@ -431,56 +431,68 @@ final class HybridSession {
   Pointer<Void> _h;
 
   HybridPage page(int offset, int limit,
-      {Map<int, Uint8List> Function(List<int> lineIds)? texts, SearchCancelToken? cancel}) {
-    final n = SeforimNative.instance;
-    final j = _step(() => n.hybridPage(_h, offset, limit, cancel?.handle ?? nullptr), texts);
-    return HybridPage([for (final e in j['hits'] as List) FusedHit.fromJson(e as Map<String, dynamic>)], j['more'] as bool,
-        j['window'] as int, j['lexical_total'] as int, j['exhausted'] as bool, HybridMeta.fromJson(j));
-  }
+      {Map<int, Uint8List> Function(List<int> lineIds)? texts, SearchCancelToken? cancel}) =>
+      hybridPageFromJson(_step(() => _pageCall(offset, limit, cancel?.handle ?? nullptr), texts));
 
   /// One fused window of [window] candidates (at most 10,000), apart from the
   /// pages: for a host that groups results itself (Otzaria's grouping counts
   /// its window in groups; the host grows the window and admits groups as
   /// Otzaria's session does). Stale lines are left out.
-  HybridWindow window(int window, {Map<int, Uint8List> Function(List<int> lineIds)? texts, SearchCancelToken? cancel}) {
-    final n = SeforimNative.instance;
-    final j = _step(() => n.hybridWindow(_h, window, cancel?.handle ?? nullptr), texts);
-    return HybridWindow([for (final e in j['hits'] as List) FusedHit.fromJson(e as Map<String, dynamic>)], j['window'] as int,
-        j['lexical_done'] as bool, j['semantic_done'] as bool, j['fused_count'] as int, HybridMeta.fromJson(j));
+  HybridWindow window(int window, {Map<int, Uint8List> Function(List<int> lineIds)? texts, SearchCancelToken? cancel}) =>
+      hybridWindowFromJson(_step(() => _windowCall(window, cancel?.handle ?? nullptr), texts));
+
+  Pointer<Utf8> _pageCall(int offset, int limit, Pointer<Void> token) {
+    if (_h == nullptr) throw StateError('HybridSession is closed');
+    return SeforimNative.instance.hybridPage(_h, offset, limit, token);
+  }
+
+  Pointer<Utf8> _windowCall(int window, Pointer<Void> token) {
+    if (_h == nullptr) throw StateError('HybridSession is closed');
+    return SeforimNative.instance.hybridWindow(_h, window, token);
   }
 
   /// Calls [call] until it answers with something other than `need_texts`,
   /// giving the session the texts it asks for.
   Map<String, dynamic> _step(Pointer<Utf8> Function() call, Map<int, Uint8List> Function(List<int> lineIds)? texts) {
-    final n = SeforimNative.instance;
-    if (_h == nullptr) throw StateError('HybridSession is closed');
     while (true) {
-      final j = jsonDecode(n.takeString(call())) as Map<String, dynamic>;
+      final j = _once(call);
       final need = j['need_texts'] as List?;
       if (need == null) return j;
       if (texts == null) throw StateError('the hybrid session needs line texts: pass texts');
       final ids = [for (final e in need) e as int];
-      final got = texts(ids);
-      using((al) {
-        final idp = al<Uint64>(ids.isEmpty ? 1 : ids.length);
-        idp.asTypedList(ids.length).setAll(0, ids);
-        final offsets = al<Uint64>(ids.length + 1);
-        final off = offsets.asTypedList(ids.length + 1);
-        var total = 0;
-        for (var i = 0; i < ids.length; i++) {
-          off[i] = total;
-          total += got[ids[i]]?.length ?? 0;
-        }
-        off[ids.length] = total;
-        final content = al<Uint8>(total == 0 ? 1 : total);
-        final ct = content.asTypedList(total);
-        for (var i = 0; i < ids.length; i++) {
-          final t = got[ids[i]];
-          if (t != null) ct.setAll(off[i], t);
-        }
-        if (n.hybridAddTexts(_h, idp, ids.length, content, total, offsets) != 0) throw n.error();
-      });
+      addTexts(ids, texts(ids));
     }
+  }
+
+  Map<String, dynamic> _once(Pointer<Utf8> Function() call) {
+    if (_h == nullptr) throw StateError('HybridSession is closed');
+    return jsonDecode(SeforimNative.instance.takeString(call())) as Map<String, dynamic>;
+  }
+
+  /// Gives the session the texts of [ids] it asked for (`need_texts`, raw row
+  /// content as UTF-8); an id absent from [texts] counts as an empty line.
+  void addTexts(List<int> ids, Map<int, Uint8List> texts) {
+    final n = SeforimNative.instance;
+    if (_h == nullptr) throw StateError('HybridSession is closed');
+    using((al) {
+      final idp = al<Uint64>(ids.isEmpty ? 1 : ids.length);
+      idp.asTypedList(ids.length).setAll(0, ids);
+      final offsets = al<Uint64>(ids.length + 1);
+      final off = offsets.asTypedList(ids.length + 1);
+      var total = 0;
+      for (var i = 0; i < ids.length; i++) {
+        off[i] = total;
+        total += texts[ids[i]]?.length ?? 0;
+      }
+      off[ids.length] = total;
+      final content = al<Uint8>(total == 0 ? 1 : total);
+      final ct = content.asTypedList(total);
+      for (var i = 0; i < ids.length; i++) {
+        final t = texts[ids[i]];
+        if (t != null) ct.setAll(off[i], t);
+      }
+      if (n.hybridAddTexts(_h, idp, ids.length, content, total, offsets) != 0) throw n.error();
+    });
   }
 
   void close() {
@@ -489,6 +501,25 @@ final class HybridSession {
     _h = nullptr;
   }
 }
+
+/// One step of [session]'s page (`kind` 'page': [a] offset, [b] limit) or
+/// window ('window': [a] the window): the answer's JSON, which holds
+/// `need_texts` when the session asks for texts ([HybridSession.addTexts]).
+/// For the worker ([AsyncHybridSession]), which asks the calling isolate.
+Map<String, dynamic> hybridStep(HybridSession session, String kind, int a, int b, int cancelAddress) {
+  final token = Pointer<Void>.fromAddress(cancelAddress);
+  return session._once(() => kind == 'page' ? session._pageCall(a, b, token) : session._windowCall(a, token));
+}
+
+/// A [HybridPage] from the session's page JSON.
+HybridPage hybridPageFromJson(Map<String, dynamic> j) => HybridPage(
+    [for (final e in j['hits'] as List) FusedHit.fromJson(e as Map<String, dynamic>)], j['more'] as bool,
+    j['window'] as int, j['lexical_total'] as int, j['exhausted'] as bool, HybridMeta.fromJson(j));
+
+/// A [HybridWindow] from the session's window JSON.
+HybridWindow hybridWindowFromJson(Map<String, dynamic> j) => HybridWindow(
+    [for (final e in j['hits'] as List) FusedHit.fromJson(e as Map<String, dynamic>)], j['window'] as int,
+    j['lexical_done'] as bool, j['semantic_done'] as bool, j['fused_count'] as int, HybridMeta.fromJson(j));
 
 /// One hybrid result.
 final class FusedHit {

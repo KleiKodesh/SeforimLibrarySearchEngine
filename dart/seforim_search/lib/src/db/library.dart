@@ -5,6 +5,8 @@
 // SeforimDataSource. Everything below it stays public for hosts that need the
 // low-level calls.
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import '../../seforim_search.dart';
 import 'data_source.dart';
@@ -553,6 +555,47 @@ final class SeforimLibrary {
   static List<TextMatch> findInText(String text, List<String> words,
           {bool phrase = false, bool ignoreQuotes = false, bool matchMarks = false}) =>
       findAllMatches(text, words, phrase: phrase, ignoreQuotes: ignoreQuotes, matchMarks: matchMarks);
+
+  // -- semantic and hybrid search (issue #18) --
+
+  /// Opens Otzaria's vector set at [path] on the worker (map its books with
+  /// [worker]'s mapVectorBookRows / setVectorMapping: the rows are the
+  /// host's).
+  Future<VectorSetInfo> openVectors(String path) => worker.openVectors(path);
+
+  /// Closes the vector set.
+  Future<void> closeVectors() => worker.closeVectors();
+
+  /// Loads Otzaria's query model (and optionally its passage model) on the
+  /// worker: [SearchWorker.loadEmbedder].
+  Future<int> loadEmbedder(String modelDir, String ortLibrary,
+          {int threads = 1, String graphFile = 'query.int8.onnx', String? passageModelDir, String? passageGraphFile}) =>
+      worker.loadEmbedder(modelDir, ortLibrary,
+          threads: threads, graphFile: graphFile, passageModelDir: passageModelDir, passageGraphFile: passageGraphFile);
+
+  /// Frees the worker's embedders.
+  Future<void> unloadEmbedder() => worker.unloadEmbedder();
+
+  /// The query's embedding by the loaded model, on the worker.
+  Future<Float32List> embedQuery(String query) => worker.embedQuery(query);
+
+  /// Otzaria's hybrid search over the library in one call: the worker embeds
+  /// [query] with the loaded embedder (none loaded or no vector set: the
+  /// lexical side alone, [HybridMeta.fallbackKind]) and the session reads
+  /// line texts from [source] (library lines) and the user index (user
+  /// lines) when it needs them. Page it with [AsyncHybridSession.page] (or
+  /// [AsyncHybridSession.window] to group), then close it.
+  Future<AsyncHybridSession> hybridSearch(String query, {HybridOptions options = const HybridOptions(), Float32List? vector}) =>
+      worker.hybridSession(query, vector: vector, options: options, texts: _rawTexts);
+
+  Future<Map<int, Uint8List>> _rawTexts(List<int> ids) async =>
+      {for (final e in (await _texts(ids)).entries) e.key: utf8.encode(e.value)};
+
+  /// Otzaria's semantic passage highlights, on the worker with its embedders
+  /// ([SearchWorker.semanticPassageHighlights]).
+  Future<List<PassageHighlight>> passageHighlights(String query, List<PassageTarget> targets,
+          {List<String> forms = const [], int? chunkingIdentity, int maxChars = 800}) =>
+      worker.semanticPassageHighlights(query, targets, forms: forms, chunkingIdentity: chunkingIdentity, maxChars: maxChars);
 
   /// Re-sorts the index into the host's own catalog order (book ids, first
   /// first; a book left out goes after the listed ones): one merge on the

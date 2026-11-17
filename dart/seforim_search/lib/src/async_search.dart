@@ -7,11 +7,13 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import 'index.dart';
+import 'meivin_embedder.dart';
 import 'models.dart';
 import 'vector_set.dart'
     show compactVectorSet, installVectorSegment, verifyOxv, VectorCompactionPolicy, VectorCompactionReport, VectorInstallReport;
 import 'native.dart';
 import 'semantic.dart';
+import 'semantic_passages.dart';
 import 'session.dart';
 
 /// One page of hits streamed by [SearchWorker.searchStream] (issue #16).
@@ -169,6 +171,52 @@ final class SearchWorker {
 
   /// [SemanticIndex.vectorInfo] on the worker.
   Future<VectorSetInfo?> vectorInfo() => _call('vectorInfo');
+
+  // -- hybrid search and the query model on the worker (issue #18) --
+
+  /// [SemanticIndex.hybridSession] on the worker: the session lives there
+  /// until [AsyncHybridSession.close]. [vector]: the query's embedding; when
+  /// null, the worker embeds [query] with its loaded embedder ([loadEmbedder];
+  /// none loaded, a query with no text to embed, or
+  /// [HybridRetrieval.lexicalOnly] = an empty vector: the lexical side alone).
+  /// [texts]: the default line-text provider of the session's calls (an index
+  /// without positions scores a query of several words from the line texts).
+  Future<AsyncHybridSession> hybridSession(String query,
+      {Float32List? vector, HybridOptions options = const HybridOptions(), HybridTexts? texts}) async {
+    final id = await _call<int>('hybridOpen', query, vector, options);
+    return AsyncHybridSession._(this, id, texts);
+  }
+
+  /// Loads Otzaria's query model on the worker ([MeivinEmbedder.open] on
+  /// [modelDir] with [graphFile]); with [passageGraphFile] (in
+  /// [passageModelDir], default [modelDir]) also the passage embedder
+  /// (Otzaria's FP32 passage model for `embed_passages`). Replaces the
+  /// embedders loaded before. Returns the query model's output dimensions.
+  Future<int> loadEmbedder(String modelDir, String ortLibrary,
+          {int threads = 1, String graphFile = 'query.int8.onnx', String? passageModelDir, String? passageGraphFile}) =>
+      _call('embedder', 'load', (modelDir, ortLibrary, threads, graphFile), (passageModelDir, passageGraphFile));
+
+  /// Frees the worker's embedders (no-op without one).
+  Future<void> unloadEmbedder() => _call('embedder', 'unload');
+
+  /// True while an embedder is loaded on the worker.
+  Future<bool> hasEmbedder() => _call('embedder', 'has');
+
+  /// [MeivinEmbedder.embedQuery] on the worker.
+  Future<Float32List> embedQuery(String query) => _call('embedder', 'query', query);
+
+  /// [MeivinEmbedder.embedQueries] on the worker.
+  Future<List<Float32List>> embedQueries(List<String> queries) => _call('embedder', 'queries', queries);
+
+  /// [MeivinEmbedder.embedPassages] on the worker, by the passage embedder
+  /// when one is loaded, else the query model (Otzaria's `embed_passages`).
+  Future<List<Float32List>> embedPassages(List<String> texts) => _call('embedder', 'passages', texts);
+
+  /// [semanticPassageHighlights] on the worker: plan, embed (the worker's
+  /// embedders) and mark there.
+  Future<List<PassageHighlight>> semanticPassageHighlights(String query, List<PassageTarget> targets,
+          {List<String> forms = const [], int? chunkingIdentity, int maxChars = 800}) =>
+      _call('embedder', 'highlights', (query, targets), (forms, chunkingIdentity, maxChars));
 
   /// [SeforimIndex.openWriter] on the worker (issue #38): the writer lives
   /// on the worker's isolate and every call is a Future, so a commit, merge
@@ -462,6 +510,67 @@ final class AsyncSearchSession {
   }
 }
 
+/// Gives a hybrid session the texts of [lineIds] (raw row content as UTF-8;
+/// an absent id counts as an empty line).
+typedef HybridTexts = FutureOr<Map<int, Uint8List>> Function(List<int> lineIds);
+
+/// A [HybridSession] living on a [SearchWorker]: the same calls, each a
+/// Future served by the worker. When the session needs line texts (an index
+/// without positions, `need_texts`), the worker answers the step with the
+/// ids; this side asks [HybridTexts] (the call's, else the session's
+/// default), sends them back ([HybridSession.addTexts] there) and repeats the
+/// step. So the texts come from the calling isolate's own database, and the
+/// worker never waits on the host.
+final class AsyncHybridSession {
+  AsyncHybridSession._(this._worker, this._id, this._texts);
+
+  final SearchWorker _worker;
+  final int _id;
+  final HybridTexts? _texts;
+  var _closed = false;
+
+  /// [HybridSession.page]; [cancel] stops the running step
+  /// ([SearchCancelledException]).
+  Future<HybridPage> page(int offset, int limit, {HybridTexts? texts, SearchCancelToken? cancel}) async =>
+      hybridPageFromJson(await _step('page', offset, limit, texts, cancel));
+
+  /// [HybridSession.window].
+  Future<HybridWindow> window(int window, {HybridTexts? texts, SearchCancelToken? cancel}) async =>
+      hybridWindowFromJson(await _step('window', window, 0, texts, cancel));
+
+  /// [HybridSession.addTexts] on the worker (texts given ahead of a step).
+  Future<void> addTexts(List<int> ids, Map<int, Uint8List> texts) => _call('addTexts', ids, texts);
+
+  Future<Map<String, dynamic>> _step(String kind, int a, int b, HybridTexts? texts, SearchCancelToken? cancel) async {
+    // a Finalizable local: the token outlives every step of this call
+    final SearchCancelToken? c = cancel;
+    while (true) {
+      final j = jsonDecode(await _call<String>('step', (kind, a, b), c?.address ?? 0)) as Map<String, dynamic>;
+      final need = j['need_texts'] as List?;
+      if (need == null) return j;
+      final provider = texts ?? _texts ?? (throw StateError('the hybrid session needs line texts: pass texts'));
+      final ids = [for (final e in need) e as int];
+      await addTexts(ids, await provider(ids));
+    }
+  }
+
+  Future<T> _call<T>(String op, [Object? a, Object? b]) {
+    if (_closed) return Future.error(StateError('HybridSession is closed'));
+    return _worker._call<T>('hybrid', _id, op, (a, b));
+  }
+
+  /// Frees the session on the worker. Idempotent.
+  Future<void> close() {
+    if (_closed || _worker._closed) {
+      _closed = true;
+      return Future.value();
+    }
+    final f = _call<void>('close');
+    _closed = true;
+    return f;
+  }
+}
+
 /// An [IndexWriter] living on a [SearchWorker] (issue #38): the same calls,
 /// each a Future served by the worker. [mergeAndClose], [resortAndClose]
 /// and [close] end it (terminal: a closed writer never reopens).
@@ -548,6 +657,15 @@ void _workerMain((SendPort, String, String?) args) {
   final sessions = <int, SearchSession>{};
   var nextSession = 1;
   final writers = <int, IndexWriter>{};
+  final hybrids = <int, HybridSession>{};
+  MeivinEmbedder? embedder, passageEmbedder;
+  void unloadEmbedder() {
+    embedder?.dispose();
+    passageEmbedder?.dispose();
+    embedder = passageEmbedder = null;
+  }
+
+  MeivinEmbedder model() => embedder ?? (throw StateError('no embedder is loaded (loadEmbedder)'));
   SeforimIndex? user;
   void closeUser() {
     final u = user;
@@ -644,6 +762,72 @@ void _workerMain((SendPort, String, String?) args) {
           index.setVectorMapping((a as List).cast<OxvBookMap>(), replace: b as bool);
         case 'vectorInfo':
           value = index.vectorInfo();
+        case 'hybridOpen':
+          final options = c as HybridOptions;
+          var vector = b as Float32List?;
+          final emb = embedder;
+          if (vector == null && emb != null && options.retrieval != HybridRetrieval.lexicalOnly) {
+            try {
+              vector = emb.embedQuery(a as String);
+            } on ArgumentError {
+              vector = null; // no text to embed: the lexical side alone
+            }
+          }
+          final h = index.hybridSession(a as String, vector ?? Float32List(0), options);
+          final hid = nextSession++;
+          hybrids[hid] = h;
+          value = hid;
+        case 'hybrid':
+          final hid = a as int;
+          final h = hybrids[hid] ?? (throw StateError('HybridSession is closed'));
+          final (x, y) = c as (Object?, Object?);
+          switch (b as String) {
+            case 'step':
+              final (kind, p, q) = x as (String, int, int);
+              value = jsonEncode(hybridStep(h, kind, p, q, y as int));
+            case 'addTexts':
+              h.addTexts((x as List).cast<int>(), (y as Map).cast<int, Uint8List>());
+            case 'close':
+              hybrids.remove(hid);
+              h.close();
+            default:
+              throw StateError('unknown hybrid op $b');
+          }
+        case 'embedder':
+          switch (a as String) {
+            case 'load':
+              final (dir, ort, threads, graph) = b as (String, String, int, String);
+              final (passDir, passGraph) = c as (String?, String?);
+              final q = MeivinEmbedder.open(dir, ort, threads: threads, graphFile: graph);
+              MeivinEmbedder? p;
+              try {
+                if (passGraph != null) p = MeivinEmbedder.open(passDir ?? dir, ort, threads: threads, graphFile: passGraph);
+              } catch (_) {
+                q.dispose();
+                rethrow;
+              }
+              unloadEmbedder();
+              embedder = q;
+              passageEmbedder = p;
+              value = q.dims;
+            case 'unload':
+              unloadEmbedder();
+            case 'has':
+              value = embedder != null;
+            case 'query':
+              value = model().embedQuery(b as String);
+            case 'queries':
+              value = model().embedQueries((b as List).cast<String>());
+            case 'passages':
+              value = (passageEmbedder ?? model()).embedPassages((b as List).cast<String>());
+            case 'highlights':
+              final (query, targets) = b as (String, List<PassageTarget>);
+              final (forms, identity, maxChars) = c as (List<String>, int?, int);
+              value = semanticPassageHighlights(query, targets, model(),
+                  passageEmbedder: passageEmbedder, forms: forms, chunkingIdentity: identity, maxChars: maxChars);
+            default:
+              throw StateError('unknown embedder op $a');
+          }
         case 'openWriter':
           final wid = nextSession++;
           writers[wid] = index.openWriter(heapBytes: a as int, threads: b as int, lowPriority: c as bool);
@@ -746,6 +930,11 @@ void _workerMain((SendPort, String, String?) args) {
         case 'close':
           sessions.remove(a as int)?.close();
         case 'dispose':
+          for (final h in hybrids.values) {
+            h.close();
+          }
+          hybrids.clear();
+          unloadEmbedder();
           for (final w in writers.values) {
             w.close();
           }

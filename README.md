@@ -2702,8 +2702,28 @@ is not run (the Dart demo prints the totals only).
 
 **Hosts.** Dart: `SemanticIndex`
 extension (`openVectors`, `closeVectors`, `mapVectorBook`, `setVectorMapping`,
-`vectorInfo`, `semanticSearch`, `hybridSession` -> `HybridSession.page`); the vector
-calls also on `SearchWorker`.
+`vectorInfo`, `semanticSearch`, `hybridSession` -> `HybridSession.page` / `window`,
+`addTexts`); the vector calls also on `SearchWorker`.
+
+**Hybrid search and the query model on the worker (Dart).** `SearchWorker` serves the
+hybrid session and the embedders on its isolate, where the index and the vector set
+live (the synchronous `HybridSession` / `MeivinEmbedder` stay for single-isolate
+hosts). `hybridSession(query, {vector, options, texts})` -> `AsyncHybridSession`
+(`page(offset, limit, {texts, cancel})`, `window(n, {texts, cancel})`, `addTexts`,
+`close`); with no `vector` the worker embeds the query with its loaded embedder (none
+loaded, a query with no text, or `lexicalOnly` = the lexical side alone). Texts on an
+index without positions: the worker answers a step that needs texts with the line ids;
+the calling isolate asks its `HybridTexts` provider (the call's, else the session's),
+sends them back and repeats the step, so the texts come from the host's own database and
+the worker never waits on the host. Cancellation: the existing `SearchCancelToken`
+(flag set from the calling isolate). Embedders: `loadEmbedder(modelDir, ortLibrary,
+{threads, graphFile, passageModelDir, passageGraphFile})` (the passage model optional),
+`unloadEmbedder`, `hasEmbedder`, `embedQuery`, `embedQueries`, `embedPassages` (the
+passage model when loaded), `semanticPassageHighlights` (plan, embed and mark on the
+worker). `SeforimLibrary` in its ready-made style: `openVectors`, `loadEmbedder`,
+`embedQuery`, `hybridSearch(query, {options})` (one call: the worker's embedder and
+vector set, texts read from the data source and the user index) and
+`passageHighlights`. Tests: `dart/seforim_search/test/async_hybrid_test.dart`.
 
 **Native build.** Pure Rust (the usearch C++ library, its HNSW sidecar, the
 f16 store, the `.oxv` import and the Windows static C runtime it needed are

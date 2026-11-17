@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 22;
+const int seforimAbiVersion = 23;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -235,6 +235,8 @@ final class SeforimNative {
                 Pointer<Uint8>, Size, Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int,
                 Pointer<Uint8>, int, Pointer<Void>)>('se_vectors_install'),
+        vectorsCompact = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>)>('se_vectors_compact'),
         vectorsInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_vectors_info'),
         semanticSearch = lib.lookupFunction<
@@ -358,6 +360,7 @@ final class SeforimNative {
   final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>) oxvVerify;
   final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int,
       Pointer<Uint8>, int, Pointer<Void>) vectorsInstall;
+  final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>) vectorsCompact;
   final Pointer<Utf8> Function(Pointer<Void>) vectorsInfo;
   final Pointer<Utf8> Function(Pointer<Void>, Pointer<Float>, int, Pointer<Uint8>, int, Pointer<Void>) semanticSearch;
   final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Float>, int, Pointer<Uint8>, int) hybridOpen;

@@ -293,6 +293,7 @@ pub struct OxvFile {
     tombstone_count: u64,
     tombstones: Range<usize>,
     occurrences: Option<Range<usize>>,
+    book_hashes: Option<Range<usize>>,
 }
 
 impl OxvFile {
@@ -404,6 +405,7 @@ impl OxvFile {
         let foreign = section(S_FOREIGN, foreign_count > 0)?.unwrap_or(0..0);
         let tombstones = section(S_TOMBSTONES, tombstone_count > 0)?.unwrap_or(0..0);
         let occurrences = section(S_OCCURRENCES, false)?;
+        let book_hashes = section(S_BOOK_HASHES, false)?;
         let codec = Codec::parse(codec_id, dims, &b[params.clone()])?;
         need(&books_r, book_count as u64, BOOK_ENTRY_LEN as u64, "BOOKS")?;
         need(&keys, slots64, key_len as u64, "SLOT_KEYS")?;
@@ -420,6 +422,9 @@ impl OxvFile {
         }
         if let Some(r) = &windows {
             need(r, slots64, 1, "SLOT_WINDOWS")?;
+        }
+        if let Some(r) = &book_hashes {
+            need(r, book_count as u64, 8, "BOOK_HASHES")?;
         }
         if let Some(r) = &occurrences {
             if r.len() % (2 * key_len + 12) != 0 {
@@ -481,6 +486,7 @@ impl OxvFile {
             tombstone_count,
             tombstones,
             occurrences,
+            book_hashes,
         })
     }
 
@@ -703,6 +709,38 @@ impl OxvFile {
             out.push((self.foreign_record(i).2, 0));
         }
         out
+    }
+
+    /// reader.rs `book_source_hash`: book `name`'s source text hash, or None (no such
+    /// book, no BOOK_HASHES, or a hash of 0 = unknown).
+    pub(crate) fn book_source_hash(&self, name: &str) -> Option<u64> {
+        let index = self.books.binary_search_by(|b| b.name.as_str().cmp(name)).ok()?;
+        let range = self.book_hashes.as_ref()?;
+        let hash = u64_at(&self.map, range.start + index * 8);
+        (hash != 0).then_some(hash)
+    }
+
+    /// The header's identity digest (bytes 48..80).
+    pub(crate) fn identity_digest(&self) -> [u8; 32] {
+        self.map[48..80].try_into().unwrap()
+    }
+
+    /// The header's codec id and codec epoch (CODEC_PARAMS SHA-256).
+    pub(crate) fn codec_header(&self) -> (u16, [u8; 32]) {
+        (u16_at(&self.map, 22), self.map[80..112].try_into().unwrap())
+    }
+
+    /// Slot `slot`'s encoded vector bytes and its own scale (codecs with one).
+    pub(crate) fn encoded_vector(&self, slot: u32) -> (&[u8], Option<f32>) {
+        let n = self.codec.bytes_per_vector(self.dims);
+        let at = self.vectors.start + slot as usize * n;
+        let scale = self.scales.as_ref().map(|r| f32_at(&self.map, r.start + slot as usize * 4));
+        (&self.map[at..at + n], scale)
+    }
+
+    /// The codec's bytes per vector and whether each vector has a scale.
+    pub(crate) fn codec_layout(&self) -> (usize, bool) {
+        (self.codec.bytes_per_vector(self.dims), self.codec.has_scales())
     }
 
     /// The decoded (not normalized) vector of `slot`.

@@ -68,6 +68,68 @@ VectorInstallReport installVectorSegment(String setDir, String segmentPath, Stri
   })) as Map<String, dynamic>);
 }
 
+/// Compacts the vector set at [setDir] into one segment when [policy] asks, in the
+/// engine (`se_vectors_compact`, Otzaria's sidecar `segment_set::compact`): live slots
+/// copied byte for byte (every source block verified first), a new generation committed.
+/// [policy]: [VectorCompactionPolicy] (null = the sidecar's defaults). Records are kept
+/// as they are (no live key source, as Otzaria on an index without its chunk-key
+/// column). [cancel] stops it, leaving the set as it was ([SearchCancelledException]);
+/// a refusal throws [SeforimEngineException] ([vectorInstallErrorKind]: `busy`,
+/// `no_space`, `corrupt`...). A session open on the set reopens to see the new generation.
+VectorCompactionReport compactVectorSet(String setDir,
+    {VectorCompactionPolicy? policy, SearchCancelToken? cancel, int? cancelAddress}) {
+  final n = SeforimNative.instance;
+  return VectorCompactionReport.fromJson(jsonDecode(using((al) {
+    final (d, dl) = utf8Native(setDir, al);
+    final (p, pl) = policy == null ? (nullptr.cast<Uint8>(), 0) : utf8Native(jsonEncode(policy.toJson()), al);
+    return n.takeString(n.vectorsCompact(d, dl, p, pl, _token(cancel, cancelAddress)));
+  })) as Map<String, dynamic>);
+}
+
+/// The sidecar's `CompactionPolicy` (defaults = its defaults).
+class VectorCompactionPolicy {
+  final double maxDeltaRatio, maxDeadRatio, minFreeSpaceFactor;
+  final int maxSegments;
+  final bool refreshHints, force;
+  const VectorCompactionPolicy(
+      {this.maxDeltaRatio = 0.20,
+      this.maxSegments = 4,
+      this.maxDeadRatio = 0.05,
+      this.minFreeSpaceFactor = 1.15,
+      this.refreshHints = true,
+      this.force = false});
+
+  Map<String, Object> toJson() => {
+        'max_delta_ratio': maxDeltaRatio,
+        'max_segments': maxSegments,
+        'max_dead_ratio': maxDeadRatio,
+        'min_free_space_factor': minFreeSpaceFactor,
+        'refresh_hints': refreshHints,
+        'force': force,
+      };
+}
+
+/// What a compaction did (the sidecar's `CompactionReport`).
+class VectorCompactionReport {
+  final bool compacted;
+  final String reason;
+  final int generation, bytesBefore, bytesAfter, slotsBefore, slotsAfter, recordsPruned, hintsRefreshed, elapsedMs;
+  const VectorCompactionReport(this.compacted, this.reason, this.generation, this.bytesBefore, this.bytesAfter,
+      this.slotsBefore, this.slotsAfter, this.recordsPruned, this.hintsRefreshed, this.elapsedMs);
+
+  factory VectorCompactionReport.fromJson(Map<String, dynamic> j) => VectorCompactionReport(
+      j['compacted'] as bool,
+      j['reason'] as String,
+      j['generation'] as int,
+      j['bytes_before'] as int,
+      j['bytes_after'] as int,
+      j['slots_before'] as int,
+      j['slots_after'] as int,
+      j['records_pruned'] as int,
+      j['hints_refreshed'] as int,
+      j['elapsed_ms'] as int);
+}
+
 /// Why the engine refused an install / verify ([installVectorSegment], [verifyOxv]),
 /// as Otzaria's sidecar classifies it for the app: `corrupt` (damaged package or set),
 /// `incompatible` (a sound release this set or build cannot take, a release of another

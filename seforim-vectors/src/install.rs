@@ -1112,6 +1112,9 @@ fn utc_timestamp(t: std::time::SystemTime) -> String {
 }
 
 
+#[path = "compact.rs"]
+pub mod compact;
+
 #[cfg(test)]
 #[path = "install_tests.rs"]
 mod tests;

@@ -8,7 +8,8 @@ import 'package:ffi/ffi.dart';
 
 import 'index.dart';
 import 'models.dart';
-import 'vector_set.dart' show installVectorSegment, verifyOxv, VectorInstallReport;
+import 'vector_set.dart'
+    show compactVectorSet, installVectorSegment, verifyOxv, VectorCompactionPolicy, VectorCompactionReport, VectorInstallReport;
 import 'native.dart';
 import 'semantic.dart';
 import 'session.dart';
@@ -142,6 +143,12 @@ final class SearchWorker {
           {String? publishedManifestSha256, String? expectedModelJson, SearchCancelToken? cancel}) =>
       _call('installVectorSegment', setDir, (segmentPath, manifestJson, publishedManifestSha256, expectedModelJson),
           cancel?.address);
+
+  /// [compactVectorSet] on the worker (reads and copies the whole set off the
+  /// calling isolate).
+  Future<VectorCompactionReport> compactVectorSet(String setDir,
+          {VectorCompactionPolicy? policy, SearchCancelToken? cancel}) =>
+      _call('compactVectorSet', setDir, policy, cancel?.address);
 
   /// [verifyOxv] on the worker.
   Future<Map<String, dynamic>> verifyOxv(String path, {String? manifestJson, SearchCancelToken? cancel}) =>
@@ -617,6 +624,8 @@ void _workerMain((SendPort, String, String?) args) {
           final (segment, manifest, published, model) = b as (String, String, String?, String?);
           value = installVectorSegment(a as String, segment, manifest,
               publishedManifestSha256: published, expectedModelJson: model, cancelAddress: c as int?);
+        case 'compactVectorSet':
+          value = compactVectorSet(a as String, policy: b as VectorCompactionPolicy?, cancelAddress: c as int?);
         case 'verifyOxv':
           value = verifyOxv(a as String, manifestJson: b as String?, cancelAddress: c as int?);
         case 'mapVectorBook':

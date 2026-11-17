@@ -25,6 +25,7 @@ pub mod kernel;
 pub mod oxv;
 pub mod scan;
 pub mod set;
+pub mod writer;
 
 /// Errors of the vector set.
 #[derive(Debug)]

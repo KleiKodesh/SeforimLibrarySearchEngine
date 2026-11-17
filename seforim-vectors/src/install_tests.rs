@@ -382,3 +382,159 @@ fn compaction_rule_is_the_sidecars_default_policy() {
     assert!(compaction_wanted(&[1000], 100, 6)); // over 5 % dead
     assert!(!compaction_wanted(&[1000], 100, 5));
 }
+
+/// Installs the base and the delta of [`segments`] into `<tmp>/vectors`.
+fn installed(tmp: &Path) -> PathBuf {
+    fs::create_dir_all(tmp).unwrap();
+    let (b, x) = segments(tmp);
+    let dir = tmp.join("vectors");
+    install(&dir, &b, &manifest(&b), None).unwrap();
+    install(&dir, &x, &manifest(&x), None).unwrap();
+    dir
+}
+
+fn all_hits(dir: &Path, map: &LineMap) -> Vec<Vec<set::LineHit>> {
+    let set = SegmentSet::open(dir).unwrap();
+    (0..D)
+        .map(|a| set.search_lines(&axis(D, a), map, &LineSearch { k: 16, threads: 1, ..Default::default() }, None).unwrap().hits)
+        .collect()
+}
+
+#[test]
+fn compaction_merges_the_set_into_one_segment_that_searches_the_same() {
+    use super::compact::{compact, CompactionPolicy};
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = installed(tmp.path());
+    let map = mapping();
+    let before = all_hits(&dir, &map);
+
+    // the default policy: 2 segments, deltas well under... whatever it says, the
+    // report says the same as the install's rule
+    let doc = |dir: &Path| -> serde_json::Value {
+        let cur: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("CURRENT")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(dir.join(cur["set"].as_str().unwrap())).unwrap()).unwrap()
+    };
+    let d = doc(&dir);
+    let sizes: Vec<u64> = d["segments"].as_array().unwrap().iter().map(|s| s["size"].as_u64().unwrap()).collect();
+    let (slots, dead) = (d["stats"]["slots"].as_u64().unwrap(), d["stats"]["slots_dead"].as_u64().unwrap());
+    assert_eq!(CompactionPolicy::default().wants(&sizes, slots - dead, dead).is_some(), compaction_wanted(&sizes, slots, dead));
+    let quiet = CompactionPolicy { max_segments: 10, max_delta_ratio: 100.0, max_dead_ratio: 1.0, ..Default::default() };
+    let r = compact(&dir, &quiet, None, None).unwrap();
+    assert!(!r.compacted);
+    assert_eq!(r.generation, 2);
+
+    // a cancelled compaction leaves the set as it was
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    let forced = CompactionPolicy { force: true, ..Default::default() };
+    assert!(matches!(compact(&dir, &forced, None, Some(&stop)), Err(crate::Error::Cancelled)));
+    assert_eq!(doc(&dir)["generation"], 2);
+    assert!(!dir.join("staging").exists());
+
+    let r = compact(&dir, &forced, None, None).unwrap();
+    assert!(r.compacted, "{r:?}");
+    assert_eq!((r.generation, r.slots_before, r.slots_after, r.records_pruned, r.hints_refreshed), (3, 6, 4, 0, 0));
+    let d = doc(&dir);
+    assert_eq!(d["segments"].as_array().unwrap().len(), 1);
+    assert_eq!(d["segments"][0]["kind"], "compacted");
+    assert_eq!((d["library_version"].as_u64(), d["stats"]["slots_dead"].as_u64()), (Some(2), Some(0)));
+    let id = d["segments"][0]["id"].as_str().unwrap().to_string();
+    let seg = OxvFile::open(&dir.join(format!("segments/{id}.oxv"))).unwrap();
+    assert_eq!((seg.kind(), seg.library_versions()), ("compacted", (0, 2)));
+    assert!(super::verify_blocks(seg.bytes(), None).is_ok());
+    drop(seg);
+    let prev: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("PREVIOUS")).unwrap()).unwrap();
+    assert_eq!(prev["generation"], 2);
+    // Otzaria's rule (segment_set/mod.rs `book_occurrences`): a newer segment's records
+    // of a key in a book replace the older ones there. The delta lists key 4 in id:2 at
+    // line 3 only, so its base record at line 0 (line id 20) is not carried over; every
+    // other hit is the same.
+    let without_20 = |hits: Vec<Vec<set::LineHit>>| -> Vec<Vec<set::LineHit>> {
+        hits.into_iter().map(|h| h.into_iter().filter(|x| x.line_id != 20).collect()).collect()
+    };
+    let after = all_hits(&dir, &map);
+    assert!(after.iter().flatten().all(|h| h.line_id != 20));
+    assert_eq!(after, without_20(before));
+
+    // the same compaction again names the same bytes (its id is its content)
+    let again = tmp.path().join("again");
+    let dir2 = installed(&again);
+    compact(&dir2, &forced, None, None).unwrap();
+    assert_eq!(doc(&dir2)["segments"][0]["id"], id.as_str());
+}
+
+/// A live index of the set's version: in id:1 key 1 is gone; in id:2 key 4 moved
+/// from line 3 to line 7 (keys 6, 1 and 2 where they were).
+struct Live;
+
+impl super::compact::LiveKeySource for Live {
+    fn library_version(&self) -> u32 {
+        2
+    }
+    fn book_keys(&self, book: &str, out: &mut Vec<(u32, u64)>) -> crate::Result<bool> {
+        out.clear();
+        match book {
+            "id:1" => out.extend([(0, 0), (1, 0)]),
+            "id:2" => out.extend([(0, 0), (1, 6), (2, 1), (3, 0), (4, 2), (7, 4)]),
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+}
+
+#[test]
+fn compaction_reanchors_on_the_live_index_of_the_sets_version() {
+    use super::compact::{compact, CompactionPolicy};
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = installed(tmp.path());
+    let forced = CompactionPolicy { force: true, ..Default::default() };
+    let r = compact(&dir, &forced, Some(&Live), None).unwrap();
+    assert_eq!((r.records_pruned, r.hints_refreshed), (1, 1));
+    let mut map = mapping();
+    map.set(vec![OxvBookMap { name: "id:2".into(), book_id: 2, line_ids: vec![20, 21, 22, 23, 24, 25, 26, 27] }], false);
+    let set = SegmentSet::open(&dir).unwrap();
+    let search = |a: usize| set.search_lines(&axis(D, a), &map, &LineSearch { k: 16, threads: 1, ..Default::default() }, None).unwrap().hits;
+    let top = |a: usize| -> Vec<u64> { search(a).iter().filter(|h| h.score > 0.5).map(|h| h.line_id).collect() };
+    // key 4 re-anchored on line 7
+    assert_eq!(top(3), vec![27]);
+    // key 1 pruned from id:1 (line id 10), kept in id:2 at line 2
+    assert_eq!(top(0), vec![22]);
+
+    // another library version: records kept as they are
+    let other = tmp.path().join("other");
+    let dir2 = installed(&other);
+    struct Old;
+    impl super::compact::LiveKeySource for Old {
+        fn library_version(&self) -> u32 {
+            1
+        }
+        fn book_keys(&self, _: &str, _: &mut Vec<(u32, u64)>) -> crate::Result<bool> {
+            panic!("not asked on another version")
+        }
+    }
+    let r = compact(&dir2, &forced, Some(&Old), None).unwrap();
+    assert_eq!((r.records_pruned, r.hints_refreshed), (0, 0));
+}
+
+#[test]
+fn compaction_refuses_a_damaged_source_and_writes_nothing() {
+    use super::compact::{compact, CompactionPolicy};
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = installed(tmp.path());
+    // flip a byte in the vectors of the installed delta
+    let id2 = "22".repeat(16);
+    let path = dir.join(format!("segments/{id2}.oxv"));
+    let mut bytes = fs::read(&path).unwrap();
+    let at = (0..u32::from_le_bytes(bytes[28..32].try_into().unwrap()) as usize)
+        .map(|i| 224 + i * 40)
+        .find(|&at| u16::from_le_bytes([bytes[at], bytes[at + 1]]) == 0x0012)
+        .map(|at| u64::from_le_bytes(bytes[at + 8..at + 16].try_into().unwrap()) as usize)
+        .unwrap();
+    bytes[at] ^= 0x40;
+    fs::write(&path, bytes).unwrap();
+    let e = compact(&dir, &CompactionPolicy { force: true, ..Default::default() }, None, None).unwrap_err();
+    assert_eq!(error_kind(&e), Some(Kind::Corrupt));
+    let cur: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("CURRENT")).unwrap()).unwrap();
+    assert_eq!(cur["generation"], 2);
+    assert!(!dir.join("gen-000003").exists() && !dir.join("staging").exists());
+    assert_eq!(fs::read_dir(dir.join("segments")).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "oxv")).count(), 2);
+}

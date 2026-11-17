@@ -84,6 +84,20 @@ void main() {
     final slots = set['stats']['slots'] as int, dead = set['stats']['slots_dead'] as int;
     expect(r3.needsCompaction,
         sizes.length > 4 || deltas > 0.2 * sizes.first || dead > 0.05 * slots);
+
+    // compaction in the engine: a quiet policy leaves it, a forced one merges the set
+    final quiet = await worker.compactVectorSet(setDir,
+        policy: const VectorCompactionPolicy(maxSegments: 10, maxDeltaRatio: 100, maxDeadRatio: 1));
+    expect((quiet.compacted, quiet.generation), (false, 3));
+    final c = await worker.compactVectorSet(setDir, policy: const VectorCompactionPolicy(force: true));
+    expect((c.compacted, c.generation, c.slotsAfter), (true, 4, 3));
+    final after = jsonDecode(File('$setDir/${jsonDecode(File('$setDir/CURRENT').readAsStringSync())['set']}')
+        .readAsStringSync());
+    expect([for (final g in after['segments'] as List) g['kind']], ['compacted']);
+    expect(after['library_version'], 3);
+    final token = SearchCancelToken()..cancel();
+    expect(() => compactVectorSet(setDir, policy: const VectorCompactionPolicy(force: true), cancel: token),
+        throwsA(isA<SearchCancelledException>()));
   });
 
   test('a corrupted block is refused; the Dart writer installs a base without native', () async {

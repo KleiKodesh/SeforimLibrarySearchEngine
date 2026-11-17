@@ -89,7 +89,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 22; // 22: se_hybrid_open options `ranking` (Otzaria's RankingProfile) and `foundational_books` replace `fusion` / the penalties (issue #18); 21: Otzaria's hybrid search session (se_hybrid_open, se_hybrid_page, se_hybrid_add_texts, se_hybrid_close; se_search_fuse_semantic removed, issue #18); 20: se_vectors_install report `needs_compaction` (Otzaria sidecar compaction policy, issue #18); 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 23; // 23: se_vectors_compact (vector set compaction, Otzaria sidecar port, issue #18); 22: se_hybrid_open options `ranking` (Otzaria's RankingProfile) and `foundational_books` replace `fusion` / the penalties (issue #18); 21: Otzaria's hybrid search session (se_hybrid_open, se_hybrid_page, se_hybrid_add_texts, se_hybrid_close; se_search_fuse_semantic removed, issue #18); 20: se_vectors_install report `needs_compaction` (Otzaria sidecar compaction policy, issue #18); 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -2416,6 +2416,43 @@ pub unsafe extern "C" fn se_vectors_install(
         let opts = seforim_vectors::install::InstallOptions { published_sha256: published, expected_model_json: model, cancel: flag.as_deref() };
         let r = seforim_vectors::install::install_with(std::path::Path::new(dir), std::path::Path::new(segment), manifest, &opts)
             .map_err(install_err)?;
+        Ok(out_string(serde_json::to_string(&r).map_err(err)?))
+    })
+}
+
+/// Compacts the vector set at `set_dir` into one segment when the policy asks, as
+/// Otzaria's sidecar does (`segment_set::compact`): the live slots copied byte for byte
+/// (every block of every source verified first), records gathered book by book from the
+/// newest snapshot of each key, a new generation committed (`PREVIOUS` = the old one),
+/// the old segments collected. `policy_json` (length 0 = the sidecar's defaults):
+/// `{"max_delta_ratio","max_segments","max_dead_ratio","min_free_space_factor",
+/// "refresh_hints","force"}`, any field optional. No live key source: records are kept
+/// as they are (Otzaria's behaviour on an index without its chunk-key column).
+/// `token` (may be null): cancels it, leaving the set as it was. JSON
+/// `{"compacted","reason","generation","bytes_before","bytes_after","slots_before",
+/// "slots_after","records_pruned","hints_refreshed","elapsed_ms"}`; null on error
+/// (tagged as an install error: `busy`, `no_space`, `corrupt`, ...). A session open on
+/// the set keeps the old generation until it reopens.
+///
+/// # Safety
+/// The strings valid UTF-8 for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn se_vectors_compact(
+    set_dir: *const u8,
+    set_dir_len: usize,
+    policy_json: *const u8,
+    policy_json_len: usize,
+    token: *const CancelToken,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let dir = str_arg(set_dir, set_dir_len)?;
+        let policy: seforim_vectors::install::compact::CompactionPolicy = if policy_json_len == 0 {
+            Default::default()
+        } else {
+            serde_json::from_str(str_arg(policy_json, policy_json_len)?).map_err(err)?
+        };
+        let flag = token.as_ref().map(|t| t.flag());
+        let r = seforim_vectors::install::compact::compact(std::path::Path::new(dir), &policy, None, flag.as_deref()).map_err(install_err)?;
         Ok(out_string(serde_json::to_string(&r).map_err(err)?))
     })
 }

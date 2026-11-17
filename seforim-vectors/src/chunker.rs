@@ -293,6 +293,52 @@ impl Chunker {
             .collect()
     }
 
+    /// The text a semantic hit's passage highlight is computed on (otzaria_search_engine
+    /// 7.2.0 `embedded_window_texts`, spaces collapsed): for a short line (not an alias
+    /// record) the capped context it was embedded with, for window `window` past the first
+    /// of a long line an ellipsis + its piece + an ellipsis (none after the line's end);
+    /// `None` when the line's own text is shown. `lines` / `index` as for [`Self::embedded_text`].
+    pub fn display_window_text(&self, lines: &[LineRef<'_>], index: usize, window: u8) -> Option<String> {
+        let text = lines[index].text;
+        let length = text.trim().chars().count();
+        if window != ALIAS_WINDOW && (self.config.min_embeddable_chars..self.config.min_meaningful_chars).contains(&length) {
+            let section = lines[index].section;
+            let mut start = index;
+            for _ in 0..self.config.context_window_lines {
+                if start == 0 || lines[start - 1].section != section {
+                    break;
+                }
+                start -= 1;
+            }
+            let mut end = index;
+            for _ in 0..self.config.context_window_lines {
+                if end + 1 >= lines.len() || lines[end + 1].section != section {
+                    break;
+                }
+                end += 1;
+            }
+            if start == end {
+                return None;
+            }
+            let joined = lines[start..=end].iter().map(|l| l.text).collect::<Vec<_>>().join(" ");
+            return Some(collapse_whitespace(truncate_to_chars(joined.trim(), self.config.max_chunk_chars)));
+        }
+        // long_line_window_text / semantic_keys.rs `window_span_with`.
+        if window == 0 || length <= ChunkerConfig::production().max_chunk_chars {
+            return None;
+        }
+        let alone = [LineRef { text, section: 0 }];
+        let found = self.embedded_windows(&alone, 0).into_iter().find(|w| w.ordinal == window)?;
+        let trimmed = text.trim();
+        let at = |n: u32| trimmed.char_indices().nth(n as usize).map_or(trimmed.len(), |(at, _)| at);
+        let piece = collapse_whitespace(&trimmed[at(found.chars.start)..at(found.chars.end)]);
+        Some(if (found.chars.end as usize) < length {
+            format!("\u{2026}{piece}\u{2026}")
+        } else {
+            format!("\u{2026}{piece}")
+        })
+    }
+
     /// chunker.rs `build_context_text`: the line and up to `context_window_lines`
     /// neighbours on each side within its section, joined with spaces.
     fn build_context_text(&self, lines: &[LineRef<'_>], index: usize) -> String {
@@ -318,6 +364,25 @@ impl Chunker {
 /// recipe.rs `EmbeddingTextRecipe::passage_text`, version 2.
 fn passage_text(text: &str) -> String {
     format!("{PASSAGE_PREFIX}{}", text.trim())
+}
+
+/// note_spans.rs `DisplayText::collapse_whitespace` on plain text: whitespace runs to one
+/// space, none leading or trailing.
+fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            pending |= !out.is_empty();
+            continue;
+        }
+        if pending {
+            out.push(' ');
+            pending = false;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// chunker.rs `truncate_to_chars`.

@@ -29,7 +29,22 @@ double _dot(Float32List a, Float32List b) {
   return s;
 }
 
+final _pardesCases = _env['OTZARIA_PARDES_CASES'] ??
+    '${_env['USERPROFILE']}/.cargo/git/checkouts/otzaria-semantic-search-934c7c4f97476962/'
+        'd2a782a/tests/data/pardes_clean_cases.json';
+
 void main() {
+  test('normalization 2 = Otzaria pardes_clean on its reference cases', () {
+    final cases = (jsonDecode(File(_pardesCases).readAsStringSync()) as List).cast<List>();
+    expect(cases, isNotEmpty);
+    for (final c in cases) {
+      expect(meivinPardesClean(c[0] as String), c[1] as String, reason: jsonEncode(c[0]));
+    }
+    expect(MeivinTextNormalization.fromVersion(1).apply(' <b>x</b> '), ' <b>x</b> ');
+    expect(MeivinTextNormalization.fromVersion(2).apply(' <b>x</b>&amp;y '), 'x &y');
+    expect(() => MeivinTextNormalization.fromVersion(3), throwsUnsupportedError);
+  }, skip: File(_pardesCases).existsSync() ? false : 'set OTZARIA_PARDES_CASES to pardes_clean_cases.json');
+
   test('L2 normalization is Otzaria\'s f32 arithmetic', () {
     final v = meivinL2Normalize(Float32List.fromList([3, 4]));
     expect(v, [0.6000000238418579, 0.800000011920929]);

@@ -641,6 +641,18 @@ impl OxvFile {
         self.occurrences.as_ref().map_or(&[][..], |r| &self.map[r.clone()])
     }
 
+    /// Every alias occurrence row's own key (reader.rs `occurrences().filter(is_alias)
+    /// .map(anchor)`): the short lines that share a neighbour's vector.
+    pub(crate) fn alias_anchors(&self) -> Vec<Key> {
+        let rows = self.occurrence_rows();
+        let k = self.key_len;
+        let len = 2 * k + 12;
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        rows.chunks_exact(len).filter(|r| r[2 * k + 9] == ROLE_ALIAS).map(|r| self.key_at_row(r, k + 8)).collect()
+    }
+
     pub(crate) fn has_occurrences(&self) -> bool {
         !self.occurrence_rows().is_empty()
     }

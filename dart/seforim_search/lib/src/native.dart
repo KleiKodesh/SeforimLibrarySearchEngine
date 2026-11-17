@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 26;
+const int seforimAbiVersion = 27;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -230,6 +230,20 @@ final class SeforimNative {
             int Function(Pointer<Uint8>, int, Pointer<Uint8>, int)>('se_oxv_expand'),
         oxvInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
             Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_oxv_info'),
+        passagePlan = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
+            Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_passage_plan'),
+        passageMark = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
+            Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_passage_mark'),
+        vectorsDirInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
+            Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_vectors_dir_info'),
+        coverageOpen = lib.lookupFunction<Pointer<Void> Function(Pointer<Uint8>, Size, Pointer<Void>),
+            Pointer<Void> Function(Pointer<Uint8>, int, Pointer<Void>)>('se_vectors_coverage_open'),
+        coverageAddBook = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, Pointer<Uint8>, int)>('se_vectors_coverage_add_book'),
+        coverageResult = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Void>)>('se_vectors_coverage_result'),
+        coverageFree = lib.lookupFunction<Void Function(Pointer<Void>), void Function(Pointer<Void>)>(
+            'se_vectors_coverage_free'),
         oxvVerify = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>)>('se_oxv_verify'),
         vectorsInstall = lib.lookupFunction<
@@ -372,6 +386,13 @@ final class SeforimNative {
   final int Function(Pointer<Void>, Pointer<Uint8>, int, int) vectorsSetMapping;
   final int Function(Pointer<Uint8>, int, Pointer<Uint8>, int) oxvExpand;
   final Pointer<Utf8> Function(Pointer<Uint8>, int) oxvInfo;
+  final Pointer<Utf8> Function(Pointer<Uint8>, int) passagePlan;
+  final Pointer<Utf8> Function(Pointer<Uint8>, int) passageMark;
+  final Pointer<Utf8> Function(Pointer<Uint8>, int) vectorsDirInfo;
+  final Pointer<Void> Function(Pointer<Uint8>, int, Pointer<Void>) coverageOpen;
+  final int Function(Pointer<Void>, Pointer<Uint8>, int) coverageAddBook;
+  final Pointer<Utf8> Function(Pointer<Void>) coverageResult;
+  final void Function(Pointer<Void>) coverageFree;
   final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>) oxvVerify;
   final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int,
       Pointer<Uint8>, int, Pointer<Void>) vectorsInstall;

@@ -2553,13 +2553,44 @@ column: records are kept as they are (our index keeps no chunk keys: bare minimu
 Named deviation: a source block that fails its CRC refuses the compaction (`corrupt`)
 without writing the sidecar's condemnation verdict (this crate's set has no verdicts).
 
+**Passage highlights, coverage, status (issue #18).** Otzaria's
+`semanticPassageHighlights` (otzaria_search_engine 7.2.0 `semantic_highlight.rs` +
+`passage_highlight`) with the model in the host: `hebrew_fts::otzaria::semantic_highlight`
+cuts the text into clauses (after `. : ; ? !` sof-pasuq and comma, before `(`, after `)` and
+dashes; short parts merged; a part over 20 words cut into windows of 14 every 10; a line of
+at most 12 words or one clause has none), spends the call's 48 clauses in order (6 per line,
+a line with more chosen by the words it shares with the query: its index tokens, their
+alternatives and quote-free forms, plus the host dictionary's `forms`), and after the host's
+embeddings marks the nearest clause (f64 cosine, first on a tie) widened to query words
+within 3 words of its edge, cut to 800 bytes around it, escaped as htmlescape's
+`encode_minimal`, ellipses where cut. The text marked is the hit's embedded window
+(`Chunker::display_window_text`: a short line's section context, a long line's window
+past the first). C ABI `se_passage_plan` / `se_passage_mark` (ABI 27); Dart
+`planPassageHighlights` / `markPassageHighlights` and `semanticPassageHighlights(query,
+targets, embedder)` (embeds the canonical query once and the chosen clauses with
+`MeivinEmbedder.embedPassages`). Named deviations: no highlight cache in the engine (the
+host may keep one), no inline-note markup (our notes are their own lines), no per-call
+cancellation (the host stops between its calls). Tests: the old engine's own unit tests,
+verbatim. `semanticVectorsInfo` = `se_vectors_dir_info` / Dart `readVectorsDirInfo`
+(segment_set::info from set.json alone: CURRENT, else PREVIOUS when CURRENT does not read
+or a scrub's `.corrupt` verdict condemns it; a version-1 artifact refused; the default
+compaction policy's flag). `semanticCoverage` = `se_vectors_coverage_open` (every slot key
+and alias key of the set) + `_add_book` per live book (the host's lines and sections from
+SQLite; each line's key with the set's recipe) + `_result` / Dart `VectorCoverageCounter`
+(Otzaria's recompute path, no chunk-key column). `semanticStatus` = Dart
+`SemanticStatus.of(vectorInfo, modelLoaded:)` (Otzaria's status of a session over an
+installed set; `notConfigured` without one).
+
 **Query embedding (Dart package).** The Meivin model stays in the host, never in
 the engine: `package:seforim_search` exports `MeivinEmbedder` (ONNX Runtime C API
 through dart:ffi, synchronous, one per isolate; `unorm_dart` for NFKC) and its
 `MeivinTokenizer`; the demo uses it. API: `MeivinEmbedder.open(modelDir, ortLibrary,
 {threads, graphFile})` reads Otzaria's model folder (`model.json`: dims,
 `query_max_tokens` / `max_tokens`, `embedding_text_version` 1 / 2 / 3;
-`normalization_version` must be 1), `MeivinEmbedder.load(modelPath:, tokenizerPath:,
+`normalization_version` 1 = as supplied or 2 = Otzaria's pardes-clean-1, ported step for
+step as `meivinPardesClean`: tags to spaces, entities of at most 8 bytes decoded, whitespace
+folded, geresh / gershayim to ASCII quotes; applied to queries and passages before the role
+prefix, tested on the sidecar's own reference cases), `MeivinEmbedder.load(modelPath:, tokenizerPath:,
 ortLibrary:, dims:, maxTokens:, ...)` takes explicit paths; `embedQuery(q)`,
 `embedQueries(list)`, `embedPassages(list)` (each text its own `[1, len]` run, never
 batched, as Otzaria), `embedTokens(ids)`, `dispose()`. A query empty after trimming

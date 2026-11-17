@@ -14,6 +14,7 @@ pub(crate) mod inline_notes;
 pub(crate) mod gap_phrase;
 pub(crate) mod hebrew_query;
 pub(crate) mod hebrew_tokenizer;
+pub mod semantic_highlight;
 pub(crate) mod highlight_matcher;
 pub(crate) mod smart_query;
 mod unicode_alnum;

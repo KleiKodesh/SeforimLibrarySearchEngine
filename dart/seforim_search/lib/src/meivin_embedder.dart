@@ -86,6 +86,143 @@ enum MeivinTextRecipe {
   String passageText(String t) => this == rolePrefixed ? '[PASSAGE] ${_trim(t)}' : t;
 }
 
+/// Otzaria's text normalization (recipe.rs `TextNormalizationRecipe`, model.json
+/// `normalization_version`): applied to the text on both sides, before the
+/// [MeivinTextRecipe] adds its role prefix.
+enum MeivinTextNormalization {
+  /// 1 (`AsSuppliedByCorpus`): the text as it is.
+  asSupplied,
+
+  /// 2 (`PardesClean1`): pardes_clean.rs `clean` ([meivinPardesClean]).
+  pardesClean;
+
+  static MeivinTextNormalization fromVersion(int v) => switch (v) {
+        1 => asSupplied,
+        2 => pardesClean,
+        _ => throw UnsupportedError('normalization_version $v (supported: 1, 2)'),
+      };
+
+  String apply(String text) => this == pardesClean ? meivinPardesClean(text) : text;
+}
+
+/// pardes_clean.rs `space`: Rust White_Space plus U+FEFF.
+bool _pardesSpace(int c) =>
+    (c >= 0x09 && c <= 0x0D) ||
+    c == 0x20 ||
+    c == 0x85 ||
+    c == 0xA0 ||
+    c == 0x1680 ||
+    (c >= 0x2000 && c <= 0x200A) ||
+    c == 0x2028 ||
+    c == 0x2029 ||
+    c == 0x202F ||
+    c == 0x205F ||
+    c == 0x3000 ||
+    c == 0xFEFF;
+
+/// pardes_clean.rs `entity`: the code point a named or numeric entity body stands for.
+int? _pardesEntity(String s) {
+  switch (s) {
+    case 'amp':
+      return 0x26;
+    case 'lt':
+      return 0x3C;
+    case 'gt':
+      return 0x3E;
+    case 'quot':
+      return 0x22;
+    case 'apos':
+      return 0x27;
+    case 'nbsp':
+      return 0x20;
+  }
+  String digits;
+  int radix, max;
+  if (s.startsWith('#x') || s.startsWith('#X')) {
+    (digits, radix, max) = (s.substring(2), 16, 6);
+  } else if (s.startsWith('#')) {
+    (digits, radix, max) = (s.substring(1), 10, 7);
+  } else {
+    return null;
+  }
+  // Rust counts bytes; a non-ASCII char fails the digit test below anyway.
+  if (digits.isEmpty || digits.length > max) return null;
+  for (final c in digits.codeUnits) {
+    final dec = c >= 0x30 && c <= 0x39;
+    final hex = dec || (c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66);
+    if (!(radix == 16 ? hex : dec)) return null;
+  }
+  final n = int.parse(digits, radix: radix);
+  // char::from_u32: no surrogates, nothing past U+10FFFF; 0 is refused.
+  if (n == 0 || n > 0x10FFFF || (n >= 0xD800 && n <= 0xDFFF)) return null;
+  return n;
+}
+
+/// UTF-8 length of [s] (Rust string offsets are bytes).
+int _utf8Len(String s) {
+  var n = 0;
+  for (final r in s.runes) {
+    n += r < 0x80 ? 1 : r < 0x800 ? 2 : r < 0x10000 ? 3 : 4;
+  }
+  return n;
+}
+
+/// Otzaria's pardes-clean-1 (otzaria-semantic-search pardes_clean.rs `clean`) step
+/// for step: every `<...>` tag becomes a space (an unclosed `<` stays text),
+/// entities of at most 8 bytes are decoded, whitespace runs fold to one space
+/// (none leading or trailing), and U+05F4 / U+05F3 become `"` / `'`.
+String meivinPardesClean(String text) {
+  final tags = StringBuffer();
+  var rest = text;
+  while (true) {
+    final i = rest.indexOf('<');
+    if (i < 0) break;
+    tags.write(rest.substring(0, i));
+    final j = rest.indexOf('>', i);
+    if (j >= 0) {
+      tags.write(' ');
+      rest = rest.substring(j + 1);
+    } else {
+      tags.write(rest.substring(i));
+      rest = '';
+      break;
+    }
+  }
+  tags.write(rest);
+  final decoded = StringBuffer();
+  rest = tags.toString();
+  while (true) {
+    final i = rest.indexOf('&');
+    if (i < 0) break;
+    decoded.write(rest.substring(0, i));
+    final tail = rest.substring(i + 1);
+    final j = tail.indexOf(';');
+    final c = (j >= 0 && _utf8Len(tail.substring(0, j)) <= 8) ? _pardesEntity(tail.substring(0, j)) : null;
+    if (c != null) {
+      decoded.writeCharCode(c);
+      rest = tail.substring(j + 1);
+    } else {
+      decoded.write('&');
+      rest = tail;
+    }
+  }
+  decoded.write(rest);
+  final out = StringBuffer();
+  var pending = false;
+  for (final c in decoded.toString().runes) {
+    if (_pardesSpace(c)) {
+      pending = out.isNotEmpty;
+      continue;
+    }
+    if (pending) {
+      out.write(' ');
+      pending = false;
+    }
+    out.writeCharCode(c == 0x05F4 ? 0x22 : c == 0x05F3 ? 0x27 : c);
+  }
+  return out.toString();
+}
+
 /// Rust `str::trim` (Unicode White_Space). Dart's `trim` also strips U+FEFF,
 /// which is not White_Space, so it is spelled out.
 String _trim(String s) {
@@ -134,14 +271,15 @@ Float32List meivinL2Normalize(Float32List v) {
 /// Otzaria's Meivin embedding model run with ONNX Runtime (its C API through
 /// dart:ffi). Synchronous; one instance per isolate, [dispose] when done.
 class MeivinEmbedder {
-  MeivinEmbedder._(this.tokenizer, this.dims, this.maxTokens, this.passageMaxTokens, this.recipe, this._api,
-      this._env, this._session, this._mem, this._inputs, this._output);
+  MeivinEmbedder._(this.tokenizer, this.dims, this.maxTokens, this.passageMaxTokens, this.recipe,
+      this.normalization, this._api, this._env, this._session, this._mem, this._inputs, this._output);
 
   final MeivinTokenizer tokenizer;
 
   /// Output dimensions; token caps (specials included) for queries / passages.
   final int dims, maxTokens, passageMaxTokens;
   final MeivinTextRecipe recipe;
+  final MeivinTextNormalization normalization;
   final Pointer<Pointer<Void>> _api;
   final Pointer<Void> _env, _session, _mem;
   final List<String> _inputs;
@@ -149,13 +287,12 @@ class MeivinEmbedder {
   bool _disposed = false;
 
   /// Opens an Otzaria model folder: [graphFile] (default `query.int8.onnx`),
-  /// `tokenizer.json` and `model.json` (dims, token caps, text version;
-  /// normalization_version must be 1, the only one Meivin models declare).
+  /// `tokenizer.json` and `model.json` (dims, token caps, text version,
+  /// normalization_version 1 or 2).
   static MeivinEmbedder open(String modelDir, String ortLibrary,
       {int threads = 1, String graphFile = 'query.int8.onnx'}) {
     final meta = jsonDecode(File('$modelDir/model.json').readAsStringSync()) as Map<String, dynamic>;
-    final norm = meta['normalization_version'] as int? ?? 1;
-    if (norm != 1) throw UnsupportedError('normalization_version $norm (supported: 1)');
+    final norm = MeivinTextNormalization.fromVersion(meta['normalization_version'] as int? ?? 1);
     return load(
         modelPath: '$modelDir/$graphFile',
         tokenizerPath: '$modelDir/tokenizer.json',
@@ -164,6 +301,7 @@ class MeivinEmbedder {
         maxTokens: meta['query_max_tokens'] as int? ?? meta['max_tokens'] as int,
         passageMaxTokens: meta['max_tokens'] as int,
         recipe: MeivinTextRecipe.fromVersion(meta['embedding_text_version'] as int? ?? 1),
+        normalization: norm,
         threads: threads);
   }
 
@@ -176,6 +314,7 @@ class MeivinEmbedder {
       required int maxTokens,
       int? passageMaxTokens,
       MeivinTextRecipe recipe = MeivinTextRecipe.rolePrefixed,
+      MeivinTextNormalization normalization = MeivinTextNormalization.asSupplied,
       int threads = 1}) {
     final tok = MeivinTokenizer.load(tokenizerPath);
     final lib = DynamicLibrary.open(ortLibrary);
@@ -247,19 +386,22 @@ class MeivinEmbedder {
       }
       final output = name(_sessionGetOutputName, 0);
       return MeivinEmbedder._(
-          tok, dims, maxTokens, passageMaxTokens ?? maxTokens, recipe, api, env, session, mem, inputs, output);
+          tok, dims, maxTokens, passageMaxTokens ?? maxTokens, recipe, normalization, api, env, session, mem, inputs, output);
     });
   }
 
-  /// The token ids Otzaria feeds for a query (recipe.rs `query_input`: a query
-  /// with no text after trimming is refused, as Otzaria refuses it).
+  /// The token ids Otzaria feeds for a query (recipe.rs `query_input`: the
+  /// query normalized, refused when no text is left after trimming, then the
+  /// recipe's query text).
   List<int> queryTokens(String query) {
-    if (_trim(query).isEmpty) throw ArgumentError.value(query, 'query', 'holds no text, nothing to embed');
-    return tokenizer.encode(recipe.queryText(query), maxTokens: maxTokens);
+    final normalized = normalization.apply(query);
+    if (_trim(normalized).isEmpty) throw ArgumentError.value(query, 'query', 'holds no text, nothing to embed');
+    return tokenizer.encode(recipe.queryText(normalized), maxTokens: maxTokens);
   }
 
-  /// The token ids for a stored passage (recipe `passage_text`, `max_tokens`).
-  List<int> passageTokens(String text) => tokenizer.encode(recipe.passageText(text), maxTokens: passageMaxTokens);
+  /// The token ids for a stored passage (normalized, then recipe `passage_text`, `max_tokens`).
+  List<int> passageTokens(String text) =>
+      tokenizer.encode(recipe.passageText(normalization.apply(text)), maxTokens: passageMaxTokens);
 
   /// The query's embedding, L2-normalized (Otzaria's query vector).
   Float32List embedQuery(String query) => embedTokens(queryTokens(query));

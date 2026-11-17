@@ -10,6 +10,7 @@ export 'src/index.dart' hide writerResortAndCloseAt;
 export 'src/session.dart';
 export 'src/async_search.dart';
 export 'src/semantic.dart';
+export 'src/semantic_passages.dart';
 export 'src/vector_set.dart';
 export 'src/meivin_embedder.dart';
 export 'src/meivin_tokenizer.dart';

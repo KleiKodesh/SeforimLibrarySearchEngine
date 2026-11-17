@@ -58,6 +58,8 @@ pub enum Kind {
     NoSpace,
     Invalid,
     Internal,
+    /// Nothing is installed where a set was expected (Otzaria `ArtifactMissing`).
+    Missing,
 }
 
 impl Kind {
@@ -70,6 +72,7 @@ impl Kind {
             Kind::NoSpace => "no_space",
             Kind::Invalid => "invalid",
             Kind::Internal => "internal",
+            Kind::Missing => "missing",
         }
     }
 }
@@ -88,7 +91,7 @@ pub fn error_kind(e: &Error) -> Option<Kind> {
         Error::Io(_) => Some(Kind::Internal),
         Error::Invalid(_) => Some(Kind::Invalid),
         Error::Format(m) => Some(
-            [Kind::Corrupt, Kind::Incompatible, Kind::NotPublished, Kind::Busy, Kind::NoSpace, Kind::Invalid, Kind::Internal]
+            [Kind::Corrupt, Kind::Incompatible, Kind::NotPublished, Kind::Busy, Kind::NoSpace, Kind::Invalid, Kind::Internal, Kind::Missing]
                 .into_iter()
                 .find(|k| m.starts_with(&format!("vector install [{}]", k.tag())))
                 .unwrap_or(Kind::Corrupt),
@@ -674,6 +677,93 @@ fn read_generation(dir: &Path, p: &Pointer) -> Option<SetDocument> {
     }
     let d: SetDocument = serde_json::from_slice(&bytes).ok()?;
     (d.format == SET_FORMAT && d.generation == p.generation).then_some(d)
+}
+
+/// files.rs `read_verdict` + `verdict_against`: whether a scrub's verdict condemns segment
+/// `id` as the generation names it (`segments/<id>.corrupt`; an empty or unreadable verdict
+/// condemns any bytes, one naming other bytes than `sha256` too).
+fn condemned(dir: &Path, id: &str, sha256: &str) -> bool {
+    let path = dir.join("segments").join(format!("{id}.corrupt"));
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    let named = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("sha256").and_then(|s| s.as_str()).map(str::to_string))
+        .unwrap_or_default();
+    named.is_empty() || named != sha256
+}
+
+/// segment_set::info's `usable` + `refuse_a_v1_artifact`: the readable, uncondemned
+/// generation (CURRENT's, else PREVIOUS's) and whether it is PREVIOUS's; None when nothing
+/// is installed.
+fn readable_generation(dir: &Path) -> Result<Option<(SetDocument, bool)>> {
+    let current = read_pointer(dir, "CURRENT");
+    let previous = read_pointer(dir, "PREVIOUS");
+    if matches!((&current, &previous), (Ok(None), Ok(None))) {
+        if dir.join("manifest.json").is_file() {
+            return Err(fail(Kind::Incompatible, format!("{} holds a version-1 artifact, which this build does not read", dir.display())));
+        }
+        return Ok(None);
+    }
+    let usable = |p: &std::result::Result<Option<Pointer>, ()>| -> Option<SetDocument> {
+        let p = p.as_ref().ok()?.as_ref()?;
+        let d = read_generation(dir, p)?;
+        (!d.segments.iter().any(|s| condemned(dir, &s.id, &s.sha256))).then_some(d)
+    };
+    if let Some(d) = usable(&current) {
+        return Ok(Some((d, false)));
+    }
+    if let Some(d) = usable(&previous) {
+        return Ok(Some((d, true)));
+    }
+    Err(fail(Kind::Corrupt, format!("{}: neither CURRENT nor PREVIOUS names a generation that can be read", dir.display())))
+}
+
+/// [`crate::coverage::dir_info`]: segment_set::info + `info_of` from set.json alone.
+pub(crate) fn dir_info(dir: &Path) -> Result<crate::coverage::VectorsDirInfo> {
+    let Some((d, recovered)) = readable_generation(dir)? else {
+        return Ok(Default::default());
+    };
+    let segments: Vec<crate::coverage::DirSegmentInfo> = d
+        .segments
+        .iter()
+        .map(|s| crate::coverage::DirSegmentInfo {
+            id: s.id.clone(),
+            kind: s.kind.clone(),
+            from_library_version: s.from,
+            to_library_version: s.to,
+            slots: s.slots,
+            slots_dead: s.del.count,
+            foreign_unresolved: s.links.as_ref().map_or(0, |l| l.count),
+            size: s.size,
+        })
+        .collect();
+    let slots: u64 = segments.iter().map(|s| s.slots).sum();
+    let dead: u64 = segments.iter().map(|s| s.slots_dead).sum();
+    let sizes: Vec<u64> = segments.iter().map(|s| s.size).collect();
+    Ok(crate::coverage::VectorsDirInfo {
+        present: true,
+        identity_digest: d.identity_digest.clone(),
+        model_family_id: d.identity.pointer("/model/family_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        library_version: d.library_version,
+        library_release_tag: d.library_release_tag.clone(),
+        generation: d.generation,
+        bytes_on_disk: sizes.iter().sum(),
+        needs_compaction: compaction_wanted(&sizes, slots, dead),
+        slots_live: slots.saturating_sub(dead),
+        slots_dead: dead,
+        segments,
+        recovered_from_previous: recovered,
+        chunking_identity: d.identity.pointer("/model/chunking_identity").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
+}
+
+/// The segment files (relative to `dir`) of the generation [`dir_info`] reads.
+pub(crate) fn live_segment_files(dir: &Path) -> Result<Vec<String>> {
+    Ok(readable_generation(dir)?.map_or_else(Vec::new, |(d, _)| d.segments.into_iter().map(|s| s.file).collect()))
 }
 
 fn gen_dir(generation: u64) -> String {

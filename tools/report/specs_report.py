@@ -25,8 +25,9 @@ MEASURED_FTSLIB = "fts14"     # FtsLib format of the runs in the results dir (= 
 STALE = [
     "The keep-marks build was not rebuilt (its row is the old dev-machine `tantivy9` number); every other "
     "result is from fullrun run 43815271560 (2026-11-16, `tantivy17` / `fts14`, one GitHub windows runner per job).",
-    "Otzaria hit counts, fuzzy rows: the Otzaria fuzzy mode now ignores quotes (Otzaria's fuzzy automaton is "
-    "quote-transparent); the rows need a rerun on the fullrun workflow (FtsLib parity unchanged).",
+    "Otzaria hit counts, fuzzy rows: fuzzy words now take Otzaria's quote rule by default (the word as typed "
+    "against a term as written or quote-free, the closer distance; off with `exact_quotes`); the rows need a "
+    "rerun on the fullrun workflow (FtsLib parity unchanged: the FtsLib facade sets `ignore_quotes`).",
 ]
 # Snippets from index positions vs the text path (median of 15, first 4000 hits, 8 cores).
 SNIPPETS = [

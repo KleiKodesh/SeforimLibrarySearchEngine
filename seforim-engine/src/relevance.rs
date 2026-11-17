@@ -214,15 +214,18 @@ struct FuzzySlot<'a> {
     word: &'a str,
     distance: u8,
     ignore_quotes: bool,
+    exact_quotes: bool,
     forms: Vec<&'a str>,
 }
 
 /// `g` as a fuzzy-mode slot: a fuzzy word (its own cap aside), alone or
 /// with dictionary forms only. None for any other slot.
 fn fuzzy_slot_of(g: &GroupSpec) -> Option<FuzzySlot<'_>> {
-    fn fuzzy(g: &GroupSpec) -> Option<(&str, u8, bool)> {
+    fn fuzzy(g: &GroupSpec) -> Option<(&str, u8, bool, bool)> {
         match g {
-            GroupSpec::Fuzzy { word, distance, ignore_quotes } => Some((word, *distance, *ignore_quotes)),
+            GroupSpec::Fuzzy { word, distance, ignore_quotes, exact_quotes } => {
+                Some((word, *distance, *ignore_quotes, *exact_quotes))
+            }
             GroupSpec::Capped { group, .. } => fuzzy(group),
             _ => None,
         }
@@ -234,8 +237,8 @@ fn fuzzy_slot_of(g: &GroupSpec) -> Option<FuzzySlot<'_>> {
             _ => None,
         }
     }
-    if let Some((word, distance, ignore_quotes)) = fuzzy(g) {
-        return Some(FuzzySlot { word, distance, ignore_quotes, forms: Vec::new() });
+    if let Some((word, distance, ignore_quotes, exact_quotes)) = fuzzy(g) {
+        return Some(FuzzySlot { word, distance, ignore_quotes, exact_quotes, forms: Vec::new() });
     }
     if let GroupSpec::Capped { group, .. } = g {
         return fuzzy_slot_of(group);
@@ -256,8 +259,8 @@ fn fuzzy_slot_of(g: &GroupSpec) -> Option<FuzzySlot<'_>> {
             _ => return None,
         }
     }
-    let (word, distance, ignore_quotes) = found?;
-    Some(FuzzySlot { word, distance, ignore_quotes, forms })
+    let (word, distance, ignore_quotes, exact_quotes) = found?;
+    Some(FuzzySlot { word, distance, ignore_quotes, exact_quotes, forms })
 }
 
 /// True when every slot is a fuzzy word (Otzaria's fuzzy mode).
@@ -848,6 +851,7 @@ impl MainWeights {
             } else {
                 let mut q = hebrew_fts::HebrewFuzzyQuery::new(field, f.word, f.distance);
                 q.set_ignore_quotes(f.ignore_quotes);
+                q.set_quote_free_terms(!f.exact_quotes);
                 q.set_marked_terms(plan.marked_terms);
                 let dfa = q.automaton();
                 m.terms[i]
@@ -1725,7 +1729,7 @@ mod tests {
         let shalom = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
         let near = "\u{05E9}\u{05DC}\u{05DD}"; // one deletion
         let (_d, index) = build(IndexOptions::default(), &[(1, near), (1, &format!("{shalom} {C}")), (1, C)]);
-        let fuzzy = GroupSpec::Fuzzy { word: shalom.into(), distance: 1, ignore_quotes: true };
+        let fuzzy = GroupSpec::Fuzzy { word: shalom.into(), distance: 1, ignore_quotes: true, exact_quotes: false };
         let r = index.search(&relevance(vec![fuzzy])).unwrap();
         assert_eq!(ids(&r), vec![1, 0]);
         // tantivy's TermQuery BM25 for the exact word, as Otzaria's exact clause
@@ -1743,7 +1747,7 @@ mod tests {
         let texts = [format!("{shalom} {C} {D} {A}"), format!("{shalom} {C} {A}")];
         let texts: Vec<(u64, &str)> = texts.iter().map(|t| (1, t.as_str())).collect();
         let (_d2, index) = build(IndexOptions::default(), &texts);
-        let f = |w: &str| GroupSpec::Fuzzy { word: w.into(), distance: 1, ignore_quotes: true };
+        let f = |w: &str| GroupSpec::Fuzzy { word: w.into(), distance: 1, ignore_quotes: true, exact_quotes: false };
         let r = index.search(&relevance(vec![f(shalom), f(A)])).unwrap();
         assert_eq!(ids(&r), vec![1, 0]);
         let s = r.scores().unwrap();

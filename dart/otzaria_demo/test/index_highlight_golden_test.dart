@@ -61,31 +61,6 @@ void _record(String key, Object? value) {
   if (Platform.environment['INDEX_HIGHLIGHT_DUMP'] != null) _dump[key] = value;
 }
 
-// Optimal string alignment distance (a swap of two adjacent letters is one edit).
-int _osa(String a, String b) {
-  final x = a.runes.toList(), y = b.runes.toList();
-  final d = List.generate(x.length + 1, (i) => List.filled(y.length + 1, 0));
-  for (var i = 0; i <= x.length; i++) {
-    d[i][0] = i;
-  }
-  for (var j = 0; j <= y.length; j++) {
-    d[0][j] = j;
-  }
-  for (var i = 1; i <= x.length; i++) {
-    for (var j = 1; j <= y.length; j++) {
-      final cost = x[i - 1] == y[j - 1] ? 0 : 1;
-      var v = [d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost].reduce((p, q) => p < q ? p : q);
-      if (i > 1 && j > 1 && x[i - 1] == y[j - 2] && x[i - 2] == y[j - 1] && d[i - 2][j - 2] + 1 < v) v = d[i - 2][j - 2] + 1;
-      d[i][j] = v;
-    }
-  }
-  return d[x.length][y.length];
-}
-
-// Otzaria's quote-transparent fuzzy rule: the term as written or without its quotes.
-bool _otzariaFuzzyMatch(String word, String term, int d) =>
-    _osa(word, term) <= d || _osa(word, term.replaceAll(RegExp(r'''['"]'''), '')) <= d;
-
 // The divine-name placeholder spelling with U+05E7 (issue #39) of a query without it.
 bool _placeholderSpelling(String term, String query) => term.contains('\u05E7') && !query.contains('\u05E7');
 
@@ -146,11 +121,7 @@ void main() {
   List<String> fuzzyTerms(String word, int d) {
     if (d == 0) return const [];
     final g = groupTerms(OtzariaSearch(query: word, mode: SearchMode.fuzzy, fuzzyDistance: d));
-    // A named deviation: this engine's fuzzy mode measures a word that itself holds a
-    // quote on its quote-free form; Otzaria's automaton keeps the word's quote (a term
-    // matches as written or without its quotes). Its terms are a superset; the pattern
-    // is compared on the old engine's own set.
-    return g.isEmpty ? const [] : [for (final t in g.first) if (_otzariaFuzzyMatch(word, t, d)) t];
+    return g.isEmpty ? const [] : g.first;
   }
 
   final cases = (input['highlight'] as List).cast<Map<String, dynamic>>();

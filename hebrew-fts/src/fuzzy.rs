@@ -21,6 +21,7 @@ use tantivy::query::{
 use tantivy::schema::Field;
 use tantivy_fst::Automaton;
 
+use crate::quote_free::QuoteFree;
 use crate::walk::DEFAULT_MAX_EXPANDED_TERMS;
 
 /// A Levenshtein DFA as a tantivy automaton. With `transparent_quotes` the
@@ -37,6 +38,11 @@ pub struct LevenshteinDfa {
     /// exact form is matched with its typed marks by a word walk, see
     /// [`HebrewFuzzyQuery`]), else 0.
     min_distance: u8,
+    /// Otzaria's `QuoteTransparent` rule (quotes not ignored): a term is as
+    /// far as the closer of its form as written and its quote-free form (with
+    /// at least one letter). The walk wraps the DFA in
+    /// [`QuoteFree`](crate::quote_free::QuoteFree) for the same rule.
+    quote_free_terms: bool,
 }
 
 impl LevenshteinDfa {
@@ -51,17 +57,34 @@ impl LevenshteinDfa {
         } else {
             term
         };
-        if self.transparent_quotes && term.iter().any(|&b| crate::chars::is_term_quote_byte(b)) {
-            let stripped: Vec<u8> = term.iter().copied().filter(|&b| !crate::chars::is_term_quote_byte(b)).collect();
-            self.dfa.eval(stripped)
-        } else {
-            self.dfa.eval(term)
+        let quoted = term.iter().any(|&b| crate::chars::is_term_quote_byte(b));
+        if !quoted || !(self.transparent_quotes || self.quote_free_terms) {
+            return self.dfa.eval(term);
         }
+        let stripped: Vec<u8> = term.iter().copied().filter(|&b| !crate::chars::is_term_quote_byte(b)).collect();
+        if self.transparent_quotes {
+            return self.dfa.eval(stripped);
+        }
+        // as written, or quote-free (an all-quote term has no quote-free form)
+        let literal = self.dfa.eval(term);
+        if stripped.is_empty() {
+            return literal;
+        }
+        closer(literal, self.dfa.eval(stripped))
     }
 
     /// The fewest edits a match takes (1: typo variants only).
     pub fn min_distance(&self) -> u8 {
         self.min_distance
+    }
+}
+
+/// The closer of two distances (`Exact` before `AtLeast`).
+fn closer(a: Distance, b: Distance) -> Distance {
+    match (a, b) {
+        (Distance::Exact(x), Distance::Exact(y)) => Distance::Exact(x.min(y)),
+        (Distance::Exact(x), Distance::AtLeast(_)) | (Distance::AtLeast(_), Distance::Exact(x)) => Distance::Exact(x),
+        (Distance::AtLeast(x), Distance::AtLeast(y)) => Distance::AtLeast(x.min(y)),
     }
 }
 
@@ -134,6 +157,10 @@ pub struct HebrewFuzzyQuery {
     matched_terms_sink: Option<MatchedTermsSink>,
     max_expansions: usize,
     ignore_quotes: bool,
+    /// Index terms match as written or by their quote-free form (Otzaria's
+    /// `QuoteTransparent`); off with `exact_quotes`. No effect with
+    /// `ignore_quotes`, which already measures on quote-free forms.
+    quote_free_terms: bool,
     /// The index keeps marks in its terms: they are read as zero width.
     marked_terms: bool,
 }
@@ -153,6 +180,7 @@ impl HebrewFuzzyQuery {
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
             ignore_quotes: false,
+            quote_free_terms: false,
             marked_terms: false,
         }
     }
@@ -172,6 +200,20 @@ impl HebrewFuzzyQuery {
     /// True when the quote is transparent.
     pub fn ignore_quotes(&self) -> bool {
         self.ignore_quotes
+    }
+
+    /// Otzaria's quote rule for a word whose quotes are not ignored (the
+    /// default unless `exact_quotes`): the word is measured as typed, quote
+    /// included, against each index term as written OR without its quotes
+    /// (Otzaria's `QuoteTransparent` around its fuzzy DFA), the closer wins.
+    /// For a quote-free word this equals measuring on the quote-free terms.
+    pub fn set_quote_free_terms(&mut self, on: bool) {
+        self.quote_free_terms = on;
+    }
+
+    /// True when terms also match by their quote-free form.
+    pub fn quote_free_terms(&self) -> bool {
+        self.quote_free_terms && !self.ignore_quotes
     }
 
     /// Collects the indexed forms this query matches into `sink` during the
@@ -220,6 +262,7 @@ impl HebrewFuzzyQuery {
             transparent_quotes: self.ignore_quotes,
             transparent_marks: self.marked_terms,
             min_distance: u8::from(vocalized),
+            quote_free_terms: self.quote_free_terms(),
         }
     }
 
@@ -261,14 +304,16 @@ impl HebrewFuzzyQuery {
         searcher: &tantivy::Searcher,
     ) -> tantivy::Result<Arc<dyn SpanTermSource>> {
         let dfa = Arc::new(self.automaton());
-        Ok(self.plan(&dfa, Some(searcher.segment_readers())).span(SharedDfa(dfa.clone())))
+        let walk = QuoteFree::new(SharedDfa(dfa.clone()), self.quote_free_terms());
+        Ok(self.plan(&dfa, Some(searcher.segment_readers())).span(walk))
     }
 }
 
 impl Query for HebrewFuzzyQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
         let dfa = Arc::new(self.automaton());
-        Ok(self.plan(&dfa, enable_scoring.searcher().map(|s| s.segment_readers())).boxed(SharedDfa(dfa.clone())))
+        let walk = QuoteFree::new(SharedDfa(dfa.clone()), self.quote_free_terms());
+        Ok(self.plan(&dfa, enable_scoring.searcher().map(|s| s.segment_readers())).boxed(walk))
     }
 }
 
@@ -304,6 +349,43 @@ mod tests {
         let dfa = q.automaton();
         assert!(matches!(dfa.distance(b"bacd"), Distance::Exact(1)));
         assert!(matches!(dfa.distance(b"badc"), Distance::AtLeast(_)));
+    }
+
+    #[test]
+    fn quote_free_terms_is_otzarias_quote_transparent_rule() {
+        // ASCII stand-ins: the word keeps its quote; a term matches as
+        // written or quote-free, the closer distance wins
+        let terms = ["ab\"cd", "abcd", "abxcd", "ab\"xd", "xabcdx", "\"\""];
+        let (index, field) = index_of(&terms);
+        let searcher = index.reader().unwrap().searcher();
+        let run = |word: &str, quote_free: bool, ignore: bool| {
+            let mut q = HebrewFuzzyQuery::new(field, word, 1);
+            q.set_quote_free_terms(quote_free);
+            q.set_ignore_quotes(ignore);
+            let sink = MatchedTermsSink::new();
+            q.set_matched_terms_sink(sink.clone());
+            searcher.search(&q, &Count).unwrap();
+            let mut got = sink.take_strings();
+            got.sort();
+            got
+        };
+        // quoted word, Otzaria's rule: as written (ab"cd 0, ab"xd 1, abcd 1,
+        // abxcd 1) or quote-free (none closer)
+        assert_eq!(run("ab\"cd", true, false), vec!["ab\"cd", "ab\"xd", "abcd", "abxcd"]);
+        // quote-free word: ab"cd by its quote-free form (0), ab"xd quote-free (1)
+        assert_eq!(run("abcd", true, false), vec!["ab\"cd", "ab\"xd", "abcd", "abxcd"]);
+        // literal only
+        assert_eq!(run("abcd", false, false), vec!["ab\"cd", "abcd", "abxcd"]);
+        // ignore_quotes: every form quote-free (FtsLib's quote-free terms)
+        assert_eq!(run("ab\"cd", true, true), vec!["ab\"cd", "ab\"xd", "abcd", "abxcd"]);
+        let q = {
+            let mut q = HebrewFuzzyQuery::new(field, "abcd", 2);
+            q.set_quote_free_terms(true);
+            q
+        };
+        let dfa = q.automaton();
+        assert!(matches!(dfa.distance(b"ab\"cd"), Distance::Exact(0)));
+        assert!(matches!(dfa.distance(b"\"ab\"x\"d"), Distance::Exact(1)));
     }
 
     #[test]

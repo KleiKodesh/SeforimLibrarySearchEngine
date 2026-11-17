@@ -402,6 +402,7 @@ mod tests {
                     word: "שלם".into(),
                     distance: 1,
                     ignore_quotes: false,
+                    exact_quotes: false,
                 }],
                 ..Default::default()
             })
@@ -1253,7 +1254,9 @@ mod tests {
 
     /// The parity diff that found the bug: FtsLib's quote-free index has
     /// יציק, one edit from יצחק; ours keeps יצי"ק, which the DFA counted as two
-    /// edits. With the quote transparent it is one edit on both paths.
+    /// edits. With the quote transparent it is one edit on both paths, and
+    /// so it is by default (Otzaria's rule: a term also by its quote-free
+    /// form); only `exact_quotes` counts the quote.
     #[test]
     fn fuzzy_quote_is_not_an_edit_when_ignored() {
         let dir = tempfile::tempdir().unwrap();
@@ -1262,8 +1265,8 @@ mod tests {
             IndexOptions::default(),
             &[line(1, 0, 1, "ויציק יצי\"ק שמן"), line(2, 1, 1, "אבגד")],
         );
-        let fuzzy = |ignore_quotes: bool| SearchRequest {
-            groups: vec![GroupSpec::Fuzzy { word: "יצחק".into(), distance: 1, ignore_quotes }],
+        let fuzzy = |ignore_quotes: bool, exact_quotes: bool| SearchRequest {
+            groups: vec![GroupSpec::Fuzzy { word: "יצחק".into(), distance: 1, ignore_quotes, exact_quotes }],
             ..Default::default()
         };
         for fm in [false, true] {
@@ -1273,12 +1276,14 @@ mod tests {
                 w.merge_all().unwrap();
                 assert!(index.build_fm_sidecar().unwrap());
             }
-            assert!(index.search(&fuzzy(false)).unwrap().hits.is_empty(), "fm={fm}: quote counts as an edit");
-            let mut r = index.search(&fuzzy(true)).unwrap();
-            assert_eq!(r.hits.len(), 1, "fm={fm}");
-            let s = r.session.locate("ויציק יצי\"ק שמן").unwrap();
-            let terms: Vec<String> = s.marks.chunks(3).map(|m| r.session.all_terms()[m[2] as usize].clone()).collect();
-            assert_eq!(terms, vec!["יצי\"ק"], "fm={fm}");
+            assert!(index.search(&fuzzy(false, true)).unwrap().hits.is_empty(), "fm={fm}: quote counts as an edit");
+            for (ignore, exact) in [(true, false), (true, true), (false, false)] {
+                let mut r = index.search(&fuzzy(ignore, exact)).unwrap();
+                assert_eq!(r.hits.len(), 1, "fm={fm} ignore={ignore} exact={exact}");
+                let s = r.session.locate("ויציק יצי\"ק שמן").unwrap();
+                let terms: Vec<String> = s.marks.chunks(3).map(|m| r.session.all_terms()[m[2] as usize].clone()).collect();
+                assert_eq!(terms, vec!["יצי\"ק"], "fm={fm} ignore={ignore} exact={exact}");
+            }
         }
     }
 
@@ -1335,11 +1340,13 @@ mod tests {
             word: w.into(),
             distance: d,
             ignore_quotes: false,
+            exact_quotes: false,
         };
         let fuzzy_q = |w: &str, d: u8| GroupSpec::Fuzzy {
             word: w.into(),
             distance: d,
             ignore_quotes: true,
+            exact_quotes: false,
         };
         let groups: Vec<GroupSpec> = vec![
             wildcard("*אב", false),

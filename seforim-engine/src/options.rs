@@ -770,9 +770,9 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
             if word.chars().any(hebrew_fts::chars::is_term_mark) {
                 // the exact form with its typed marks, or a typo variant mark-free
                 let exact = GroupSpec::Word { word: word.clone(), options: exact_options(o) };
-                GroupSpec::Any { alternatives: vec![exact, GroupSpec::Fuzzy { word, distance, ignore_quotes }] }
+                GroupSpec::Any { alternatives: vec![exact, GroupSpec::Fuzzy { word, distance, ignore_quotes, exact_quotes: o.exact_quotes }] }
             } else {
-                GroupSpec::Fuzzy { word, distance, ignore_quotes }
+                GroupSpec::Fuzzy { word, distance, ignore_quotes, exact_quotes: o.exact_quotes }
             }
         }
         QueryTerm::Grammar { word, prefixes, suffixes } => {

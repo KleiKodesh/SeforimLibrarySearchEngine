@@ -134,6 +134,11 @@ pub enum GroupSpec {
         /// quote-free forms, as FtsLib's quote-free terms.
         #[serde(default)]
         ignore_quotes: bool,
+        /// Off (default, quotes not ignored): Otzaria's `QuoteTransparent`
+        /// rule, the word as typed against each term as written or without
+        /// its quotes, the closer distance wins. On: terms as written only.
+        #[serde(default)]
+        exact_quotes: bool,
     },
     /// A literal word too long to be indexed (its term has
     /// `MAX_TERM_BYTES` bytes or more): it matches no term. It keeps its
@@ -2132,12 +2137,13 @@ impl LineIndex {
                 q.set_max_expansions(walk.cap);
                 Some(q.span_slot(searcher)?)
             }
-            GroupSpec::Fuzzy { word, distance, ignore_quotes } => {
+            GroupSpec::Fuzzy { word, distance, ignore_quotes, exact_quotes } => {
                 if word.is_empty() {
                     return Ok(None);
                 }
                 let mut q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
                 q.set_ignore_quotes(*ignore_quotes);
+                q.set_quote_free_terms(!*exact_quotes);
                 q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
                 q.set_max_expansions(walk.cap);
@@ -2277,12 +2283,13 @@ impl LineIndex {
                 q.set_max_expansions(walk.cap);
                 Some(Box::new(q))
             }
-            GroupSpec::Fuzzy { word, distance, ignore_quotes } => {
+            GroupSpec::Fuzzy { word, distance, ignore_quotes, exact_quotes } => {
                 if word.is_empty() {
                     return Ok(None);
                 }
                 let mut q = HebrewFuzzyQuery::new(self.fields.text, word.clone(), *distance);
                 q.set_ignore_quotes(*ignore_quotes);
+                q.set_quote_free_terms(!*exact_quotes);
                 q.set_marked_terms(self.options.keep_marks);
                 q.set_matched_terms_sink(sink.clone());
                 q.set_max_expansions(walk.cap);
@@ -2489,12 +2496,13 @@ impl LineIndex {
                 )?;
                 Ok(Some(terms))
             }
-            GroupSpec::Fuzzy { word, distance, ignore_quotes } => {
+            GroupSpec::Fuzzy { word, distance, ignore_quotes, exact_quotes } => {
                 if word.is_empty() {
                     return Ok(None);
                 }
                 let mut q = HebrewFuzzyQuery::new(field, word.clone(), *distance);
                 q.set_ignore_quotes(*ignore_quotes);
+                q.set_quote_free_terms(!*exact_quotes);
                 q.set_marked_terms(self.options.keep_marks);
                 let Some(sidecars) = sidecars()? else { return Ok(None) };
                 let parts: Vec<_> = sidecars.iter().map(|(fm, inv)| (*fm, inv.terms())).collect();

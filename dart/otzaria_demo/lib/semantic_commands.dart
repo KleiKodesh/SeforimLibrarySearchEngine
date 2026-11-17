@@ -9,7 +9,6 @@ import 'dart:typed_data';
 
 import 'package:seforim_search/seforim_search.dart';
 
-import 'meivin_embedder.dart';
 import 'seforim_db.dart';
 
 String _ms(num ms) => ms < 1000 ? '${ms.toStringAsFixed(ms < 100 ? 1 : 0)} ms' : '${(ms / 60000).toStringAsFixed(2)} min';
@@ -305,7 +304,7 @@ void semanticSearchCommand(SeforimDb db, String indexDir, String vectors,
         }
       }
     } finally {
-      emb.close();
+      emb.dispose();
     }
     final sorted = [...latencies]..sort();
     final p95 = sorted[((0.95 * sorted.length).ceil() - 1).clamp(0, sorted.length - 1)];

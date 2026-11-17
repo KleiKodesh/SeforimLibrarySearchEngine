@@ -2553,14 +2553,28 @@ column: records are kept as they are (our index keeps no chunk keys: bare minimu
 Named deviation: a source block that fails its CRC refuses the compaction (`corrupt`)
 without writing the sidecar's condemnation verdict (this crate's set has no verdicts).
 
-**Query embedding (host demo).** The Meivin model stays in the host: Dart
-`meivin_embedder.dart` (ONNX Runtime C API through dart:ffi; `unorm_dart`
-for NFKC). Otzaria's recipe: `"[QUERY] " + query.trim()`, the model's
+**Query embedding (Dart package).** The Meivin model stays in the host, never in
+the engine: `package:seforim_search` exports `MeivinEmbedder` (ONNX Runtime C API
+through dart:ffi, synchronous, one per isolate; `unorm_dart` for NFKC) and its
+`MeivinTokenizer`; the demo uses it. API: `MeivinEmbedder.open(modelDir, ortLibrary,
+{threads, graphFile})` reads Otzaria's model folder (`model.json`: dims,
+`query_max_tokens` / `max_tokens`, `embedding_text_version` 1 / 2 / 3;
+`normalization_version` must be 1), `MeivinEmbedder.load(modelPath:, tokenizerPath:,
+ortLibrary:, dims:, maxTokens:, ...)` takes explicit paths; `embedQuery(q)`,
+`embedQueries(list)`, `embedPassages(list)` (each text its own `[1, len]` run, never
+batched, as Otzaria), `embedTokens(ids)`, `dispose()`. A query empty after trimming
+throws (Otzaria's `query_input`). The L2 normalization is Otzaria's `l2_normalize`
+in f32 step for step (`meivinL2Normalize`). Otzaria's recipe: `"[QUERY] " + query.trim()`
+(Rust `str::trim`: U+FEFF is kept), the model's
 `tokenizer.json` (a Unigram tokenizer in each demo: added tokens, normalizer
 rules from the JSON, Metaspace, `[CLS] .. [SEP]`, right truncation to
 `query_max_tokens`), `input_ids` + `attention_mask` int64 (`token_type_ids`
 zeros only when declared), first output, L2-normalized. The tokenizer gives
-Otzaria's golden token ids on all 41 golden cases. Demo command (Dart): `semantic-search <index> --vectors <set dir or
+Otzaria's golden token ids on all 41 golden cases. Tests (`dart/seforim_search/test/meivin_*`): the tokenizer on a tiny
+fixture + the golden ids, the f32 normalization, the recipes; with the installed model
+and onnxruntime (`OTZARIA_ONNX_RUNTIME`) every golden query's ids and a vector close to
+the fp32 reference (the installed graph is int8); every golden vector within 1e-5 only with
+`OTZARIA_TEST_ONNX_MODEL` = the reference fp32 graph (else skipped). Demo command (Dart): `semantic-search <index> --vectors <set dir or
 .oxv> --db <seforim.db> --model <dir> (--line N | --lines a,b | --query text)
 [--k] [--books] [--threads] [--hybrid] [--repeat]`: maps the set's `id:N` books
 through seforim.db with the text check (rows + `line_note`; `--no-verify` =

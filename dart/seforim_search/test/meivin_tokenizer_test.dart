@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:otzaria_demo/meivin_tokenizer.dart';
+import 'package:seforim_search/seforim_search.dart';
 import 'package:test/test.dart';
 
 /// A tiny Unigram tokenizer.json in the shape of the Meivin model's.

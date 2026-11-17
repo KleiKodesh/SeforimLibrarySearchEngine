@@ -206,3 +206,62 @@ pub(crate) fn b64(s: &str) -> Vec<u8> {
     }
     out
 }
+
+/// semantic_keys.rs `keyed_chunkings` with pardes; the identity is the sidecar's
+/// `pardesqa491-windows-onnx/model.json` `chunking_identity`.
+#[test]
+fn pardes_identity_is_the_published_one() {
+    let pardes = ChunkerConfig::pardes();
+    assert_eq!(pardes.identity(), 13_334_152_532_150_206_612);
+    assert_eq!(
+        ChunkerConfig::keyed().map(|c| c.identity()),
+        [320_260_894_818_558_297, 2_685_558_872_390_372_738, 13_334_152_532_150_206_612]
+    );
+    assert_eq!(ChunkerConfig::by_identity(13_334_152_532_150_206_612), Some(pardes.clone()));
+    assert_eq!(ChunkerConfig::by_identity(pardes.anchor().identity()), None);
+    assert!(Chunker::new(pardes).is_ok());
+    assert!(Chunker::new(ChunkerConfig { embedding_text_version: 4, ..ChunkerConfig::production() }).is_err());
+    assert!(Chunker::new(ChunkerConfig { normalization_version: 3, ..ChunkerConfig::production() }).is_err());
+}
+
+/// pardes_clean.rs `matches_python_reference_cases` (the sidecar's own cases file).
+#[test]
+fn pardes_clean_matches_python_reference_cases() {
+    let cases: Vec<(String, String)> =
+        serde_json::from_str(include_str!("../tests/data/pardes_clean_cases.json")).unwrap();
+    assert!(!cases.is_empty());
+    for (input, expected) in cases {
+        assert_eq!(pardes_clean(&input), expected, "{input:?}");
+    }
+}
+
+/// tests/pardes_recipe.rs `pardes_roles_clean_then_prefix_without_meivin_markers`,
+/// passage side (the query side lives in the hosts' embedders).
+#[test]
+fn pardes_passage_is_cleaned_without_prefix() {
+    let raw = "  <b>\u{05e9}\u{05f4}\u{05e1}</b>&nbsp;\u{feff}\u{05e8}\u{05f3}  ";
+    let cleaned = pardes_clean(raw);
+    assert_eq!(cleaned, "\u{05e9}\"\u{05e1} \u{05e8}'");
+    let chunker = Chunker::new(ChunkerConfig::pardes()).unwrap();
+    assert_eq!(chunker.passage_text(&cleaned), cleaned);
+    assert_eq!(pardes_clean("<br>&nbsp; "), "");
+}
+
+/// A pardes line: window 0 and the later windows are cleaned and carry no prefix;
+/// a line that cleans to nothing embeds nothing.
+#[test]
+fn pardes_windows_clean_every_window() {
+    let chunker = Chunker::new(ChunkerConfig::pardes()).unwrap();
+    let lines = refs(&[("  <b>a line</b> that &amp; stands   alone  ", 1), ("<br><i>&nbsp;</i>&#32;<p>", 1)]);
+    assert_eq!(chunker.embedded_text(&lines, 0).as_deref(), Some("a line that & stands alone"));
+    assert_eq!(chunker.embedded_text(&lines, 1), None);
+    let long: String = (0..200).map(|i| format!("<b>w{i}</b> ")).collect();
+    let lines = refs(&[(Box::leak(long.into_boxed_str()), 1)]);
+    let windows = chunker.embedded_windows(&lines, 0);
+    assert!(windows.len() > 1);
+    for w in &windows {
+        assert!(!w.text.contains('<') && !w.text.starts_with(PASSAGE_PREFIX) && w.text == w.text.trim());
+    }
+    let production = Chunker::production().embedded_windows(&lines, 0);
+    assert_eq!(windows.iter().map(|w| &w.chars).collect::<Vec<_>>(), production.iter().map(|w| &w.chars).collect::<Vec<_>>());
+}

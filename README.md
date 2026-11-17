@@ -2476,8 +2476,9 @@ newline is several lines: each line keeps its row and sub-line;
 `normalize_text_for_indexing`; a line starting `<h` opens a section), the
 `Chunker` computes each line's embedded text and SHA-256 chunk key (Meivin
 round 2 recipe: short lines with neighbour context within the section,
-windows of long lines; families qa491 / qa491-windows by `chunking_identity`;
-pardes not ported), and `verify` / `holds` / `locate` (within 16 lines,
+windows of long lines; families qa491 / qa491-windows / pardes by
+`chunking_identity`, Otzaria's `keyed_chunkings`; pardes = embedding text 3, no
+passage prefix, with pardes-clean-1 on every window), and `verify` / `holds` / `locate` (within 16 lines,
 Otzaria's `RECOMPUTE_REACH`) compare a stored key at its width (16 bytes in
 format 2, 8 in format 3). On 53 books of the v37 release vs seforim.db v37:
 63,730 of 63,730 records match. Not wired to the C ABI / hosts yet.

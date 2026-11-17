@@ -155,13 +155,23 @@ impl ChunkerConfig {
         u64::from_le_bytes(digest[..8].try_into().unwrap())
     }
 
-    /// semantic_keys.rs `keyed_chunking`, limited to the recipes this port implements
-    /// (production and its anchor: embedding text 2, no normalization). The pardes
-    /// recipe (text 3 / normalization 2) is not ported: no family in use names it.
-    pub fn by_identity(identity: u64) -> Option<Self> {
+    /// semantic_keys.rs `pardes_chunking`: the production geometry with embedding
+    /// text 3 (no passage prefix) and normalization 2 (pardes-clean-1).
+    pub fn pardes() -> Self {
+        Self { embedding_text_version: 3, normalization_version: 2, ..Self::production() }
+    }
+
+    /// semantic_keys.rs `keyed_chunkings`: production, its anchor, pardes.
+    pub fn keyed() -> [Self; 3] {
         let production = Self::production();
         let anchor = production.anchor();
-        [production, anchor].into_iter().find(|c| c.identity() == identity)
+        [production, anchor, Self::pardes()]
+    }
+
+    /// semantic_keys.rs `keyed_chunking`: the one of [`Self::keyed`] whose identity is
+    /// `identity`.
+    pub fn by_identity(identity: u64) -> Option<Self> {
+        Self::keyed().into_iter().find(|c| c.identity() == identity)
     }
 }
 
@@ -180,7 +190,7 @@ pub struct EmbeddedWindow {
     pub text: String,
 }
 
-/// chunker.rs `Chunker`, for the recipes of [`ChunkerConfig::by_identity`].
+/// chunker.rs `Chunker`.
 #[derive(Debug, Clone)]
 pub struct Chunker {
     config: ChunkerConfig,
@@ -191,12 +201,12 @@ pub struct Chunker {
 pub struct UnsupportedRecipe(pub String);
 
 impl Chunker {
-    /// chunker.rs `Chunker::new` with `check_windows`, accepting only embedding text 2
-    /// (role prefix) and normalization 1 (as supplied), the production recipe.
+    /// chunker.rs `Chunker::new` with `check_windows`: recipe.rs embedding text
+    /// versions 1, 2, 3 and normalization versions 1, 2.
     pub fn new(config: ChunkerConfig) -> Result<Self, UnsupportedRecipe> {
-        if config.embedding_text_version != 2 || config.normalization_version != 1 {
+        if !matches!(config.embedding_text_version, 1..=3) || !matches!(config.normalization_version, 1 | 2) {
             return Err(UnsupportedRecipe(format!(
-                "embedding text {} / normalization {} not ported",
+                "embedding text {} / normalization {} not implemented",
                 config.embedding_text_version, config.normalization_version
             )));
         }
@@ -234,11 +244,11 @@ impl Chunker {
             text
         };
         let truncated = truncate_to_chars(embedding_text.trim(), self.config.max_chunk_chars);
-        // Normalization 1 (AsSuppliedByCorpus) leaves the text as is.
-        if truncated.trim().is_empty() {
+        let normalized = self.normalize(truncated);
+        if normalized.trim().is_empty() {
             return None;
         }
-        Some(passage_text(truncated))
+        Some(self.passage_text(&normalized))
     }
 
     /// chunker.rs `Chunker::windows_of`: window 0, then (version 2) the windows of a
@@ -271,10 +281,11 @@ impl Chunker {
         );
         for (ordinal, (start, end)) in spans.into_iter().enumerate().skip(1) {
             let piece: String = chars[start..end].iter().collect();
-            if piece.trim().is_empty() {
+            let normalized = self.normalize(&piece);
+            if normalized.trim().is_empty() {
                 continue;
             }
-            let text = passage_text(&piece);
+            let text = self.passage_text(&normalized);
             let key = ChunkKey::of(&text);
             if keys.contains(&key) {
                 continue;
@@ -362,9 +373,129 @@ impl Chunker {
     }
 }
 
-/// recipe.rs `EmbeddingTextRecipe::passage_text`, version 2.
-fn passage_text(text: &str) -> String {
-    format!("{PASSAGE_PREFIX}{}", text.trim())
+impl Chunker {
+    /// recipe.rs `TextNormalizationRecipe::apply`: 1 = as supplied, 2 = pardes-clean-1.
+    fn normalize<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        match self.config.normalization_version {
+            2 => std::borrow::Cow::Owned(pardes_clean(text)),
+            _ => std::borrow::Cow::Borrowed(text),
+        }
+    }
+
+    /// recipe.rs `EmbeddingTextRecipe::passage_text`: versions 1 and 3 the text as
+    /// is, version 2 the role prefix before the trimmed text.
+    fn passage_text(&self, text: &str) -> String {
+        match self.config.embedding_text_version {
+            2 => format!("{PASSAGE_PREFIX}{}", text.trim()),
+            _ => text.to_string(),
+        }
+    }
+}
+
+/// pardes_clean.rs `space`.
+fn pardes_space(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n'
+            | '\u{000b}'
+            | '\u{000c}'
+            | '\r'
+            | ' '
+            | '\u{0085}'
+            | '\u{00a0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202f}'
+            | '\u{205f}'
+            | '\u{3000}'
+            | '\u{feff}'
+    )
+}
+
+/// pardes_clean.rs `entity`.
+fn pardes_entity(s: &str) -> Option<char> {
+    match s {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some(' '),
+        _ => {
+            let (digits, radix, max) = if let Some(t) = s.strip_prefix("#x").or_else(|| s.strip_prefix("#X")) {
+                (t, 16, 6)
+            } else {
+                (s.strip_prefix('#')?, 10, 7)
+            };
+            if digits.is_empty()
+                || digits.len() > max
+                || !digits.chars().all(|c| c.is_ascii_hexdigit() && (radix == 16 || c.is_ascii_digit()))
+            {
+                return None;
+            }
+            let n = u32::from_str_radix(digits, radix).ok()?;
+            if n == 0 {
+                None
+            } else {
+                char::from_u32(n)
+            }
+        }
+    }
+}
+
+/// pardes_clean.rs `clean` (pardes-clean-1): tags to a space, one entity pass,
+/// whitespace runs to one space (none at either end), gershayim / geresh to ASCII.
+pub fn pardes_clean(text: &str) -> String {
+    let mut tags = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('<') {
+        tags.push_str(&rest[..i]);
+        if let Some(j) = rest[i..].find('>') {
+            tags.push(' ');
+            rest = &rest[i + j + 1..];
+        } else {
+            tags.push_str(&rest[i..]);
+            rest = "";
+            break;
+        }
+    }
+    tags.push_str(rest);
+    let mut decoded = String::with_capacity(tags.len());
+    let mut rest = tags.as_str();
+    while let Some(i) = rest.find('&') {
+        decoded.push_str(&rest[..i]);
+        let tail = &rest[i + 1..];
+        // Every recognized entity has at most eight ASCII characters before ';'.
+        let candidate = tail.find(';').filter(|&j| j <= 8);
+        if let Some((j, c)) = candidate.and_then(|j| pardes_entity(&tail[..j]).map(|c| (j, c))) {
+            decoded.push(c);
+            rest = &tail[j + 1..];
+        } else {
+            decoded.push('&');
+            rest = tail;
+        }
+    }
+    decoded.push_str(rest);
+    let mut out = String::with_capacity(decoded.len());
+    let mut pending_space = false;
+    for c in decoded.chars() {
+        if pardes_space(c) {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(match c {
+            '\u{05f4}' => '"',
+            '\u{05f3}' => '\'',
+            _ => c,
+        });
+    }
+    out
 }
 
 /// semantic_keys.rs `context_window`: the lines a short line at `position` is embedded

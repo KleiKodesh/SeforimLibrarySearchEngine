@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import '../otzaria_text.dart' show BookNoteRow, libraryBookTextFingerprint;
 import 'data_source.dart';
 import 'note_ids.dart';
 
@@ -507,6 +508,68 @@ class SeforimSqlDb implements SeforimDataSource {
       yield (id, rawContent(r[1] as String, r[2] as Uint8List?, id));
     }
   }
+
+  /// Otzaria's `libraryBookContentFingerprint` (otzaria_search_engine 7.2.0): the
+  /// `textHash` the old engine stamps on book [bookId], byte-identical, so an index
+  /// stamped by it stays valid. Its read step for step: null when [dbTitle] is given and
+  /// is not the book's title, when the book has no rows or its text is empty; rows in
+  /// `lineIndex, id` order (a TEXT value's own bytes, a BLOB frame decoded, NULL empty);
+  /// with [withNotes] (the old engine's library source) and a `line_note` table with its
+  /// five columns, the notes' bodies put back in their lines. The text is assembled and
+  /// hashed by the engine (`libraryBookTextFingerprint`).
+  int? bookContentFingerprint(int bookId, {String? dbTitle, bool withNotes = true}) => _readSnapshot(() {
+        if (dbTitle != null && _select('SELECT 1 FROM book WHERE id = ? AND title = ?', [bookId, dbTitle]).isEmpty) {
+          return null;
+        }
+        Uint8List value(String type, Uint8List? raw, String where) {
+          if (raw == null || type == 'null') return Uint8List(0);
+          if (type == 'text') return raw;
+          if (type == 'blob') {
+            if (!compressed) throw FormatException('$where: a BLOB row in a database without zstd_dict');
+            try {
+              return _db.decodeFrame(raw);
+            } on FormatException catch (e) {
+              throw FormatException('$where cannot be decoded: ${e.message}');
+            }
+          }
+          throw FormatException('$where: a row that is neither TEXT nor BLOB');
+        }
+
+        final notes = <BookNoteRow>[];
+        final noteColumns = withNotes
+            ? _select("SELECT count(*) FROM pragma_table_info('line_note')"
+                " WHERE name IN ('lineId', 'noteIndex', 'charPos', 'hasMarker', 'body')").first[0] as int
+            : 0;
+        if (noteColumns == 5) {
+          for (final r in _select(
+              'SELECT l.lineIndex, n.noteIndex, n.charPos, n.hasMarker, typeof(n.body), CAST(n.body AS BLOB)'
+              ' FROM line l JOIN line_note n ON n.lineId = l.id WHERE l.bookId = ? ORDER BY l.lineIndex, n.noteIndex',
+              [bookId])) {
+            final lineIndex = r[0], noteIndex = r[1];
+            if (lineIndex is! int || noteIndex is! int || r[4] == 'null') continue;
+            final where = 'book $bookId line $lineIndex note $noteIndex';
+            final hasMarker = r[3];
+            if (hasMarker is! int || (hasMarker != 0 && hasMarker != 1)) throw FormatException('$where has hasMarker $hasMarker, not 0 or 1');
+            final bytes = value(r[4] as String, r[5] as Uint8List?, where);
+            final String body;
+            try {
+              body = utf8.decode(bytes);
+            } on FormatException {
+              throw FormatException('$where is not valid UTF-8');
+            }
+            final charPos = r[2];
+            notes.add((lineIndex: lineIndex, charPos: charPos is int ? charPos : -1, hasMarker: hasMarker == 1, body: body));
+          }
+        }
+        final rows = [
+          for (final (i, r) in _select(
+              'SELECT typeof($_contentCol), CAST($_contentCol AS BLOB) FROM line l$_contentJoin'
+              ' WHERE l.bookId = ? ORDER BY l.lineIndex, l.id',
+              [bookId]).indexed)
+            value(r[0] as String, r[1] as Uint8List?, 'book $bookId row $i')
+        ];
+        return libraryBookTextFingerprint(rows, notes);
+      });
 
   /// One book's lines in reading order.
   ///

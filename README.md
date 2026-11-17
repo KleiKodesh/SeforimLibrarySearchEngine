@@ -2197,6 +2197,80 @@ probe) plus fetching all those texts from seforim.db. The in-order query's
 per-hit arena; the peak moves by a few MB (a chunk's positions) and drops
 for the 2M-hit word.
 
+## Otzaria's text and query helpers (otzaria_search_engine 7.2.0)
+
+The search helpers an Otzaria host took from its old engine, `otzaria_search_engine` 7.2.0
+(the version the app's `pubspec.lock` pins), built into this engine so the app can drop
+the old package. Results are byte-identical to the old engine's (golden tests below).
+
+- **Query helpers**: `sanitizeQuery`, `splitQueryWords`, `queryWordSpans` (the words
+  per-word options are keyed by, with their UTF-16 source ranges; a paired reading gives
+  its second reading only).
+- **Display highlight**: `generateHighlightPattern` (advanced search: distance, per-pair
+  spacing, alternative words, per-word options, any order) and
+  `generateSmartHighlightPattern` (smart search, exact / fuzzy), each with its prepared
+  matcher (`findMatches`, `findWordMatches`, `allowsCrossLine`; displayed HTML in, UTF-16
+  ranges out), and `generateLiteralHighlightPattern` (the literal in-book search regex).
+- **User regex in a book**: `parseUserRegex` (kind, folded pattern, words) and
+  `prepareUserRegexMatcher` (its matches in displayed text). Built on this engine's own
+  port of Otzaria's user regex (`user_regex::parse` / `parse_line`, `line_regex`), with
+  `user_regex::plan` added for the classification. The app's in-book regex search
+  (`searchUserRegexInContent`) and its PDF regex pattern are app code over this matcher.
+- **Book stamps**: `textHash` of a text (`contentFingerprint` / `contentFingerprintBytes`,
+  already in the Dart package), `contentHash` (`bookFingerprint`) and `metadataHash`
+  (`bookMetadataFingerprint`) as pure Dart FNV-1a 64; the `textHash` of a library book
+  (`libraryBookContentFingerprint`) as `SeforimSqlDb.bookContentFingerprint(bookId,
+  dbTitle:, withNotes:)`: the host reads the rows and `line_note` rows exactly as the old
+  engine did (title check, `lineIndex, id` order, TEXT bytes as stored, frames decoded,
+  NULL empty) and the engine assembles and hashes the text (`line_note` bodies put back,
+  `data:` URIs of 64+ chars dropped, a leading BOM skipped only with a data URI), so
+  existing index stamps stay valid.
+
+Layers: Rust `hebrew_fts::otzaria` (`sanitize_query`, `split_query_words`,
+`query_word_spans`, `literal_highlight_pattern`, `highlight_pattern`,
+`smart_highlight_pattern`, `UserRegexMatcher`, `book_content_fingerprint`); C ABI
+`se_text_helper` (JSON op: `sanitize_query`, `split_query_words`, `query_word_spans`,
+`literal_highlight_pattern`, `user_regex_plan`), `se_matcher_open` / `se_matcher_find` /
+`se_matcher_free` (kinds `highlight`, `smart`, `user_regex`), `se_book_content_fingerprint`;
+Dart `package:seforim_search` with the old package's names (`otzaria_text.dart`). Not in C#
+(KitveiHakodesh uses none of them).
+
+Not ported, with the existing engine path that serves it:
+- `searchUserRegexStream` (the old index's `/.../` search): this engine's own search runs
+  `/.../` queries (term kinds as walks, the line kind on the line text), streamed.
+- `generateIndexHighlightPattern` / `...FuzzyHighlightPattern` / `...SmartHighlightPattern`
+  (patterns from the old index's matched terms): the search's own matched terms paint an
+  open text through the all-matches locate / find in an open text (next section).
+- User-books / attached-database sources of `libraryBookContentFingerprint`: Otzaria app
+  sources; a host opens such a DB with `SeforimSqlDb` and calls the same method
+  (`withNotes: false`, as the old engine read them).
+
+Deviations (named):
+- The code is ported verbatim into `hebrew-fts/src/otzaria/` (Otzaria's tokenizer core,
+  query normalisation, display classes and matcher; MIT, see THIRD-PARTY-NOTICES), not
+  rebuilt on this engine's FtsLib scanner: option keys, regex strings and match offsets
+  must be the old engine's byte for byte, and the two word models differ in details
+  (entities, tags, quotes at edges). `quoted_phrases` is reused from `seforim-vectors`
+  (the same code as Otzaria's sidecar).
+- `char::is_alphanumeric` is a pinned table (`otzaria/unicode_alnum.rs`): the 7.2.0
+  release binary has a newer Unicode than this toolchain (12,833 more letters / digits),
+  found by probing its `splitQueryWords` on every code point; the table makes the
+  helpers independent of the toolchain. `to_lowercase` still follows the toolchain (no
+  difference seen on the goldens).
+- `computeContentFingerprintBytes` and the stamps return a Dart `int` (unsigned 64-bit in
+  two's complement, `fingerprintHex` for text) where the old package returned `BigInt`.
+
+Tests: `hebrew-fts/tests/otzaria_helpers.rs` compares every helper with goldens written
+by the old engine itself (`tests/fixtures/otzaria_helpers/`: 33 queries incl. paired
+readings, quotes, gershayim, marks, entities, digits, divine-name placeholders; 18
+highlight cases over all option kinds, distance, spacing, any order, alternatives;
+15 user regexes of every kind; matches on 9 texts with markup and marks).
+`dart/seforim_search_sqlite/test/otzaria_text_test.dart` checks the Dart API through the
+C ABI on the same goldens, the pure stamps, and the library book `textHash` on a small
+DB (BOM, data URIs, rows with line breaks, notes with and without `charPos`, a note
+inside a row's second line, invalid UTF-8, NULL rows, title check) against the old
+engine's output.
+
 ## User index: documents outside the library (issue #44)
 
 A host can index documents that are not in seforim.db (a user's text files,

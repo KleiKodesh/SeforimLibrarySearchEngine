@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 23;
+const int seforimAbiVersion = 24;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -258,6 +258,18 @@ final class SeforimNative {
         cancelTokenCancel = lib.lookupFunction<_CloseC, _CloseD>('se_cancel_token_cancel'),
         cancelTokenFinalizer =
             NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_cancel_token_free').cast()),
+        textHelper = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
+            Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_text_helper'),
+        matcherOpen = lib.lookupFunction<Pointer<Void> Function(Pointer<Uint8>, Size, Pointer<Pointer<Utf8>>),
+            Pointer<Void> Function(Pointer<Uint8>, int, Pointer<Pointer<Utf8>>)>('se_matcher_open'),
+        matcherFind = lib.lookupFunction<
+            Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, Size, Int32, Pointer<Uint8>, Size),
+            Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint8>, int)>('se_matcher_find'),
+        matcherFinalizer = NativeFinalizer(lib.lookup<NativeFunction<_CloseC>>('se_matcher_free').cast()),
+        bookContentFingerprint = lib.lookupFunction<
+            Int32 Function(Pointer<Uint8>, Pointer<Uint64>, Size, Pointer<Uint8>, Size, Pointer<Uint64>),
+            int Function(Pointer<Uint8>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>)>(
+            'se_book_content_fingerprint'),
         countNeedsText = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>(
             'se_search_count_needs_text'),
         countBatch = lib.lookupFunction<
@@ -371,6 +383,11 @@ final class SeforimNative {
   final Pointer<Void> Function() cancelTokenNew;
   final void Function(Pointer<Void>) cancelTokenCancel;
   final NativeFinalizer cancelTokenFinalizer;
+  final Pointer<Utf8> Function(Pointer<Uint8>, int) textHelper;
+  final Pointer<Void> Function(Pointer<Uint8>, int, Pointer<Pointer<Utf8>>) matcherOpen;
+  final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint8>, int) matcherFind;
+  final NativeFinalizer matcherFinalizer;
+  final int Function(Pointer<Uint8>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>) bookContentFingerprint;
   final int Function(Pointer<Void>) countNeedsText;
   final int Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>, int) countBatch;
   final Pointer<Utf8> Function(Pointer<Void>) searchCounts;

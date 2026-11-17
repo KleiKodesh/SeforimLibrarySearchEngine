@@ -21,6 +21,7 @@ pub mod grammar;
 pub mod grammar_query;
 mod html_tags;
 pub mod marks;
+pub mod otzaria;
 mod scanner_reference;
 pub mod prepared;
 pub mod query_parser;

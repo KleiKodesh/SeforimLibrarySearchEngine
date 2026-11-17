@@ -50,6 +50,67 @@ int contentFingerprintBytes(List<int> bytes) {
   return h == 0 ? 1 : h;
 }
 
+/// Otzaria's `compute_book_metadata_fingerprint` (the `metadataHash` stamp): FNV-1a 64
+/// over the title, the category path and the extra facets (sorted by their UTF-8 bytes
+/// and deduplicated, as the index keeps them), each as an 8-byte little-endian length
+/// then its UTF-8 bytes; never 0.
+int bookMetadataFingerprint(String title, String topics, [List<String>? extraFacets]) {
+  final f = _Fnv();
+  _feedMetadata(f, title, topics, extraFacets ?? const []);
+  return f.finish();
+}
+
+/// Otzaria's `compute_book_fingerprint` (the `contentHash` stamp): the text as a field,
+/// then the [bookMetadataFingerprint] fields; never 0.
+int bookFingerprint(String text, String title, String topics, [List<String>? extraFacets]) {
+  final f = _Fnv()..field(utf8.encode(text));
+  _feedMetadata(f, title, topics, extraFacets ?? const []);
+  return f.finish();
+}
+
+void _feedMetadata(_Fnv f, String title, String topics, List<String> extraFacets) {
+  final facets = [for (final x in extraFacets) utf8.encode(x)]..sort(_compareBytes);
+  f
+    ..field(utf8.encode(title))
+    ..field(utf8.encode(topics));
+  List<int>? previous;
+  for (final x in facets) {
+    if (previous != null && _compareBytes(previous, x) == 0) continue; // Vec::dedup
+    f.field(x);
+    previous = x;
+  }
+}
+
+int _compareBytes(List<int> a, List<int> b) {
+  final n = a.length < b.length ? a.length : b.length;
+  for (var i = 0; i < n; i++) {
+    if (a[i] != b[i]) return a[i] - b[i];
+  }
+  return a.length - b.length;
+}
+
+final class _Fnv {
+  var h = _fnvOffset;
+  void feed(List<int> bytes) {
+    for (final x in bytes) {
+      h = (h ^ x) * _fnvPrime; // wraps mod 2^64 on the VM
+    }
+  }
+
+  void field(List<int> bytes) {
+    var n = bytes.length;
+    final le = List<int>.filled(8, 0);
+    for (var i = 0; i < 8; i++) {
+      le[i] = n & 0xff;
+      n >>= 8;
+    }
+    feed(le);
+    feed(bytes);
+  }
+
+  int finish() => h == 0 ? 1 : h;
+}
+
 /// A fingerprint as 16 lowercase hex digits (unsigned).
 String fingerprintHex(int fingerprint) =>
     (BigInt.from(fingerprint) & ((BigInt.one << 64) - BigInt.one)).toRadixString(16).padLeft(16, '0');

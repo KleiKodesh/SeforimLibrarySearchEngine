@@ -280,6 +280,61 @@ pub fn parse(query: &str) -> Result<UserRegex, UserRegexError> {
     Ok(UserRegex { words })
 }
 
+/// Otzaria's `UserRegexKind` (its `parse_user_regex` API).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserRegexKind {
+    Invalid,
+    SingleWord,
+    WordSequence,
+    CrossSpace,
+}
+
+/// Otzaria's `UserRegexPlan`: the kind, the whole folded pattern (an edge `^` / `$`
+/// printed as `\A` / `\z`), each word's pattern (none for `CrossSpace`), and why
+/// it is `Invalid`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserRegexPlan {
+    pub kind: UserRegexKind,
+    pub pattern: String,
+    pub words: Vec<String>,
+    pub reason: Option<String>,
+}
+
+/// Otzaria's `parse_user_regex`: [`parse`] / [`parse_line`] as one classification.
+pub fn plan(query: &str) -> UserRegexPlan {
+    let invalid = |reason: String| UserRegexPlan {
+        kind: UserRegexKind::Invalid,
+        pattern: String::new(),
+        words: Vec::new(),
+        reason: Some(reason),
+    };
+    let reason = |e: UserRegexError| match e {
+        UserRegexError::Invalid(r) => r,
+        other => other.to_string(),
+    };
+    let (elements, parts, spans_space) = match split(query) {
+        Ok(split) => split,
+        Err(e) => return invalid(reason(e)),
+    };
+    let pattern = Hir::concat(elements.clone()).to_string();
+    if spans_space {
+        return match crate::line_regex::LinePlan::new(&elements) {
+            Ok(_) => UserRegexPlan { kind: UserRegexKind::CrossSpace, pattern, words: Vec::new(), reason: None },
+            Err(e) => invalid(e),
+        };
+    }
+    let mut words = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let word = part.to_string();
+        if let Err(e) = term_part(&word) {
+            return invalid(reason(e));
+        }
+        words.push(word);
+    }
+    let kind = if words.len() == 1 { UserRegexKind::SingleWord } else { UserRegexKind::WordSequence };
+    UserRegexPlan { kind, pattern, words, reason: None }
+}
+
 /// Parses a wrapped query of Otzaria's `Line` kind into its line plan
 /// (Otzaria's `parse` + `line_plan`). `Err(Invalid)` when it is a term regex
 /// (a `Word` / `Sequence`) or cannot compile.

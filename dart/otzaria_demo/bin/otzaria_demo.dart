@@ -10,7 +10,7 @@ import 'package:otzaria_demo/grouping.dart';
 import 'package:otzaria_demo/snippet_texts.dart';
 import 'package:otzaria_demo/meivin_embedder.dart';
 import 'package:otzaria_demo/semantic_commands.dart';
-import 'package:seforim_search/seforim_search.dart';
+import 'package:seforim_search/seforim_search.dart' hide splitQueryWords;
 
 const _usage = '''
 otzaria_demo build  [--db path] [--index dir] [--max-lines N] [--max-books N] [--keep-marks] [--no-positions]

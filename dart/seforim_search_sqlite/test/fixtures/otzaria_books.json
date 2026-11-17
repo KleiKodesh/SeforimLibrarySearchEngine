@@ -1,0 +1,218 @@
+{
+ "books": [
+  {
+   "id": 1,
+   "title": "plain",
+   "rows": [
+    "Zmlyc3QgbGluZQ==",
+    "c2Vjb25kINeQ15HXkiDXk9eU",
+    "dGhpcmQ="
+   ],
+   "notes": []
+  },
+  {
+   "id": 2,
+   "title": "bom",
+   "rows": [
+    "77u/Ym9tIHJvdw==",
+    "bmV4dA=="
+   ],
+   "notes": []
+  },
+  {
+   "id": 3,
+   "title": "bom+uri",
+   "rows": [
+    "77u/aW1nIDxpbWcgc3JjPSJkYXRhOmltYWdlL3BuZztiYXNlNjQsQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSI+IGFmdGVy",
+    "eA=="
+   ],
+   "notes": []
+  },
+  {
+   "id": 4,
+   "title": "short uri",
+   "rows": [
+    "c2VlIGRhdGE6YWJjIGhlcmU=",
+    "eQ=="
+   ],
+   "notes": []
+  },
+  {
+   "id": 5,
+   "title": "newline row",
+   "rows": [
+    "YQpi",
+    "Yw0KZA==",
+    "ZQ=="
+   ],
+   "notes": []
+  },
+  {
+   "id": 6,
+   "title": "notes",
+   "rows": [
+    "d29yZDxzdXAgY2xhc3M9ImZvb3Rub3RlLW1hcmtlciI+MTwvc3VwPiBtb3JlIHdvcmRz",
+    "bGluZSB0d28=",
+    "bGluZSA8c3VwIGNsYXNzPSJmb290bm90ZS1tYXJrZXIiPjE8L3N1cD4gdGhyZWU="
+   ],
+   "notes": [
+    [
+     0,
+     0,
+     -1,
+     1,
+     "note body one"
+    ],
+    [
+     2,
+     0,
+     5,
+     1,
+     "body <b>two</b>"
+    ],
+    [
+     1,
+     0,
+     4,
+     0,
+     "free note"
+    ]
+   ]
+  },
+  {
+   "id": 7,
+   "title": "bom+notes",
+   "rows": [
+    "77u/c3RhcnQ8c3VwIGNsYXNzPSJmb290bm90ZS1tYXJrZXIiPjE8L3N1cD4gZW5k",
+    "eg=="
+   ],
+   "notes": [
+    [
+     0,
+     0,
+     5,
+     1,
+     "bom note"
+    ]
+   ]
+  },
+  {
+   "id": 8,
+   "title": "notes+newline",
+   "rows": [
+    "cjAKcjE8c3VwIGNsYXNzPSJmb290bm90ZS1tYXJrZXIiPjE8L3N1cD4=",
+    "cjI="
+   ],
+   "notes": [
+    [
+     0,
+     0,
+     -1,
+     1,
+     "n1"
+    ],
+    [
+     1,
+     0,
+     1,
+     0,
+     "n2"
+    ]
+   ]
+  },
+  {
+   "id": 9,
+   "title": "invalid utf8",
+   "rows": [
+    "YmFkIP/+IGJ5dGU=",
+    "ww=="
+   ],
+   "notes": []
+  },
+  {
+   "id": 10,
+   "title": "null row",
+   "rows": [
+    null,
+    "YWZ0ZXIgbnVsbA=="
+   ],
+   "notes": []
+  },
+  {
+   "id": 11,
+   "title": "empty",
+   "rows": [
+    ""
+   ],
+   "notes": []
+  },
+  {
+   "id": 12,
+   "title": "no rows",
+   "rows": [],
+   "notes": []
+  },
+  {
+   "id": 13,
+   "title": "bom only+uri",
+   "rows": [
+    "77u/",
+    "ZGF0YTppbWFnZS9wbmc7YmFzZTY0LEFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+   ],
+   "notes": []
+  },
+  {
+   "id": 14,
+   "title": "surrogate pos",
+   "rows": [
+    "ePCfmIB5PHN1cCBjbGFzcz0iZm9vdG5vdGUtbWFya2VyIj4xPC9zdXA+"
+   ],
+   "notes": [
+    [
+     0,
+     0,
+     2,
+     1,
+     "s"
+    ]
+   ]
+  },
+  {
+   "id": 15,
+   "title": "notes, null body",
+   "rows": [
+    "cTxzdXAgY2xhc3M9ImZvb3Rub3RlLW1hcmtlciI+MTwvc3VwPg=="
+   ],
+   "notes": [
+    [
+     0,
+     0,
+     1,
+     1,
+     null
+    ],
+    [
+     0,
+     1,
+     1,
+     1,
+     "kept"
+    ]
+   ]
+  }
+ ],
+ "titleChecks": [
+  [
+   1,
+   "plain"
+  ],
+  [
+   1,
+   "other"
+  ],
+  [
+   6,
+   "notes"
+  ]
+ ]
+}

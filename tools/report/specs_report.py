@@ -25,6 +25,8 @@ MEASURED_FTSLIB = "fts14"     # FtsLib format of the runs in the results dir (= 
 STALE = [
     "The keep-marks build was not rebuilt (its row is the old dev-machine `tantivy9` number); every other "
     "result is from fullrun run 43815271560 (2026-11-16, `tantivy17` / `fts14`, one GitHub windows runner per job).",
+    "Otzaria hit counts, fuzzy rows: the Otzaria fuzzy mode now ignores quotes (Otzaria's fuzzy automaton is "
+    "quote-transparent); the rows need a rerun on the fullrun workflow (FtsLib parity unchanged).",
 ]
 # Snippets from index positions vs the text path (median of 15, first 4000 hits, 8 cores).
 SNIPPETS = [
@@ -480,7 +482,7 @@ claude_block = "\n".join([
     f"options as FST walks (cap per request, default 2000, global across segments), proximity / word match, vocalized walks (plain, wildcard and fuzzy words), user regex "
     f"(word, sequence, line), relevance / generation order, totals + per-book counts, cancellation, re-sort into a new catalog order (one merge), per-book updates + background merge (restart on open), non-blocking package APIs, hits decided from positions + streamed (word-tightest window, word-level descriptors finished for display), resume after position, "
     f"truncated flag, cross-line (enumerators skipped) and same-section, quoted phrases, divine-name placeholder spellings, positions snippets, FM sidecar, all-matches locate + find in an open text, substring find over position ranges (decline over the cap), "
-    f"morphology forms from the host (lexical tier, unmarked forms), semantic search like Otzaria (exact integer scan over Otzaria's own vector set, read-only, host line mapping) + hybrid fusion, Meivin query model in the hosts, vector set install + compaction (Otzaria's sidecar install and compaction in the engine; the app downloads), Otzaria's text and query helpers (query split, display highlight patterns and matchers, user regex in a book, book stamps; otzaria_search_engine 7.2.0, byte-identical).",
+    f"morphology forms from the host (lexical tier, unmarked forms), semantic search like Otzaria (exact integer scan over Otzaria's own vector set, read-only, host line mapping) + hybrid fusion, Meivin query model in the hosts, vector set install + compaction (Otzaria's sidecar install and compaction in the engine; the app downloads), Otzaria's text and query helpers (query split, display highlight patterns and matchers incl. the index patterns from the search's matched terms per word, user regex in a book, book stamps; otzaria_search_engine 7.2.0, byte-identical).",
     "Builds: " + "; ".join(l.strip("| ").replace(" | ", " ") for l in build_lines()) + ".",
     ("Parity with FtsLib: " + "no positions: every set identical (" + ", ".join(x[0] for x in PAR_RUN) + "); positions: " + ("identical hit sets on every set" if all(x[2] and x[2].startswith(x[2].split(" ")[0].split("/")[1] + "/") for x in PAR_RUN) else "same hits without a distance, only added hits with one") + ", snippet windows differ (word-tightest window, issue #21)" + "."
      if PAR_ALL_SAME else "Parity with FtsLib: " + parity_summary() + "."),

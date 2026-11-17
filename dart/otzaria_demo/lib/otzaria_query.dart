@@ -514,6 +514,10 @@ class OtzariaSearch {
       ),
       global,
     );
+    // Otzaria's fuzzy automaton is quote-transparent (QuoteTransparent: a term
+    // matches as written or without its quotes), so the fuzzy mode measures its
+    // distances on the quote-free forms.
+    if (mode == SearchMode.fuzzy) s.ignoreQuotes = true;
     // The engine counts the words for partial matching and cuts the words
     // it drops (no letters or digits) out of the proximity, merging their
     // gaps. A one-letter word is a word. A partial mode sends no proximity.

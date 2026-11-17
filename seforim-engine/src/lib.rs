@@ -1069,6 +1069,29 @@ mod tests {
         assert!(index.search(&req("שלו*")).unwrap().hits.is_empty());
     }
 
+    /// `group_terms`: each request group's matched index terms, aligned with the
+    /// groups (a group that matched nothing has an empty list).
+    #[test]
+    fn group_terms_follow_the_request_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(dir.path(), IndexOptions::default()).unwrap();
+        let mut w = index.writer(50_000_000, 1).unwrap();
+        w.add(&line(1, 0, 1, "alpha alphas beta")).unwrap();
+        w.add(&line(2, 1, 1, "gamma")).unwrap();
+        w.commit(None).unwrap();
+        let word = |w: &str| GroupSpec::Word { word: w.into(), options: Default::default() };
+        let wild = |p: &str| GroupSpec::Wildcard { pattern: p.into(), ignore_quotes: false };
+        let r = index
+            .search(&SearchRequest { groups: vec![wild("alpha*"), word("beta")], ..Default::default() })
+            .unwrap();
+        let mut terms = r.session.group_terms().to_vec();
+        terms[0].sort();
+        assert_eq!(terms, vec![vec!["alpha".to_string(), "alphas".to_string()], vec!["beta".to_string()]]);
+        let r = index.search(&SearchRequest { groups: vec![word("beta"), word("delta")], ..Default::default() }).unwrap();
+        assert!(r.hits.is_empty());
+        assert_eq!(r.session.group_terms(), &[vec!["beta".to_string()], Vec::<String>::new()]);
+    }
+
     /// Doc order = catalog order: lines fed out of order to several
     /// indexing threads come out of the merge sorted by position, so the
     /// search skips its sort; an update (extra segment) turns that off until

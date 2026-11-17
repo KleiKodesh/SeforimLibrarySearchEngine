@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 24;
+const int seforimAbiVersion = 25;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -203,6 +203,8 @@ final class SeforimNative {
             'se_find_all_matches'),
         takeNewTerms = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_search_take_new_terms'),
+        groupTerms = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Void>)>('se_search_group_terms'),
         searchCancellable = lib.lookupFunction<
             Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, Size, Pointer<Void>),
             Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>)>('se_search_cancellable'),
@@ -358,6 +360,7 @@ final class SeforimNative {
   final SeBuffer Function(Pointer<Void>, Pointer<Int64>, Pointer<Size>, int, Pointer<Uint64>,
       Pointer<Pointer<Uint8>>, Pointer<Size>) locateLines;
   final Pointer<Utf8> Function(Pointer<Void>) takeNewTerms;
+  final Pointer<Utf8> Function(Pointer<Void>) groupTerms;
   final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>) searchCancellable;
   final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Void>) searchStream;
   final int Function(Pointer<Void>, int, int) searchStreamPull;

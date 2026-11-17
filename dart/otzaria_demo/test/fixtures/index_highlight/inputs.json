@@ -1,0 +1,323 @@
+{
+ "queries": [
+  "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea",
+  "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea  \u05d1\u05e8A ",
+  "  \u05e9\u05dc\u05d5\u05dd-\u05e2\u05dc\u05d9\u05da\u05dd ",
+  "\u05e8\u05de\u05d1\"\u05dd",
+  "\u05e8\u05de\u05d1\u05f4\u05dd",
+  "\u05e8\u05de\u05d1''\u05dd",
+  "\"\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea \u05d1\u05e8A\" \u05d0\u05dc\u05d4\u05d9\u05dd",
+  "\u05d1\u05bc\u05e8\u05b7\u05e9\u05b4\u05d9\u05b0\u05ea",
+  "(\u05db\u05d8\u05d9\u05d1) [\u05e7\u05e8\u05d9] \u05de\u05dc\u05d4",
+  "\u05d0\u05d1 (\u05db\u05d8\u05d9\u05d1)[\u05e7\u05e8\u05d9]",
+  "\u05d7*\u05d6?\u05d9\u05d0",
+  "^\u05d0\u05d1\u05d9$ [\u05de\u05dc\u05d4] .",
+  "\u05d9\u05d4\u05d5\u05d4 \u05d0\u05dc\u05d4\u05d9\u05dd",
+  "\u05d0,\u05d1;\u05e6:\u05d3!\u05e2?f",
+  "\u05e9\ufb2a\u05dc_\u05d5\u05dd",
+  "\u201c\u05d1\u05e8\u05d0\u05e9\u05d9\u05d8\u201d \u05d1\u05e8A",
+  "\u05d0\u200f\u05d1",
+  "\u05d0\u05d1\u05be\u05d2\u05d3",
+  "\u05d7\u05f3\u05d9\u05d9",
+  "\u05d7'\u05d9\u05d9",
+  "\"\"",
+  "",
+  "   ",
+  "123 \u05d0\u05d112 \u05d05",
+  "<\u05d1>\u05d0\u05d1</\u05d1> &\u05d0\u05de\u05e4; \u05d2\u05d3",
+  "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea|\u05d1\u05e8A",
+  "{\u05d0\u05d1} (\u05d2\u05d3)",
+  "\u05e8\u05d1\u05d9\u05ea\u05c3",
+  "\u05e7\u05d5\u05d3\u05e9' \u05e7\u05d3\u05e9\u05d9\u05dd'",
+  "\u05d9\u05e7\u05d5\u05e7 \u05d0\u05dc\u05e7\u05d9\u05dd",
+  "\u05d0\u05d1\u05d9 ''\u05d9\u05d5'' \u05d7",
+  "\"\u05d0\u05d1\u05d9\" \"\u05d1\u05e0\"",
+  "\u05de\u05e9\u05d4\u0591 \u05e8\u05b7\u05d1\u05d9\u05c3\u05d5"
+ ],
+ "texts": [
+  "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea \u05d1\u05e8A \u05d0\u05dc\u05d4\u05d9\u05dd \u05d0\u05ea \u05d4\u05e9\u05de\u05d9\u05dd \u05d5\u05d0\u05ea \u05d4\u05d0\u05e8\u05e5",
+  "\u05d5\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea \u05d4\u05d3\u05d1\u05e8\u05d9\u05dd \u05d5\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea\u05d5 \u05d1\u05e8A \u05dc\u05d4\u05dd",
+  "<\u05d1>\u05d1\u05bc\u05e8\u05b7\u05e9\u05b4\u05d9\u05b0\u05ea</\u05d1> \u05d1\u05b8\u05e8\u05b8\u05b7\u05d0 \u05d0\u05b0\u05dc\u05d4\u05b9\u05d9\u05b4\u05dd",
+  "\u05d0\u05de\u05e8 \u05e8\u05de\u05d1\"\u05dd \u05d7\u05dc\u05e7 \u05d0. \u05d5\u05e8\u05de\u05d1\u05f4\u05dd \u05d1\u05d7\u05dc\u05e7 \u05d1. \u05d5\u05e8\u05de\u05d1''\u05dd",
+  "\u05e9\u05dc\u05d5\u05dd \u05e2\u05dc\u05d9\u05da\u05dd, \u05e9\u05dc\u05d5\u05dd-\u05e2\u05dc\u05d9\u05da\u05dd; \u05d5\u05e9\u05dc\u05d5\u05de\u05d9\u05dd",
+  "\u05de\u05e9\u05d4 \u05e8\u05d1\u05d9\u05df\u05d5 \u05d5\u05de\u05e9\u05d4 \u05e8\u05d1\u05df\u05d5 \u05d0\u05de\u05e8 \u05dc\u05d4\u05dd",
+  "\u05d9\u05d4\u05d5\u05d4 \u05d0\u05dc\u05d4\u05d9\u05dd \u05d5\u05d9\u05e7\u05d5\u05e7 \u05d0\u05dc\u05e7\u05d9\u05dd \u05d5\u05d4' \u05d0\u05dc\u05d4\u05d9\u05dd",
+  "\u05d0\u05d1 \u05d2\u05d3 \u05d4\u05d5 \u05d6\u05d7 \u05d8\u05d9 \u05db\u05dc \u05de\u05e0",
+  "(\u05db\u05d8\u05d9\u05d1) [\u05e7\u05e8\u05d9] \u05de\u05dc\u05d4 \u05d0\u05ea \u05d4\u05de\u05dc\u05d4"
+ ],
+ "highlight": [
+  {
+   "query": "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {},
+   "anyOrder": false
+  },
+  {
+   "query": "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea \u05d1\u05e8A",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {},
+   "anyOrder": false
+  },
+  {
+   "query": "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea \u05d1\u05e8A",
+   "distance": 3,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {},
+   "anyOrder": false
+  },
+  {
+   "query": "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea \u05d0\u05dc\u05d4\u05d9\u05dd",
+   "distance": 2,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {},
+   "anyOrder": true
+  },
+  {
+   "query": "\u05d1\u05e8A \u05d0\u05dc\u05d4\u05d9\u05dd \u05d0\u05ea",
+   "distance": 0,
+   "customSpacing": {
+    "0-1": "1",
+    "1-2": "0"
+   },
+   "alternativeWords": {},
+   "searchOptions": {},
+   "anyOrder": false
+  },
+  {
+   "query": "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {
+    "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea_0": {
+     "\u05e7\u05d9\u05d3\u05d5\u05de\u05d5\u05ea": true,
+     "\u05e1\u05d9\u05d5\u05de\u05d5\u05ea": true
+    }
+   },
+   "anyOrder": false
+  },
+  {
+   "query": "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {
+    "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea_0": {
+     "\u05e7\u05d9\u05d3\u05d5\u05de\u05d5\u05ea \u05d3\u05e7\u05d3\u05d5\u05e7\u05d9\u05d5\u05ea": true,
+     "\u05e1\u05d9\u05d5\u05de\u05d5\u05ea \u05d3\u05e7\u05d3\u05d5\u05e7\u05d9\u05d5\u05ea": true
+    }
+   },
+   "anyOrder": false
+  },
+  {
+   "query": "\u05e8\u05d1\u05d9\u05df\u05d5",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {
+    "\u05e8\u05d1\u05d9\u05df\u05d5_0": {
+     "\u05db\u05ea\u05d9\u05d1 \u05de\u05dc\u05d0/\u05d7\u05e1\u05e8": true
+    }
+   },
+   "anyOrder": false
+  },
+  {
+   "query": "\u05de\u05e9\u05d4 \u05e8\u05d1\u05d9\u05df\u05d5",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {
+    "\u05e8\u05d1\u05d9\u05df\u05d5_1": {
+     "\u05db\u05ea\u05d9\u05d1 \u05de\u05dc\u05d0/\u05d7\u05e1\u05e8": true,
+     "\u05e7\u05d9\u05d3\u05d5\u05de\u05d5\u05ea \u05d3\u05e7\u05d3\u05d5\u05e7\u05d9\u05d5\u05ea": true
+    }
+   },
+   "anyOrder": false
+  },
+  {
+   "query": "\u05e8\u05de\u05d1\"\u05dd",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {
+    "\u05e8\u05de\u05d1\"\u05dd_0": {
+     "\u05d4\u05ea\u05e2\u05dc\u05dd \u05de\u05d2\u05e8\u05e9\u05d9\u05d9\u05dd": true
+    }
+   },
+   "anyOrder": false
+  },
+  {
+   "query": "\u05e9\u05dc\u05d5\u05dd",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {
+    "0": [
+     "\u05e9\u05dc\u05d5\u05de\u05d9\u05dd"
+    ]
+   },
+   "searchOptions": {},
+   "anyOrder": false
+  },
+  {
+   "query": "\u05e9\u05dc\u05d5\u05dd \u05e2\u05dc\u05d9\u05da\u05dd",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {},
+   "anyOrder": false
+  },
+  {
+   "query": "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {
+    "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea_0": {
+     "\u05e9\u05d2\u05d9\u05d0\u05d5\u05ea \u05db\u05ea\u05d9\u05d1": true
+    }
+   },
+   "anyOrder": false
+  },
+  {
+   "query": "\u05d1\u05e8A",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {
+    "\u05d1\u05e8A_0": {
+     "\u05d7\u05dc\u05e7 \u05de\u05de\u05d9\u05dc\u05d4": true
+    }
+   },
+   "anyOrder": false
+  },
+  {
+   "query": "\u05d0\u05dc\u05d4\u05d9\u05dd",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {
+    "\u05d0\u05dc\u05d4\u05d9\u05dd_0": {
+     "\u05e7\u05d9\u05d3\u05d5\u05de\u05d5\u05ea \u05d0\u05e8\u05de\u05d9\u05d5\u05ea": true,
+     "\u05e1\u05d9\u05d5\u05de\u05d5\u05ea \u05d0\u05e8\u05de\u05d9\u05d5\u05ea": true
+    }
+   },
+   "anyOrder": false
+  },
+  {
+   "query": "\u05d1\u05bc\u05e8\u05b7\u05e9\u05b4\u05d9\u05b0\u05ea",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {
+    "\u05d1\u05bc\u05e8\u05b7\u05e9\u05b4\u05d9\u05b0\u05ea_0": {
+     "\u05e0\u05d9\u05e7\u05d5\u05d3": true
+    }
+   },
+   "anyOrder": false
+  },
+  {
+   "query": "",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {},
+   "anyOrder": false
+  },
+  {
+   "query": "\u05d0\u05b0\u05dc\u05d4\u05b9\u05d9\u05b4\u05dd",
+   "distance": 0,
+   "customSpacing": {},
+   "alternativeWords": {},
+   "searchOptions": {},
+   "anyOrder": false
+  }
+ ],
+ "regex": [
+  "/\u05d1\u05e8\u05d0\u05e9\u05d9.*/",
+  "/\u05d1.\u05d0\u05e9\u05d9\u05ea \u05d1\u05e8./",
+  "/^\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea/",
+  "/\u05d4\u05d0\u05e8\u05e5$/",
+  "/[\u05d0\u05d1]+/",
+  "/\u05e8\u05de\u05d1\"\u05dd/",
+  "/\u05e9\u05dc\u05d5\u05dd s*\u05e2\u05dc\u05d9\u05da\u05dd/",
+  "/(/",
+  "/$\u05d0/",
+  "/ /",
+  "/\u05d0{2,5}/",
+  "/.* \u05d1\u05e8A/",
+  "/b\u05e8\u05d0\u05e9\u05d9b/",
+  "/\u05de\u05e9\u05d4.*\u05d0\u05de\u05e8/",
+  "/\u05db\u05dc|\u05de\u05e0/"
+ ],
+ "fingerprints": {
+  "content": [
+   "",
+   "\u05d0",
+   "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea \u05d1\u05e8A \u05d0\u05dc\u05d4\u05d9\u05dd",
+   "\u05dci\u05e0\u05e21\n\u05dci\u05e0\u05e22\r\n",
+   "\ufeff\u05d1o\u05de"
+  ],
+  "contentBytes": [
+   [
+    255,
+    254,
+    65
+   ],
+   [
+    97,
+    195
+   ],
+   [
+    226,
+    130,
+    172
+   ],
+   []
+  ],
+  "metadata": [
+   {
+    "title": "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea",
+    "topics": "a/b",
+    "facets": null
+   },
+   {
+    "title": "",
+    "topics": "",
+    "facets": []
+   },
+   {
+    "title": "T",
+    "topics": "x",
+    "facets": [
+     "z",
+     "a",
+     "z",
+     "author/b"
+    ]
+   }
+  ],
+  "book": [
+   {
+    "text": "\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea \u05d1\u05e8A",
+    "title": "T",
+    "topics": "p",
+    "facets": [
+     "b",
+     "a"
+    ]
+   },
+   {
+    "text": "",
+    "title": "",
+    "topics": "",
+    "facets": null
+   }
+  ]
+ }
+}

@@ -20,6 +20,8 @@ enum TextRequest {
     QueryWordSpans { query: String },
     LiteralHighlightPattern { query: String },
     UserRegexPlan { raw: String },
+    FuzzyIndexHighlightTokens { query: String },
+    SmartIndexHighlightWords { query: String, #[serde(default)] exact: bool },
 }
 
 /// Otzaria's pure text helpers. `request` is JSON `{"op": ..., ...}`:
@@ -29,6 +31,10 @@ enum TextRequest {
 /// - `literal_highlight_pattern` `{query}` -> string | null (`generateLiteralHighlightPattern`)
 /// - `user_regex_plan` `{raw}` -> {kind: invalid|single_word|word_sequence|cross_space,
 ///   pattern, words, reason} (`parseUserRegex`)
+/// - `fuzzy_index_highlight_tokens` `{query}` -> [token] | null: the tokens whose fuzzy
+///   terms the `index_fuzzy` matcher reads (null: they do not align with the words)
+/// - `smart_index_highlight_words` `{query, exact}` -> [word]: the words whose fuzzy
+///   terms the `index_smart` matcher reads
 ///
 /// Returns a JSON string (free with `se_string_free`), null on error.
 ///
@@ -56,6 +62,8 @@ pub unsafe extern "C" fn se_text_helper(request: *const u8, len: usize) -> *mut 
                 };
                 json!({"kind": kind, "pattern": plan.pattern, "words": plan.words, "reason": plan.reason})
             }
+            TextRequest::FuzzyIndexHighlightTokens { query } => json!(otzaria::fuzzy_index_highlight_tokens(&query)),
+            TextRequest::SmartIndexHighlightWords { query, exact } => json!(otzaria::smart_index_highlight_words(&query, exact)),
         };
         Ok(out_string(out.to_string()))
     })
@@ -82,6 +90,44 @@ enum MatcherRequest {
     Smart { query: String, #[serde(default)] exact: bool },
     /// `prepareUserRegexMatcher`.
     UserRegex { raw: String },
+    /// `generateIndexHighlightPattern` given each word's matched index terms.
+    IndexHighlight {
+        query: String,
+        #[serde(default)]
+        distance: u32,
+        #[serde(default)]
+        custom_spacing: HashMap<String, String>,
+        #[serde(default)]
+        alternative_words: HashMap<String, Vec<String>>,
+        #[serde(default)]
+        search_options: HashMap<String, HashMap<String, bool>>,
+        #[serde(default)]
+        any_order: bool,
+        #[serde(default)]
+        per_word_terms: Vec<Vec<String>>,
+    },
+    /// `generateIndexFuzzyHighlightPattern` given each token's fuzzy terms.
+    IndexFuzzy {
+        query: String,
+        #[serde(default)]
+        per_token_terms: Vec<Vec<String>>,
+    },
+    /// `generateIndexSmartHighlightPattern` given each word's fuzzy terms.
+    IndexSmart {
+        query: String,
+        #[serde(default)]
+        exact: bool,
+        #[serde(default)]
+        terms: HashMap<String, Vec<String>>,
+    },
+}
+
+fn word_index_keys(alternative_words: HashMap<String, Vec<String>>) -> Result<HashMap<u32, Vec<String>>, String> {
+    // JSON object keys are strings (a tagged enum cannot read them as numbers)
+    alternative_words
+        .into_iter()
+        .map(|(k, v)| k.parse::<u32>().map(|k| (k, v)).map_err(|_| format!("alternative_words key {k:?} is not a word index")))
+        .collect()
 }
 
 /// A prepared display matcher (`se_matcher_open`).
@@ -102,6 +148,11 @@ fn matches_json(ms: Vec<HighlightMatch>) -> Value {
 /// - `highlight` `{query, distance, custom_spacing, alternative_words, search_options, any_order}`
 /// - `smart` `{query, exact}`
 /// - `user_regex` `{raw}`
+/// - `index_highlight` `{query, distance, custom_spacing, alternative_words, search_options,
+///   any_order, per_word_terms}`: `per_word_terms[i]` = query word i's matched index terms
+///   (a search's `se_search_group_terms`)
+/// - `index_fuzzy` `{query, per_token_terms}` (tokens of `fuzzy_index_highlight_tokens`)
+/// - `index_smart` `{query, exact, terms: {word: [term]}}` (words of `smart_index_highlight_words`)
 ///
 /// `*out_info` gets a JSON string (free with `se_string_free`): for a pattern
 /// `{combined_pattern, word_patterns, word_boundary_eligible, allows_cross_line}`, for a
@@ -120,16 +171,39 @@ pub unsafe extern "C" fn se_matcher_open(request: *const u8, len: usize, out_inf
         let request: MatcherRequest = serde_json::from_str(str_arg(request, len)?).map_err(err)?;
         let matcher = match request {
             MatcherRequest::Highlight { query, distance, custom_spacing, alternative_words, search_options, any_order } => {
-                // JSON object keys are strings (a tagged enum cannot read them as numbers)
-                let alternative_words = alternative_words
-                    .into_iter()
-                    .map(|(k, v)| k.parse::<u32>().map(|k| (k, v)).map_err(|_| format!("alternative_words key {k:?} is not a word index")))
-                    .collect::<Result<HashMap<u32, Vec<String>>, String>>()?;
+                let alternative_words = word_index_keys(alternative_words)?;
                 otzaria::highlight_pattern(&query, distance, &custom_spacing, &alternative_words, &search_options, any_order)
                     .map(DisplayMatcher::Pattern)
             }
             MatcherRequest::Smart { query, exact } => otzaria::smart_highlight_pattern(&query, exact).map(DisplayMatcher::Pattern),
             MatcherRequest::UserRegex { raw } => UserRegexMatcher::prepare(&raw).map(DisplayMatcher::UserRegex),
+            MatcherRequest::IndexHighlight {
+                query,
+                distance,
+                custom_spacing,
+                alternative_words,
+                search_options,
+                any_order,
+                per_word_terms,
+            } => {
+                let alternative_words = word_index_keys(alternative_words)?;
+                otzaria::index_highlight_pattern(
+                    &query,
+                    distance,
+                    &custom_spacing,
+                    &alternative_words,
+                    &search_options,
+                    &per_word_terms,
+                    any_order,
+                )
+                .map(DisplayMatcher::Pattern)
+            }
+            MatcherRequest::IndexFuzzy { query, per_token_terms } => {
+                otzaria::fuzzy_index_highlight_pattern(&query, &per_token_terms).map(DisplayMatcher::Pattern)
+            }
+            MatcherRequest::IndexSmart { query, exact, terms } => {
+                otzaria::smart_index_highlight_pattern(&query, exact, &terms).map(DisplayMatcher::Pattern)
+            }
         };
         let info = match &matcher {
             None => Value::Null,

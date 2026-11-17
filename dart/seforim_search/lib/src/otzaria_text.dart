@@ -176,6 +176,53 @@ HighlightPattern? generateHighlightPattern({
 HighlightPattern? generateSmartHighlightPattern({required String query, required bool exact}) =>
     _pattern({'kind': 'smart', 'query': query, 'exact': exact});
 
+/// Otzaria's `generateIndexHighlightPattern` after its term scan: [perWordTerms][i] =
+/// the index terms query word i matched (a search's [SearchSession.groupTerms]); a word
+/// with none paints its query shape, as Otzaria's does.
+HighlightPattern? generateIndexHighlightPattern({
+  required String query,
+  required int distance,
+  required List<List<String>> perWordTerms,
+  Map<String, String> customSpacing = const {},
+  Map<int, List<String>> alternativeWords = const {},
+  Map<String, Map<String, bool>> searchOptions = const {},
+  bool anyOrder = false,
+}) =>
+    _pattern({
+      'kind': 'index_highlight',
+      'query': query,
+      'distance': distance,
+      'custom_spacing': customSpacing,
+      'alternative_words': {for (final e in alternativeWords.entries) '${e.key}': e.value},
+      'search_options': searchOptions,
+      'any_order': anyOrder,
+      'per_word_terms': perWordTerms,
+    });
+
+/// The tokens whose fuzzy terms [generateIndexFuzzyHighlightPattern] reads, in order;
+/// null when they do not align with the query's words (no terms are read then).
+List<String>? fuzzyIndexHighlightTokens(String query) =>
+    (_text({'op': 'fuzzy_index_highlight_tokens', 'query': query}) as List?)?.cast<String>();
+
+/// Otzaria's `generateIndexFuzzyHighlightPattern` after its term scan:
+/// [perTokenTerms][i] = the index terms within the edit distance of token i of
+/// [fuzzyIndexHighlightTokens] plus its dictionary forms (the token itself and its
+/// quote-free form are added by the engine).
+HighlightPattern? generateIndexFuzzyHighlightPattern({required String query, required List<List<String>> perTokenTerms}) =>
+    _pattern({'kind': 'index_fuzzy', 'query': query, 'per_token_terms': perTokenTerms});
+
+/// The words whose fuzzy terms [generateIndexSmartHighlightPattern] reads (empty for an
+/// exact query).
+List<String> smartIndexHighlightWords(String query, {required bool exact}) =>
+    (_text({'op': 'smart_index_highlight_words', 'query': query, 'exact': exact}) as List).cast<String>();
+
+/// Otzaria's `generateIndexSmartHighlightPattern` after its term scans: [terms][word] =
+/// the index terms within the edit distance of a word of [smartIndexHighlightWords] plus
+/// its dictionary forms.
+HighlightPattern? generateIndexSmartHighlightPattern(
+        {required String query, required bool exact, Map<String, List<String>> terms = const {}}) =>
+    _pattern({'kind': 'index_smart', 'query': query, 'exact': exact, 'terms': terms});
+
 /// Otzaria's `prepareUserRegexMatcher`: the book-view matcher of a `/.../` query, null
 /// when it is invalid. Use [HighlightMatcher.findMatches] (no boundaries).
 HighlightMatcher? prepareUserRegexMatcher(String raw) {

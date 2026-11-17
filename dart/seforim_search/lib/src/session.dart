@@ -387,6 +387,13 @@ final class SearchSession implements Finalizable {
   List<String> takeNewTerms() =>
       (jsonDecode(_n.takeString(_n.takeNewTerms(_h))) as List).cast<String>();
 
+  /// The index terms each word group of the query matched (the walks' matched
+  /// terms), one list per group in query order; a group that was not searched or
+  /// matched nothing has an empty list.
+  List<List<String>> groupTerms() => [
+        for (final g in jsonDecode(_n.takeString(_n.groupTerms(_h))) as List) (g as List).cast<String>()
+      ];
+
   void close() {
     if (_handle == nullptr) return;
     _n.searchCloseFinalizer.detach(this);

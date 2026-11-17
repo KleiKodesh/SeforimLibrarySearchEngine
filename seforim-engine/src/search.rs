@@ -713,6 +713,9 @@ pub struct SnippetSession {
     /// Terms matched only by [`GroupSpec::Unmarked`] members: their marks
     /// are dropped. Empty (the usual case): nothing is checked.
     unmarked: std::collections::HashSet<String>,
+    /// Each query group's matched index terms, by group (see
+    /// [`group_terms`](Self::group_terms)).
+    group_terms: Vec<Vec<String>>,
     /// See [`set_match_mode`](Self::set_match_mode).
     match_mode: hebrew_fts::MatchMode,
     /// The locators pick the word-tightest window (an index with
@@ -994,6 +997,7 @@ impl SnippetSession {
             positions: None,
             force_positions: false,
             unmarked: Default::default(),
+            group_terms: Vec::new(),
             match_mode: hebrew_fts::MatchMode::BestWindow,
             word_span: false,
             word_windows: false,
@@ -1467,6 +1471,15 @@ impl SnippetSession {
     /// Every term so far, by id.
     pub fn all_terms(&self) -> &[String] {
         &self.terms.terms
+    }
+
+    /// The index terms each of the request's groups matched (the walks'
+    /// `MatchedTermsSink` sets), aligned with `SearchRequest::groups`: a
+    /// group that was not searched or matched nothing has an empty list.
+    /// Always one list per group (all empty when the search returned before the
+    /// main query's terms were read); empty for a line-regex search.
+    pub fn group_terms(&self) -> &[Vec<String>] {
+        &self.group_terms
     }
 
     /// Every group's matched words, in query order (skipped slots absent).
@@ -2760,6 +2773,7 @@ impl LineIndex {
             positions: None,
             force_positions: false,
             unmarked: Default::default(),
+            group_terms: vec![Vec::new(); request.groups.len()],
             match_mode: hebrew_fts::MatchMode::BestWindow,
             word_span: self.options.positions,
             word_windows: request.word_windows && self.options.positions,
@@ -3387,6 +3401,13 @@ impl LineIndex {
         let mut group_terms: Vec<Vec<String>> = sinks.iter().map(|s| s.take_strings()).collect();
         // every slot's terms, empty ones included (aligned with `main_slots`)
         let main_terms = relevance.then(|| group_terms.clone());
+        session.group_terms = vec![Vec::new(); request.groups.len()];
+        for (k, terms) in group_terms.iter().enumerate() {
+            let at = main_slot_ids.as_ref().map_or(k, |ids| ids[k]);
+            if let Some(slot) = session.group_terms.get_mut(at) {
+                *slot = terms.clone();
+            }
+        }
         let main_ok = if group_terms.is_empty() {
             false
         } else if let Some(min) = partial_min {

@@ -82,7 +82,7 @@ pub(crate) fn canonical(query: &str) -> Cow<'_, str> {
     Cow::Owned(String::from_utf16(&units).expect("query word spans preserve UTF-16 boundaries"))
 }
 
-fn display_tokens(query: &str) -> Vec<String> {
+pub(crate) fn display_tokens(query: &str) -> Vec<String> {
     // Match the index's `hebrew_query` analyzer without opening an index. In
     // particular, keep both qere/ketiv terms and remove the same long tokens.
     let mut analyzer = TextAnalyzer::builder(crate::otzaria::hebrew_tokenizer::HebrewTokenizer::default())

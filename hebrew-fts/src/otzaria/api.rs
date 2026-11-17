@@ -171,3 +171,155 @@ impl UserRegexMatcher {
         })
     }
 }
+
+// ---- index highlight patterns (the `generate_index_*_highlight_pattern` family) ----
+//
+// otzaria_search_engine reads each word's matched index terms with its own term scans
+// and then builds the pattern from them. Here the terms come from the caller (this
+// engine's search hands its walks' matched terms back, `SnippetSession::group_terms`);
+// the steps after the scan are Otzaria's, verbatim.
+
+fn to_pattern(p: smart_query::DisplayPattern) -> HighlightPattern {
+    HighlightPattern {
+        combined_pattern: p.combined_pattern,
+        word_patterns: p.word_patterns,
+        word_boundary_eligible: p.word_boundary_eligible,
+        matcher: HighlightMatcher(p.matcher),
+    }
+}
+
+fn from_display(hl: display_highlight::DisplayHighlight) -> HighlightPattern {
+    HighlightPattern {
+        combined_pattern: hl.combined_pattern,
+        word_patterns: hl.word_patterns,
+        word_boundary_eligible: hl.word_boundary_eligible,
+        matcher: HighlightMatcher(Arc::new(hl.matcher)),
+    }
+}
+
+/// otzaria_search_engine `SearchEngine::quoteless_variant`.
+fn quoteless_variant(token: &str) -> Option<String> {
+    if !token.contains(['"', '\'']) {
+        return None;
+    }
+    let clean: String = token.chars().filter(|c| !matches!(c, '"' | '\'')).collect();
+    (!clean.is_empty()).then_some(clean)
+}
+
+/// Index terms as Otzaria's plain `text` field holds them (its highlight scans read that
+/// field, never the vocalized one): a keep-marks index's terms lose their marks.
+fn plain_terms(terms: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(terms.len());
+    for t in terms {
+        let plain = crate::chars::strip_term_marks(t).into_owned();
+        if !out.contains(&plain) {
+            out.push(plain);
+        }
+    }
+    out
+}
+
+/// A token's display term set (`lexical_phrase_per_word_terms` /
+/// `compute_index_fuzzy_highlight_pattern` per token): the matched terms, the token
+/// itself, its quote-free form and the caller's dictionary forms.
+fn token_terms(token: &str, matched: &[String]) -> std::collections::BTreeSet<String> {
+    let mut set: std::collections::BTreeSet<String> = plain_terms(matched).into_iter().collect();
+    set.insert(token.to_string());
+    set.extend(quoteless_variant(token));
+    set
+}
+
+/// Otzaria's `generate_index_highlight_pattern` after its term scan
+/// (`compute_index_highlight_pattern`): `per_word_terms[i]` = the index terms query
+/// word `i` matched (empty: the word paints its query shape), read as the plain `text`
+/// field holds them (marks dropped).
+pub fn index_highlight_pattern(
+    query: &str,
+    distance: u32,
+    custom_spacing: &HashMap<String, String>,
+    alternative_words: &HashMap<u32, Vec<String>>,
+    search_options: &HashMap<String, HashMap<String, bool>>,
+    per_word_terms: &[Vec<String>],
+    any_order: bool,
+) -> Option<HighlightPattern> {
+    let per_word: Vec<Vec<String>> = per_word_terms.iter().map(|t| plain_terms(t)).collect();
+    display_highlight::build_display_highlight_from_terms(
+        query,
+        distance,
+        custom_spacing,
+        alternative_words,
+        search_options,
+        &per_word,
+        any_order,
+    )
+    .map(from_display)
+}
+
+/// The tokens whose fuzzy terms [`fuzzy_index_highlight_pattern`] reads (the
+/// `hebrew_query` analyzer's tokens), or None when they do not align with the query's
+/// words (Otzaria then paints the query shape and reads no terms).
+pub fn fuzzy_index_highlight_tokens(query: &str) -> Option<Vec<String>> {
+    let tokens = smart_query::display_tokens(query);
+    let words = hebrew_query::split_query_words(&hebrew_query::normalize_for_index(query));
+    (tokens.len() == words.len()).then_some(tokens)
+}
+
+/// Otzaria's `generate_index_fuzzy_highlight_pattern` after its term scan:
+/// `per_token_terms[i]` = the index terms within the edit distance of token `i` of
+/// [`fuzzy_index_highlight_tokens`] (none at distance 0) plus the dictionary forms;
+/// the token and its quote-free form are added here.
+pub fn fuzzy_index_highlight_pattern(query: &str, per_token_terms: &[Vec<String>]) -> Option<HighlightPattern> {
+    let per_word: Vec<Vec<String>> = match fuzzy_index_highlight_tokens(query) {
+        None => Vec::new(),
+        Some(tokens) => tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| token_terms(t, per_token_terms.get(i).map(Vec::as_slice).unwrap_or(&[])).into_iter().collect())
+            .collect(),
+    };
+    display_highlight::build_display_highlight_from_terms(
+        query,
+        0,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &per_word,
+        false,
+    )
+    .map(from_display)
+}
+
+/// The words whose fuzzy terms [`smart_index_highlight_pattern`] reads (every
+/// alternative of every word outside a quotation); empty when the query is exact.
+pub fn smart_index_highlight_words(query: &str, exact: bool) -> Vec<String> {
+    let exact = exact || smart_query::whole_query_quoted(query);
+    let mut words: Vec<String> = Vec::new();
+    let _ = smart_query::display_pattern(query, exact, |choices| {
+        for c in choices {
+            if !words.contains(c) {
+                words.push(c.clone());
+            }
+        }
+        Ok::<_, std::convert::Infallible>(Vec::new())
+    });
+    words
+}
+
+/// Otzaria's `generate_index_smart_highlight_pattern` after its term scans:
+/// `terms[word]` = the index terms within the edit distance of `word` (none at
+/// distance 0) plus the dictionary forms, for the words of
+/// [`smart_index_highlight_words`]; the word and its quote-free form are added here.
+pub fn smart_index_highlight_pattern(query: &str, exact: bool, terms: &HashMap<String, Vec<String>>) -> Option<HighlightPattern> {
+    let exact = exact || smart_query::whole_query_quoted(query);
+    let pattern = smart_query::display_pattern(query, exact, |choices| {
+        let mut set = std::collections::BTreeSet::new();
+        for c in choices {
+            set.extend(token_terms(c, terms.get(c).map(Vec::as_slice).unwrap_or(&[])));
+        }
+        Ok::<_, std::convert::Infallible>(set.into_iter().collect())
+    });
+    match pattern {
+        Ok(p) => p.map(to_pattern),
+        Err(never) => match never {},
+    }
+}

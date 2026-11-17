@@ -445,6 +445,9 @@ final class AsyncSearchSession {
   /// [SearchSession.takeNewTerms].
   Future<List<String>> takeNewTerms() => _call('takeNewTerms');
 
+  /// [SearchSession.groupTerms].
+  Future<List<List<String>>> groupTerms() => _call('groupTerms');
+
   /// Sets [SearchSession.matchMode].
   Future<void> setMatchMode(SnippetMatchMode mode) => _call('matchMode', mode.index);
 
@@ -611,6 +614,8 @@ void _workerMain((SendPort, String, String?) args) {
           value = s().info();
         case 'takeNewTerms':
           value = s().takeNewTerms();
+        case 'groupTerms':
+          value = s().groupTerms();
         case 'matchMode':
           s().matchMode = SnippetMatchMode.values[b as int];
         case 'semanticSearch':

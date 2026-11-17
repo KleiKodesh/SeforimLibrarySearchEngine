@@ -89,7 +89,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 21; // 21: Otzaria's hybrid search session (se_hybrid_open, se_hybrid_page, se_hybrid_add_texts, se_hybrid_close; se_search_fuse_semantic removed, issue #18); 20: se_vectors_install report `needs_compaction` (Otzaria sidecar compaction policy, issue #18); 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 22; // 22: se_hybrid_open options `ranking` (Otzaria's RankingProfile) and `foundational_books` replace `fusion` / the penalties (issue #18); 21: Otzaria's hybrid search session (se_hybrid_open, se_hybrid_page, se_hybrid_add_texts, se_hybrid_close; se_search_fuse_semantic removed, issue #18); 20: se_vectors_install report `needs_compaction` (Otzaria sidecar compaction policy, issue #18); 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -2208,9 +2208,17 @@ pub unsafe extern "C" fn se_semantic_search(
 /// Opens Otzaria's hybrid search session (issue #18): `query` (the lexical
 /// text) and `vector` (`dims` floats: the query's embedding by the host's
 /// query model; 0 dims or no open vector set = the lexical side alone).
-/// `options_json` (may be empty): `{"books":[..]|null,"fusion":{"strategy":
-/// "weighted","alpha":null,"bm25_k":10}|{"strategy":"rrf","k":60},"threads":0,
-/// "window_penalty":0.04,"alias_penalty":0.04}`. Pages come from
+/// `options_json` (may be empty): `{"books":[..]|null,"foundational_books":[..]|null,
+/// "threads":0,"ranking":{..}}`: `ranking` = Otzaria's `RankingProfile` (every field
+/// optional, defaults = otzaria_search_engine's): `"fusion_strategy":{"strategy":"rrf",
+/// "k":60}|{"strategy":"weighted"}|{"strategy":"adaptive"}`, `"alpha_override"`,
+/// `"alpha_by_query_type":{"quoted_phrase","exact_reference","short","mixed",
+/// "conceptual","unknown"}`, `"bm25_saturation_k"`, `"semantic_threshold"`,
+/// `"agreement_bonus"`, `"phrase_match_bonus"`, `"rare_term_bonus"`,
+/// `"section_coverage_bonus"`, `"duplicate_penalty"`, `"metadata_ranking_enabled"`,
+/// `"candidate_window_multiplier"`, `"foundational_bonus"`,
+/// `"foundational_candidate_share"`, `"window_penalty"`, `"alias_penalty"` (out of
+/// range: an error, as Otzaria's `validate`). Pages come from
 /// `se_hybrid_page`; free with `se_hybrid_close`. Null on error.
 ///
 /// # Safety
@@ -2245,7 +2253,8 @@ pub unsafe extern "C" fn se_hybrid_open(
 /// "lexical":x|null,"semantic":x|null,"source":"lexical"|"semantic"|"both"}],
 /// "more":bool,"window":N,"lexical_total":N,"exhausted":bool}`, or (an index
 /// without positions, a query of several words: the phrase is scored from
-/// the line texts) `{"need_texts":[line ids]}`: give them with
+/// the line texts; or a profile whose text bonuses / duplicate penalty read
+/// the lines) `{"need_texts":[line ids]}`: give them with
 /// `se_hybrid_add_texts` and ask again. Null on error. `token` null or live.
 ///
 /// # Safety

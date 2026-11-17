@@ -238,7 +238,7 @@ final class SemanticResult {
   final int unmapped;
   final int scanned, threads, generation;
 
-  /// The engine's JSON (passed back for [FusionOptions] fusion).
+  /// The engine's JSON.
   final String json;
 
   factory SemanticResult.fromJsonText(String text) {
@@ -253,47 +253,40 @@ final class SemanticResult {
   }
 }
 
-/// Hybrid fusion strategy.
-enum FusionStrategy { weighted, rrf }
-
-/// How to fuse lexical and semantic results (Otzaria's fusion).
-final class FusionOptions {
-  const FusionOptions({this.strategy = FusionStrategy.weighted, this.alpha, this.bm25K = 10.0, this.rrfK = 60});
-  final FusionStrategy strategy;
-
-  /// Weighted: lexical weight 0..1; null = Otzaria's table by query type.
-  final double? alpha;
-
-  /// Weighted: BM25 saturation k (x / (k + x)).
-  final double bm25K;
-
-  /// RRF: k (1 / (k + rank)).
-  final int rrfK;
-
-  Map<String, Object?> toJson() => strategy == FusionStrategy.rrf
-      ? {'strategy': 'rrf', 'k': rrfK}
-      : {'strategy': 'weighted', 'bm25_k': bm25K, if (alpha != null) 'alpha': alpha};
-}
-
 /// A hybrid search request (Otzaria's hybrid session, issue #18).
 final class HybridOptions {
-  const HybridOptions(
-      {this.books, this.fusion = const FusionOptions(), this.threads = 0, this.windowPenalty = 0.04, this.aliasPenalty = 0.04});
+  const HybridOptions({this.books, this.foundationalBooks, this.ranking = const {}, this.threads = 0});
 
   /// Only these books (both sides); null = all.
   final List<int>? books;
-  final FusionOptions fusion;
+
+  /// The foundational books (Otzaria's `/base` facet: the host's base books),
+  /// for the profile's foundational bonus and foundational query.
+  final List<int>? foundationalBooks;
+
+  /// Otzaria's ranking profile fields to set (`RankingProfile`, snake_case as
+  /// the C ABI documents; empty = otzaria_search_engine's defaults: RRF k 60,
+  /// threshold 0.55, window multiplier 2, foundational bonus 0.002 / share 0.5).
+  final Map<String, Object?> ranking;
 
   /// Semantic scan threads; 0 = Otzaria's default.
   final int threads;
-  final double windowPenalty, aliasPenalty;
+
+  /// Otzaria's `SearchProfile.balanced` (weighted fusion).
+  static const Map<String, Object?> balanced = {
+    'fusion_strategy': {'strategy': 'weighted'},
+    'semantic_threshold': 0.0,
+    'agreement_bonus': 0.10,
+    'candidate_window_multiplier': 2.0,
+    'foundational_bonus': 0.0,
+    'foundational_candidate_share': 0.0,
+  };
 
   Map<String, Object?> toJson() => {
         'books': books,
-        'fusion': fusion.toJson(),
+        'foundational_books': foundationalBooks,
+        'ranking': ranking,
         'threads': threads,
-        'window_penalty': windowPenalty,
-        'alias_penalty': aliasPenalty,
       };
 }
 

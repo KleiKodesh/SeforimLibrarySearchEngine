@@ -1198,6 +1198,7 @@ pub(crate) struct LexicalCandidate {
     pub line_id: u64,
     pub book_id: u64,
     pub position: u64,
+    pub section_id: u64,
     pub bm25: Score,
 }
 
@@ -1300,8 +1301,8 @@ pub(crate) fn hybrid_lexical_window(
         None
     };
     let book_set: Option<std::collections::HashSet<u64>> = books.map(|b| b.iter().copied().collect());
-    // (score, segment ord, doc, line, book, position): every match, then the top window
-    let mut all: Vec<(Score, usize, DocId, u64, u64, u64)> = Vec::new();
+    // (score, segment ord, doc, line, book, position, section): every match, then the top window
+    let mut all: Vec<(Score, usize, DocId, u64, u64, u64, u64)> = Vec::new();
     let mut missing: Vec<u64> = Vec::new();
     for (ord, segment) in searcher.segment_readers().iter().enumerate() {
         let alive = segment.alive_bitset();
@@ -1309,9 +1310,10 @@ pub(crate) fn hybrid_lexical_window(
         let line_ids = fast.u64("line_id")?;
         let book_ids = fast.u64(searcher.schema().get_field_name(book_field))?;
         let places = fast.u64(searcher.schema().get_field_name(position_field))?;
+        let sections = fast.u64("section_id")?;
         let inverted = segment.inverted_index(field)?;
         let fieldnorms = segment.get_fieldnorms_reader(field)?;
-        let keep = |doc: DocId| -> Option<(u64, u64, u64)> {
+        let keep = |doc: DocId| -> Option<(u64, u64, u64, u64)> {
             if alive.is_some_and(|a| !a.is_alive(doc)) {
                 return None;
             }
@@ -1319,7 +1321,7 @@ pub(crate) fn hybrid_lexical_window(
             if book_set.as_ref().is_some_and(|s| !s.contains(&book)) {
                 return None;
             }
-            Some((line_ids.first(doc).unwrap_or(0), book, places.first(doc).unwrap_or(0)))
+            Some((line_ids.first(doc).unwrap_or(0), book, places.first(doc).unwrap_or(0), sections.first(doc).unwrap_or(0)))
         };
         if let Some(bm25) = &single {
             let Some(mut union) = open_union(&inverted, field, &spellings_of[0], IndexRecordOption::Basic)? else {
@@ -1327,8 +1329,8 @@ pub(crate) fn hybrid_lexical_window(
             };
             let mut doc = union.doc();
             while doc != tantivy::TERMINATED {
-                if let Some((line, book, pos)) = keep(doc) {
-                    all.push((bm25.score(fieldnorms.fieldnorm_id(doc), 1), ord, doc, line, book, pos));
+                if let Some((line, book, pos, sec)) = keep(doc) {
+                    all.push((bm25.score(fieldnorms.fieldnorm_id(doc), 1), ord, doc, line, book, pos, sec));
                 }
                 doc = union.advance();
             }
@@ -1347,8 +1349,8 @@ pub(crate) fn hybrid_lexical_window(
                 }
             }
             for (doc, score) in sums {
-                if let Some((line, book, pos)) = keep(doc) {
-                    all.push((score, ord, doc, line, book, pos));
+                if let Some((line, book, pos, sec)) = keep(doc) {
+                    all.push((score, ord, doc, line, book, pos, sec));
                 }
             }
             continue;
@@ -1386,7 +1388,7 @@ pub(crate) fn hybrid_lexical_window(
                 doc = unions[0].seek(target);
                 continue;
             }
-            if let Some((line, book, pos)) = keep(doc) {
+            if let Some((line, book, pos, sec)) = keep(doc) {
                 match texts.get(&line) {
                     None => missing.push(line),
                     Some(text) => {
@@ -1398,7 +1400,7 @@ pub(crate) fn hybrid_lexical_window(
                             .map(|((_, bm25), &n)| bm25.score(fieldnorms.fieldnorm_id(doc), n))
                             .sum();
                         if counts.iter().any(|&n| n > 0) {
-                            all.push((score, ord, doc, line, book, pos));
+                            all.push((score, ord, doc, line, book, pos, sec));
                         }
                     }
                 }
@@ -1416,9 +1418,40 @@ pub(crate) fn hybrid_lexical_window(
     all.sort_by(|a, b| b.0.total_cmp(&a.0).then((a.1, a.2).cmp(&(b.1, b.2))));
     all.truncate(window);
     Ok(Ok((
-        all.into_iter().map(|(bm25, _, _, line_id, book_id, position)| LexicalCandidate { line_id, book_id, position, bm25 }).collect(),
+        all.into_iter()
+            .map(|(bm25, _, _, line_id, book_id, position, section_id)| LexicalCandidate { line_id, book_id, position, section_id, bm25 })
+            .collect(),
         total,
     )))
+}
+
+/// The section of each of `lines` (the `section_id` fast field, found by
+/// line id; a line not in the index is left out).
+pub(crate) fn sections_of(source: &HybridSource, lines: &[u64]) -> Result<HashMap<u64, u64>> {
+    let searcher = &match &source.user {
+        Some(u) => tantivy::Searcher::union(&[source.reader.searcher(), u.searcher()])?,
+        None => source.reader.searcher(),
+    };
+    let line_field = searcher.schema().get_field("line_id").map_err(|e| Error::Unsupported(e.to_string()))?;
+    let mut out = HashMap::with_capacity(lines.len());
+    for segment in searcher.segment_readers() {
+        let ids = segment.inverted_index(line_field)?;
+        let sections = segment.fast_fields().u64("section_id")?;
+        let alive = segment.alive_bitset();
+        for &id in lines {
+            if let Some(mut p) = ids.read_postings(&Term::from_field_u64(line_field, id), IndexRecordOption::Basic)? {
+                let mut doc = p.doc();
+                while doc != tantivy::TERMINATED {
+                    if alive.is_none_or(|a| a.is_alive(doc)) {
+                        out.insert(id, sections.first(doc).unwrap_or(0));
+                        break;
+                    }
+                    doc = p.advance();
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Per phrase (its slots: the allowed terms of each word), how many times it

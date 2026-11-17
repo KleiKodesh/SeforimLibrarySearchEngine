@@ -600,6 +600,17 @@ impl SegmentSet {
     /// best occurrence), best first (a stable sort: ties keep the scan's
     /// order), at most `k` lines.
     pub fn search_lines(&self, query: &[f32], map: &LineMap, options: &LineSearch, cancel: Option<&AtomicBool>) -> Result<LineResult> {
+        self.lines_of(query, map, options, true, cancel)
+    }
+
+    /// [`search_lines`](Self::search_lines) without the cut to `k` lines:
+    /// every line the top `k` vectors resolve to (the candidates Otzaria's
+    /// hybrid coordinator fuses, `SemanticSide::candidates`).
+    pub fn search_lines_all(&self, query: &[f32], map: &LineMap, options: &LineSearch, cancel: Option<&AtomicBool>) -> Result<LineResult> {
+        self.lines_of(query, map, options, false, cancel)
+    }
+
+    fn lines_of(&self, query: &[f32], map: &LineMap, options: &LineSearch, cut: bool, cancel: Option<&AtomicBool>) -> Result<LineResult> {
         let names = options.books.as_ref().map(|ids| map.names_of(ids));
         let threads = if options.threads == 0 { scan::default_scan_threads() } else { options.threads };
         let mut result = LineResult { threads, ..Default::default() };
@@ -641,7 +652,9 @@ impl SegmentSet {
             }
         }
         lines.sort_by(|a, b| b.score.total_cmp(&a.score));
-        lines.truncate(options.k);
+        if cut {
+            lines.truncate(options.k);
+        }
         result.hits = lines;
         Ok(result)
     }

@@ -86,7 +86,7 @@ void main() {
     expect((page.hits.first.lineId, page.hits.first.source), (1, 'both'));
     expect((page.more, page.window, page.exhausted), (false, 21, true));
     h.close();
-    final rrf = index.hybridSession('alpha', v([0, 0, 1, 0]), const HybridOptions(fusion: FusionOptions(strategy: FusionStrategy.rrf)));
+    final rrf = index.hybridSession('alpha', v([0, 0, 1, 0]), const HybridOptions(ranking: HybridOptions.balanced));
     // RRF (Otzaria's Fast profile) leaves out semantic lines under 0.55 normalized
     expect(rrf.page(0, 10).hits.map((h) => h.lineId), contains(1));
     rrf.close();

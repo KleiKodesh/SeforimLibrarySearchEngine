@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use seforim_vectors::fusion::{self, Fusion, QueryTypeAlphas};
+use seforim_vectors::fusion;
+pub use seforim_vectors::fusion::{FusionStrategy, QueryTypeAlphas, RankingProfile};
 use seforim_vectors::set::{LineMap, SegmentSet};
 
 pub use seforim_vectors::oxv::{OxvBookMap, OxvInfo};
@@ -87,41 +88,6 @@ pub struct SemanticResult {
     pub generation: u64,
 }
 
-
-/// How to fuse (JSON at the C ABI: `{"strategy":"weighted","alpha":0.5}` or
-/// `{"strategy":"rrf","k":60}`).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "strategy", rename_all = "lowercase")]
-pub enum FusionOptions {
-    /// Otzaria's weighted fusion. `alpha` = lexical weight (0..1); None =
-    /// Otzaria's table by query type (quoted phrase 1.0, exact reference
-    /// 0.85, short 0.7, mixed 0.5, conceptual 0.3, unknown 0.5).
-    Weighted {
-        #[serde(default)]
-        alpha: Option<f32>,
-        #[serde(default = "default_bm25_k")]
-        bm25_k: f32,
-    },
-    /// Reciprocal rank fusion.
-    Rrf {
-        #[serde(default = "default_rrf_k")]
-        k: u32,
-    },
-}
-
-fn default_bm25_k() -> f32 {
-    fusion::DEFAULT_BM25_SATURATION_K
-}
-
-fn default_rrf_k() -> u32 {
-    fusion::DEFAULT_RRF_K
-}
-
-impl Default for FusionOptions {
-    fn default() -> Self {
-        FusionOptions::Weighted { alpha: None, bm25_k: default_bm25_k() }
-    }
-}
 
 /// One hybrid result.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -253,29 +219,18 @@ impl LineIndex {
 pub const MAX_HYBRID_WINDOW: u32 = 10_000;
 
 /// A hybrid search request (JSON at the C ABI).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HybridOptions {
     /// Only these books (both sides). None = all.
     pub books: Option<Vec<u64>>,
-    /// The fusion profile (Otzaria's Balanced weighted fusion by default).
-    pub fusion: FusionOptions,
+    /// The foundational books (Otzaria's `/base` facet: the host's base
+    /// books), for the profile's foundational bonus and foundational query.
+    pub foundational_books: Option<Vec<u64>>,
+    /// Otzaria's ranking profile (default: otzaria_search_engine's defaults).
+    pub ranking: RankingProfile,
     /// Semantic scan threads (0 = Otzaria's default).
     pub threads: usize,
-    pub window_penalty: f32,
-    pub alias_penalty: f32,
-}
-
-impl Default for HybridOptions {
-    fn default() -> Self {
-        HybridOptions {
-            books: None,
-            fusion: FusionOptions::default(),
-            threads: 0,
-            window_penalty: DEFAULT_WINDOW_PENALTY,
-            alias_penalty: DEFAULT_WINDOW_PENALTY,
-        }
-    }
 }
 
 /// One page of a hybrid session.
@@ -328,6 +283,26 @@ pub struct HybridSession {
     exhausted: bool,
     lexical_total: u64,
     texts: std::collections::HashMap<u64, String>,
+    /// The query as Otzaria's coordinator reads it: `smart_query::canonical`, normalized.
+    features: fusion::QueryFeatures,
+    alpha: f32,
+}
+
+/// otzaria_search_engine `smart_query::canonical`: each placeholder spelling
+/// of the divine name in the query replaced by its full spelling (the copy
+/// the semantic side scores; the lexical query keeps the input).
+pub fn canonical_query(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    let mut last = 0;
+    hebrew_fts::scanner::scan_with(query, true, |_, span| {
+        if let Some(alt) = crate::relevance::placeholder_alternative(&query[span.byte_start..span.byte_end]) {
+            out.push_str(&query[last..span.byte_start]);
+            out.push_str(&alt);
+            last = span.byte_end;
+        }
+    });
+    out.push_str(&query[last..]);
+    out
 }
 
 impl LineIndex {
@@ -341,7 +316,12 @@ impl LineIndex {
         } else {
             seforim_vectors::normalized(vector).map_err(map_err)?
         };
+        options.ranking.validate().map_err(Error::Unsupported)?;
+        let features = fusion::analyze_query(&fusion::normalize_query(&canonical_query(query)));
+        let alpha = fusion::requested_alpha(&features, &options.ranking);
         Ok(HybridSession {
+            features,
+            alpha,
             source: self.hybrid_source(None),
             book_field: self.fields.book_id,
             position_field: self.fields.position,
@@ -391,10 +371,13 @@ impl HybridSession {
         }))
     }
 
-    /// One window fused (Otzaria's `expand_semantic_session`); Some = texts needed.
+    /// One window fused (otzaria_search_engine `expand_semantic_session` +
+    /// otzaria-semantic-search `HybridCoordinator::prepare_with` / `fuse`, with
+    /// `limit = window`, offset 0); Some = texts needed.
     fn expand(&mut self, window: u32, cancel: Option<&CancelToken>) -> Result<Option<Vec<u64>>> {
+        let profile = self.options.ranking.clone();
         let books = self.options.books.as_deref();
-        let lexical = match crate::relevance::hybrid_lexical_window(
+        let (candidates, total) = match crate::relevance::hybrid_lexical_window(
             &self.source,
             self.book_field,
             self.position_field,
@@ -406,49 +389,116 @@ impl HybridSession {
             Ok(l) => l,
             Err(crate::relevance::NeedTexts(ids)) => return Ok(Some(ids)),
         };
-        let (candidates, total) = lexical;
         self.lexical_total = total;
         let lexical_done = candidates.len() < window as usize;
-        let (semantic, semantic_done) = match &self.set {
-            Some((set, map)) => {
+        // prepare_with: the semantic half (skipped for an exact query: alpha >= 1)
+        let top_k = fusion::semantic_top_k(window as usize, 0, &profile);
+        let foundational: std::collections::HashSet<u64> = self.options.foundational_books.iter().flatten().copied().collect();
+        let mut semantic: Vec<SemanticHit> = Vec::new();
+        let mut healthy = false;
+        let mut semantic_hits = 0usize;
+        if self.alpha < 1.0 {
+            if let Some((set, map)) = &self.set {
+                let flag = cancel.map(|c| c.flag());
                 let opts = SemanticOptions {
-                    k: window as usize,
+                    k: top_k,
                     books: self.options.books.clone(),
                     threads: self.options.threads,
-                    window_penalty: self.options.window_penalty,
-                    alias_penalty: self.options.alias_penalty,
+                    window_penalty: profile.window_penalty,
+                    alias_penalty: profile.alias_penalty,
                 };
-                let flag = cancel.map(|c| c.flag());
-                let r = set.search_lines(&self.vector, map, &opts, flag.as_deref()).map_err(map_err)?;
-                let done = (r.vectors as usize) < window as usize;
-                (r.hits, done)
+                let r = set.search_lines_all(&self.vector, map, &opts, flag.as_deref()).map_err(map_err)?;
+                semantic_hits = r.vectors as usize;
+                semantic = r.hits.into_iter().map(|h| SemanticHit { line_id: h.line_id, book_id: h.book_id, score: h.score, chunk: h.chunk }).collect();
+                healthy = true;
+                // append_foundational: a share of top_k over the foundational books, the lines main lacks
+                let share = profile.foundational_candidate_share;
+                let user_foundational = books.is_some_and(|b| !b.is_empty() && b.iter().all(|x| foundational.contains(x)));
+                if !share.is_nan() && share > 0.0 && !foundational.is_empty() && !user_foundational {
+                    let base_k = (top_k as f64 * f64::from(share.min(1.0))).ceil() as usize;
+                    let base_books: Vec<u64> = match books {
+                        Some(b) => b.iter().copied().filter(|x| foundational.contains(x)).collect(),
+                        None => foundational.iter().copied().collect(),
+                    };
+                    let opts = SemanticOptions { k: base_k, books: Some(base_books), ..opts };
+                    let extras = set.search_lines_all(&self.vector, map, &opts, flag.as_deref()).map_err(map_err)?;
+                    let mut seen: std::collections::HashSet<u64> = semantic.iter().map(|h| h.line_id).collect();
+                    for h in extras.hits {
+                        if seen.insert(h.line_id) {
+                            semantic.push(SemanticHit { line_id: h.line_id, book_id: h.book_id, score: h.score, chunk: h.chunk });
+                        }
+                    }
+                }
             }
-            None => (Vec::new(), true),
+        }
+        let semantic_done = !healthy || semantic_hits < top_k;
+        // what ranking reads beyond the scores: sections, and (only for the bonuses / penalty that
+        // read them, weighted fusion) the line texts
+        let weighted = !matches!(profile.fusion_strategy, fusion::FusionStrategy::Rrf { .. });
+        let want_text = weighted && (profile.phrase_match_bonus > 0.0 || profile.rare_term_bonus > 0.0 || profile.duplicate_penalty > 0.0);
+        if want_text {
+            let mut need: Vec<u64> = candidates.iter().map(|c| c.line_id).collect();
+            if profile.duplicate_penalty > 0.0 {
+                need.extend(semantic.iter().map(|h| h.line_id));
+            }
+            need.retain(|id| !self.texts.contains_key(id));
+            need.sort_unstable();
+            need.dedup();
+            if !need.is_empty() {
+                return Ok(Some(need));
+            }
+        }
+        let sections = if weighted && profile.section_coverage_bonus > 0.0 {
+            crate::relevance::sections_of(&self.source, &semantic.iter().map(|h| h.line_id).collect::<Vec<_>>())?
+        } else {
+            Default::default()
         };
-        let fusion = match self.options.fusion {
-            FusionOptions::Weighted { alpha, bm25_k } => Fusion::Weighted { alpha, bm25_k },
-            FusionOptions::Rrf { k } => Fusion::Rrf { k },
+        let plain = |id: u64| self.texts.get(&id).map(|t| strip_tags(t)).unwrap_or_default();
+        let hash = |id: u64| -> u64 {
+            if profile.duplicate_penalty > 0.0 {
+                line_hash(&plain(id))
+            } else {
+                0
+            }
         };
-        let lex: Vec<(u64, f32)> = candidates.iter().map(|c| (c.line_id, c.bm25)).collect();
-        let sem: Vec<(u64, f32)> = semantic.iter().map(|h| (h.line_id, h.score)).collect();
-        let mut fused = fusion::fuse(&lex, &sem, fusion, &self.query, &QueryTypeAlphas::default());
+        let lex: Vec<fusion::Lexical> = candidates
+            .iter()
+            .map(|c| fusion::Lexical {
+                line_id: c.line_id,
+                book_id: c.book_id,
+                bm25: c.bm25,
+                section_id: c.section_id,
+                line_hash: hash(c.line_id),
+                text: if want_text { plain(c.line_id) } else { String::new() },
+                foundational: foundational.contains(&c.book_id),
+            })
+            .collect();
+        let sem: Vec<fusion::Semantic> = semantic
+            .iter()
+            .map(|h| fusion::Semantic {
+                line_id: h.line_id,
+                book_id: h.book_id,
+                score: h.score,
+                section_id: sections.get(&h.line_id).copied().unwrap_or(0),
+                line_hash: hash(h.line_id),
+                foundational: foundational.contains(&h.book_id),
+            })
+            .collect();
+        // fuse: the mode that ran (no semantic side: lexical only, alpha 1)
+        let (mode, alpha) = if healthy { (fusion::Mode::Hybrid, self.alpha) } else { (fusion::Mode::LexicalOnly, 1.0) };
+        let mut fused = fusion::fuse_candidates(lex, sem, alpha, mode, &profile, &self.features);
         let fused_count = fused.len();
         fused.truncate(window as usize);
         self.exhausted = (lexical_done && semantic_done && fused_count <= window as usize) || window >= MAX_HYBRID_WINDOW;
-        let places: std::collections::HashMap<u64, (u64, u64)> = candidates.iter().map(|c| (c.line_id, (c.book_id, c.position))).collect();
-        let books: std::collections::HashMap<u64, u64> = semantic.iter().map(|h| (h.line_id, h.book_id)).collect();
+        let places: std::collections::HashMap<u64, u64> = candidates.iter().map(|c| (c.line_id, c.position)).collect();
         for f in fused {
             if !self.held.insert(f.line_id) {
                 continue;
             }
-            let (book_id, position) = match places.get(&f.line_id) {
-                Some(&(b, p)) => (b, Some(p)),
-                None => (books.get(&f.line_id).copied().unwrap_or(0), None),
-            };
             self.entries.push(FusedHit {
                 line_id: f.line_id,
-                book_id,
-                position,
+                book_id: f.book_id,
+                position: places.get(&f.line_id).copied(),
                 fused: f.fused,
                 lexical: f.lexical,
                 semantic: f.semantic,
@@ -461,6 +511,39 @@ impl HybridSession {
         }
         Ok(None)
     }
+}
+
+/// The line's plain text for the profile's text bonuses (Otzaria reads the
+/// index's stored plain text): tags removed, whitespace collapsed.
+fn strip_tags(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_tag = false;
+    for c in raw.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                out.push(' ');
+            }
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A line's text hash for the duplicate penalty (Otzaria's `line_hash`: equal
+/// texts, equal hashes; 0 = none): FNV-1a of the plain text.
+fn line_hash(plain: &str) -> u64 {
+    if plain.is_empty() {
+        return 0;
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in plain.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h.max(1)
 }
 
 #[cfg(test)]
@@ -544,7 +627,8 @@ mod tests {
         index.set_vector_mapping(vec![OxvBookMap { name: "id:20".into(), book_id: 20, line_ids: vec![3, 4] }], false);
 
         // hybrid: the semantic-only line joins the lexical ones
-        let mut h = index.hybrid_session("alpha", &axis(3), HybridOptions::default()).unwrap();
+        let balanced = HybridOptions { ranking: RankingProfile::balanced(), ..Default::default() };
+        let mut h = index.hybrid_session("alpha", &axis(3), balanced).unwrap();
         let p = page(&mut h, 0, 10, &[]);
         let mut got: Vec<u64> = p.hits.iter().map(|f| f.line_id).collect();
         got.sort_unstable();
@@ -552,12 +636,25 @@ mod tests {
         let three = p.hits.iter().find(|f| f.line_id == 3).unwrap();
         assert_eq!((three.source, three.position, three.book_id), ("semantic", None, 20));
         let one = p.hits.iter().find(|f| f.line_id == 1).unwrap();
-        let both = if one.semantic.is_some() { fusion::BALANCED_AGREEMENT_BONUS } else { 0.0 };
+        let both = if one.semantic.is_some() { 0.10 } else { 0.0 };
         let want = 0.7 * fusion::normalize_bm25(one.lexical.unwrap(), 10.0) + 0.3 * one.semantic.map_or(0.0, fusion::normalize_cosine) + both;
         assert!((one.fused - want).abs() < 1e-6);
-        let rrf = HybridOptions { fusion: FusionOptions::Rrf { k: 60 }, ..Default::default() };
-        let p = page(&mut index.hybrid_session("alpha", &axis(3), rrf).unwrap(), 0, 10, &[]);
+        // Otzaria's defaults (RRF k 60, threshold 0.55): the lexical lines 1 and 4 and line 3
+        // (cosine 1); the other semantic lines (cosine 0 -> 0.5 < 0.55) left out
+        let p = page(&mut index.hybrid_session("alpha", &axis(3), HybridOptions::default()).unwrap(), 0, 10, &[]);
         assert_eq!(p.hits.iter().filter(|f| f.lexical.is_some()).count(), 2);
+        let three = p.hits.iter().find(|f| f.line_id == 3).unwrap();
+        assert!((three.fused - 1.0 / 61.0).abs() < 1e-7, "{three:?}");
+        // the foundational books (book 20): its line gets the profile's 0.002, and the
+        // foundational query (share 0.5 of top_k) adds its lines the main query lacked
+        let f = HybridOptions { foundational_books: Some(vec![20]), ..Default::default() };
+        let p = page(&mut index.hybrid_session("alpha", &axis(3), f).unwrap(), 0, 10, &[]);
+        let three = p.hits.iter().find(|f| f.line_id == 3).unwrap();
+        assert!((three.fused - (1.0 / 61.0 + 0.002)).abs() < 1e-7, "{three:?}");
+        assert!(p.exhausted, "5 vectors < top_k 42: the semantic side ran out");
+        // an exact query (a quoted phrase: alpha 1) skips the semantic side: lexical only
+        let p = page(&mut index.hybrid_session("\"alpha\"", &axis(3), HybridOptions::default()).unwrap(), 0, 10, &[]);
+        assert!(p.hits.iter().all(|f| f.source == "lexical") && !p.hits.is_empty(), "{:?}", p.hits);
 
         // a bad set path is an error; closing forgets the set
         assert!(index.open_vectors(&tmp.path().join("missing")).is_err());
@@ -630,9 +727,10 @@ mod tests {
         let field = index.fields.text;
         let term = |w: &str| Term::from_field_text(field, w);
 
-        // one word: TermQuery without frequencies, best first, Balanced fusion
+        // one word: TermQuery without frequencies, best first; no vector: lexical only, alpha 1
         let want = tantivy_scores(&index, &TermQuery::new(term("alpha"), IndexRecordOption::Basic));
-        let mut s = index.hybrid_session("alpha", &[], HybridOptions::default()).unwrap();
+        let balanced = || HybridOptions { ranking: RankingProfile::balanced(), ..Default::default() };
+        let mut s = index.hybrid_session("alpha", &[], balanced()).unwrap();
         let p = page(&mut s, 0, 10, &[]);
         assert_eq!((p.hits.len(), p.lexical_total, p.more, p.window, p.exhausted), (4, 4, false, 21, true));
         let mut by_score: Vec<(u64, f32)> = want.iter().map(|(&k, &v)| (k, v)).collect();
@@ -641,8 +739,8 @@ mod tests {
         for h in &p.hits {
             let bm25 = h.lexical.unwrap();
             assert!((bm25 - want[&h.line_id]).abs() < 1e-5);
-            // one word = Otzaria's "short" query: alpha 0.7
-            assert!((h.fused - 0.7 * fusion::normalize_bm25(bm25, 10.0)).abs() < 1e-6);
+            // the mode that ran is lexical only: alpha 1 (coordinator.rs `fuse`)
+            assert!((h.fused - fusion::normalize_bm25(bm25, 10.0)).abs() < 1e-6);
             assert_eq!(h.source, "lexical");
         }
 

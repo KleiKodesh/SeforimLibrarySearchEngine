@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 28;
+const int seforimAbiVersion = 29;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -265,6 +265,8 @@ final class SeforimNative {
             'se_hybrid_open'),
         hybridPage = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>, Uint32, Uint32, Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>, int, int, Pointer<Void>)>('se_hybrid_page'),
+        hybridWindow = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>, Uint32, Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Void>, int, Pointer<Void>)>('se_hybrid_window'),
         hybridAddTexts = lib.lookupFunction<
             Int32 Function(Pointer<Void>, Pointer<Uint64>, Size, Pointer<Uint8>, Size, Pointer<Uint64>),
             int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>)>('se_hybrid_add_texts'),
@@ -401,6 +403,7 @@ final class SeforimNative {
   final Pointer<Utf8> Function(Pointer<Void>, Pointer<Float>, int, Pointer<Uint8>, int, Pointer<Void>) semanticSearch;
   final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Float>, int, Pointer<Uint8>, int) hybridOpen;
   final Pointer<Utf8> Function(Pointer<Void>, int, int, Pointer<Void>) hybridPage;
+  final Pointer<Utf8> Function(Pointer<Void>, int, Pointer<Void>) hybridWindow;
   final int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>) hybridAddTexts;
   final void Function(Pointer<Void>) hybridClose;
   final int Function() lastErrorCancelled;

@@ -85,7 +85,22 @@ void main() {
     final page = h.page(0, 10);
     expect((page.hits.first.lineId, page.hits.first.source), (1, 'both'));
     expect((page.more, page.window, page.exhausted), (false, 21, true));
+    expect((page.meta.executedMode, page.meta.semanticAvailable, page.meta.fallbackKind), (HybridRetrieval.hybrid, true, null));
     h.close();
+    // Otzaria's retrieval modes: semantic only discards the lexical candidates (counted once)
+    final hs = index.hybridSession('alpha', v([0, 0, 1, 0]), const HybridOptions(retrieval: HybridRetrieval.semanticOnly));
+    final sp = hs.page(0, 10);
+    expect(sp.hits.every((h) => h.source == 'semantic' && h.lexical == null), isTrue);
+    expect((sp.meta.executedMode, sp.meta.requestedMode, sp.lexicalTotal > 0), (HybridRetrieval.semanticOnly, HybridRetrieval.semanticOnly, true));
+    final w = hs.window(5);
+    expect((w.window, w.semanticDone, w.hits.length <= 5), (5, true, true));
+    hs.close();
+    final lex = index.hybridSession('alpha', v([0, 0, 1, 0]),
+        const HybridOptions(retrieval: HybridRetrieval.lexicalOnly, lexicalMode: HybridLexicalMode.fuzzy));
+    final lp = lex.page(0, 10);
+    expect(lp.hits.every((h) => h.source == 'lexical'), isTrue);
+    expect((lp.meta.executedMode, lp.meta.semanticAvailable), (HybridRetrieval.lexicalOnly, false));
+    lex.close();
     final rrf = index.hybridSession('alpha', v([0, 0, 1, 0]), const HybridOptions(ranking: HybridOptions.balanced));
     // RRF (Otzaria's Fast profile) leaves out semantic lines under 0.55 normalized
     expect(rrf.page(0, 10).hits.map((h) => h.lineId), contains(1));

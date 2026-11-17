@@ -38,7 +38,7 @@
 //!   - Rollback drops everything queued since the last commit (never seen by
 //!     searches); a crash before a commit loses only that queue.
 
-use seforim_engine::semantic::{HybridSession, HybridStep};
+use seforim_engine::semantic::{HybridSession, HybridStep, HybridWindowStep};
 mod otzaria_text;
 mod semantic_aux;
 pub use semantic_aux::*;
@@ -94,7 +94,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 28; // 28: se_vectors_coverage_add_book requires one section per line, a passage target's missing section means no context window (Otzaria context_window); 27: semantic passage highlights (se_passage_plan, se_passage_mark), vector set directory info and coverage (se_vectors_dir_info, se_vectors_coverage_open / _add_book / _result / _free; vector install error kind `missing`), otzaria_search_engine 7.2.0 port (issue #18); 26: search request fuzzy group field `exact_quotes` (default off: Otzaria's quote-transparent fuzzy rule); 25: se_search_group_terms, index highlight matchers (se_matcher_open kinds index_highlight / index_fuzzy / index_smart, se_text_helper ops fuzzy_index_highlight_tokens / smart_index_highlight_words); 24: Otzaria's text / query helpers (se_text_helper, se_matcher_open / _find / _free, se_book_content_fingerprint, otzaria_search_engine 7.2.0 port); 23: se_vectors_compact (vector set compaction, Otzaria sidecar port, issue #18); 22: se_hybrid_open options `ranking` (Otzaria's RankingProfile) and `foundational_books` replace `fusion` / the penalties (issue #18); 21: Otzaria's hybrid search session (se_hybrid_open, se_hybrid_page, se_hybrid_add_texts, se_hybrid_close; se_search_fuse_semantic removed, issue #18); 20: se_vectors_install report `needs_compaction` (Otzaria sidecar compaction policy, issue #18); 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 29; // 29: hybrid session options `retrieval`, `lexical_mode`, `fuzzy_max_distance`, `match_nikud`, `match_teamim`; page fields `lexical_truncated`, `total_count`, `counts_are_exact`, `requested_mode`, `executed_mode`, `semantic_available`, `fallback_reason`, `fallback_kind`, `candidate_window_truncated`, `stale_dropped`; hit fields `matched_window`, `section_id`; no vector set = Otzaria's lexical fallback; se_hybrid_window (otzaria_search_engine 7.2.0 search_semantic port, issue #18); 28: se_vectors_coverage_add_book requires one section per line, a passage target's missing section means no context window (Otzaria context_window); 27: semantic passage highlights (se_passage_plan, se_passage_mark), vector set directory info and coverage (se_vectors_dir_info, se_vectors_coverage_open / _add_book / _result / _free; vector install error kind `missing`), otzaria_search_engine 7.2.0 port (issue #18); 26: search request fuzzy group field `exact_quotes` (default off: Otzaria's quote-transparent fuzzy rule); 25: se_search_group_terms, index highlight matchers (se_matcher_open kinds index_highlight / index_fuzzy / index_smart, se_text_helper ops fuzzy_index_highlight_tokens / smart_index_highlight_words); 24: Otzaria's text / query helpers (se_text_helper, se_matcher_open / _find / _free, se_book_content_fingerprint, otzaria_search_engine 7.2.0 port); 23: se_vectors_compact (vector set compaction, Otzaria sidecar port, issue #18); 22: se_hybrid_open options `ranking` (Otzaria's RankingProfile) and `foundational_books` replace `fusion` / the penalties (issue #18); 21: Otzaria's hybrid search session (se_hybrid_open, se_hybrid_page, se_hybrid_add_texts, se_hybrid_close; se_search_fuse_semantic removed, issue #18); 20: se_vectors_install report `needs_compaction` (Otzaria sidecar compaction policy, issue #18); 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -2226,9 +2226,14 @@ pub unsafe extern "C" fn se_semantic_search(
 
 /// Opens Otzaria's hybrid search session (issue #18): `query` (the lexical
 /// text) and `vector` (`dims` floats: the query's embedding by the host's
-/// query model; 0 dims or no open vector set = the lexical side alone).
+/// query model; 0 dims with a set open = a failed semantic side, served as
+/// Otzaria degrades; no open vector set = Otzaria's lexical fallback).
 /// `options_json` (may be empty): `{"books":[..]|null,"foundational_books":[..]|null,
-/// "threads":0,"ranking":{..}}`: `ranking` = Otzaria's `RankingProfile` (every field
+/// "threads":0,"retrieval":"hybrid"|"semantic_only"|"lexical_only",
+/// "lexical_mode":"exact"|"fuzzy","fuzzy_max_distance":1|2,"match_nikud":bool,
+/// "match_teamim":bool,"ranking":{..}}` (Otzaria's `search_semantic` options;
+/// defaults hybrid, exact, 1, false, false; match_nikud / match_teamim need a
+/// keep_marks index): `ranking` = Otzaria's `RankingProfile` (every field
 /// optional, defaults = otzaria_search_engine's): `"fusion_strategy":{"strategy":"rrf",
 /// "k":60}|{"strategy":"weighted"}|{"strategy":"adaptive"}`, `"alpha_override"`,
 /// `"alpha_by_query_type":{"quoted_phrase","exact_reference","short","mixed",
@@ -2269,8 +2274,14 @@ pub unsafe extern "C" fn se_hybrid_open(
 /// pages them (its candidate window grows to hold one result past the
 /// page: `max(2 * (offset + limit) + 1, 2 * window)`, at most 10,000).
 /// Returns JSON `{"hits":[{"line_id","book_id","position":N|null,"fused",
-/// "lexical":x|null,"semantic":x|null,"source":"lexical"|"semantic"|"both"}],
-/// "more":bool,"window":N,"lexical_total":N,"exhausted":bool}`, or (an index
+/// "lexical":x|null,"semantic":x|null,"source":"lexical"|"semantic"|"both",
+/// "matched_window":N,"section_id":N}],"more":bool,"window":N,"exhausted":bool,
+/// "lexical_total":N,"lexical_truncated":bool,"total_count":N,"counts_are_exact":bool,
+/// "requested_mode":M,"executed_mode":M,"semantic_available":bool,
+/// "fallback_reason":s|null,"fallback_kind":"not_configured"|"query_failed"|null,
+/// "candidate_window_truncated":bool,"stale_dropped":N}` (M = a retrieval
+/// mode; Otzaria's response fields; no vector set: its lexical fallback,
+/// fused 1 / (rank on the page + 1), `window` 0), or (an index
 /// without positions, a query of several words: the phrase is scored from
 /// the line texts; or a profile whose text bonuses / duplicate penalty read
 /// the lines) `{"need_texts":[line ids]}`: give them with
@@ -2285,6 +2296,29 @@ pub unsafe extern "C" fn se_hybrid_page(session: *mut HybridSession, offset: u32
         let json = match session.page(offset, limit, token.as_ref()).map_err(err)? {
             HybridStep::Page(p) => serde_json::to_string(&p).map_err(err)?,
             HybridStep::NeedTexts(ids) => serde_json::json!({ "need_texts": ids }).to_string(),
+        };
+        Ok(out_string(json))
+    })
+}
+
+/// One fused window of a hybrid session (`window` candidates, at most
+/// 10,000), apart from its pages: for a host that groups results itself
+/// (Otzaria's grouping counts the window in groups). JSON `{"hits":[..as
+/// se_hybrid_page..],"window":N,"lexical_done":bool,"semantic_done":bool,
+/// "fused_count":N, ..the page's meta fields..}` (stale lines left out,
+/// counted in `stale_dropped`, this window's count; use either
+/// `se_hybrid_window` or `se_hybrid_page` on one session), or `{"need_texts":[..]}` as `se_hybrid_page`.
+/// Null on error.
+///
+/// # Safety
+/// `session` from `se_hybrid_open`; `token` null or live.
+#[no_mangle]
+pub unsafe extern "C" fn se_hybrid_window(session: *mut HybridSession, window: u32, token: *const CancelToken) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let session = session.as_mut().ok_or("null session")?;
+        let json = match session.window(window, token.as_ref()).map_err(err)? {
+            HybridWindowStep::Window(w) => serde_json::to_string(&w).map_err(err)?,
+            HybridWindowStep::NeedTexts(ids) => serde_json::json!({ "need_texts": ids }).to_string(),
         };
         Ok(out_string(json))
     })

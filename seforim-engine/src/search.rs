@@ -2380,7 +2380,7 @@ impl LineIndex {
 
     /// The `marked` line flag, or the error a vocalized search gets on an
     /// index that cannot serve it.
-    fn marked_field(&self) -> Result<tantivy::schema::Field> {
+    pub(crate) fn marked_field(&self) -> Result<tantivy::schema::Field> {
         if !self.options.keep_marks {
             return Err(Error::Unsupported(
                 "nikud / te'amim matching (match_nikud, match_teamim) needs an index built with keep_marks".into(),

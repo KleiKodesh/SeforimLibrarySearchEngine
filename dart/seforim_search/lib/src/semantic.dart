@@ -253,9 +253,48 @@ final class SemanticResult {
   }
 }
 
+/// Otzaria's `SemanticRetrievalMode` (and the executed mode).
+enum HybridRetrieval {
+  hybrid('hybrid'),
+  semanticOnly('semantic_only'),
+  lexicalOnly('lexical_only');
+
+  const HybridRetrieval(this.json);
+  final String json;
+
+  static HybridRetrieval fromJson(String s) => values.firstWhere((m) => m.json == s);
+}
+
+/// Otzaria's `SemanticLexicalMode`.
+enum HybridLexicalMode { exact, fuzzy }
+
 /// A hybrid search request (Otzaria's hybrid session, issue #18).
 final class HybridOptions {
-  const HybridOptions({this.books, this.foundationalBooks, this.ranking = const {}, this.threads = 0});
+  const HybridOptions(
+      {this.books,
+      this.foundationalBooks,
+      this.ranking = const {},
+      this.threads = 0,
+      this.retrieval = HybridRetrieval.hybrid,
+      this.lexicalMode = HybridLexicalMode.exact,
+      this.fuzzyMaxDistance = 1,
+      this.matchNikud = false,
+      this.matchTeamim = false});
+
+  /// Otzaria's retrieval mode: semantic only discards the lexical candidates
+  /// (counted once), lexical only runs no vector scan.
+  final HybridRetrieval retrieval;
+
+  /// Otzaria's lexical mode (a query that is one quotation is exact).
+  final HybridLexicalMode lexicalMode;
+
+  /// The fuzzy mode's edit distance (1 or 2).
+  final int fuzzyMaxDistance;
+
+  /// Otzaria's match_nikud / match_taamim on every lexical candidate and
+  /// count (needs a keep_marks index).
+  final bool matchNikud;
+  final bool matchTeamim;
 
   /// Only these books (both sides); null = all.
   final List<int>? books;
@@ -287,12 +326,86 @@ final class HybridOptions {
         'foundational_books': foundationalBooks,
         'ranking': ranking,
         'threads': threads,
+        'retrieval': retrieval.json,
+        'lexical_mode': lexicalMode.name,
+        'fuzzy_max_distance': fuzzyMaxDistance,
+        'match_nikud': matchNikud,
+        'match_teamim': matchTeamim,
       };
+}
+
+/// How a hybrid session served its results (Otzaria's response fields).
+final class HybridMeta {
+  const HybridMeta(
+      this.lexicalTotal,
+      this.lexicalTruncated,
+      this.totalCount,
+      this.countsAreExact,
+      this.requestedMode,
+      this.executedMode,
+      this.semanticAvailable,
+      this.fallbackReason,
+      this.fallbackKind,
+      this.candidateWindowTruncated,
+      this.staleDropped);
+
+  /// Lines the lexical query matches.
+  final int lexicalTotal;
+
+  /// The lexical side hit an expansion cap.
+  final bool lexicalTruncated;
+
+  /// Candidates the last window fused (the fallback: the lexical total).
+  final int totalCount;
+  final bool countsAreExact;
+  final HybridRetrieval requestedMode;
+
+  /// The mode that ran (a hybrid search whose semantic side failed or was
+  /// skipped ran lexical only).
+  final HybridRetrieval executedMode;
+  final bool semanticAvailable;
+
+  /// The semantic side's failure and the session's notes, joined by "; ".
+  final String? fallbackReason;
+
+  /// 'not_configured' (no vector set: the lexical fallback), 'query_failed', or null.
+  final String? fallbackKind;
+  final bool candidateWindowTruncated;
+
+  /// Semantic results dropped: their line is not in the index.
+  final int staleDropped;
+
+  factory HybridMeta.fromJson(Map<String, dynamic> j) => HybridMeta(
+      j['lexical_total'] as int,
+      j['lexical_truncated'] as bool,
+      j['total_count'] as int,
+      j['counts_are_exact'] as bool,
+      HybridRetrieval.fromJson(j['requested_mode'] as String),
+      HybridRetrieval.fromJson(j['executed_mode'] as String),
+      j['semantic_available'] as bool,
+      j['fallback_reason'] as String?,
+      j['fallback_kind'] as String?,
+      j['candidate_window_truncated'] as bool,
+      j['stale_dropped'] as int);
+}
+
+/// One fused window ([HybridSession.window]): every result of the window in
+/// fused order, for a host that groups results itself.
+final class HybridWindow {
+  const HybridWindow(this.hits, this.window, this.lexicalDone, this.semanticDone, this.fusedCount, this.meta);
+  final List<FusedHit> hits;
+  final int window;
+  final bool lexicalDone;
+  final bool semanticDone;
+
+  /// Candidates the fusion produced before the cut to [window].
+  final int fusedCount;
+  final HybridMeta meta;
 }
 
 /// One page of a [HybridSession].
 final class HybridPage {
-  const HybridPage(this.hits, this.more, this.window, this.lexicalTotal, this.exhausted);
+  const HybridPage(this.hits, this.more, this.window, this.lexicalTotal, this.exhausted, this.meta);
   final List<FusedHit> hits;
 
   /// True when another page follows.
@@ -304,6 +417,9 @@ final class HybridPage {
   /// Lines the lexical query matches.
   final int lexicalTotal;
   final bool exhausted;
+
+  /// Otzaria's response fields (modes, fallback, notes).
+  final HybridMeta meta;
 }
 
 /// Otzaria's hybrid search session ([SemanticIndex.hybridSession]): pages of
@@ -317,14 +433,31 @@ final class HybridSession {
   HybridPage page(int offset, int limit,
       {Map<int, Uint8List> Function(List<int> lineIds)? texts, SearchCancelToken? cancel}) {
     final n = SeforimNative.instance;
+    final j = _step(() => n.hybridPage(_h, offset, limit, cancel?.handle ?? nullptr), texts);
+    return HybridPage([for (final e in j['hits'] as List) FusedHit.fromJson(e as Map<String, dynamic>)], j['more'] as bool,
+        j['window'] as int, j['lexical_total'] as int, j['exhausted'] as bool, HybridMeta.fromJson(j));
+  }
+
+  /// One fused window of [window] candidates (at most 10,000), apart from the
+  /// pages: for a host that groups results itself (Otzaria's grouping counts
+  /// its window in groups; the host grows the window and admits groups as
+  /// Otzaria's session does). Stale lines are left out.
+  HybridWindow window(int window, {Map<int, Uint8List> Function(List<int> lineIds)? texts, SearchCancelToken? cancel}) {
+    final n = SeforimNative.instance;
+    final j = _step(() => n.hybridWindow(_h, window, cancel?.handle ?? nullptr), texts);
+    return HybridWindow([for (final e in j['hits'] as List) FusedHit.fromJson(e as Map<String, dynamic>)], j['window'] as int,
+        j['lexical_done'] as bool, j['semantic_done'] as bool, j['fused_count'] as int, HybridMeta.fromJson(j));
+  }
+
+  /// Calls [call] until it answers with something other than `need_texts`,
+  /// giving the session the texts it asks for.
+  Map<String, dynamic> _step(Pointer<Utf8> Function() call, Map<int, Uint8List> Function(List<int> lineIds)? texts) {
+    final n = SeforimNative.instance;
     if (_h == nullptr) throw StateError('HybridSession is closed');
     while (true) {
-      final j = jsonDecode(n.takeString(n.hybridPage(_h, offset, limit, cancel?.handle ?? nullptr))) as Map<String, dynamic>;
+      final j = jsonDecode(n.takeString(call())) as Map<String, dynamic>;
       final need = j['need_texts'] as List?;
-      if (need == null) {
-        return HybridPage([for (final e in j['hits'] as List) FusedHit.fromJson(e as Map<String, dynamic>)],
-            j['more'] as bool, j['window'] as int, j['lexical_total'] as int, j['exhausted'] as bool);
-      }
+      if (need == null) return j;
       if (texts == null) throw StateError('the hybrid session needs line texts: pass texts');
       final ids = [for (final e in need) e as int];
       final got = texts(ids);
@@ -359,7 +492,8 @@ final class HybridSession {
 
 /// One hybrid result.
 final class FusedHit {
-  const FusedHit(this.lineId, this.bookId, this.position, this.fused, this.lexical, this.semantic, this.source);
+  const FusedHit(this.lineId, this.bookId, this.position, this.fused, this.lexical, this.semantic, this.source,
+      [this.matchedWindow = 0, this.sectionId = 0]);
   final int lineId;
   final int bookId;
 
@@ -372,6 +506,14 @@ final class FusedHit {
   /// 'lexical', 'semantic' or 'both'.
   final String source;
 
+  /// The semantic match's window (Otzaria's `matched_window`: 0 = the line's
+  /// first, n its n-th; bit 31 = through a neighbour's vector), for
+  /// passage highlights; 0 when the semantic side did not find the line.
+  final int matchedWindow;
+
+  /// The line's section (the index's `section_id`).
+  final int sectionId;
+
   factory FusedHit.fromJson(Map<String, dynamic> j) => FusedHit(
       j['line_id'] as int,
       j['book_id'] as int,
@@ -379,7 +521,9 @@ final class FusedHit {
       (j['fused'] as num).toDouble(),
       (j['lexical'] as num?)?.toDouble(),
       (j['semantic'] as num?)?.toDouble(),
-      j['source'] as String);
+      j['source'] as String,
+      j['matched_window'] as int? ?? 0,
+      j['section_id'] as int? ?? 0);
 }
 
 /// Semantic search on an index (issue #18), like Otzaria: the index opens

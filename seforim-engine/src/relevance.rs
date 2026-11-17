@@ -1196,6 +1196,53 @@ pub(crate) fn placeholder_alternative(word: &str) -> Option<String> {
     ends.into_iter().rev().find_map(tail)
 }
 
+/// Otzaria's `VocalizedFlags` for the hybrid lexical side (match_nikud /
+/// match_taamim on an index that keeps marks): each word's spellings are
+/// the terms its vocalized walk matches (typed marks required on their
+/// letters, every other mark free: Otzaria's `vocalized_token_pattern`),
+/// and only the lines carrying a mark can match (its `textVocalized` field).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Vocalized {
+    pub match_nikud: bool,
+    pub match_teamim: bool,
+    /// The `marked` line flag field.
+    pub marked: Field,
+}
+
+/// The terms of a word under vocalized matching ([`Vocalized`]), the
+/// required form first.
+fn vocalized_spellings(searcher: &Searcher, field: Field, word: &str, v: Vocalized) -> Result<Vec<String>> {
+    use hebrew_fts::walk::{required_marks_form, HebrewWalkAutomaton, WalkOptions};
+    let typed = required_marks_form(word, v.match_nikud, v.match_teamim);
+    let options = WalkOptions { match_nikud: v.match_nikud, match_teamim: v.match_teamim, marked_terms: true, ..Default::default() };
+    let automaton = HebrewWalkAutomaton::new(&typed, &options);
+    let required = typed.chars().any(hebrew_fts::chars::is_term_mark);
+    let mut out = vec![typed];
+    let mut add = |key: &[u8]| {
+        if let Ok(term) = std::str::from_utf8(key) {
+            if !out.iter().any(|known| known == term) {
+                out.push(term.to_string());
+            }
+        }
+    };
+    for reader in searcher.segment_readers() {
+        let inverted = reader.inverted_index(field)?;
+        if required {
+            let mut stream = inverted.terms().search(&automaton).into_stream()?;
+            while stream.advance() {
+                add(stream.key());
+            }
+        } else {
+            // no typed mark: the walk reads every mark zero-width
+            let mut stream = inverted.terms().search(hebrew_fts::MarkFree::new(&automaton)).into_stream()?;
+            while stream.advance() {
+                add(stream.key());
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// One lexical candidate of Otzaria's hybrid search.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct LexicalCandidate {
@@ -1242,6 +1289,7 @@ pub(crate) fn hybrid_lexical_window(
     books: Option<&[u64]>,
     window: usize,
     texts: &HashMap<u64, String>,
+    vocalized: Option<Vocalized>,
 ) -> Result<std::result::Result<(Vec<LexicalCandidate>, u64), NeedTexts>> {
     let searcher = &match &source.user {
         Some(u) => tantivy::Searcher::union(&[source.reader.searcher(), u.searcher()])?,
@@ -1249,7 +1297,7 @@ pub(crate) fn hybrid_lexical_window(
     };
     let (field, marked_terms, positions) = (source.field, source.marked_terms, source.positions);
     let mut words: Vec<String> = Vec::new();
-    hebrew_fts::scanner::scan_with(query, false, |w, span| {
+    hebrew_fts::scanner::scan_with(query, vocalized.is_some(), |w, span| {
         if span.term_bytes < hebrew_fts::chars::MAX_TERM_BYTES && !w.is_empty() {
             words.push(w.to_string());
         }
@@ -1259,10 +1307,14 @@ pub(crate) fn hybrid_lexical_window(
     }
     // each word's spellings: the typed word's, then its alternative's (spelling_terms)
     let mut spellings_of: Vec<Vec<String>> = Vec::with_capacity(words.len());
+    let spell = |w: &str| match vocalized {
+        Some(v) => vocalized_spellings(searcher, field, w, v),
+        None => spellings(searcher, field, w, marked_terms),
+    };
     for w in &words {
-        let mut s = spellings(searcher, field, w, marked_terms)?;
+        let mut s = spell(w)?;
         if let Some(alt) = placeholder_alternative(w) {
-            for t in spellings(searcher, field, &alt, marked_terms)? {
+            for t in spell(&alt)? {
                 if !s.contains(&t) {
                     s.push(t);
                 }
@@ -1317,8 +1369,26 @@ pub(crate) fn hybrid_lexical_window(
         let sections = fast.u64("section_id")?;
         let inverted = segment.inverted_index(field)?;
         let fieldnorms = segment.get_fieldnorms_reader(field)?;
+        // vocalized: only the lines carrying a mark (Otzaria's textVocalized field holds those)
+        let marked: Option<std::collections::HashSet<DocId>> = match vocalized {
+            Some(v) => {
+                let mut set = std::collections::HashSet::new();
+                if let Some(mut p) = crate::positioned::marked_postings(segment, v.marked)? {
+                    let mut doc = p.doc();
+                    while doc != tantivy::TERMINATED {
+                        set.insert(doc);
+                        doc = p.advance();
+                    }
+                }
+                Some(set)
+            }
+            None => None,
+        };
         let keep = |doc: DocId| -> Option<(u64, u64, u64, u64)> {
             if alive.is_some_and(|a| !a.is_alive(doc)) {
+                return None;
+            }
+            if marked.as_ref().is_some_and(|m| !m.contains(&doc)) {
                 return None;
             }
             let book = book_ids.first(doc).unwrap_or(0);

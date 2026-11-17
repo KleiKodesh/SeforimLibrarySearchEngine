@@ -19,7 +19,9 @@ import 'semantic.dart' show VectorSetInfo;
 /// line's text, the window the hit matched ([SemanticHit.chunk]; 255 = an alias record)
 /// and, for a short line, its book's lines around it ([contextLines], [contextSections];
 /// [contextIndex] = the line's place in them; Otzaria's recipe reads up to 2 on each side
-/// in the same section). Without a context a short line is marked on its own text.
+/// in the same section). Without a context, or when a section it needs is missing from
+/// [contextSections] (as Otzaria's `context_window` on a line without a section id), a short
+/// line is marked on its own text.
 final class PassageTarget {
   const PassageTarget(this.text, {this.window = 0, this.contextLines, this.contextSections, this.contextIndex = 0});
   final String text;
@@ -144,11 +146,14 @@ List<PassageHighlight> markPassageHighlights(
 }
 
 /// Otzaria's `semanticPassageHighlights` end to end, the model in the host: plan, embed the
-/// query (once, only when some line needs it) and the chosen clauses with [embedder], mark.
+/// query (once, only when some line needs it) with [embedder] and the chosen clauses with
+/// [passageEmbedder] (Otzaria's `embed_passages`: the set's FP32 passage model when the family
+/// ships one, else [embedder]), mark.
 List<PassageHighlight> semanticPassageHighlights(
   String query,
   List<PassageTarget> targets,
   MeivinEmbedder embedder, {
+  MeivinEmbedder? passageEmbedder,
   List<String> forms = const [],
   int? chunkingIdentity,
   int maxChars = 800,
@@ -156,7 +161,7 @@ List<PassageHighlight> semanticPassageHighlights(
   final plan = planPassageHighlights(query, targets, forms: forms, chunkingIdentity: chunkingIdentity);
   if (!plan.needsQueryVector) return markPassageHighlights(query, plan, null, const [], maxChars: maxChars);
   final queryVector = embedder.embedQuery(plan.queryText);
-  final vectors = [for (final l in plan.lines) l.clauses.isEmpty ? <Float32List>[] : embedder.embedPassages(l.clauses)];
+  final vectors = [for (final l in plan.lines) l.clauses.isEmpty ? <Float32List>[] : (passageEmbedder ?? embedder).embedPassages(l.clauses)];
   return markPassageHighlights(query, plan, queryVector, vectors, maxChars: maxChars);
 }
 
@@ -241,7 +246,8 @@ final class VectorCoverage {
 }
 
 /// Otzaria's `semanticCoverage`, fed by the host: [open] reads every key of the set, then
-/// [addBook] takes each live book's lines in order (with their section ids; no PDF), [result]
+/// [addBook] takes each live book's lines in order (with their section ids, one per line:
+/// Otzaria's heading-count sections; no PDF), [result]
 /// the counts. [dispose] when done.
 final class VectorCoverageCounter {
   VectorCoverageCounter._(this._handle);
@@ -259,11 +265,11 @@ final class VectorCoverageCounter {
     return VectorCoverageCounter._(h);
   }
 
-  void addBook(List<String> lines, [List<int>? sections]) {
+  void addBook(List<String> lines, List<int> sections) {
     final n = SeforimNative.instance;
     if (_handle == nullptr) throw StateError('VectorCoverageCounter is disposed');
     final rc = using((al) {
-      final (p, pl) = utf8Native(jsonEncode({'lines': lines, 'sections': sections ?? const <int>[]}), al);
+      final (p, pl) = utf8Native(jsonEncode({'lines': lines, 'sections': sections}), al);
       return n.coverageAddBook(_handle, p, pl);
     });
     if (rc != 0) throw n.error();
@@ -324,9 +330,11 @@ final class SemanticStatus {
   final int? vectorsLibraryVersion;
   final bool needsCompaction;
 
-  /// [vectors]: the open set's info ([SemanticIndex.vectorInfo]); [dirInfo]: its directory's
-  /// ([readVectorsDirInfo], for the model family and the compaction flag; read here from
-  /// `vectors.path` when not given); [modelLoaded]: whether the host's query model is loaded.
+  /// [vectors]: the open set's info ([SemanticIndex.vectorInfo]: library version, segments,
+  /// counts and the compaction flag come from the open generation, as Otzaria's
+  /// `vector_set_info`); [dirInfo]: its directory's ([readVectorsDirInfo], for the model
+  /// family; read here from `vectors.path` when not given); [modelLoaded]: whether the host's
+  /// query model is loaded.
   static SemanticStatus of(VectorSetInfo? vectors, {required bool modelLoaded, VectorsDirInfo? dirInfo}) {
     if (vectors == null) {
       return const SemanticStatus(
@@ -356,7 +364,7 @@ final class SemanticStatus {
       enabled: true,
       available: available,
       modelLoaded: modelLoaded,
-      indexedBookCount: vectors.books,
+      indexedBookCount: vectors.books > 0xFFFFFFFF ? 0xFFFFFFFF : vectors.books,
       vectorCount: vectorCount,
       modelId: dir.present ? dir.modelFamilyId : '',
       embeddingDim: vectors.dims,
@@ -367,7 +375,18 @@ final class SemanticStatus {
       errorKind: null,
       vectorsLibraryVersion: vectors.libraryVersion,
       vectorSegments: vectors.segments.length,
-      needsCompaction: dir.present && dir.needsCompaction,
+      needsCompaction: _compactionWanted(vectors),
     );
   }
+}
+
+/// The sidecar's default `CompactionPolicy::wants` on the open generation's info: more than 4
+/// segments, deltas over 20 % of the base's bytes, or over 5 % of the slots dead.
+bool _compactionWanted(VectorSetInfo v) {
+  if (v.segments.length > 4) return true;
+  final base = v.segments.isEmpty ? 0 : v.segments.first.size;
+  final deltas = v.segments.skip(1).fold<int>(0, (a, s) => a + s.size);
+  if (base > 0 && deltas > 0.20 * base) return true;
+  final slots = v.slotsLive + v.slotsDead;
+  return slots > 0 && v.slotsDead > 0.05 * slots;
 }

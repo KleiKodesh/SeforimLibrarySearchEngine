@@ -111,4 +111,16 @@ void main() {
     expect(s.errorKind, 'notConfigured');
     expect(s.enabled, isFalse);
   });
+
+  test('a passage target without the sections its window needs is marked on its own text', () {
+    final lines = ['first line of the section', 'short one', 'third line'];
+    final withSections = planPassageHighlights('q', [
+      PassageTarget('short one', contextLines: lines, contextSections: const [1, 1, 1], contextIndex: 1),
+    ]);
+    expect(withSections.lines.single.text, 'first line of the section short one third line');
+    final without = planPassageHighlights('q', [
+      PassageTarget('short one', contextLines: lines, contextSections: const [1, 1], contextIndex: 1),
+    ]);
+    expect(without.lines.single.text, 'short one');
+  });
 }

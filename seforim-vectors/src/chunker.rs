@@ -299,29 +299,30 @@ impl Chunker {
     /// of a long line an ellipsis + its piece + an ellipsis (none after the line's end);
     /// `None` when the line's own text is shown. `lines` / `index` as for [`Self::embedded_text`].
     pub fn display_window_text(&self, lines: &[LineRef<'_>], index: usize, window: u8) -> Option<String> {
-        let text = lines[index].text;
+        let texts: Vec<&str> = lines.iter().map(|l| l.text).collect();
+        self.display_window_text_with(&texts, |at| Some(lines[at].section), index, window)
+    }
+
+    /// [`Self::display_window_text`] with each line's section read through `section`, `None`
+    /// when unknown: as Otzaria's `context_window`, a short line whose window needs a section
+    /// that is unknown has no window (its own text is shown).
+    pub fn display_window_text_with(
+        &self,
+        texts: &[&str],
+        section: impl Fn(usize) -> Option<u64>,
+        index: usize,
+        window: u8,
+    ) -> Option<String> {
+        let text = texts[index];
         let length = text.trim().chars().count();
         if window != ALIAS_WINDOW && (self.config.min_embeddable_chars..self.config.min_meaningful_chars).contains(&length) {
-            let section = lines[index].section;
-            let mut start = index;
-            for _ in 0..self.config.context_window_lines {
-                if start == 0 || lines[start - 1].section != section {
-                    break;
+            // short_line_windows: `context_window` (production reach), none of one line.
+            if let Some(range) = context_window(texts.len(), index, &section) {
+                if range.start() != range.end() {
+                    let joined = texts[range].join(" ");
+                    return Some(collapse_whitespace(truncate_to_chars(joined.trim(), self.config.max_chunk_chars)));
                 }
-                start -= 1;
             }
-            let mut end = index;
-            for _ in 0..self.config.context_window_lines {
-                if end + 1 >= lines.len() || lines[end + 1].section != section {
-                    break;
-                }
-                end += 1;
-            }
-            if start == end {
-                return None;
-            }
-            let joined = lines[start..=end].iter().map(|l| l.text).collect::<Vec<_>>().join(" ");
-            return Some(collapse_whitespace(truncate_to_chars(joined.trim(), self.config.max_chunk_chars)));
         }
         // long_line_window_text / semantic_keys.rs `window_span_with`.
         if window == 0 || length <= ChunkerConfig::production().max_chunk_chars {
@@ -364,6 +365,29 @@ impl Chunker {
 /// recipe.rs `EmbeddingTextRecipe::passage_text`, version 2.
 fn passage_text(text: &str) -> String {
     format!("{PASSAGE_PREFIX}{}", text.trim())
+}
+
+/// semantic_keys.rs `context_window`: the lines a short line at `position` is embedded
+/// with, up to the production recipe's `context_window_lines` on each side within its
+/// section; `None` when a section it reads is unknown.
+fn context_window(len: usize, position: usize, section: impl Fn(usize) -> Option<u64>) -> Option<std::ops::RangeInclusive<usize>> {
+    let reach = ChunkerConfig::production().context_window_lines;
+    let own = section(position)?;
+    let mut start = position;
+    for _ in 0..reach {
+        if start == 0 || section(start - 1)? != own {
+            break;
+        }
+        start -= 1;
+    }
+    let mut end = position;
+    for _ in 0..reach {
+        if end + 1 >= len || section(end + 1)? != own {
+            break;
+        }
+        end += 1;
+    }
+    Some(start..=end)
 }
 
 /// note_spans.rs `DisplayText::collapse_whitespace` on plain text: whitespace runs to one

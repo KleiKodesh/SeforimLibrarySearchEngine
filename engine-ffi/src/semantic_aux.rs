@@ -46,16 +46,13 @@ struct PlanRequest {
 /// The text a target's highlight is computed on: its window text, else its line.
 fn display_text(chunker: &Chunker, target: &PassageTarget) -> String {
     let window = match &target.context {
+        // A section not given is unknown: as Otzaria's `context_window`, a window that needs
+        // it is not formed and the line's own text is shown.
         Some(c) if c.index < c.lines.len() => {
-            let lines: Vec<LineRef<'_>> = c
-                .lines
-                .iter()
-                .enumerate()
-                .map(|(i, text)| LineRef { text, section: c.sections.get(i).copied().unwrap_or(0) })
-                .collect();
-            chunker.display_window_text(&lines, c.index, target.window)
+            let texts: Vec<&str> = c.lines.iter().map(String::as_str).collect();
+            chunker.display_window_text_with(&texts, |i| c.sections.get(i).copied(), c.index, target.window)
         }
-        _ => chunker.display_window_text(&[LineRef { text: &target.text, section: 0 }], 0, target.window),
+        _ => chunker.display_window_text_with(&[target.text.as_str()], |_| None, 0, target.window),
     };
     window.unwrap_or_else(|| target.text.clone())
 }
@@ -182,11 +179,11 @@ pub unsafe extern "C" fn se_vectors_coverage_open(dir: *const u8, dir_len: usize
 #[derive(serde::Deserialize)]
 struct CoverageBook {
     lines: Vec<String>,
-    #[serde(default)]
     sections: Vec<u64>,
 }
 
-/// One book's lines in order, `{"lines": [..], "sections": [..]}`. 0, -1 on error.
+/// One book's lines in order, `{"lines": [..], "sections": [..]}` (one section per line,
+/// required: Otzaria's heading-count sections). 0, -1 on error.
 ///
 /// # Safety
 /// `counter` from [`se_vectors_coverage_open`]; `book_json` valid UTF-8 for `len` bytes.
@@ -195,12 +192,12 @@ pub unsafe extern "C" fn se_vectors_coverage_add_book(counter: *mut CoverageCoun
     guard(-1, || {
         let counter = counter.as_mut().ok_or_else(|| "null coverage counter".to_string())?;
         let book: CoverageBook = serde_json::from_str(str_arg(book_json, len)?).map_err(err)?;
-        let lines: Vec<LineRef<'_>> = book
-            .lines
-            .iter()
-            .enumerate()
-            .map(|(i, text)| LineRef { text, section: book.sections.get(i).copied().unwrap_or(0) })
-            .collect();
+        // Every line has its section, as every Otzaria document has its sectionId (its key
+        // recomputation fails on one without).
+        if book.sections.len() != book.lines.len() {
+            return Err(format!("coverage book: {} section(s) for {} line(s); every line needs its section", book.sections.len(), book.lines.len()));
+        }
+        let lines: Vec<LineRef<'_>> = book.lines.iter().zip(&book.sections).map(|(text, &section)| LineRef { text, section }).collect();
         counter.add_book(&lines);
         Ok(0)
     })

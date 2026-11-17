@@ -179,6 +179,7 @@ mod tests {
         let mut doc: serde_json::Value = serde_json::from_slice(&fs::read(&set).unwrap()).unwrap();
         doc["identity"] = serde_json::json!({"model": {"family_id": "fam", "chunking_identity": ChunkerConfig::production().identity()}});
         doc["identity_digest"] = serde_json::json!("ab");
+        doc["segments"][0]["sha256"] = serde_json::json!("cd");
         doc["stats"] = serde_json::json!({"slots": 3, "slots_dead": 1, "foreign": 0, "foreign_unresolved": 0, "bytes": 0});
         let bytes = serde_json::to_vec_pretty(&doc).unwrap();
         fs::write(&set, &bytes).unwrap();
@@ -201,6 +202,15 @@ mod tests {
         assert_eq!(info.chunking_identity, ChunkerConfig::production().identity());
         // dead over 5 % of the slots: the sidecar's default policy compacts it
         assert!(info.needs_compaction);
+        // a verdict on the bytes the generation names passes; one that does not read as a
+        // verdict (no `reason`) names nothing and condemns (files.rs `read_verdict`)
+        let doc: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("gen-000003").join("set.json")).unwrap()).unwrap();
+        let held = doc["segments"][0]["sha256"].as_str().unwrap().to_string();
+        let verdict = dir.join("segments").join(format!("{}.corrupt", info.segments[0].id));
+        fs::write(&verdict, serde_json::json!({"sha256": held, "reason": "old"}).to_string()).unwrap();
+        assert!(dir_info(&dir).unwrap().present);
+        fs::write(&verdict, serde_json::json!({"sha256": held}).to_string()).unwrap();
+        assert_eq!(install::error_kind(&dir_info(&dir).unwrap_err()), Some(Kind::Corrupt));
         // a scrub's verdict condemns the generation, and nothing else is readable
         fs::write(dir.join("segments").join(format!("{}.corrupt", info.segments[0].id)), "{}").unwrap();
         let e = dir_info(&dir).unwrap_err();
@@ -264,5 +274,27 @@ mod tests {
         let last = windows.last().unwrap();
         assert!(chunker.display_window_text(&alone, 0, last.ordinal).unwrap().ends_with("w199"));
         assert_eq!(chunker.display_window_text(&alone, 0, 0), None);
+    }
+
+    /// Otzaria's `context_window`: a section that is unknown where the walk reads it means no
+    /// window (the line's own text); one past where the walk stops is not read.
+    #[test]
+    fn an_unknown_section_leaves_the_line_alone() {
+        let chunker = Chunker::production();
+        let texts = ["first  line of the section", "short one", "third	line", "fourth line here", "fifth"];
+        let known = |i: usize| Some([1, 1, 1, 1, 2][i]);
+        assert_eq!(chunker.display_window_text_with(&texts, known, 1, 0).as_deref(), Some("first line of the section short one third line fourth line here"));
+        // the line's own section unknown
+        assert_eq!(chunker.display_window_text_with(&texts, |i| (i != 1).then(|| 1), 1, 0), None);
+        // a neighbour's section unknown
+        assert_eq!(chunker.display_window_text_with(&texts, |i| (i != 0).then(|| 1), 1, 0), None);
+        // beyond the production reach (2): not read
+        assert_eq!(
+            chunker.display_window_text_with(&texts, |i| (i != 4).then(|| 1), 1, 0).as_deref(),
+            Some("first line of the section short one third line fourth line here")
+        );
+        // the walk stops at another section before an unknown one
+        let stops = |i: usize| [Some(9), Some(1), Some(1), Some(2), None][i];
+        assert_eq!(chunker.display_window_text_with(&texts, stops, 1, 0).as_deref(), Some("short one third line"));
     }
 }

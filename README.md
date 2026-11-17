@@ -2564,22 +2564,28 @@ alternatives and quote-free forms, plus the host dictionary's `forms`), and afte
 embeddings marks the nearest clause (f64 cosine, first on a tie) widened to query words
 within 3 words of its edge, cut to 800 bytes around it, escaped as htmlescape's
 `encode_minimal`, ellipses where cut. The text marked is the hit's embedded window
-(`Chunker::display_window_text`: a short line's section context, a long line's window
-past the first). C ABI `se_passage_plan` / `se_passage_mark` (ABI 27); Dart
+(`Chunker::display_window_text`: a short line's section context, up to the production
+recipe's 2 lines each side in its section, none when a section the walk reads is missing,
+as Otzaria's `context_window`; a long line's window past the first). C ABI
+`se_passage_plan` / `se_passage_mark` (ABI 28); Dart
 `planPassageHighlights` / `markPassageHighlights` and `semanticPassageHighlights(query,
-targets, embedder)` (embeds the canonical query once and the chosen clauses with
-`MeivinEmbedder.embedPassages`). Named deviations: no highlight cache in the engine (the
+targets, embedder, {passageEmbedder})` (embeds the canonical query once and the chosen
+clauses with `passageEmbedder` (the family's FP32 passage model, as Otzaria's
+`embed_passages`) or else `embedder`). Named deviations: no highlight cache in the engine (the
 host may keep one), no inline-note markup (our notes are their own lines), no per-call
 cancellation (the host stops between its calls). Tests: the old engine's own unit tests,
 verbatim. `semanticVectorsInfo` = `se_vectors_dir_info` / Dart `readVectorsDirInfo`
 (segment_set::info from set.json alone: CURRENT, else PREVIOUS when CURRENT does not read
 or a scrub's `.corrupt` verdict condemns it; a version-1 artifact refused; the default
 compaction policy's flag). `semanticCoverage` = `se_vectors_coverage_open` (every slot key
-and alias key of the set) + `_add_book` per live book (the host's lines and sections from
-SQLite; each line's key with the set's recipe) + `_result` / Dart `VectorCoverageCounter`
+and alias key of the set) + `_add_book` per live book (the host's lines and one section per
+line, required as Otzaria's `sectionId`: the heading count, `BookLine::section`; each line's
+key with the set's recipe; a set under the pardes recipe is refused `incompatible`, the
+pardes chunker not being ported) + `_result` / Dart `VectorCoverageCounter`
 (Otzaria's recompute path, no chunk-key column). `semanticStatus` = Dart
 `SemanticStatus.of(vectorInfo, modelLoaded:)` (Otzaria's status of a session over an
-installed set; `notConfigured` without one).
+installed set, library version / segments / compaction flag from the open generation;
+`notConfigured` without one).
 
 **Query embedding (Dart package).** The Meivin model stays in the host, never in
 the engine: `package:seforim_search` exports `MeivinEmbedder` (ONNX Runtime C API

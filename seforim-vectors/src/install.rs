@@ -689,8 +689,11 @@ fn condemned(dir: &Path, id: &str, sha256: &str) -> bool {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
         Err(_) => return true,
     };
+    // files.rs `read_verdict`: a marker that does not read as a `Verdict` (both `sha256`
+    // and `reason` strings) names nothing, and condemns whatever a generation names.
     let named = serde_json::from_slice::<Value>(&bytes)
         .ok()
+        .filter(|v| v.get("reason").is_some_and(Value::is_string))
         .and_then(|v| v.get("sha256").and_then(|s| s.as_str()).map(str::to_string))
         .unwrap_or_default();
     named.is_empty() || named != sha256

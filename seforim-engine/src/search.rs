@@ -513,6 +513,14 @@ pub struct SearchRequest {
     /// slots' own. Off: its plain fuzzy builder's score.
     #[serde(default)]
     pub lexical_fuzzy: bool,
+    /// Relevance order on an index without positions: fuzzy mode's adjacency
+    /// boost (the typed words within one word of each other, Otzaria's
+    /// `exact_phrase_boost`) is left out of the scores instead of falling back
+    /// to catalog order; the words it reads are returned
+    /// ([`SearchResult::text_phrase`]) for the caller to decide from the line
+    /// texts (the hybrid session's fuzzy side). Not part of the JSON request.
+    #[serde(skip)]
+    pub fuzzy_phrase_from_texts: bool,
     /// Which indexes the search reads (issue #44, see [`crate::user_docs`]).
     pub sources: crate::user_docs::Sources,
 }
@@ -546,6 +554,7 @@ impl Default for SearchRequest {
             resume_stamp: None,
             max_expanded_terms: hebrew_fts::DEFAULT_MAX_EXPANDED_TERMS,
             lexical_fuzzy: false,
+            fuzzy_phrase_from_texts: false,
             sources: Default::default(),
         }
     }
@@ -1502,6 +1511,9 @@ pub struct SearchResult {
     tally: CountTally,
     /// Relevance order only: each hit's score, aligned with `hits`.
     scores: Option<Vec<Score>>,
+    /// The adjacency boost's words left to the texts (see
+    /// [`SearchRequest::fuzzy_phrase_from_texts`]).
+    text_phrase: Option<Vec<Vec<String>>>,
     /// Notices about how the search was served (see [`notices`](Self::notices)).
     notices: Vec<String>,
     /// A walk hit its expansion cap (see [`truncated`](Self::truncated)).
@@ -1567,6 +1579,7 @@ impl SearchResult {
             session,
             tally: CountTally::default(),
             scores: None,
+            text_phrase: None,
             notices: Vec::new(),
             truncated: false,
             declined: false,
@@ -1739,6 +1752,14 @@ impl SearchResult {
     /// search was ordered by relevance.
     pub fn scores(&self) -> Option<&[Score]> {
         self.scores.as_deref()
+    }
+
+    /// With [`SearchRequest::fuzzy_phrase_from_texts`] on an index without
+    /// positions: the adjacency boost the scores leave out, as each typed
+    /// word's spelling terms (in order; within one word of each other, worth
+    /// [`crate::relevance::FUZZY_BOOST_PHRASE`] when the line holds them).
+    pub fn text_phrase(&self) -> Option<&[Vec<String>]> {
+        self.text_phrase.as_deref()
     }
 
     /// True when the exact count needs the hits' texts: feed them in
@@ -2979,6 +3000,7 @@ impl LineIndex {
                 !request.vocalized,
                 main_query.is_some().then_some((shape, main_slots.as_slice())),
                 &alternative_groups,
+                request.fuzzy_phrase_from_texts,
             )
         {
             relevance = false;
@@ -3653,6 +3675,7 @@ impl LineIndex {
                 vocalized: request.vocalized,
                 marked_terms: keep_marks,
                 lexical_fuzzy: request.lexical_fuzzy,
+                phrase_from_texts: request.fuzzy_phrase_from_texts && !self.options.positions,
                 main: (main_ok && main_terms.len() == main_slots.len()).then(|| relevance::MainPlan {
                     shape,
                     slots: main_slots,
@@ -3669,7 +3692,7 @@ impl LineIndex {
                     .map(|(groups, sinks)| (*groups, sinks.iter().map(|s| s.take_strings()).collect()))
                     .collect(),
             };
-            let mut scores = relevance::scores(&searcher, &plan, &keys, cancel.as_ref())?;
+            let (mut scores, text_phrase) = relevance::scores(&searcher, &plan, &keys, cancel.as_ref())?;
             // cross-line hits rank after every in-line hit (score 0)
             scores.extend(cross_keys.iter().map(|_| relevance::RankScore { cross_line: true, ..Default::default() }));
             let (hits, scores) = if self.options.positions && keys.len() + cross_keys.len() == hits.len() {
@@ -3691,6 +3714,7 @@ impl LineIndex {
             }
             let mut result = SearchResult::new(hits, session).with_notices(with_fm_notice(notices)).with_truncated(truncated);
             result.scores = Some(scores);
+            result.text_phrase = text_phrase;
             return Ok(result);
         }
         if stream {

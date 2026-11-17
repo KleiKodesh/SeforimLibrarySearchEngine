@@ -270,6 +270,12 @@ pub struct WordOptions {
     /// This word's own expansion cap (its walk / wildcard / fuzzy terms),
     /// instead of the request's `max_expanded_terms` (0 = uncapped).
     pub max_expanded_terms: Option<usize>,
+    /// This word (and its alternatives) as a fuzzy word at this edit
+    /// distance, 0 to 2 (Otzaria's smart fuzzy query, `build_smart_fuzzy_query`).
+    /// Distance 0 is Otzaria's distance-0 fuzzy word: the word itself,
+    /// quotes zero-width, or its quote-free form; no spelling variants. None:
+    /// the word as typed (its own `~N`, if any).
+    pub fuzzy_distance: Option<u8>,
 }
 
 /// Otzaria's plain `distance` and `any_order` under the query's rule
@@ -645,6 +651,7 @@ impl SearchOptions {
             resume_stamp: self.resume_stamp.clone(),
             max_expanded_terms: self.max_expanded_terms,
             lexical_fuzzy: self.lexical_fuzzy,
+            fuzzy_phrase_from_texts: false,
             sources: self.sources,
         })
     }
@@ -1041,8 +1048,16 @@ fn slots_with<'a>(
         let alternatives = w.map_or(none, |w| w.alternatives.as_slice());
         let unmarked = w.map_or(none, |w| w.unmarked_alternatives.as_slice());
         let cap = w.and_then(|w| w.max_expanded_terms);
+        let fuzzy = w.and_then(|w| w.fuzzy_distance);
+        let as_fuzzy = |t: QueryTerm| match (fuzzy, t) {
+            (Some(distance), QueryTerm::Word(word) | QueryTerm::Fuzzy { word, .. }) => {
+                QueryTerm::Fuzzy { word, distance: distance.min(hebrew_fts::query_parser::MAX_FUZZY_DISTANCE) }
+            }
+            (_, t) => t,
+        };
         let mut members: Vec<GroupSpec> = term
             .into_iter()
+            .map(as_fuzzy)
             .map(|t| match cap {
                 Some(cap) => GroupSpec::Capped { group: Box::new(group(t, o)), cap },
                 None => group(t, o),
@@ -1051,7 +1066,7 @@ fn slots_with<'a>(
         for alt in alternatives {
             for t in tokenize_query(alt, keep_marks) {
                 if let QueryToken::Word { term: Some(t), .. } = t {
-                    members.push(group(t, o));
+                    members.push(group(as_fuzzy(t), o));
                 }
             }
         }

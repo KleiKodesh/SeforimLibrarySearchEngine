@@ -288,7 +288,8 @@ final class HybridOptions {
   /// Otzaria's lexical mode (a query that is one quotation is exact).
   final HybridLexicalMode lexicalMode;
 
-  /// The fuzzy mode's edit distance (1 or 2).
+  /// The fuzzy mode's edit distance (0 to 2; 0 = Otzaria's smart search:
+  /// each word exact, quotes zero-width, or its quote-free form).
   final int fuzzyMaxDistance;
 
   /// Otzaria's match_nikud / match_taamim on every lexical candidate and

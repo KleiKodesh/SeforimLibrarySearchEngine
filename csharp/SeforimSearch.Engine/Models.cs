@@ -862,6 +862,10 @@ namespace SeforimSearch.Engine
         /// <summary>This word's own expansion cap, instead of
         /// <see cref="SearchOptions.MaxExpandedTerms"/> (0 = uncapped). Null: the request's.</summary>
         public int? MaxExpandedTerms { get; set; }
+        /// <summary>This word (and its alternatives) as a fuzzy word at this edit distance, 0 to 2
+        /// (Otzaria's smart fuzzy query; 0 = the word itself, quotes zero-width, or its quote-free
+        /// form). Null: the word as typed.</summary>
+        public int? FuzzyDistance { get; set; }
 
         internal void WriteJson(StringBuilder sb)
         {
@@ -906,6 +910,11 @@ namespace SeforimSearch.Engine
             {
                 if (MaxExpandedTerms.Value < 0) throw new ArgumentOutOfRangeException(nameof(MaxExpandedTerms));
                 sb.Append(",\"max_expanded_terms\":").Append(MaxExpandedTerms.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+            if (FuzzyDistance.HasValue)
+            {
+                if (FuzzyDistance.Value < 0 || FuzzyDistance.Value > 2) throw new ArgumentOutOfRangeException(nameof(FuzzyDistance));
+                sb.Append(",\"fuzzy_distance\":").Append(FuzzyDistance.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
             SearchOptions.WordFields(sb, GrammarPrefixes, GrammarSuffixes, AramaicPrefixes, AramaicSuffixes,
                 KtivMaleHaser, PartOfWord, AdvancedPrefixes, AdvancedSuffixes, IgnoreQuotes, ExactQuotes,

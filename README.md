@@ -1269,6 +1269,11 @@ way: every query, collector and statistic sees one index with more segments.
     marked; under relevance order they score Otzaria's lexical tier (30).
     `max_expanded_terms` on a word (low level `GroupSpec::Capped`) is that
     word's own expansion cap instead of the request's.
+    `fuzzy_distance` on a word (C# `FuzzyDistance`, Dart `fuzzyDistance`; 0 to
+    2) makes the word and its alternatives fuzzy words at that distance
+    (`GroupSpec::Fuzzy`); 0 has no query syntax (`~N` starts at 1) and is
+    Otzaria's distance-0 fuzzy word (the word itself, quotes zero-width, or its
+    quote-free form), the hybrid session's smart-search lexical side.
   - Query level: `max_word_distance`, `require_ordered`, `min_groups`,
     `word_match` (`{"mode":"all"|"any_word"|"most_words"}` /
     `{"mode":"at_least","count":N}`: Otzaria's wordMatchMode, the engine
@@ -2472,13 +2477,18 @@ candidates discarded, the lexical side only counted, once a session) or
 `lexical_only` (no vector scan); the mode that ran follows the coordinator's
 `fuse` (a hybrid search whose semantic side failed or was skipped runs lexical
 only, alpha 1; semantic only, alpha 0). `lexical_mode` `exact` (default) or
-`fuzzy` with `fuzzy_max_distance` 1 or 2 (Otzaria's `build_smart_fuzzy_query`:
+`fuzzy` with `fuzzy_max_distance` 0, 1 or 2 (Otzaria's `build_smart_fuzzy_query`;
+distance 0 is Otzaria's smart search: each word exact, quotes zero-width, or its
+quote-free form (the word option `fuzzy_distance` 0), scored as Otzaria's
+distance-0 token clause (constant 1 plus the quote-free term's BM25) and the
+typed words' adjacency boost:
 every word of the query, quoted ones included, a fuzzy word, a placeholder
 spelling of the divine name also its full spelling, each quoted phrase also
 literal and adjacent; run once as the engine's own search in relevance order,
 whose score is Otzaria's fuzzy-mode score, ranked by score then catalog order;
-an index without positions decides a phrase from the line texts, asked with
-`need_texts`); a query that is one quotation covering every word runs exact
+an index without positions decides a phrase, and at distance 0 the adjacency
+boost of several words (tantivy's phrase scorer run on the line's own word
+positions), from the line texts, asked with `need_texts`); a query that is one quotation covering every word runs exact
 (`whole_query_quoted`). `match_nikud` / `match_teamim` apply to every lexical
 candidate and count (exact: each word's spellings are the terms its vocalized
 walk matches, typed marks required, other marks free, only the lines carrying a
@@ -2519,9 +2529,9 @@ deviations: the fallback's exact search has no cross-line variant (Otzaria's
 fallback search passes `cross_line = true`); vocalized exact BM25 reads the
 text field's statistics (Otzaria's `textVocalized` field holds only the
 vocalized lines); a fuzzy query mixing a quoted phrase or a placeholder
-spelling scores by the engine's relevance shape for those slots; fuzzy distance
-0 is refused (the query syntax has `~1` / `~2` only); a fuzzy query of several
-words on an index without positions is refused (its score needs positions);
+spelling scores by the engine's relevance shape for those slots; a fuzzy query
+of several words above distance 0 on an index without positions is refused (its
+exact tier's BM25 reads term frequencies, which that index does not keep);
 the fuzzy search runs once when the session opens (not cancellable); no
 "unverified" note (the text check runs in the host's mapping, which counts the
 failing records itself); no session cache, so no `session_restarted` and no

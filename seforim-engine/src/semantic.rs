@@ -273,7 +273,9 @@ pub struct HybridOptions {
     pub retrieval: RetrievalMode,
     /// Otzaria's lexical mode (default exact).
     pub lexical_mode: LexicalMode,
-    /// The fuzzy lexical mode's edit distance (1 or 2; default 1).
+    /// The fuzzy lexical mode's edit distance (0 to 2; default 1). 0 is
+    /// Otzaria's distance-0 fuzzy word: each word exact, quotes zero-width,
+    /// or its quote-free form (the app's smart search).
     pub fuzzy_max_distance: u8,
     /// Otzaria's `match_nikud` on every lexical candidate and count: typed
     /// nikud required on its letter, other marks free, only lines carrying
@@ -547,8 +549,8 @@ impl LineIndex {
     /// order (Otzaria's fuzzy-mode score).
     fn fuzzy_lexical(&self, query: &str, options: &HybridOptions) -> Result<FuzzyLexical> {
         let d = options.fuzzy_max_distance;
-        if !(1..=2).contains(&d) {
-            return Err(Error::Unsupported(format!("fuzzy distance is limited to 1..=2, got {d}")));
+        if d > 2 {
+            return Err(Error::Unsupported(format!("fuzzy distance is limited to 0..=2, got {d}")));
         }
         let keep_marks = options.match_nikud || options.match_teamim;
         let words = token_words(query, keep_marks);
@@ -561,9 +563,19 @@ impl LineIndex {
             if i > 0 {
                 q.push(' ');
             }
-            q.push_str(&format!("{w}~{d}"));
-            if let Some(alt) = crate::relevance::placeholder_alternative(w) {
-                overrides.insert(i, crate::WordOptions { alternatives: vec![format!("{alt}~{d}")], ..Default::default() });
+            // distance 0 has no `~N` syntax: the word option makes the word
+            // (and its alternative) a fuzzy word at distance 0, as Otzaria's
+            // distance-0 automaton (the word, quotes zero-width, or its
+            // quote-free form)
+            let zero = d == 0;
+            let typed = |w: &str| if zero { w.to_string() } else { format!("{w}~{d}") };
+            q.push_str(&typed(w));
+            let alternatives = crate::relevance::placeholder_alternative(w).map(|alt| vec![typed(&alt)]).unwrap_or_default();
+            if zero || !alternatives.is_empty() {
+                overrides.insert(
+                    i,
+                    crate::WordOptions { alternatives, fuzzy_distance: zero.then_some(0), ..Default::default() },
+                );
             }
         }
         for phrase in fusion::quoted_phrases(query) {
@@ -581,10 +593,21 @@ impl LineIndex {
             order: crate::ResultsOrder::Relevance,
             ..Default::default()
         };
-        let result = self.search_options(&search)?;
+        // an index without positions: the adjacency boost of several words
+        // is decided from the line texts (rank_fuzzy asks for them)
+        let mut request = search.to_request(self.options.keep_marks)?;
+        request.fuzzy_phrase_from_texts = true;
+        let result = self.search(&request)?;
         if result.scores().is_none() && !result.hits.is_empty() {
             return Err(Error::Unsupported(
-                "the fuzzy lexical side of several words is ranked from positions: this index has none".into(),
+                "the fuzzy lexical side of this query is ranked from positions: this index has none".into(),
+            ));
+        }
+        // above distance 0 the exact tier's BM25 reads term frequencies, which
+        // an index without positions does not keep
+        if d > 0 && result.text_phrase().is_some() {
+            return Err(Error::Unsupported(
+                "the fuzzy lexical side of several words above distance 0 is ranked from term frequencies: this index has none".into(),
             ));
         }
         let truncated = result.truncated();
@@ -797,8 +820,27 @@ impl HybridSession {
             f.ranked = Some(Vec::new());
             return Ok(Ok(()));
         };
-        let scores: Vec<f32> = result.scores().map(|s| s.to_vec()).unwrap_or_else(|| vec![0.0; result.hits.len()]);
+        let mut scores: Vec<f32> = result.scores().map(|s| s.to_vec()).unwrap_or_else(|| vec![0.0; result.hits.len()]);
         let mut pass = vec![true; result.hits.len()];
+        // an index without positions: Otzaria's adjacency boost from the texts
+        if let Some(words) = result.text_phrase().map(|w| w.to_vec()) {
+            let mut missing: Vec<u64> = result.hits.iter().map(|h| h.line_id).filter(|id| !texts.contains_key(id)).collect();
+            if !missing.is_empty() {
+                missing.sort_unstable();
+                missing.dedup();
+                return Ok(Err(missing));
+            }
+            for (h, score) in result.hits.iter().zip(scores.iter_mut()) {
+                if crate::relevance::text_holds_phrase(
+                    &texts[&h.line_id],
+                    &words,
+                    crate::relevance::FUZZY_PHRASE_SLOP,
+                    source.marked_terms,
+                ) {
+                    *score += crate::relevance::FUZZY_BOOST_PHRASE;
+                }
+            }
+        }
         if result.count_needs_text() {
             let mut missing: Vec<u64> = result.hits.iter().map(|h| h.line_id).filter(|id| !texts.contains_key(id)).collect();
             if !missing.is_empty() {
@@ -1517,6 +1559,56 @@ mod tests {
         assert_eq!(p.meta.lexical_total, 4);
         // a distance past 2 is refused (Otzaria's limit)
         assert!(index.hybrid_session("alpah", &[], fuzzy(3)).is_err());
+        assert!(index.hybrid_session("alpah", &[], fuzzy(0)).is_ok());
+    }
+
+    /// Fuzzy distance 0 (Otzaria's smart search, `build_smart_fuzzy_query`
+    /// at distance 0): each word exact (quotes zero-width) or its quote-free
+    /// form, the fuzzy-mode score; several words on an index without
+    /// positions decide the adjacency boost from the line texts, equal to
+    /// the positions index.
+    #[test]
+    fn hybrid_fuzzy_distance_zero() {
+        let fuzzy = |d: u8| HybridOptions { lexical_mode: LexicalMode::Fuzzy, fuzzy_max_distance: d, ..lexonly() };
+        let (_t, index) = build(true);
+        let ids = |p: &HybridPage| {
+            let mut v: Vec<u64> = p.hits.iter().map(|h| h.line_id).collect();
+            v.sort_unstable();
+            v
+        };
+        // exact: no edit allowed ("alphabet" and a swap are not)
+        let p = page(&mut index.hybrid_session("alpha", &[], fuzzy(0)).unwrap(), 0, 10, &[]);
+        assert_eq!(ids(&p), vec![1, 2, 3, 6]);
+        assert!(p.hits.iter().all(|h| h.lexical == Some(1.0)), "the distance-0 automaton's constant");
+        let p = page(&mut index.hybrid_session("alpah", &[], fuzzy(0)).unwrap(), 0, 10, &[]);
+        assert!(p.hits.is_empty());
+        // two words: both required, the adjacent pair boosted
+        let texts: Vec<(u64, &str)> = LINES.to_vec();
+        let with_pos = page(&mut index.hybrid_session("alpha beta", &[], fuzzy(0)).unwrap(), 0, 10, &[]);
+        assert_eq!(ids(&with_pos), vec![1, 2, 3, 6]);
+        let line = |p: &HybridPage, id: u64| p.hits.iter().find(|h| h.line_id == id).unwrap().lexical.unwrap();
+        assert!(line(&with_pos, 1) >= 2000.0, "adjacent: the boost");
+        // an index without positions: the same lines and scores, from the texts
+        let (_t2, plain) = build(false);
+        assert!(plain.hybrid_session("alpha beta", &[], fuzzy(1)).is_err(), "above 0: term frequencies");
+        let mut s = plain.hybrid_session("alpha beta", &[], fuzzy(0)).unwrap();
+        assert!(matches!(s.page(0, 10, None).unwrap(), HybridStep::NeedTexts(_)), "texts first");
+        let got = page(&mut s, 0, 10, &texts);
+        let pairs = |p: &HybridPage| p.hits.iter().map(|h| (h.line_id, h.lexical)).collect::<Vec<_>>();
+        assert_eq!(pairs(&got), pairs(&with_pos));
+    }
+
+    /// The text side of the adjacency boost runs tantivy's phrase scorer on
+    /// the line's own positions.
+    #[test]
+    fn text_phrase_within_slop() {
+        let w = |a: &str, b: &str| vec![vec![a.to_string()], vec![b.to_string()]];
+        let holds = |t: &str, words: &[Vec<String>], slop| crate::relevance::text_holds_phrase(t, words, slop, false);
+        assert!(holds("alpha beta", &w("alpha", "beta"), 0));
+        assert!(!holds("alpha gamma beta", &w("alpha", "beta"), 0));
+        assert!(holds("alpha gamma beta", &w("alpha", "beta"), 1));
+        assert!(!holds("alpha gamma delta beta", &w("alpha", "beta"), 1));
+        assert!(!holds("alpha", &w("alpha", "beta"), 1));
     }
 
     /// match_nikud / match_teamim on the lexical side (Otzaria's vocalized

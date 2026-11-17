@@ -939,6 +939,7 @@ class WordOptions {
     List<String>? lexicalForms,
     List<String>? unmarkedLexicalForms,
     this.maxExpandedTerms,
+    this.fuzzyDistance,
   })  : alternatives = alternatives ?? [],
         unmarkedAlternatives = unmarkedAlternatives ?? [],
         lexicalForms = lexicalForms ?? [],
@@ -971,12 +972,18 @@ class WordOptions {
   /// This word's own expansion cap, instead of the request's (0 = uncapped).
   int? maxExpandedTerms;
 
+  /// This word (and its alternatives) as a fuzzy word at this edit distance,
+  /// 0 to 2 (Otzaria's smart fuzzy query; 0 = the word itself, quotes
+  /// zero-width, or its quote-free form). Null: the word as typed.
+  int? fuzzyDistance;
+
   Map<String, Object?> toJson() => {
         if (alternatives.isNotEmpty) 'alternatives': alternatives,
         if (unmarkedAlternatives.isNotEmpty) 'unmarked_alternatives': unmarkedAlternatives,
         if (lexicalForms.isNotEmpty) 'lexical_forms': lexicalForms,
         if (unmarkedLexicalForms.isNotEmpty) 'unmarked_lexical_forms': unmarkedLexicalForms,
         if (maxExpandedTerms != null) 'max_expanded_terms': maxExpandedTerms,
+        if (fuzzyDistance != null) 'fuzzy_distance': fuzzyDistance,
         ..._wordFields(grammarPrefixes, grammarSuffixes, aramaicPrefixes, aramaicSuffixes, ktivMaleHaser,
             partOfWord, advancedPrefixes, advancedSuffixes, ignoreQuotes, exactQuotes, spellingErrors,
             matchNikud, matchTeamim, typoMode, prefixMaxLetters, suffixMaxLetters, partOfWordMaxLetters,

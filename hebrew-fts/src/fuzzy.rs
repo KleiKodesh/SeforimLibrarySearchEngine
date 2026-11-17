@@ -169,14 +169,15 @@ pub struct HebrewFuzzyQuery {
 pub const MAX_FUZZY_DISTANCE: u8 = 3;
 
 impl HebrewFuzzyQuery {
-    /// `distance`: 1..=[`MAX_FUZZY_DISTANCE`] (clamped, as FtsLib's
-    /// `ExpandFuzzy`). The expansion is capped at
+    /// `distance`: 0..=[`MAX_FUZZY_DISTANCE`] (clamped, as FtsLib's
+    /// `ExpandFuzzy`; the query syntax gives 1 and up, 0 is Otzaria's
+    /// distance-0 fuzzy word: the word itself, quotes as configured). The expansion is capped at
     /// [`DEFAULT_MAX_EXPANDED_TERMS`] across all segments, closest first.
     pub fn new(field: Field, word: impl Into<String>, distance: u8) -> HebrewFuzzyQuery {
         HebrewFuzzyQuery {
             field,
             word: word.into(),
-            distance: distance.clamp(1, MAX_FUZZY_DISTANCE),
+            distance: distance.min(MAX_FUZZY_DISTANCE),
             matched_terms_sink: None,
             max_expansions: DEFAULT_MAX_EXPANDED_TERMS,
             ignore_quotes: false,

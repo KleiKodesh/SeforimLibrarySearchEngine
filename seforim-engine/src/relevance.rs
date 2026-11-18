@@ -254,10 +254,16 @@ fn fuzzy_slot_of(g: &GroupSpec) -> Option<FuzzySlot<'_>> {
     let vocalized_exact = |w: &str| {
         alternatives.iter().any(|b| matches!(b, GroupSpec::Fuzzy { word, .. } if word == w))
     };
+    // a distance-0 word's quote-free form (see options.rs `group`)
+    let quote_free_twin = |w: &str| {
+        alternatives.iter().any(|b| {
+            matches!(b, GroupSpec::Fuzzy { word, distance: 0, .. } if crate::options::quote_free_word(word).as_deref() == Some(w))
+        })
+    };
     for a in alternatives {
         match a {
             GroupSpec::Lexical { group } => forms.push(form(group)?),
-            GroupSpec::Word { word, .. } if vocalized_exact(word) => {}
+            GroupSpec::Word { word, .. } if vocalized_exact(word) || quote_free_twin(word) => {}
             _ if found.is_none() => found = Some(fuzzy(a)?),
             _ => return None,
         }
@@ -925,9 +931,21 @@ impl MainWeights {
                     }
                     None => None,
                 };
+                // the automaton's constant only on the terms it matches,
+                // not the quote-free form's spellings
+                let mut q = hebrew_fts::HebrewFuzzyQuery::new(field, f.word, 0);
+                q.set_ignore_quotes(f.ignore_quotes);
+                q.set_quote_free_terms(!f.exact_quotes);
+                q.set_marked_terms(plan.marked_terms);
+                let dfa = q.automaton();
+                let fuzzy_terms = m.terms[i]
+                    .iter()
+                    .filter(|t| matches!(dfa.distance(t.as_bytes()), hebrew_fts::fuzzy::Distance::Exact(0)))
+                    .cloned()
+                    .collect();
                 return Ok(Some(FuzzyWeights {
                     exact: Vec::new(),
-                    fuzzy_terms: m.terms[i].clone(),
+                    fuzzy_terms,
                     forms: Vec::new(),
                     quoteless,
                 }));

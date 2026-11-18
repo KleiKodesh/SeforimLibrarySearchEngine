@@ -368,6 +368,11 @@ impl SearchOptions {
     /// vocalized when the global flags are on (Otzaria passes the global
     /// flags to both builds).
     pub fn to_request(&self, keep_marks: bool) -> Result<SearchRequest> {
+        // Otzaria's limit ("fuzzy distance is limited to 2"), refused as it does
+        let words = self.words.values().chain(self.exclude.iter().flat_map(|e| e.words.values()));
+        if let Some(d) = words.filter_map(|w| w.fuzzy_distance).find(|&d| d > hebrew_fts::query_parser::MAX_FUZZY_DISTANCE) {
+            return Err(Error::Unsupported(format!("fuzzy distance is limited to 0..=2, got {d}")));
+        }
         let mut request = self.to_request_inner(keep_marks)?;
         request.sources = self.sources;
         Ok(request)
@@ -774,12 +779,22 @@ fn group(term: QueryTerm, o: WalkOptionsSpec) -> GroupSpec {
         }
         QueryTerm::Fuzzy { word, distance } => {
             let word = required_marks_form(&word, o.match_nikud, o.match_teamim);
+            // distance 0 (no query syntax, the word option): a word with a
+            // quote also matches its quote-free form's spellings (Otzaria's
+            // distance-0 token clause, the automaton OR the quote-free
+            // term's `quote_expansion::term_query`); a distance above 0
+            // reaches it with one edit, ignored quotes strip it already
+            let twin = (distance == 0 && !ignore_quotes)
+                .then(|| quote_free_word(&word))
+                .flatten()
+                .map(|clean| GroupSpec::Word { word: clean, options: WalkOptionsSpec { exact_quotes: false, ..exact_options(o) } });
+            let fuzzy = GroupSpec::Fuzzy { word: word.clone(), distance, ignore_quotes, exact_quotes: o.exact_quotes };
             if word.chars().any(hebrew_fts::chars::is_term_mark) {
                 // the exact form with its typed marks, or a typo variant mark-free
-                let exact = GroupSpec::Word { word: word.clone(), options: exact_options(o) };
-                GroupSpec::Any { alternatives: vec![exact, GroupSpec::Fuzzy { word, distance, ignore_quotes, exact_quotes: o.exact_quotes }] }
+                let exact = GroupSpec::Word { word, options: exact_options(o) };
+                GroupSpec::Any { alternatives: [exact, fuzzy].into_iter().chain(twin).collect() }
             } else {
-                GroupSpec::Fuzzy { word, distance, ignore_quotes, exact_quotes: o.exact_quotes }
+                with_variants(fuzzy, twin.into_iter().collect())
             }
         }
         QueryTerm::Grammar { word, prefixes, suffixes } => {
@@ -806,6 +821,16 @@ fn exact_options(o: WalkOptionsSpec) -> WalkOptionsSpec {
         match_teamim: o.match_teamim,
         ..Default::default()
     }
+}
+
+/// `word` without its quotes, when it has one and a letter is left
+/// (Otzaria's `quoteless_variant`).
+pub(crate) fn quote_free_word(word: &str) -> Option<String> {
+    if !word.chars().any(hebrew_fts::chars::is_term_quote) {
+        return None;
+    }
+    let clean: String = word.chars().filter(|&c| !hebrew_fts::chars::is_term_quote(c)).collect();
+    (!clean.is_empty()).then_some(clean)
 }
 
 /// A quoted phrase's word as written: a wildcard, fuzzy or `%` word loses
@@ -1051,7 +1076,7 @@ fn slots_with<'a>(
         let fuzzy = w.and_then(|w| w.fuzzy_distance);
         let as_fuzzy = |t: QueryTerm| match (fuzzy, t) {
             (Some(distance), QueryTerm::Word(word) | QueryTerm::Fuzzy { word, .. }) => {
-                QueryTerm::Fuzzy { word, distance: distance.min(hebrew_fts::query_parser::MAX_FUZZY_DISTANCE) }
+                QueryTerm::Fuzzy { word, distance }
             }
             (_, t) => t,
         };
@@ -1114,6 +1139,46 @@ fn slots_with<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The per-word `fuzzy_distance` is 0..=2 (Otzaria refuses a larger
+    /// distance, "fuzzy distance is limited to 2"), on a negative word too;
+    /// distance 0 on a word with a quote ORs the quote-free form's walk
+    /// (Otzaria's distance-0 token clause), not with ignored quotes or
+    /// without a quote.
+    #[test]
+    fn word_fuzzy_distance_range_and_quote_free_twin() {
+        let fuzzy = |q: &str, d: u8, ignore_quotes: bool| SearchOptions {
+            query: q.into(),
+            ignore_quotes,
+            words: BTreeMap::from([(0, WordOptions { fuzzy_distance: Some(d), ..Default::default() })]),
+            ..Default::default()
+        };
+        assert!(matches!(fuzzy("abcd", 3, false).to_request(false), Err(Error::Unsupported(_))));
+        let r = fuzzy("abcd", 2, false).to_request(false).unwrap();
+        assert!(matches!(&r.groups[0], GroupSpec::Fuzzy { distance: 2, .. }));
+        let negative = SearchOptions {
+            query: "abcd".into(),
+            exclude: Some(ExcludeOptions {
+                query: "efgh".into(),
+                words: BTreeMap::from([(0, WordOptions { fuzzy_distance: Some(3), ..Default::default() })]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(negative.to_request(false), Err(Error::Unsupported(_))));
+        // distance 0: no quote, one group; a quote, the twin
+        let r = fuzzy("abcd", 0, false).to_request(false).unwrap();
+        assert!(matches!(&r.groups[0], GroupSpec::Fuzzy { distance: 0, .. }));
+        let r = fuzzy("ab\"cd", 0, false).to_request(false).unwrap();
+        let GroupSpec::Any { alternatives } = &r.groups[0] else { panic!("{:?}", r.groups[0]) };
+        assert!(matches!(&alternatives[0], GroupSpec::Fuzzy { word, distance: 0, .. } if word == "ab\"cd"));
+        assert!(matches!(&alternatives[1], GroupSpec::Word { word, options } if word == "abcd" && !options.exact_quotes));
+        let r = fuzzy("ab\"cd", 0, true).to_request(false).unwrap();
+        assert!(matches!(&r.groups[0], GroupSpec::Fuzzy { distance: 0, ignore_quotes: true, .. }));
+        // a distance above 0 reaches the quote-free form with one edit
+        let r = fuzzy("ab\"cd", 1, false).to_request(false).unwrap();
+        assert!(matches!(&r.groups[0], GroupSpec::Fuzzy { distance: 1, .. }));
+    }
 
     /// `ktiv_rules: "ftslib"` (here per word) makes a wildcard core's
     /// variants FtsLib's `KetivExpander` output, in its order.

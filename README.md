@@ -1273,7 +1273,10 @@ way: every query, collector and statistic sees one index with more segments.
     2) makes the word and its alternatives fuzzy words at that distance
     (`GroupSpec::Fuzzy`); 0 has no query syntax (`~N` starts at 1) and is
     Otzaria's distance-0 fuzzy word (the word itself, quotes zero-width, or its
-    quote-free form), the hybrid session's smart-search lexical side.
+    quote-free form's spellings: a word with a quote ORs that form's word walk,
+    `GroupSpec::Any`), the hybrid session's smart-search lexical side. A
+    distance above 2 is refused (Otzaria's limit), on a negative word too.
+    The low-level `GroupSpec::Fuzzy` keeps distance 0 as the word itself.
   - Query level: `max_word_distance`, `require_ordered`, `min_groups`,
     `word_match` (`{"mode":"all"|"any_word"|"most_words"}` /
     `{"mode":"at_least","count":N}`: Otzaria's wordMatchMode, the engine
@@ -2480,7 +2483,8 @@ only, alpha 1; semantic only, alpha 0). `lexical_mode` `exact` (default) or
 `fuzzy` with `fuzzy_max_distance` 0, 1 or 2 (Otzaria's `build_smart_fuzzy_query`;
 distance 0 is Otzaria's smart search: each word exact, quotes zero-width, or its
 quote-free form (the word option `fuzzy_distance` 0), scored as Otzaria's
-distance-0 token clause (constant 1 plus the quote-free term's BM25) and the
+distance-0 token clause (constant 1 on the automaton's own terms plus the
+quote-free form's BM25 over its spellings) and the
 typed words' adjacency boost:
 every word of the query, quoted ones included, a fuzzy word, a placeholder
 spelling of the divine name also its full spelling, each quoted phrase also

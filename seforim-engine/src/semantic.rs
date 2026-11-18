@@ -1598,6 +1598,77 @@ mod tests {
         assert_eq!(pairs(&got), pairs(&with_pos));
     }
 
+    /// Fuzzy distance 0 on a word with an inner quote (otzaria_search_engine
+    /// 7.2.0 `build_fuzzy_query_from_terms` at distance 0, its test
+    /// `test_lexical_fuzzy_distance_zero_keeps_quote_free_spelling`): the
+    /// quoted spelling and the quote-free one match, scored as Otzaria's
+    /// token clause summed: the distance-0 automaton (constant 1, the quoted
+    /// spelling only) and `quote_expansion::term_query` of the quote-free
+    /// form (BM25 over its spellings, the quoted one included, document
+    /// frequencies summed: `SpellingsTermQuery`).
+    #[test]
+    fn hybrid_fuzzy_distance_zero_inner_quote() {
+        use tantivy::fieldnorm::FieldNormReader;
+        use tantivy::query::{Bm25Weight, FuzzyTermQuery};
+        use tantivy::Term;
+        let lines: [(u64, &str); 4] =
+            [(1, "dvri rmbm"), (2, "dvri rmb\"m"), (3, "dvri rmbn"), (4, "rmbm rmbm dvri sof")];
+        let tmp = tempfile::tempdir().unwrap();
+        let index = LineIndex::create(tmp.path(), IndexOptions::default()).unwrap();
+        {
+            let mut w = index.writer(50_000_000, 1).unwrap();
+            for (i, &(id, text)) in lines.iter().enumerate() {
+                let doc = LineDoc { line_id: id, position: i as u64, book_id: 1, text: text.into(), section_id: None, no_cross: false };
+                w.add(&doc).unwrap();
+            }
+            w.commit(None).unwrap();
+        }
+        let oxv = tmp.path().join("vec.oxv");
+        seforim_vectors::oxv::write_test_segment(&oxv, 8, false, "v1", &[("id:1", vec![(0, 0, axis(1))])]).unwrap();
+        index.open_vectors(&oxv).unwrap();
+        index.set_vector_mapping(vec![OxvBookMap { name: "id:1".into(), book_id: 1, line_ids: vec![1] }], true);
+
+        let field = index.fields.text;
+        let term = |w: &str| Term::from_field_text(field, w);
+        // the automaton: the quoted spelling only
+        let automaton = tantivy_scores(&index, &FuzzyTermQuery::new(term("rmb\"m"), 0, true));
+        assert_eq!(automaton.keys().copied().collect::<Vec<_>>(), vec![2]);
+        // the spellings' BM25: df 2 + 1 of 4 lines, 10 words (term frequency 1, `Basic`)
+        let bm25 = Bm25Weight::for_one_term(3, 4, 2.5);
+        let spelling = |words: u32| bm25.score(FieldNormReader::fieldnorm_to_id(words), 1);
+        let want = std::collections::HashMap::from([(1u64, spelling(2)), (2, 1.0 + spelling(2)), (4, spelling(4))]);
+
+        let o = HybridOptions { lexical_mode: LexicalMode::Fuzzy, fuzzy_max_distance: 0, ..lexonly() };
+        let p = page(&mut index.hybrid_session("rmb\"m", &[], o).unwrap(), 0, 10, &[]);
+        let mut got: Vec<u64> = p.hits.iter().map(|h| h.line_id).collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![1, 2, 4], "not the edit-distance neighbour");
+        for h in &p.hits {
+            assert!((h.lexical.unwrap() - want[&h.line_id]).abs() < 1e-5, "{} {:?} {}", h.line_id, h.lexical, want[&h.line_id]);
+        }
+    }
+
+    /// The low-level fuzzy group keeps distance 0 (the word itself) rather
+    /// than turning it into 1: the query syntax never gives 0 (`~` alone is
+    /// 1, `~0` is no operator), so FtsLib parity is untouched; Otzaria-mode
+    /// hosts reach 0 only through the word option.
+    #[test]
+    fn fuzzy_group_distance_zero_is_the_word() {
+        let (_t, index) = build(true);
+        let ids = |word: &str, d: u8| -> Vec<u64> {
+            let json = format!("{{\"groups\":[{{\"kind\":\"fuzzy\",\"word\":\"{word}\",\"distance\":{d}}}]}}");
+            let request: crate::SearchRequest = serde_json::from_str(&json).unwrap();
+            index.search(&request).unwrap().hits.iter().map(|h| h.line_id).collect()
+        };
+        assert_eq!(ids("alpha", 0), vec![1, 2, 3, 6]);
+        assert!(ids("alpxa", 0).is_empty(), "one edit away: not at distance 0");
+        assert_eq!(ids("alpxa", 1), vec![1, 2, 3, 6]);
+        // the query syntax: `~` is 1, `~0` is not an operator
+        let parsed = |q: &str| hebrew_fts::tokenize_query(q, false);
+        assert!(matches!(&parsed("alpxa~")[0], hebrew_fts::QueryToken::Word { term: Some(hebrew_fts::QueryTerm::Fuzzy { distance: 1, .. }), .. }));
+        assert!(!parsed("alpxa~0").iter().any(|t| matches!(t, hebrew_fts::QueryToken::Word { term: Some(hebrew_fts::QueryTerm::Fuzzy { .. }), .. })));
+    }
+
     /// The text side of the adjacency boost runs tantivy's phrase scorer on
     /// the line's own positions.
     #[test]

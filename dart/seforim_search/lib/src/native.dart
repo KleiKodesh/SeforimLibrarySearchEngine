@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 30;
+const int seforimAbiVersion = 31;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -232,6 +232,8 @@ final class SeforimNative {
             Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_oxv_info'),
         passagePlan = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
             Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_passage_plan'),
+        passageWindowTexts = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
+            Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_passage_window_texts'),
         passageMark = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
             Pointer<Utf8> Function(Pointer<Uint8>, int)>('se_passage_mark'),
         vectorsDirInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
@@ -240,6 +242,13 @@ final class SeforimNative {
             Pointer<Void> Function(Pointer<Uint8>, int, Pointer<Void>)>('se_vectors_coverage_open'),
         coverageAddBook = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint8>, Size),
             int Function(Pointer<Void>, Pointer<Uint8>, int)>('se_vectors_coverage_add_book'),
+        coverageAddBookRows = lib.lookupFunction<
+            Int32 Function(Pointer<Void>, Size, Pointer<Uint8>, Size, Pointer<Uint64>, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int)>(
+            'se_vectors_coverage_add_book_rows'),
+        vectorsBookLines = lib.lookupFunction<
+            Pointer<Utf8> Function(Size, Pointer<Uint8>, Size, Pointer<Uint64>, Pointer<Uint8>, Size),
+            Pointer<Utf8> Function(int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int)>('se_vectors_book_lines'),
         coverageResult = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_vectors_coverage_result'),
         coverageFree = lib.lookupFunction<Void Function(Pointer<Void>), void Function(Pointer<Void>)>(
@@ -251,8 +260,16 @@ final class SeforimNative {
                 Pointer<Uint8>, Size, Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int,
                 Pointer<Uint8>, int, Pointer<Void>)>('se_vectors_install'),
-        vectorsCompact = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Void>),
-            Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>)>('se_vectors_compact'),
+        vectorsCompact = lib.lookupFunction<
+            Pointer<Utf8> Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size, Pointer<Void>, Pointer<Void>),
+            Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>, Pointer<Void>)>('se_vectors_compact'),
+        liveKeysOpen = lib.lookupFunction<Pointer<Void> Function(Pointer<Uint8>, Size, Uint32),
+            Pointer<Void> Function(Pointer<Uint8>, int, int)>('se_live_keys_open'),
+        liveKeysAddBookRows = lib.lookupFunction<
+            Int32 Function(Pointer<Void>, Pointer<Uint8>, Size, Size, Pointer<Uint8>, Size, Pointer<Uint64>, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>,
+                int)>('se_live_keys_add_book_rows'),
+        liveKeysFree = lib.lookupFunction<Void Function(Pointer<Void>), void Function(Pointer<Void>)>('se_live_keys_free'),
         vectorsInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>),
             Pointer<Utf8> Function(Pointer<Void>)>('se_vectors_info'),
         semanticSearch = lib.lookupFunction<
@@ -389,16 +406,23 @@ final class SeforimNative {
   final int Function(Pointer<Uint8>, int, Pointer<Uint8>, int) oxvExpand;
   final Pointer<Utf8> Function(Pointer<Uint8>, int) oxvInfo;
   final Pointer<Utf8> Function(Pointer<Uint8>, int) passagePlan;
+  final Pointer<Utf8> Function(Pointer<Uint8>, int) passageWindowTexts;
   final Pointer<Utf8> Function(Pointer<Uint8>, int) passageMark;
   final Pointer<Utf8> Function(Pointer<Uint8>, int) vectorsDirInfo;
   final Pointer<Void> Function(Pointer<Uint8>, int, Pointer<Void>) coverageOpen;
   final int Function(Pointer<Void>, Pointer<Uint8>, int) coverageAddBook;
+  final int Function(Pointer<Void>, int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int) coverageAddBookRows;
+  final Pointer<Utf8> Function(int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int) vectorsBookLines;
   final Pointer<Utf8> Function(Pointer<Void>) coverageResult;
   final void Function(Pointer<Void>) coverageFree;
   final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>) oxvVerify;
   final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int,
       Pointer<Uint8>, int, Pointer<Void>) vectorsInstall;
-  final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>) vectorsCompact;
+  final Pointer<Utf8> Function(Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Void>, Pointer<Void>) vectorsCompact;
+  final Pointer<Void> Function(Pointer<Uint8>, int, int) liveKeysOpen;
+  final int Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int)
+      liveKeysAddBookRows;
+  final void Function(Pointer<Void>) liveKeysFree;
   final Pointer<Utf8> Function(Pointer<Void>) vectorsInfo;
   final Pointer<Utf8> Function(Pointer<Void>, Pointer<Float>, int, Pointer<Uint8>, int, Pointer<Void>) semanticSearch;
   final Pointer<Void> Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Float>, int, Pointer<Uint8>, int) hybridOpen;

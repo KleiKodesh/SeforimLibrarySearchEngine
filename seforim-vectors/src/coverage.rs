@@ -3,12 +3,13 @@
 //! `semantic_coverage` = `LiveResolver::coverage` on recomputed keys). No database here: the
 //! host feeds every book's lines; the engine computes each line's key with the set's recipe.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::chunker::{ChunkKey, Chunker, ChunkerConfig, LineRef};
+use crate::chunker::{book_lines, BookNote, ChunkKey, Chunker, ChunkerConfig, LineRef};
 use crate::install::{self, Kind};
 use crate::oxv::OxvFile;
 use crate::{Error, Result};
@@ -136,10 +137,86 @@ impl CoverageCounter {
         self.coverage.books_covered += u32::from(covered);
     }
 
+    /// One book from its raw rows and notes (`lineIndex, id` order, notes in `lineIndex,
+    /// noteIndex` order): its lines rebuilt as Otzaria indexes them ([`book_lines`]: a row
+    /// holding a newline gives several lines, heading-count sections), then [`Self::add_book`].
+    pub fn add_book_rows(&mut self, rows: &[&[u8]], notes: &[BookNote]) {
+        let lines = book_lines(rows, notes);
+        let refs: Vec<LineRef<'_>> = lines.iter().map(|l| l.as_ref()).collect();
+        self.add_book(&refs);
+    }
+
     pub fn result(&self) -> Coverage {
         let mut out = self.coverage.clone();
         out.ratio = if out.live_keyed_lines == 0 { 0.0 } else { out.covered_lines as f64 / out.live_keyed_lines as f64 };
         out
+    }
+}
+
+/// The host's live library as compaction asks it (Otzaria's `LiveKeys`, there read off its
+/// index's chunk-key column): fed book by book, each line's window-0 key at the set's recipe
+/// (0 for a line that is not embedded), as [`CoverageCounter::add_book`] computes it. With it
+/// a compaction of the set's library version re-anchors every record on the live line that
+/// holds its text and prunes records whose book no longer holds it.
+pub struct HostLiveKeys {
+    chunker: Chunker,
+    library_version: u32,
+    books: HashMap<String, Vec<(u32, u64)>>,
+}
+
+impl HostLiveKeys {
+    /// For the set at `dir` (its recipe), `library_version` = the library the host holds
+    /// (Otzaria's `live_library_version`).
+    pub fn open(dir: &Path, library_version: u32) -> Result<HostLiveKeys> {
+        let info = install::dir_info(dir)?;
+        if !info.present {
+            return Err(Error::Format(format!(
+                "vector install [{}]: no semantic vectors are installed at {}",
+                Kind::Missing.tag(),
+                dir.display()
+            )));
+        }
+        let config = ChunkerConfig::by_identity(info.chunking_identity).ok_or_else(|| {
+            Error::Format(format!(
+                "vector install [{}]: the set's chunking identity {} is not a recipe this build implements",
+                Kind::Incompatible.tag(),
+                info.chunking_identity
+            ))
+        })?;
+        let chunker = Chunker::new(config).map_err(|e| Error::Invalid(e.0))?;
+        Ok(HostLiveKeys { chunker, library_version, books: HashMap::new() })
+    }
+
+    /// One live book (`name` as the set names it, `id:<bookId>`), its lines in order.
+    pub fn add_book(&mut self, name: &str, lines: &[LineRef<'_>]) {
+        let keys = (0..lines.len())
+            .map(|i| (i as u32, self.chunker.embedded_text(lines, i).map_or(0, |t| ChunkKey::of(&t).column_value())))
+            .collect();
+        self.books.insert(name.to_string(), keys);
+    }
+
+    /// One live book from its raw rows and notes ([`book_lines`]).
+    pub fn add_book_rows(&mut self, name: &str, rows: &[&[u8]], notes: &[BookNote]) {
+        let lines = book_lines(rows, notes);
+        let refs: Vec<LineRef<'_>> = lines.iter().map(|l| l.as_ref()).collect();
+        self.add_book(name, &refs);
+    }
+}
+
+impl crate::install::compact::LiveKeySource for HostLiveKeys {
+    fn library_version(&self) -> u32 {
+        self.library_version
+    }
+
+    fn book_keys(&self, book: &str, out: &mut Vec<(u32, u64)>) -> Result<bool> {
+        out.clear();
+        match self.books.get(book) {
+            Some(keys) => {
+                out.extend_from_slice(keys);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 }
 
@@ -249,6 +326,49 @@ mod tests {
         assert_eq!(r.ratio, 0.5);
         let cancel = AtomicBool::new(true);
         assert!(matches!(CoverageCounter::open(&dir, Some(&cancel)), Err(Error::Cancelled)));
+    }
+
+    #[test]
+    fn coverage_from_rows_counts_the_lines_otzaria_rebuilds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rows: [&[u8]; 3] = [b"<h2>head</h2>", b"alpha beta gamma delta epsilon zeta
+short line", b"eta theta iota kappa lambda mu nu xi"];
+        let notes = [BookNote { line_index: 3, char_pos: -1, has_marker: false, body: "a note body that is long enough".into() }];
+        let lines = book_lines(&rows, &notes);
+        // the row holding a newline gives two lines
+        assert_eq!(lines.len(), 4);
+        let refs: Vec<LineRef<'_>> = lines.iter().map(|l| l.as_ref()).collect();
+        let chunker = Chunker::production();
+        let key = |i: usize| ChunkKey::of(&chunker.embedded_text(&refs, i).unwrap()).column_value();
+        let dir = tmp.path().join("set");
+        set_with(&dir, &[key(1), key(2)]);
+        let mut by_rows = CoverageCounter::open(&dir, None).unwrap();
+        by_rows.add_book_rows(&rows, &notes);
+        let mut by_lines = CoverageCounter::open(&dir, None).unwrap();
+        by_lines.add_book(&refs);
+        assert_eq!(by_rows.result(), by_lines.result());
+        assert_eq!(by_rows.result().covered_lines, 2);
+    }
+
+    #[test]
+    fn host_live_keys_give_each_lines_window_zero_key() {
+        use crate::install::compact::LiveKeySource;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("set");
+        assert_eq!(install::error_kind(&HostLiveKeys::open(&dir, 5).err().unwrap()), Some(Kind::Missing));
+        set_with(&dir, &[1]);
+        let mut live = HostLiveKeys::open(&dir, 5).unwrap();
+        let long1 = "alpha beta gamma delta epsilon zeta";
+        let book = [LineRef { text: long1, section: 1 }, LineRef { text: "abc", section: 1 }];
+        live.add_book("id:3", &book);
+        let mut out = Vec::new();
+        assert!(live.book_keys("id:3", &mut out).unwrap());
+        let chunker = Chunker::production();
+        let k0 = ChunkKey::of(&chunker.embedded_text(&book, 0).unwrap()).column_value();
+        // "abc" is under min_embeddable_chars: not embedded
+        assert_eq!(out, vec![(0, k0), (1, 0)]);
+        assert!(!live.book_keys("id:4", &mut out).unwrap());
+        assert_eq!(live.library_version(), 5);
     }
 
     #[test]

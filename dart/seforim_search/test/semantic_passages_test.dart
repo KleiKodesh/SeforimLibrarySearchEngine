@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -103,6 +105,34 @@ void main() {
       () => VectorCoverageCounter.open(dir),
       throwsA(isA<SeforimEngineException>().having((e) => vectorInstallErrorKind(e), 'kind', 'incompatible')),
     );
+  });
+
+  test('embedded window texts (Otzaria embedded_window_texts)', () {
+    final lines = ['first line of the section', 'short one', 'third line'];
+    final long = List.generate(400, (i) => 'w$i').join(' ');
+    final texts = passageWindowTexts([
+      PassageTarget('short one', contextLines: lines, contextSections: const [1, 1, 1], contextIndex: 1),
+      PassageTarget('short one', contextLines: lines, contextSections: const [1, 1], contextIndex: 1),
+      const PassageTarget('a plain line that is long enough to stand on its own as it is'),
+      PassageTarget(long),
+      PassageTarget(long, window: 1),
+    ]);
+    expect(texts[0], 'first line of the section short one third line');
+    expect(texts[1], isNull);
+    expect(texts[2], isNull);
+    expect(texts[3], isNull);
+    expect(texts[4], startsWith('…'));
+  });
+
+  test('book lines as Otzaria indexes them (rows split at newlines, heading sections)', () {
+    final enc = (String t) => Uint8List.fromList(utf8.encode(t));
+    final lines = vectorBookLines([enc('<h2>head</h2>'), enc('one\ntwo'), enc('three')]);
+    expect([for (final l in lines) (l.row, l.sub, l.section)], [(0, 0, 1), (1, 0, 1), (1, 1, 1), (2, 0, 1)]);
+    expect(lines[2].text, 'two');
+  });
+
+  test('coverage from raw rows needs an open counter', () {
+    expect(SeforimNative.instance.coverageAddBookRows(nullptr, 0, nullptr, 0, nullptr, nullptr, 0), -1);
   });
 
   test('semantic status without a session', () {

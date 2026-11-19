@@ -95,6 +95,11 @@ void main() {
         .readAsStringSync());
     expect([for (final g in after['segments'] as List) g['kind']], ['compacted']);
     expect(after['library_version'], 3);
+    // live keys need the set's recipe: the fixtures' test identity is none this build has
+    expect(() => VectorLiveKeys.open(setDir, 3),
+        throwsA(isA<SeforimEngineException>().having((e) => vectorInstallErrorKind(e), 'kind', 'incompatible')));
+    expect(() => VectorLiveKeys.open('${tmp.path}/none', 3),
+        throwsA(isA<SeforimEngineException>().having((e) => vectorInstallErrorKind(e), 'kind', 'missing')));
     final token = SearchCancelToken()..cancel();
     expect(() => compactVectorSet(setDir, policy: const VectorCompactionPolicy(force: true), cancel: token),
         throwsA(isA<SearchCancelledException>()));

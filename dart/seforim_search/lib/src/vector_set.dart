@@ -28,6 +28,7 @@ import 'package:ffi/ffi.dart';
 import 'async_search.dart' show SearchWorker;
 import 'index.dart' show SearchCancelToken;
 import 'native.dart';
+import 'semantic_passages.dart' show VectorLiveKeys;
 /// Checks a staged segment before the Dart writer installs it: throw to refuse it.
 typedef VectorSegmentVerifier = Future<void> Function(String segmentPath, String manifestJson);
 
@@ -71,18 +72,21 @@ VectorInstallReport installVectorSegment(String setDir, String segmentPath, Stri
 /// Compacts the vector set at [setDir] into one segment when [policy] asks, in the
 /// engine (`se_vectors_compact`, Otzaria's sidecar `segment_set::compact`): live slots
 /// copied byte for byte (every source block verified first), a new generation committed.
-/// [policy]: [VectorCompactionPolicy] (null = the sidecar's defaults). Records are kept
-/// as they are (no live key source, as Otzaria on an index without its chunk-key
-/// column). [cancel] stops it, leaving the set as it was ([SearchCancelledException]);
+/// [policy]: [VectorCompactionPolicy] (null = the sidecar's defaults). [live] (or its
+/// [liveAddress] from another isolate): the host's live library ([VectorLiveKeys], Otzaria's
+/// `live_library_version`); when it holds the set's library version every record is
+/// re-anchored on the live line holding its text and records whose book no longer holds it
+/// are pruned; without it records are kept as they are. [cancel] stops it, leaving the set as it was ([SearchCancelledException]);
 /// a refusal throws [SeforimEngineException] ([vectorInstallErrorKind]: `busy`,
 /// `no_space`, `corrupt`...). A session open on the set reopens to see the new generation.
 VectorCompactionReport compactVectorSet(String setDir,
-    {VectorCompactionPolicy? policy, SearchCancelToken? cancel, int? cancelAddress}) {
+    {VectorCompactionPolicy? policy, SearchCancelToken? cancel, int? cancelAddress, VectorLiveKeys? live, int? liveAddress}) {
   final n = SeforimNative.instance;
   return VectorCompactionReport.fromJson(jsonDecode(using((al) {
     final (d, dl) = utf8Native(setDir, al);
     final (p, pl) = policy == null ? (nullptr.cast<Uint8>(), 0) : utf8Native(jsonEncode(policy.toJson()), al);
-    return n.takeString(n.vectorsCompact(d, dl, p, pl, _token(cancel, cancelAddress)));
+    return n.takeString(n.vectorsCompact(d, dl, p, pl, _token(cancel, cancelAddress),
+        live?.handle ?? (liveAddress == null ? nullptr : Pointer<Void>.fromAddress(liveAddress))));
   })) as Map<String, dynamic>);
 }
 

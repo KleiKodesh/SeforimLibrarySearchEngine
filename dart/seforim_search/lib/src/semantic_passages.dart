@@ -13,7 +13,7 @@ import 'package:ffi/ffi.dart';
 import 'index.dart' show SearchCancelToken;
 import 'meivin_embedder.dart';
 import 'native.dart';
-import 'semantic.dart' show VectorSetInfo;
+import 'semantic.dart' show VectorBookNote, VectorSetInfo;
 
 /// A semantic hit whose passage is to be marked (Otzaria `SemanticHighlightTarget`): the
 /// line's text, the window the hit matched ([SemanticHit.chunk]; 255 = an alias record)
@@ -70,6 +70,24 @@ final class PassageHighlight {
   final String snippetHtml;
   final bool isHighlighted;
   final double? spanScore;
+}
+
+/// The embedded window text of each semantic hit (Otzaria's `embedded_window_texts`), shown
+/// in place of the line: a short line's capped context (give its [PassageTarget.contextLines]
+/// with their sections), a long line's matched window past its first ([PassageTarget.window]
+/// = the hit's matched window). Null where the line's own text is shown. [chunkingIdentity]:
+/// the open set's recipe (null = production).
+List<String?> passageWindowTexts(List<PassageTarget> targets, {int? chunkingIdentity}) {
+  final n = SeforimNative.instance;
+  final req = jsonEncode({
+    'targets': [for (final t in targets) t.toJson()],
+    if (chunkingIdentity != null) 'chunking_identity': chunkingIdentity,
+  });
+  final j = jsonDecode(using((al) {
+    final (p, pl) = utf8Native(req, al);
+    return n.takeString(n.passageWindowTexts(p, pl));
+  })) as List;
+  return j.cast<String?>();
 }
 
 /// Cuts each target's text into clauses and picks those to embed (at most 6 per line, 48
@@ -250,8 +268,21 @@ final class VectorCoverage {
 /// Otzaria's heading-count sections; no PDF), [result]
 /// the counts. [dispose] when done.
 final class VectorCoverageCounter {
-  VectorCoverageCounter._(this._handle);
+  VectorCoverageCounter._(this._handle, {bool owned = true}) : _owned = owned;
   Pointer<Void> _handle;
+  final bool _owned;
+
+  /// The native address, to feed books from another isolate ([borrow]).
+  int get address {
+    if (_handle == nullptr) throw StateError('VectorCoverageCounter is disposed');
+    return _handle.address;
+  }
+
+  /// The counter at [address] (from [address] on another isolate), borrowed: [dispose] on
+  /// it does nothing; the owner keeps it alive while the borrower feeds it, one isolate at
+  /// a time.
+  static VectorCoverageCounter borrow(int address) =>
+      VectorCoverageCounter._(Pointer<Void>.fromAddress(address), owned: false);
 
   /// Throws [SeforimEngineException] (`vector install [missing]` when nothing is installed)
   /// or [SearchCancelledException] when [cancel] fires.
@@ -275,6 +306,21 @@ final class VectorCoverageCounter {
     if (rc != 0) throw n.error();
   }
 
+  /// One book from its raw rows (UTF-8 content as stored, seforim.db `lineIndex, id`
+  /// order, NULL as empty) and its `line_note` rows (`lineIndex, noteIndex` order), as
+  /// [SemanticIndex.mapVectorBookRows] takes them: the engine rebuilds the lines as Otzaria
+  /// indexes them (a row holding a newline gives several lines, heading-count sections).
+  void addBookRows(List<Uint8List> rows, [List<VectorBookNote> notes = const []]) {
+    final n = SeforimNative.instance;
+    if (_handle == nullptr) throw StateError('VectorCoverageCounter is disposed');
+    final rc = using((al) {
+      final (content, total, offsets) = _packRows(rows, al);
+      final (j, jl) = utf8Native(jsonEncode([for (final t in notes) t.toJson()]), al);
+      return n.coverageAddBookRows(_handle, rows.length, content, total, offsets, j, jl);
+    });
+    if (rc != 0) throw n.error();
+  }
+
   VectorCoverage result() {
     final n = SeforimNative.instance;
     if (_handle == nullptr) throw StateError('VectorCoverageCounter is disposed');
@@ -290,7 +336,103 @@ final class VectorCoverageCounter {
   }
 
   void dispose() {
-    if (_handle != nullptr) SeforimNative.instance.coverageFree(_handle);
+    if (_handle != nullptr && _owned) SeforimNative.instance.coverageFree(_handle);
+    _handle = nullptr;
+  }
+}
+
+/// A book's rows packed for the C ABI: the content, its length and the row offsets.
+(Pointer<Uint8>, int, Pointer<Uint64>) _packRows(List<Uint8List> rows, Allocator al) {
+  final offsets = al<Uint64>(rows.length + 1);
+  final off = offsets.asTypedList(rows.length + 1);
+  var total = 0;
+  for (var i = 0; i < rows.length; i++) {
+    off[i] = total;
+    total += rows[i].length;
+  }
+  off[rows.length] = total;
+  final content = al<Uint8>(total == 0 ? 1 : total);
+  final c = content.asTypedList(total);
+  for (var i = 0; i < rows.length; i++) {
+    c.setAll(off[i], rows[i]);
+  }
+  return (content, total, offsets);
+}
+
+/// One line of a book as Otzaria indexes it ([vectorBookLines]).
+final class VectorBookLine {
+  const VectorBookLine(this.row, this.sub, this.text, this.section);
+
+  /// The row it comes from (index into the rows given) and its newline-separated piece.
+  final int row, sub;
+  final String text;
+
+  /// Otzaria's heading-count section (the `<h` lines up to and including this one).
+  final int section;
+}
+
+/// A book's lines as Otzaria indexes them, from its raw rows and notes (as
+/// [VectorCoverageCounter.addBookRows] takes them): a row holding a newline gives several
+/// lines, notes put back, heading-count sections. A short semantic hit's context
+/// ([PassageTarget.contextLines] / [PassageTarget.contextSections]) comes from these.
+List<VectorBookLine> vectorBookLines(List<Uint8List> rows, [List<VectorBookNote> notes = const []]) {
+  final n = SeforimNative.instance;
+  final j = jsonDecode(using((al) {
+    final (content, total, offsets) = _packRows(rows, al);
+    final (p, pl) = utf8Native(jsonEncode([for (final t in notes) t.toJson()]), al);
+    return n.takeString(n.vectorsBookLines(rows.length, content, total, offsets, p, pl));
+  })) as List;
+  return [
+    for (final l in j.cast<Map<String, dynamic>>())
+      VectorBookLine(l['row'] as int, l['sub'] as int, l['text'] as String, l['section'] as int),
+  ];
+}
+
+/// The host's live library for a vector set compaction (Otzaria's `live_library_version`,
+/// its index's chunk keys): [open] for the set and the library version the host holds, then
+/// [addBookRows] for every live book (`id:<bookId>`, raw rows + notes as
+/// [VectorCoverageCounter.addBookRows]), then pass it to `compactVectorSet(live:)`.
+/// [dispose] when the compaction is done.
+final class VectorLiveKeys {
+  VectorLiveKeys._(this._handle, {bool owned = true}) : _owned = owned;
+  Pointer<Void> _handle;
+  final bool _owned;
+
+  /// The keys at [address] (`handle.address` on another isolate), borrowed: [dispose] on it
+  /// does nothing; the owner keeps it alive while the borrower feeds it, one isolate at a time.
+  static VectorLiveKeys borrow(int address) => VectorLiveKeys._(Pointer<Void>.fromAddress(address), owned: false);
+
+  /// The native handle (for a compaction on another isolate).
+  Pointer<Void> get handle {
+    if (_handle == nullptr) throw StateError('VectorLiveKeys is disposed');
+    return _handle;
+  }
+
+  /// Throws [SeforimEngineException] (`vector install [missing]` / `[incompatible]`).
+  static VectorLiveKeys open(String vectorsDir, int libraryVersion) {
+    final n = SeforimNative.instance;
+    final h = using((al) {
+      final (p, pl) = utf8Native(vectorsDir, al);
+      return n.liveKeysOpen(p, pl, libraryVersion);
+    });
+    if (h == nullptr) throw n.error();
+    return VectorLiveKeys._(h);
+  }
+
+  void addBookRows(String name, List<Uint8List> rows, [List<VectorBookNote> notes = const []]) {
+    final n = SeforimNative.instance;
+    final h = handle;
+    final rc = using((al) {
+      final (b, bl) = utf8Native(name, al);
+      final (content, total, offsets) = _packRows(rows, al);
+      final (j, jl) = utf8Native(jsonEncode([for (final t in notes) t.toJson()]), al);
+      return n.liveKeysAddBookRows(h, b, bl, rows.length, content, total, offsets, j, jl);
+    });
+    if (rc != 0) throw n.error();
+  }
+
+  void dispose() {
+    if (_handle != nullptr && _owned) SeforimNative.instance.liveKeysFree(_handle);
     _handle = nullptr;
   }
 }

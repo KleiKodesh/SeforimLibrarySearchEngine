@@ -147,10 +147,10 @@ final class SearchWorker {
           cancel?.address);
 
   /// [compactVectorSet] on the worker (reads and copies the whole set off the
-  /// calling isolate).
+  /// calling isolate). [live] stays the caller's: keep it until the future completes.
   Future<VectorCompactionReport> compactVectorSet(String setDir,
-          {VectorCompactionPolicy? policy, SearchCancelToken? cancel}) =>
-      _call('compactVectorSet', setDir, policy, cancel?.address);
+          {VectorCompactionPolicy? policy, SearchCancelToken? cancel, VectorLiveKeys? live}) =>
+      _call('compactVectorSet', setDir, (policy, live?.handle.address), cancel?.address);
 
   /// [verifyOxv] on the worker.
   Future<Map<String, dynamic>> verifyOxv(String path, {String? manifestJson, SearchCancelToken? cancel}) =>
@@ -748,7 +748,8 @@ void _workerMain((SendPort, String, String?) args) {
           value = installVectorSegment(a as String, segment, manifest,
               publishedManifestSha256: published, expectedModelJson: model, cancelAddress: c as int?);
         case 'compactVectorSet':
-          value = compactVectorSet(a as String, policy: b as VectorCompactionPolicy?, cancelAddress: c as int?);
+          final (policy, live) = b as (VectorCompactionPolicy?, int?);
+          value = compactVectorSet(a as String, policy: policy, cancelAddress: c as int?, liveAddress: live);
         case 'verifyOxv':
           value = verifyOxv(a as String, manifestJson: b as String?, cancelAddress: c as int?);
         case 'mapVectorBook':

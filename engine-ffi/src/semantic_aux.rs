@@ -9,10 +9,10 @@ use std::ptr;
 
 use hebrew_fts::otzaria::semantic_highlight::{self, PASSAGE_SNIPPET_BYTES};
 use seforim_vectors::chunker::{Chunker, ChunkerConfig, LineRef};
-use seforim_vectors::coverage::CoverageCounter;
+use seforim_vectors::coverage::{CoverageCounter, HostLiveKeys};
 use serde_json::json;
 
-use crate::{err, guard, install_err, out_string, str_arg, CancelToken};
+use crate::{book_notes_arg, book_rows_arg, err, guard, install_err, out_string, str_arg, CancelToken};
 
 /// A short line's context: its book's lines around it, with their sections.
 #[derive(serde::Deserialize)]
@@ -45,7 +45,12 @@ struct PlanRequest {
 
 /// The text a target's highlight is computed on: its window text, else its line.
 fn display_text(chunker: &Chunker, target: &PassageTarget) -> String {
-    let window = match &target.context {
+    window_text(chunker, target).unwrap_or_else(|| target.text.clone())
+}
+
+/// A target's embedded window text (`embedded_window_texts`), `None` when its line is shown.
+fn window_text(chunker: &Chunker, target: &PassageTarget) -> Option<String> {
+    match &target.context {
         // A section not given is unknown: as Otzaria's `context_window`, a window that needs
         // it is not formed and the line's own text is shown.
         Some(c) if c.index < c.lines.len() => {
@@ -53,8 +58,17 @@ fn display_text(chunker: &Chunker, target: &PassageTarget) -> String {
             chunker.display_window_text_with(&texts, |i| c.sections.get(i).copied(), c.index, target.window)
         }
         _ => chunker.display_window_text_with(&[target.text.as_str()], |_| None, 0, target.window),
+    }
+}
+
+/// The chunker of a request's `chunking_identity` (0: the production recipe).
+fn chunker_of(identity: u64) -> Result<Chunker, String> {
+    let config = if identity == 0 {
+        ChunkerConfig::production()
+    } else {
+        ChunkerConfig::by_identity(identity).ok_or_else(|| format!("chunking identity {identity} is not a recipe this build implements"))?
     };
-    window.unwrap_or_else(|| target.text.clone())
+    Chunker::new(config).map_err(|e| e.0)
 }
 
 /// Semantic passage highlights, step 1 (otzaria_search_engine 7.2.0
@@ -73,12 +87,7 @@ fn display_text(chunker: &Chunker, target: &PassageTarget) -> String {
 pub unsafe extern "C" fn se_passage_plan(request: *const u8, len: usize) -> *mut c_char {
     guard(ptr::null_mut(), || {
         let r: PlanRequest = serde_json::from_str(str_arg(request, len)?).map_err(err)?;
-        let config = if r.chunking_identity == 0 {
-            ChunkerConfig::production()
-        } else {
-            ChunkerConfig::by_identity(r.chunking_identity).ok_or_else(|| format!("chunking identity {} is not a recipe this build implements", r.chunking_identity))?
-        };
-        let chunker = Chunker::new(config).map_err(|e| e.0)?;
+        let chunker = chunker_of(r.chunking_identity)?;
         let texts: Vec<String> = r.targets.iter().map(|t| display_text(&chunker, t)).collect();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let plan = semantic_highlight::passage_plan(&r.query, &refs, &r.forms);
@@ -89,6 +98,31 @@ pub unsafe extern "C" fn se_passage_plan(request: *const u8, len: usize) -> *mut
             .map(|(l, text)| json!({"text": text, "chosen": l.chosen, "clauses": l.clauses, "out_of_budget": l.out_of_budget}))
             .collect();
         Ok(out_string(json!({"query_text": plan.query_text, "needs_query_vector": plan.needs_query_vector, "lines": lines}).to_string()))
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct WindowTextsRequest {
+    targets: Vec<PassageTarget>,
+    #[serde(default)]
+    chunking_identity: u64,
+}
+
+/// The embedded window text of each semantic hit, as otzaria_search_engine 7.2.0 shows it
+/// in place of the line (`embedded_window_texts`: a short line's capped context, a long
+/// line's matched window past its first). `request` JSON `{"targets": [..], "chunking_identity"}`,
+/// targets as [`se_passage_plan`] takes them. Returns a JSON array, one entry per target:
+/// the window text, or null when the line's own text is shown. Null on error.
+///
+/// # Safety
+/// `request` valid UTF-8 for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn se_passage_window_texts(request: *const u8, len: usize) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let r: WindowTextsRequest = serde_json::from_str(str_arg(request, len)?).map_err(err)?;
+        let chunker = chunker_of(r.chunking_identity)?;
+        let texts: Vec<Option<String>> = r.targets.iter().map(|t| window_text(&chunker, t)).collect();
+        Ok(out_string(serde_json::to_string(&texts).map_err(err)?))
     })
 }
 
@@ -160,7 +194,8 @@ pub unsafe extern "C" fn se_vectors_dir_info(dir: *const u8, dir_len: usize) -> 
 }
 
 /// Opens a coverage count of the set at `dir` (Otzaria `semantic_coverage`): every key the
-/// set holds is read. Feed every live book with [`se_vectors_coverage_add_book`], read the
+/// set holds is read. Feed every live book with [`se_vectors_coverage_add_book`] (its lines) or
+/// [`se_vectors_coverage_add_book_rows`] (its raw rows + notes), read the
 /// result with [`se_vectors_coverage_result`], free with [`se_vectors_coverage_free`]. Null on
 /// error (`vector install [missing]` when nothing is installed; cancelled by `token`).
 ///
@@ -203,6 +238,64 @@ pub unsafe extern "C" fn se_vectors_coverage_add_book(counter: *mut CoverageCoun
     })
 }
 
+/// One book from its raw rows and `line_note` rows, as [`crate::se_vectors_map_book_rows`]
+/// takes them (`content` cut at `offsets[0..=row_count]`, `notes_json` may be empty): the
+/// engine rebuilds the book's lines as Otzaria indexes them (chunker `book_lines`: a row
+/// holding a newline gives several lines, notes rehydrated, heading-count sections) and
+/// counts them as [`se_vectors_coverage_add_book`]. 0, -1 on error.
+///
+/// # Safety
+/// `counter` from [`se_vectors_coverage_open`]; `offsets` valid for `row_count + 1`;
+/// `content` for `content_len`; `notes_json` null with 0 or valid UTF-8 for `notes_len`.
+#[no_mangle]
+pub unsafe extern "C" fn se_vectors_coverage_add_book_rows(
+    counter: *mut CoverageCounter,
+    row_count: usize,
+    content: *const u8,
+    content_len: usize,
+    offsets: *const u64,
+    notes_json: *const u8,
+    notes_len: usize,
+) -> i32 {
+    guard(-1, || {
+        let counter = counter.as_mut().ok_or_else(|| "null coverage counter".to_string())?;
+        let rows = book_rows_arg(content, content_len, offsets, row_count)?;
+        let notes = book_notes_arg(notes_json, notes_len)?;
+        counter.add_book_rows(&rows, &notes);
+        Ok(0)
+    })
+}
+
+/// A book's lines as Otzaria indexes them (chunker `book_lines`), from its raw rows and
+/// `line_note` rows as [`se_vectors_coverage_add_book_rows`] takes them: JSON
+/// `[{"row", "sub", "text", "section"}]` (`row` = the row's index, `sub` = its
+/// newline-separated piece, `section` = Otzaria's heading-count section). The host reads a
+/// short semantic hit's context from it ([`se_passage_window_texts`], [`se_passage_plan`]).
+/// Null on error.
+///
+/// # Safety
+/// `offsets` valid for `row_count + 1`; `content` for `content_len`; `notes_json` null with
+/// 0 or valid UTF-8 for `notes_len`.
+#[no_mangle]
+pub unsafe extern "C" fn se_vectors_book_lines(
+    row_count: usize,
+    content: *const u8,
+    content_len: usize,
+    offsets: *const u64,
+    notes_json: *const u8,
+    notes_len: usize,
+) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let rows = book_rows_arg(content, content_len, offsets, row_count)?;
+        let notes = book_notes_arg(notes_json, notes_len)?;
+        let lines: Vec<_> = seforim_vectors::chunker::book_lines(&rows, &notes)
+            .into_iter()
+            .map(|l| json!({"row": l.row, "sub": l.sub, "text": l.text, "section": l.section}))
+            .collect();
+        Ok(out_string(serde_json::to_string(&lines).map_err(err)?))
+    })
+}
+
 /// JSON `{"live_keyed_lines", "covered_lines", "books_live", "books_covered",
 /// "vectors_library_version", "ratio"}`. Null on error.
 ///
@@ -224,5 +317,62 @@ pub unsafe extern "C" fn se_vectors_coverage_result(counter: *const CoverageCoun
 pub unsafe extern "C" fn se_vectors_coverage_free(counter: *mut CoverageCounter) {
     if !counter.is_null() {
         drop(Box::from_raw(counter));
+    }
+}
+
+/// Opens the host's live library for a compaction of the set at `dir` (Otzaria's
+/// `live_library_version` with its index's chunk keys): `library_version` = the library the
+/// host holds. Feed every live book with [`se_live_keys_add_book_rows`], pass it to
+/// `se_vectors_compact`, free with [`se_live_keys_free`]. Null on error (`vector install
+/// [missing]` when nothing is installed, `[incompatible]` for a recipe this build lacks).
+///
+/// # Safety
+/// `dir` valid UTF-8 for `dir_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn se_live_keys_open(dir: *const u8, dir_len: usize, library_version: u32) -> *mut HostLiveKeys {
+    guard(ptr::null_mut(), || {
+        let dir = str_arg(dir, dir_len)?;
+        let live = HostLiveKeys::open(Path::new(dir), library_version).map_err(install_err)?;
+        Ok(Box::into_raw(Box::new(live)))
+    })
+}
+
+/// One live book: `name` as the set names it (`id:<bookId>`), its raw rows and `line_note`
+/// rows as [`se_vectors_coverage_add_book_rows`] takes them. 0, -1 on error.
+///
+/// # Safety
+/// `live` from [`se_live_keys_open`]; `name` valid UTF-8 for `name_len`; `offsets` valid for
+/// `row_count + 1`; `content` for `content_len`; `notes_json` null with 0 or valid UTF-8.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn se_live_keys_add_book_rows(
+    live: *mut HostLiveKeys,
+    name: *const u8,
+    name_len: usize,
+    row_count: usize,
+    content: *const u8,
+    content_len: usize,
+    offsets: *const u64,
+    notes_json: *const u8,
+    notes_len: usize,
+) -> i32 {
+    guard(-1, || {
+        let live = live.as_mut().ok_or_else(|| "null live keys".to_string())?;
+        let name = str_arg(name, name_len)?;
+        let rows = book_rows_arg(content, content_len, offsets, row_count)?;
+        let notes = book_notes_arg(notes_json, notes_len)?;
+        live.add_book_rows(name, &rows, &notes);
+        Ok(0)
+    })
+}
+
+/// Frees live keys (null is ignored).
+///
+/// # Safety
+/// `live` from [`se_live_keys_open`], not used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn se_live_keys_free(live: *mut HostLiveKeys) {
+    if !live.is_null() {
+        drop(Box::from_raw(live));
     }
 }

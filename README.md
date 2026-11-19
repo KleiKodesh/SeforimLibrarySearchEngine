@@ -2625,9 +2625,13 @@ only with their vector; book source hashes carried; vectors copied byte for byte
 compaction gives the same file); a sample of 1000 slots compared with its sources; one
 generation committed (`PREVIOUS` = the old one, garbage collected); cancellable (a
 cancelled or failed compaction leaves the set as it was). Re-anchoring on the live index
-is the sidecar's `LiveKeySource` (a Rust trait for hosts that keep a chunk-key per line);
-the C ABI passes none, which is Otzaria's own behaviour on an index without its chunk-key
-column: records are kept as they are (our index keeps no chunk keys: bare minimum).
+is the sidecar's `LiveKeySource`, Otzaria's `live_library_version`: the host feeds its live
+library book by book (`se_live_keys_open(dir, library_version)` + `se_live_keys_add_book_rows`
+per book, raw rows + notes, ABI 31; Dart `VectorLiveKeys`, `compactVectorSet(live:)`): each
+line's window-0 key at the set's recipe (`HostLiveKeys`, what Otzaria's chunk-key column
+holds; our index keeps no chunk keys: bare minimum). When it holds the set's library version
+every record is re-anchored on the live line holding its text and records whose book no
+longer holds it are pruned; without it (null, another version) records are kept as they are.
 Named deviation: a source block that fails its CRC refuses the compaction (`corrupt`)
 without writing the sidecar's condemnation verdict (this crate's set has no verdicts).
 
@@ -2658,9 +2662,16 @@ or a scrub's `.corrupt` verdict condemns it; a version-1 artifact refused; the d
 compaction policy's flag). `semanticCoverage` = `se_vectors_coverage_open` (every slot key
 and alias key of the set) + `_add_book` per live book (the host's lines and one section per
 line, required as Otzaria's `sectionId`: the heading count, `BookLine::section`; each line's
-key with the set's recipe; a set under the pardes recipe is refused `incompatible`, the
-pardes chunker not being ported) + `_result` / Dart `VectorCoverageCounter`
-(Otzaria's recompute path, no chunk-key column). `semanticStatus` = Dart
+key with the set's recipe; a recipe this build lacks is refused `incompatible`)
++ `_result` / Dart `VectorCoverageCounter`
+(Otzaria's recompute path, no chunk-key column); `se_vectors_coverage_add_book_rows` / Dart
+`addBookRows` takes a book's raw rows + notes instead and rebuilds its lines in the engine
+(`chunker::book_lines`, ABI 31). A book's lines as Otzaria indexes them (rows split at
+newlines, notes put back, heading-count sections) = `se_vectors_book_lines` / Dart
+`vectorBookLines`: the host reads a short hit's context from them. The embedded window text
+Otzaria shows in place of a hit's line (`embedded_window_texts`: a short line's section
+context, a long line's matched window past its first) = `se_passage_window_texts` / Dart
+`passageWindowTexts` (null where the line itself is shown). `semanticStatus` = Dart
 `SemanticStatus.of(vectorInfo, modelLoaded:)` (Otzaria's status of a session over an
 installed set, library version / segments / compaction flag from the open generation;
 `notConfigured` without one).

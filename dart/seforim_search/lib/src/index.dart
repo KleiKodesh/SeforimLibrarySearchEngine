@@ -41,7 +41,16 @@ final class SearchCancelToken implements Finalizable {
   int get address => handle.address;
 
   /// Asks the search holding this token to stop.
-  void cancel() => SeforimNative.instance.cancelTokenCancel(handle);
+  void cancel() {
+    _cancelled = true;
+    SeforimNative.instance.cancelTokenCancel(handle);
+  }
+
+  bool _cancelled = false;
+
+  /// Whether [cancel] was called on this object (a [cancelAt] from another
+  /// isolate is not seen here): a host loop between engine calls checks it.
+  bool get isCancelled => _cancelled;
 
   /// Cancels the token at [address] (from [SearchCancelToken.address]).
   static void cancelAt(int address) => SeforimNative.instance.cancelTokenCancel(Pointer.fromAddress(address));

@@ -1149,7 +1149,7 @@ way: every query, collector and statistic sees one index with more segments.
   `_free`, `se_search_cancellable`, `se_last_error_cancelled`; C#
   `SeforimIndex.Search(SearchOptions, CancellationToken)`, which throws
   `OperationCanceledException`; Dart `search(options, cancel:
-  SearchCancelToken())`, `SearchCancelledException`, `cancelAt(address)`
+  SearchCancelToken())`, `SearchCancelledException`, `cancelAt(address)`, `isCancelled` (Dart side: set by `cancel()`, not by `cancelAt`)
   from another isolate).
   - Checked before the walks, per segment, every 4096 collected docs (the
     collection then walks the scorer itself), and per chunk of every

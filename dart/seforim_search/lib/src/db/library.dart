@@ -190,11 +190,17 @@ final class SeforimLibrary {
   /// Adds or replaces the documents [put] (by key) and deletes the documents
   /// [delete] in ONE commit of the user index; with [merge] (default) then
   /// merges it to one segment and rebuilds its FM sidecar (leading `*`,
-  /// fuzzy). Returns how many of [delete] were indexed.
+  /// fuzzy). Returns how many of [delete] were indexed. [threads] (0 = the
+  /// engine's default) and [lowPriority] (indexing threads at background
+  /// priority) are passed to the writer: a host's economy indexing mode.
   Future<int> updateUserDocuments(
-      {List<UserDocument> put = const [], List<String> delete = const [], bool merge = true}) async {
+      {List<UserDocument> put = const [],
+      List<String> delete = const [],
+      bool merge = true,
+      int threads = 0,
+      bool lowPriority = false}) async {
     _userTitles = null;
-    final w = await worker.openUserWriter();
+    final w = await worker.openUserWriter(threads: threads, lowPriority: lowPriority);
     var deleted = 0;
     try {
       if (delete.isNotEmpty) deleted = await w.deleteDocuments(delete);

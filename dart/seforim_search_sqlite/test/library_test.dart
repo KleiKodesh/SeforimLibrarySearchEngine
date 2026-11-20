@@ -136,7 +136,7 @@ void main() {
       expect(onTxt.before, 'first line'); // short row: same-document context
       final libOnly = [for (final p in await lib.search(SearchOptions('omega', sources: SearchSources.library)).toList()) ...p.results];
       expect(libOnly, isEmpty);
-      await lib.updateUserDocuments(delete: ['c:/notes.txt']);
+      await lib.updateUserDocuments(delete: ['c:/notes.txt'], threads: 1, lowPriority: true); // economy mode
       final left = [for (final p in await lib.search(SearchOptions('omega')).toList()) ...p.results];
       expect(left.single.userSource!.key, 'c:/a.pdf');
       final mixed = await lib.counts(SearchOptions('alpha'));

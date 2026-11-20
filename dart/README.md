@@ -165,7 +165,7 @@ var pdf = UserDocuments.fromPdfPages(pdfPath, UserDocuments.fileStamp(pdfPath), 
 if (pdf.isEmpty) {                                  // scanned: Otzaria's OCR sidecar
   pdf = UserDocuments.fromPdfPages(pdfPath, pdf.stamp, await UserDocuments.pdfSidecarPages(pdfPath));
 }
-await lib.updateUserDocuments(put: [txt, pdf], delete: removedPaths); // one commit, merge, FM sidecar
+await lib.updateUserDocuments(put: [txt, pdf], delete: removedPaths); // one commit, merge, FM sidecar (threads: / lowPriority: = economy indexing)
 final docs = await lib.documents();                 // key, stamp, book id, lines (indexed paths + stamps)
 // searches read both (SearchOptions.sources: all / library / user);
 // a user hit has userSource (key, locator = PDF page, line), its text and

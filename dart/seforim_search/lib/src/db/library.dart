@@ -70,9 +70,13 @@ final class SearchHit {
 
 /// Another hit of a grouped result's group.
 final class GroupSibling {
-  const GroupSibling(this.lineId, this.bookId, this.bookTitle, this.lineIndex, this.reference);
+  const GroupSibling(this.lineId, this.bookId, this.bookTitle, this.lineIndex, this.reference, {this.userSource});
   final int lineId, bookId, lineIndex;
   final String bookTitle, reference;
+
+  /// A user document line's source (its document key and locator, e.g. a PDF
+  /// page), as [SearchHit.userSource]; null for a library line.
+  final UserLineSource? userSource;
 }
 
 /// One page of [SeforimLibrary.search]: the next ready results and the
@@ -423,7 +427,7 @@ final class SeforimLibrary {
       final reps = await _ready(s, [for (final g in page) g.members.first], contextWords);
       final sib = [for (final g in page) g.members.skip(1).take(mergedSiblingsCap).toList()];
       final sibIds = [for (final l in sib) for (final h in l) h.lineId];
-      final (where, _) = await _locations(sibIds);
+      final (where, sources) = await _locations(sibIds);
       final refs = await source.heRefs([for (final id in sibIds) if (!_isUser(id)) id]);
       final done = at >= end;
       out.add(ResultPage([
@@ -444,7 +448,8 @@ final class SeforimLibrary {
             siblings: [
               for (final h in sib[i])
                 GroupSibling(h.lineId, h.bookId, titles[h.bookId] ?? userTitles[h.bookId] ?? '',
-                    where[h.lineId]?.lineIndex ?? 0, refs[h.lineId] ?? ''),
+                    where[h.lineId]?.lineIndex ?? 0, refs[h.lineId] ?? '',
+                    userSource: sources[h.lineId]),
             ],
             userSource: reps[i].userSource,
           ),

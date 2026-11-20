@@ -517,7 +517,9 @@ impl LineIndex {
         Ok(HybridSession {
             features,
             alpha,
-            source: self.hybrid_source(None),
+            // the lexical side reads the attached user index too (Otzaria's one
+            // index holds the user documents)
+            source: self.hybrid_source(self.user_index().as_deref()),
             book_field: self.fields.book_id,
             position_field: self.fields.position,
             set,
@@ -1453,6 +1455,34 @@ mod tests {
         assert!(p.hits.is_empty() && !p.more);
         assert_eq!((p.meta.lexical_total, p.meta.total_count, p.meta.executed_mode), (2, 0, RetrievalMode::SemanticOnly));
         assert_eq!(p.meta.fallback_kind, Some("not_configured"));
+    }
+
+    /// Otzaria's semantic search covers user documents (its one index holds
+    /// them): the hybrid session's lexical side reads the attached user index
+    /// with the library, and a book filter reaches user documents too.
+    #[test]
+    fn hybrid_covers_user_documents() {
+        use crate::user_docs::{DocLine, USER_ID_BASE};
+        let (tmp, tmp2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let index = index_with_vectors(tmp.path());
+        index.close_vectors();
+        let user = std::sync::Arc::new(LineIndex::create_user(tmp2.path(), IndexOptions::default()).unwrap());
+        {
+            let mut w = user.writer(50_000_000, 1).unwrap();
+            let line = DocLine { text: "alpha gamma".into(), locator: 3, section_id: None, no_cross: false };
+            w.put_document("c:/u.pdf", "s1", &[line]).unwrap();
+            w.commit(None).unwrap();
+        }
+        index.attach_user_index(Some(user)).unwrap();
+        let ids = |options: HybridOptions| -> Vec<u64> {
+            let mut s = index.hybrid_session("alpha", &axis(3), options).unwrap();
+            page(&mut s, 0, 10, &[]).hits.iter().map(|h| h.line_id).collect()
+        };
+        let all = ids(HybridOptions::default());
+        assert!(all.contains(&4) && all.contains(&1), "{all:?}");
+        assert!(all.contains(&USER_ID_BASE), "{all:?}");
+        let only_user = ids(HybridOptions { books: Some(vec![USER_ID_BASE]), ..Default::default() });
+        assert_eq!(only_user, vec![USER_ID_BASE]);
     }
 
     /// The retrieval modes (Otzaria's coordinator `fuse`): semantic only

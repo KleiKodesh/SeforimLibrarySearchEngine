@@ -178,28 +178,23 @@ abstract final class UserDocuments {
   /// on `\n`, every line normalised ([normalizePdfTextForIndexing]) and
   /// dropped when [isProbablyGarbagePdfText]; a kept line's locator is its
   /// page's index and its section the page (sectionId = pageIndex + 1, as
-  /// sections start at 1). A line next to a dropped one takes part in no
-  /// cross-line phrase (Otzaria: no phrase continues across a dropped line;
-  /// it blocks only the side facing the dropped line, our one no-cross bit
-  /// blocks both sides: a named deviation, slightly fewer cross-line hits).
-  /// No lines at all: the PDF has no usable text (scanned): try
+  /// sections start at 1). A dropped line keeps its slot as an empty line (no
+  /// words, never a hit): no phrase continues across it, while each neighbour
+  /// still joins its other side (Otzaria blocks only the side facing a dropped
+  /// line). No kept line at all: the PDF has no usable text (scanned): try
   /// [pdfSidecarPages], else the host records the empty book.
   static UserDocument fromPdfPages(String key, String stamp, List<PdfPageText> pages) {
-    final lines = <(int, String, bool)>[];
+    final out = <UserDocumentLine>[];
+    var kept = false;
     for (final p in pages) {
       for (final raw in p.text.split('\n')) {
         final t = normalizePdfTextForIndexing(raw);
-        lines.add((p.pageIndex, t, isProbablyGarbagePdfText(t)));
+        final garbage = isProbablyGarbagePdfText(t);
+        kept |= !garbage;
+        out.add(UserDocumentLine(garbage ? '' : t, locator: p.pageIndex, sectionId: p.pageIndex + 1));
       }
     }
-    final out = <UserDocumentLine>[];
-    for (var i = 0; i < lines.length; i++) {
-      final (page, text, garbage) = lines[i];
-      if (garbage) continue;
-      final edge = (i > 0 && lines[i - 1].$3) || (i + 1 < lines.length && lines[i + 1].$3);
-      out.add(UserDocumentLine(text, locator: page, sectionId: page + 1, noCross: edge));
-    }
-    return UserDocument(key, stamp, out);
+    return UserDocument(key, stamp, kept ? out : const []);
   }
 
   /// Otzaria's OCR sidecar of a scanned PDF: `<pdf>.txt` or the PDF's path

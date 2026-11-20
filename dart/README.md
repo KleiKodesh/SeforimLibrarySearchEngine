@@ -180,7 +180,9 @@ final docs = await lib.documents();                 // key, stamp, book id, line
   invisibles, presentation forms, marks, whitespace) and dropped when
   `isProbablyGarbagePdfText` (port; needs the native library for the
   paired-readings step); locator = page index, section = page index + 1 (our
-  sections start at 1), a line next to a dropped one is no-cross. No lines:
+  sections start at 1); a dropped line keeps its slot as an empty line, so no
+  phrase crosses it while its neighbours still join their other side
+  (Otzaria's rule). No kept line:
   `pdfSidecarPages` (`<pdf>.txt` or `.txt` for the extension, split on form
   feed), else the host records the empty book (Otzaria's marker is app
   bookkeeping).
@@ -193,6 +195,7 @@ final docs = await lib.documents();                 // key, stamp, book id, line
   (`AsyncIndexWriter.putDocument` / `deleteDocuments`, commit,
   `mergeAndClose`), `buildUserFmSidecar`, `reloadUser`, `info`.
 - sameSection grouping keys a user line by document + locator (one PDF page).
+- A grouped hit's siblings carry their `userSource` too (a sibling in a user PDF opens at its page).
 
 ## Otzaria → engine mapping
 

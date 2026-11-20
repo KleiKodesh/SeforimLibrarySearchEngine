@@ -52,15 +52,15 @@ void main() {
     expect(isProbablyGarbagePdfText('abcde ${'#' * 15}'), isFalse);
   });
 
-  test('PDF pages: lines per page, garbage dropped, neighbours do not cross', () {
+  test('PDF pages: lines per page, garbage dropped to an empty slot', () {
     final d = UserDocuments.fromPdfPages('c:/b.pdf', 'st', const [
       PdfPageText(0, 'first line\n####################\nthird line'),
       PdfPageText(1, 'page two'),
     ]);
-    expect([for (final l in d.lines) l.text], ['first line', 'third line', 'page two']);
-    expect([for (final l in d.lines) l.locator], [0, 0, 1]);
-    expect([for (final l in d.lines) l.sectionId], [1, 1, 2]);
-    expect([for (final l in d.lines) l.noCross], [true, true, false]);
+    expect([for (final l in d.lines) l.text], ['first line', '', 'third line', 'page two']);
+    expect([for (final l in d.lines) l.locator], [0, 0, 0, 1]);
+    expect([for (final l in d.lines) l.sectionId], [1, 1, 1, 2]);
+    expect([for (final l in d.lines) l.noCross], [false, false, false, false]);
     expect(UserDocuments.fromPdfPages('k', 's', const [PdfPageText(0, '....')]).isEmpty, isTrue);
   });
 

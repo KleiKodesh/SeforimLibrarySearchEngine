@@ -2345,7 +2345,9 @@ feeds lines.
   over its own dictionary, and ONE cap ranks the candidates of both as the walk
   does (FM rank, zero-width length, doc count summed over both, pinned typed
   word); hybrid BM25 scores over the union too. A user index is never re-sorted
-  (its positions are its ids). Semantic search reads the library only.
+  (its positions are its ids). Semantic search: the vector scan reads the
+  library's set only (Otzaria embeds no user document), the hybrid session's
+  lexical side reads the union (Otzaria's one index holds the user documents).
   Cross-line matching covers user documents too (a line continues only onto
   the next line of its own document); its per-line bits switch to sparse words
   for a range reaching the user ids (2^51 + ...), dense for the library.

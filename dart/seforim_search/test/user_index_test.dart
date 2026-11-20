@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:seforim_search/seforim_db.dart' show PdfPageText, UserDocuments;
 import 'package:seforim_search/seforim_search.dart';
 import 'package:test/test.dart';
 
@@ -62,6 +63,39 @@ void main() {
     expect(docs.single.stamp, 'h1');
     expect(ids(SearchSources.all), [5, a1]);
 
+    lib.attachUserIndex(null);
+    user.close();
+    lib.close();
+    tmp.deleteSync(recursive: true);
+  });
+
+  test('a junk PDF line blocks only the facing side of cross-line phrases (Otzaria)', () {
+    SeforimNative.load(_nativePath());
+    final tmp = Directory.systemTemp.createTempSync('se_user_junk_');
+    final lib = SeforimIndex.create('${tmp.path}/lib');
+    var w = lib.openWriter(heapBytes: 30000000, threads: 1);
+    w.add(const LineDocument(lineId: 5, position: 0, bookId: 1, text: 'zeta'));
+    w.commit();
+    w.close();
+    final user = SeforimIndex.createUser('${tmp.path}/user');
+    w = user.openWriter(heapBytes: 30000000, threads: 1);
+    final pdf = UserDocuments.fromPdfPages('c:/j.pdf', 'h', [
+      PdfPageText(0, 'one two\nthree alpha\n${'#' * 30}\nbeta four\nfive six'),
+    ]);
+    w.putDocument(pdf.key, pdf.stamp, pdf.lines);
+    w.commit();
+    w.close();
+    lib.attachUserIndex(user);
+    int hits(String q) {
+      final r = lib.search(SearchOptions('"$q"', crossLine: true));
+      final n = r.hitCount;
+      r.close();
+      return n;
+    }
+
+    expect(hits('two three'), 1); // the line before the junk joins its previous line
+    expect(hits('four five'), 1); // the line after it joins its next line
+    expect(hits('alpha beta'), 0); // nothing continues across the junk
     lib.attachUserIndex(null);
     user.close();
     lib.close();

@@ -139,6 +139,19 @@ void main() {
       await lib.updateUserDocuments(delete: ['c:/notes.txt'], threads: 1, lowPriority: true); // economy mode
       final left = [for (final p in await lib.search(SearchOptions('omega')).toList()) ...p.results];
       expect(left.single.userSource!.key, 'c:/a.pdf');
+      // a grouped hit's sibling in another PDF keeps its page (locator);
+      // identical text needs enough Hebrew letters to group
+      const twin = '\u05d1\u05e8\u05d0\u05e9\u05d9\u05ea \u05d1\u05e8\u05d0 \u05d0\u05dc\u05d4\u05d9\u05dd \u05d0\u05ea \u05d4\u05e9\u05de\u05d9\u05dd';
+      await lib.updateUserDocuments(put: [
+        UserDocuments.fromPdfPages('c:/b.pdf', 's2', [PdfPageText(2, 'sigma $twin')]),
+        UserDocuments.fromPdfPages('c:/c.pdf', 's3', [PdfPageText(7, 'sigma $twin')]),
+      ]);
+      final grouped = [
+        for (final p in await lib.search(SearchOptions('sigma'), grouping: Grouping.identicalText).toList()) ...p.results
+      ];
+      expect(grouped.single.userSource!.locator, 2);
+      expect(grouped.single.siblings.single.userSource!.key, 'c:/c.pdf');
+      expect(grouped.single.siblings.single.userSource!.locator, 7);
       final mixed = await lib.counts(SearchOptions('alpha'));
       expect(mixed.total, 10); // the deleted document is gone
     } finally {

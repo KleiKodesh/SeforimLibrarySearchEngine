@@ -865,11 +865,31 @@ pub fn install(dir: &Path, segment: &Path, manifest_json: &str, published_sha256
     install_with(dir, segment, manifest_json, &InstallOptions { published_sha256, ..Default::default() })
 }
 
-/// install.rs `install_package`: installs the plain `.oxv` at `segment` (as
+/// install.rs `install_package`: installs the `.oxv` (or `.oxv.zst`) at `segment` (as
 /// `manifest_json` describes it) into the set at `dir`, as [`InstallOptions`] expect.
-/// A segment inside `<dir>/incoming/` is moved into the set, any other copied.
+/// A segment inside `<dir>/incoming/` is moved into the set, any other copied. A
+/// segment compressed with zstd (`.zst`, as Otzaria's app downloads it) is first
+/// expanded into a file of its own in `incoming/` (so it needs its expanded size free
+/// besides what the install needs), gone when this returns, installed or not.
 pub fn install_with(dir: &Path, segment: &Path, manifest_json: &str, opts: &InstallOptions) -> Result<InstallReport> {
+    // otzaria_search_engine `install_semantic_vectors`: a `.zst` segment is expanded into
+    // `incoming/` first (and moved into the set from there); the expansion goes when this
+    // returns, installed or not. The set's lock is taken first, as Otzaria takes its set
+    // work lock before expanding.
     let _lock = SetLock::take(dir)?;
+    let expanded = if segment.extension().is_some_and(|ext| ext == "zst") {
+        Some(expand_segment(segment, dir, opts.cancel)?)
+    } else {
+        None
+    };
+    let segment = expanded.as_ref().and_then(|e| e.segment.as_deref()).unwrap_or(segment);
+    let r = install_plain(dir, segment, manifest_json, opts);
+    drop(expanded);
+    r
+}
+
+/// Called with the set's lock held.
+fn install_plain(dir: &Path, segment: &Path, manifest_json: &str, opts: &InstallOptions) -> Result<InstallReport> {
     recover(dir)?;
     let r = install_locked(dir, segment, manifest_json, opts);
     if matches!(r, Err(Error::Cancelled)) {
@@ -877,6 +897,147 @@ pub fn install_with(dir: &Path, segment: &Path, manifest_json: &str, opts: &Inst
         let _ = recover(dir);
     }
     r
+}
+
+/// search_engine.rs `EXPANDING_PREFIX` / `EXPANSION_LOCK` / `EXPANSION_LOCK_ATTEMPTS` /
+/// `STRAY_EXPANSION_AGE`: an expansion in `incoming/` is this prefix and a name of its own,
+/// with `.oxv` for the segment and `.lock` for its lock file, held locked until it is
+/// dropped; a segment with no lock file goes once it is an hour old.
+const EXPANDING_PREFIX: &str = ".expanding-";
+const EXPANSION_LOCK: &str = ".lock";
+const EXPANSION_LOCK_ATTEMPTS: u32 = 3;
+const STRAY_EXPANSION_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// search_engine.rs `remove_abandoned_expansions`: an expansion's lock file that nothing
+/// holds locked is a process gone (its segment and lock file go); a locked one is an
+/// install still running; a segment without a lock file goes once it is old. Best effort.
+fn remove_abandoned_expansions(incoming: &Path) {
+    let Ok(entries) = fs::read_dir(incoming) else { return };
+    let names: Vec<String> =
+        entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(EXPANDING_PREFIX)).collect();
+    let remove = |path: &Path| {
+        let _ = fs::remove_file(path);
+    };
+    for name in &names {
+        let path = incoming.join(name);
+        if let Some(stem) = name.strip_suffix(EXPANSION_LOCK) {
+            let Ok(lock) = OpenOptions::new().write(true).open(&path) else { continue };
+            if lock.try_lock().is_ok() {
+                remove(&incoming.join(format!("{stem}.oxv")));
+                // Windows cannot remove a file this process holds open
+                drop(lock);
+                remove(&path);
+            }
+            continue;
+        }
+        let stem = name.strip_suffix(".oxv").unwrap_or(name);
+        if names.contains(&format!("{stem}{EXPANSION_LOCK}")) {
+            continue;
+        }
+        let old = fs::metadata(&path).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > STRAY_EXPANSION_AGE));
+        if old {
+            remove(&path);
+        }
+    }
+}
+
+/// search_engine.rs `Expansion`: a segment expanded for an install and the lock that keeps
+/// it the install's; dropping it removes the segment (when the install did not move it)
+/// and then the lock file.
+struct Expansion {
+    segment: Option<PathBuf>,
+    lock: Option<(File, PathBuf)>,
+}
+
+impl Drop for Expansion {
+    fn drop(&mut self) {
+        if let Some(segment) = self.segment.take() {
+            let _ = fs::remove_file(segment);
+        }
+        if let Some((file, path)) = self.lock.take() {
+            drop(file);
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// A fresh expansion name (tempfile's part in the sidecar: unique, created new).
+fn expansion_stem() -> String {
+    use std::sync::atomic::AtomicU64;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("{EXPANDING_PREFIX}{}-{t:x}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// search_engine.rs `expand_segment`: the zstd-compressed segment expanded into a file of
+/// its own in the set's `incoming/` folder, its lock file created and locked first. A full
+/// disk while writing is `no_space`, a stream that does not expand `corrupt`, an unreadable
+/// download `internal`, a lock taken by another install's cleanup three times `busy`;
+/// `cancel` is read between 1 MiB blocks.
+fn expand_segment(compressed: &Path, dir: &Path, cancel: Option<&AtomicBool>) -> Result<Expansion> {
+    let incoming = dir.join("incoming");
+    let writing = |e: std::io::Error| {
+        let kind = match e.kind() {
+            std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => Kind::NoSpace,
+            _ => Kind::Internal,
+        };
+        fail(kind, format!("expanding into {}: {e}", incoming.display()))
+    };
+    fs::create_dir_all(&incoming).map_err(writing)?;
+    remove_abandoned_expansions(&incoming);
+    let source = File::open(compressed).map_err(|e| fail(Kind::Internal, format!("reading {}: {e}", compressed.display())))?;
+    let damaged = |e: std::io::Error| fail(Kind::Corrupt, format!("{} does not expand as zstd: {e}", compressed.display()));
+    let mut decoder = zstd::stream::read::Decoder::new(source).map_err(damaged)?;
+    // Another process's cleanup can take a lock file in the instant between its creation
+    // and its locking; such a lock file is given up for a new one.
+    let mut attempts = 0;
+    let (stem, lock) = loop {
+        attempts += 1;
+        let stem = expansion_stem();
+        let path = incoming.join(format!("{stem}{EXPANSION_LOCK}"));
+        let file = OpenOptions::new().write(true).create_new(true).open(&path).map_err(writing)?;
+        let locked = match file.try_lock() {
+            Ok(()) => path.exists(),
+            Err(fs::TryLockError::WouldBlock) => false,
+            Err(fs::TryLockError::Error(e)) => {
+                drop(file);
+                let _ = fs::remove_file(&path);
+                return Err(writing(e));
+            }
+        };
+        if locked {
+            break (stem, (file, path));
+        }
+        drop(file);
+        let _ = fs::remove_file(&path);
+        if attempts == EXPANSION_LOCK_ATTEMPTS {
+            return Err(fail(
+                Kind::Busy,
+                format!(
+                    "another install's cleanup of {} took this one's expansion lock {attempts} times; try again once it has finished",
+                    incoming.display()
+                ),
+            ));
+        }
+    };
+    let path = incoming.join(format!("{stem}.oxv"));
+    let mut expansion = Expansion { segment: None, lock: Some(lock) };
+    let file = OpenOptions::new().write(true).create_new(true).open(&path).map_err(writing)?;
+    expansion.segment = Some(path);
+    let mut sink = std::io::BufWriter::new(file);
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(Error::Cancelled);
+        }
+        let read = decoder.read(&mut buffer).map_err(damaged)?;
+        if read == 0 {
+            break;
+        }
+        sink.write_all(&buffer[..read]).map_err(writing)?;
+    }
+    sink.into_inner().map_err(|e| writing(e.into_error()))?.sync_all().map_err(writing)?;
+    Ok(expansion)
 }
 
 fn install_locked(dir: &Path, segment: &Path, manifest_json: &str, opts: &InstallOptions) -> Result<InstallReport> {

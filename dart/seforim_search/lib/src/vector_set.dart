@@ -47,7 +47,8 @@ Map<String, dynamic> verifyOxv(String path, {String? manifestJson, SearchCancelT
   })) as Map<String, dynamic>;
 }
 
-/// Installs a downloaded plain `.oxv` into the set directory [setDir] in the
+/// Installs a downloaded `.oxv` (or `.oxv.zst`, expanded into `<setDir>/incoming/`
+/// first, as Otzaria's engine does) into the set directory [setDir] in the
 /// engine (`se_vectors_install`, Otzaria's sidecar `install_package`): a base
 /// starts a new generation, a delta applies its tombstones, duplicates and
 /// foreign links to the current one. A segment inside `<setDir>/incoming/` is
@@ -220,7 +221,7 @@ class VectorSetWriter {
   /// The library version the set stands at, or `null`.
   int? installedVersion() => currentSet()?['library_version'] as int?;
 
-  /// Installs [segmentPath] (a plain `.oxv` that [manifestJson] describes) as a
+  /// Installs [segmentPath] (an `.oxv` or `.oxv.zst` that [manifestJson] describes) as a
   /// new generation. A segment inside [incoming] is moved, any other copied.
   ///
   /// Through the engine: [expectedModelJson] (the query model's model.json) is

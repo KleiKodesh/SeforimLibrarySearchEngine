@@ -2452,7 +2452,8 @@ pub unsafe extern "C" fn se_oxv_verify(
 /// Otzaria's sidecar does (`install_package`): a base starts a new generation, a
 /// delta applies its tombstones, duplicates and foreign links to the current
 /// one; `gen-NNNNNN/set.json`, `.del`, `.links`, `PREVIOUS`, `CURRENT`, garbage
-/// collected. `segment`: the plain `.oxv` (moved when it lies in
+/// collected. `segment`: the `.oxv`, or `.oxv.zst` (expanded into `incoming/` first, as
+/// Otzaria's engine does; moved when it lies in
 /// `<set_dir>/incoming/`, else copied); `manifest_json`: its release manifest;
 /// `published_sha256` (length 0 = none): the manifest's published SHA-256;
 /// `model_json` (length 0 = none): the query model's model.json, which the release

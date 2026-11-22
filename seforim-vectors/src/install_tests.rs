@@ -538,3 +538,50 @@ fn compaction_refuses_a_damaged_source_and_writes_nothing() {
     assert!(!dir.join("gen-000003").exists() && !dir.join("staging").exists());
     assert_eq!(fs::read_dir(dir.join("segments")).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "oxv")).count(), 2);
 }
+
+#[test]
+fn a_zstd_segment_is_expanded_into_incoming_and_installed() {
+    // otzaria_search_engine `expand_segment`: Otzaria's app downloads `.oxv.zst`
+    let tmp = tempfile::tempdir().unwrap();
+    let (b, x) = segments(tmp.path());
+    let dir = tmp.path().join("v");
+    let zst = |plain: &Path| {
+        let out = plain.with_extension("oxv.zst");
+        fs::write(&out, zstd::encode_all(&fs::read(plain).unwrap()[..], 3).unwrap()).unwrap();
+        out
+    };
+    let (bz, xz) = (zst(&b), zst(&x));
+    // a damaged stream: corrupt, nothing installed, nothing left in incoming/
+    let bad = tmp.path().join("bad.oxv.zst");
+    let mut bytes = fs::read(&bz).unwrap();
+    let mid = bytes.len() / 2;
+    bytes.truncate(mid);
+    fs::write(&bad, &bytes).unwrap();
+    let e = install(&dir, &bad, &manifest(&b), None).unwrap_err();
+    assert_eq!(error_kind(&e), Some(Kind::Corrupt), "{e}");
+    fs::write(&bad, b"not zstd at all").unwrap();
+    assert_eq!(error_kind(&install(&dir, &bad, &manifest(&b), None).unwrap_err()), Some(Kind::Corrupt));
+    assert!(!dir.join("CURRENT").exists());
+    let left = || fs::read_dir(dir.join("incoming")).unwrap().count();
+    assert_eq!(left(), 0);
+    // a cancelled expansion leaves nothing either
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    let opts = InstallOptions { cancel: Some(&stop), ..Default::default() };
+    assert!(matches!(install_with(&dir, &bz, &manifest(&b), &opts), Err(crate::Error::Cancelled)));
+    assert_eq!(left(), 0);
+    // an abandoned expansion (lock file nothing holds) is cleaned by the next install
+    fs::write(dir.join("incoming/.expanding-dead.lock"), b"").unwrap();
+    fs::write(dir.join("incoming/.expanding-dead.oxv"), b"junk").unwrap();
+    // base then delta, both compressed; the downloads stay, incoming/ is empty after
+    let r = install(&dir, &bz, &manifest(&b), None).unwrap();
+    assert_eq!((r.generation, r.library_version), (1, 1));
+    let r = install(&dir, &xz, &manifest(&x), None).unwrap();
+    assert_eq!((r.generation, r.library_version, r.segments), (2, 2, 2));
+    assert!(bz.exists() && xz.exists());
+    assert_eq!(left(), 0);
+    assert!(dir.join(format!("segments/{}.oxv", "22".repeat(16))).exists());
+    // a zst whose content is not the manifest's segment: corrupt
+    let e = install(&tmp.path().join("v2"), &xz, &manifest(&b), None).unwrap_err();
+    assert_eq!(error_kind(&e), Some(Kind::Corrupt), "{e}");
+    assert_eq!(fs::read_dir(tmp.path().join("v2/incoming")).unwrap().count(), 0);
+}

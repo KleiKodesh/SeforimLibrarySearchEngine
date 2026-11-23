@@ -127,6 +127,16 @@ pub trait CandidateResolver {
     /// each line once, at its best occurrence (`score + applied_penalty -
     /// penalty(window)`), best first; or the host rows the check needs first.
     fn resolve(&self, hits: &[scan::VectorHit], books: Option<&BookSet>, options: &LineSearch, cancel: Option<&AtomicBool>) -> Result<Resolution>;
+
+    /// resolve.rs `CandidateResolver::unreached`: the vectors a scan of the
+    /// admitted `books` does not reach although live lines of those books hold
+    /// their texts (texts that moved or were copied into an admitted book since
+    /// the set was built), slots of the set's generation `set_generation`.
+    /// Asked only of a filtered search; weighed beside the scan's hits
+    /// ([`SegmentSet::scan_with`]). The default is none.
+    fn unreached(&self, _books: &BookSet, _set_generation: u64, _cancel: Option<&AtomicBool>) -> Result<Vec<scan::SlotRef>> {
+        Ok(Vec::new())
+    }
 }
 
 /// What a resolver returns.
@@ -456,6 +466,21 @@ impl SegmentSet {
     /// The exact scan (segment_set/mod.rs `scan_with_penalties`): the best
     /// `request.top_k` vectors for `query` (a unit vector of the set's width).
     pub fn scan(&self, query: &[f32], request: &ScanRequest<'_>, penalties: ScanPenalties, cancel: Option<&AtomicBool>) -> Result<Vec<scan::VectorHit>> {
+        self.scan_with(query, request, &[], penalties, cancel)
+    }
+
+    /// segment_set/mod.rs `scan_with`: [`Self::scan`], and the slots of `also`
+    /// besides, each live one holding its key scored as the scan scores; the
+    /// best `request.top_k` of those the scan did not return are merged into
+    /// its hits (none of its hits gives way to them).
+    pub fn scan_with(
+        &self,
+        query: &[f32],
+        request: &ScanRequest<'_>,
+        also: &[scan::SlotRef],
+        penalties: ScanPenalties,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<scan::VectorHit>> {
         let prepared = PreparedQuery::new(query, self.segments[0].codec(), self.dims())?;
         let views: Vec<ScanSegment<'_>> = self
             .segments
@@ -465,7 +490,7 @@ impl SegmentSet {
             .map(|((segment, deleted), links)| ScanSegment { segment, deleted, links })
             .collect();
         let set = ScanSet { segments: &views, reverse_links: &self.reverse };
-        scan::scan(&set, &prepared, request, penalties, cancel)
+        scan::scan(&set, &prepared, request, also, penalties, cancel)
     }
 
     /// Semantic search by line: the scan's top `k` vectors (admitted books only,
@@ -489,7 +514,13 @@ impl SegmentSet {
         let request = ScanRequest { top_k: options.k, books: names.as_ref(), threads };
         let penalties = ScanPenalties { window: options.window_penalty, alias: options.alias_penalty };
         result.scanned = self.slots_to_scan(names.as_ref());
-        let hits = self.scan(query, &request, penalties, cancel)?;
+        // hybrid/coordinator.rs `candidates`: under a filter, the vectors the
+        // resolver names as unreached are weighed beside the scan
+        let unreached = match &names {
+            Some(books) => resolver.unreached(books, self.generation, cancel)?,
+            None => Vec::new(),
+        };
+        let hits = self.scan_with(query, &request, &unreached, penalties, cancel)?;
         result.vectors = hits.len() as u64;
         result.records = hits
             .iter()

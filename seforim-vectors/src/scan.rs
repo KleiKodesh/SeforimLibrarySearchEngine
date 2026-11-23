@@ -1,8 +1,9 @@
 //! The exact scan: every live slot of a set scored against one query, the
 //! best `k` kept. A port of Otzaria's `src/semantic/oxv/scan.rs`
-//! (otzaria-semantic-search d2a782a), step for step; Otzaria's `scan_with`
-//! (extra slots named one by one) and progress reporting are not ported (no
-//! caller needs them).
+//! (otzaria-semantic-search d2a782a), step for step, `scan_with` included
+//! (slots the filter does not reach, named one by one and weighed beside the
+//! scan's hits: [`merge_also`]); progress reporting is not ported (no caller
+//! needs it).
 //!
 //! - threads: each scans an equal share of the slots (`std::thread::scope`,
 //!   the calling thread running the first share; scan.rs `run_shares`);
@@ -35,6 +36,17 @@ pub(crate) const LINK_UNRESOLVED: u16 = 1;
 
 /// The books a search may return lines from, by Otzaria book name.
 pub type BookSet = HashSet<String>;
+
+/// resolve.rs `SlotRef`: one slot of the set, and the key it holds there.
+/// What a resolver hands back for a scan to weigh besides the slots its
+/// filter reaches (`CandidateResolver::unreached`); a slot that does not hold
+/// its key (another generation) is passed over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SlotRef {
+    pub seg: u16,
+    pub slot: u32,
+    pub key: Key,
+}
 
 /// scan.rs `Link`: where one foreign record of a delta resolves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -135,11 +147,13 @@ fn checkpoint(cancel: Option<&AtomicBool>) -> Result<()> {
     Ok(())
 }
 
-/// scan.rs `scan_all` (without `also` / progress).
+/// scan.rs `scan_all` (without progress): the scan, and the slots of `also`
+/// besides ([`merge_also`]); with `also` empty, exactly the scan.
 pub(crate) fn scan(
     set: &ScanSet<'_>,
     query: &PreparedQuery,
     request: &ScanRequest<'_>,
+    also: &[SlotRef],
     penalties: ScanPenalties,
     cancel: Option<&AtomicBool>,
 ) -> Result<Vec<VectorHit>> {
@@ -159,11 +173,13 @@ pub(crate) fn scan(
         PreparedQuery::Int8 { q16, inv_scale } => {
             let scorer = Int8 { q16, inv_scale: *inv_scale, kernel: select().0 };
             let found = run_shares(set, &scorer, books, penalties, top_k, &shares, cancel)?;
+            let found = merge_also(set, &scorer, request, penalties, found, also, cancel)?;
             Ok(hits(set, found, books, penalties, &scorer))
         }
         PreparedQuery::Int8PerVector { q16, inv_scale } => {
             let scorer = Int8PerVector { q16, inv_scale: *inv_scale, kernel: select().0 };
             let found = run_shares(set, &scorer, books, penalties, top_k, &shares, cancel)?;
+            let found = merge_also(set, &scorer, request, penalties, found, also, cancel)?;
             Ok(hits(set, found, books, penalties, &scorer))
         }
         PreparedQuery::Rotated { head, inv_head, tail_lo, tail_hi, inv_tail, constant, .. } => {
@@ -178,11 +194,13 @@ pub(crate) fn scan(
                 nibbles: select_nibbles().0,
             };
             let found = run_shares(set, &scorer, books, penalties, top_k, &shares, cancel)?;
+            let found = merge_also(set, &scorer, request, penalties, found, also, cancel)?;
             Ok(hits(set, found, books, penalties, &scorer))
         }
         PreparedQuery::Float { q } => {
             let scorer = Float { q };
             let found = run_shares(set, &scorer, books, penalties, top_k, &shares, cancel)?;
+            let found = merge_also(set, &scorer, request, penalties, found, also, cancel)?;
             Ok(hits(set, found, books, penalties, &scorer))
         }
     }
@@ -396,6 +414,70 @@ fn run_shares(
     all.retain(|c| seen.insert(c.key));
     all.truncate(k);
     Ok(all)
+}
+
+/// scan.rs `merge_also`: the slots of `also` that are live and hold their
+/// key, scored as the scan scores (penalized by their least role, under the
+/// filter or else over every book); of those whose key the scan did not
+/// return, the best `request.top_k` are merged into its hits in the scan's
+/// order. None of the scan's hits gives way to them: up to twice
+/// `request.top_k` hits.
+fn merge_also(
+    set: &ScanSet<'_>,
+    scorer: &impl Scorer,
+    request: &ScanRequest<'_>,
+    penalties: ScanPenalties,
+    mut found: Vec<Candidate>,
+    also: &[SlotRef],
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<Candidate>> {
+    let k = request.top_k;
+    if also.is_empty() {
+        return Ok(found);
+    }
+    let returned: HashSet<Key> = found.iter().map(|c| c.key).collect();
+    let mut weighed = Vec::new();
+    for (visited, wanted) in also.iter().enumerate() {
+        if visited % SCAN_CHECK_INTERVAL == 0 {
+            checkpoint(cancel)?;
+        }
+        let Some(segment) = set.segments.get(wanted.seg as usize) else { continue };
+        if wanted.slot >= segment.segment.slot_count() || segment.is_deleted(wanted.slot) {
+            continue;
+        }
+        // the key as the segment holds it, at its width: what the scan's hits carry
+        let key = segment.segment.key(wanted.slot);
+        if !crate::chunker::ChunkKey(key).same_text(crate::chunker::ChunkKey(wanted.key)) || returned.contains(&key) {
+            continue;
+        }
+        let width = segment.segment.codec().bytes_per_vector(segment.segment.dims());
+        let start = wanted.slot as usize * width;
+        let vector = &segment.segment.vector_bytes()[start..start + width];
+        let scale = segment
+            .segment
+            .vector_scale_bytes()
+            .map_or(1.0, |s| f32::from_le_bytes(s[wanted.slot as usize * 4..wanted.slot as usize * 4 + 4].try_into().unwrap()));
+        let mut rank = scorer.rank(vector, scale);
+        let Some(window) =
+            effective_role(set, wanted.seg, wanted.slot, request.books, penalties).or_else(|| effective_role(set, wanted.seg, wanted.slot, None, penalties))
+        else {
+            continue;
+        };
+        let applied = penalty_for(window, penalties);
+        if applied != 0.0 {
+            rank = scorer.penalize(rank, applied);
+        }
+        weighed.push(Candidate { rank, key, seg: wanted.seg, slot: wanted.slot, window });
+    }
+    weighed.sort_unstable_by(Candidate::best_first);
+    // a key the set holds live twice, or named twice: the better-ranked copy stands
+    let mut seen = HashSet::with_capacity(weighed.len());
+    weighed.retain(|c| seen.insert(c.key));
+    weighed.truncate(k);
+    found.extend(weighed);
+    // a total order: the same merge whatever order either list came in
+    found.sort_unstable_by(Candidate::best_first);
+    Ok(found)
 }
 
 /// scan.rs `scan_share` + `Pass::run`.

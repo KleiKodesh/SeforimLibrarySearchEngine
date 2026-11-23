@@ -474,3 +474,109 @@ fn the_hosts_verified_fixture_is_current() {
     assert_eq!(set.book_names(), vec!["id:3".to_string()]);
 }
 
+
+/// Six books of 40 random vectors each (books `id:0`..`id:5`, slot = book * 40 + line),
+/// opened as a set.
+fn six_books(dir: &Path, codec: TestCodec, seed: u64) -> SegmentSet {
+    let mut rng = Rng(seed);
+    let dims = 16;
+    let books = (0..6u32)
+        .map(|b| TestBook {
+            name: format!("id:{b}"),
+            slots: (0..40u32).map(|i| slot(u64::from(b * 40 + i + 1), i, 0, rng.unit(dims))).collect(),
+            ..Default::default()
+        })
+        .collect();
+    let seg = TestSegment { dims, codec, delta: false, from: 0, to: 1, tag: "t".into(), books, occurrences: vec![], tombstones: vec![] };
+    let path = dir.join(format!("six{codec:?}{seed}.oxv"));
+    oxv::write_segment(&path, &seg).unwrap();
+    SegmentSet::open(&path).unwrap()
+}
+
+fn slot_ref(set: &SegmentSet, seg: u16, slot: u32) -> crate::scan::SlotRef {
+    crate::scan::SlotRef { seg, slot, key: set.parts().0[seg as usize].key(slot) }
+}
+
+fn hit_bits(hits: &[crate::scan::VectorHit]) -> Vec<(u32, oxv::Key, Vec<(String, u32)>, u16, u32)> {
+    hits.iter().map(|h| (h.score.to_bits(), h.key, h.records.iter().map(|r| (r.book.clone(), r.hint)).collect(), h.seg, h.slot)).collect()
+}
+
+/// scan_tests.rs `a_scan_with_nothing_besides_is_the_scan_bit_for_bit`: with nothing to
+/// weigh besides, `scan_with` is the scan, bit for bit (every codec, with and without a
+/// filter, every `k`, every thread count).
+#[test]
+fn a_scan_with_nothing_besides_is_the_scan_bit_for_bit() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (seed, codec) in [(51u64, TestCodec::I8Vec), (52, TestCodec::F32), (53, TestCodec::Rot)] {
+        let set = six_books(tmp.path(), codec, seed);
+        let q = Rng(seed + 7).unit(16);
+        let one: crate::scan::BookSet = ["id:1".to_string()].into_iter().collect();
+        let several: crate::scan::BookSet = ["id:0", "id:4", "id:99"].into_iter().map(String::from).collect();
+        for books in [None, Some(&one), Some(&several)] {
+            for top_k in [0, 1, 10, 500] {
+                for threads in [1, 2, 3, 8] {
+                    let request = ScanRequest { top_k, books, threads };
+                    let plain = set.scan(&q, &request, NO_PENALTY, None).unwrap();
+                    let with = set.scan_with(&q, &request, &[], NO_PENALTY, None).unwrap();
+                    assert_eq!(hit_bits(&with), hit_bits(&plain), "{books:?}, k {top_k}, {threads} threads");
+                }
+            }
+        }
+    }
+}
+
+/// scan_tests.rs `a_slot_the_filter_does_not_reach_is_weighed_beside_the_filtered_hits`:
+/// every hit of the filtered scan stays as it was, and the best `k` of the others are
+/// merged in at the score a full scan gives them, in the scan's order.
+#[test]
+fn a_slot_the_filter_does_not_reach_is_weighed_beside_the_filtered_hits() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (seed, codec) in [(54u64, TestCodec::I8Vec), (55, TestCodec::Rot), (56, TestCodec::F32)] {
+        let set = six_books(tmp.path(), codec, seed);
+        let q = Rng(seed + 7).unit(16);
+        let books: crate::scan::BookSet = ["id:1".to_string()].into_iter().collect();
+        // book 5's slots: no record of the admitted book names any of them
+        let also: Vec<_> = (5 * 40..6 * 40).map(|s| slot_ref(&set, 0, s)).collect();
+        let also_keys: std::collections::HashSet<oxv::Key> = also.iter().map(|s| s.key).collect();
+        let everything = set.scan(&q, &ScanRequest { top_k: 1 << 20, books: None, threads: 1 }, NO_PENALTY, None).unwrap();
+        for top_k in [1, 5, 40, 1000] {
+            let request = ScanRequest { top_k, books: Some(&books), threads: 1 };
+            let filtered = set.scan(&q, &request, NO_PENALTY, None).unwrap();
+            let merged = set.scan_with(&q, &request, &also, NO_PENALTY, None).unwrap();
+            let filtered_keys: std::collections::HashSet<oxv::Key> = filtered.iter().map(|h| h.key).collect();
+            let kept: Vec<_> = merged.iter().filter(|h| filtered_keys.contains(&h.key)).cloned().collect();
+            assert_eq!(kept, filtered, "k {top_k}: every filtered hit stays, unchanged and in its order");
+            let weighed: Vec<_> = merged.iter().filter(|h| !filtered_keys.contains(&h.key)).map(|h| (h.key, h.score.to_bits())).collect();
+            let expected: Vec<_> =
+                everything.iter().filter(|h| also_keys.contains(&h.key) && !filtered_keys.contains(&h.key)).take(top_k).map(|h| (h.key, h.score.to_bits())).collect();
+            assert_eq!(weighed, expected, "k {top_k}: the best k of the others");
+            assert!(!weighed.is_empty());
+            assert!(merged.windows(2).all(|p| p[0].score >= p[1].score), "k {top_k}: in the scan's order");
+        }
+    }
+}
+
+/// scan_tests.rs `a_dead_missing_or_mislabelled_slot_is_passed_over`: a slot past its
+/// segment's end, in no segment, or holding another key than the one it is named by adds
+/// nothing; one good slot among them is added alone.
+#[test]
+fn a_dead_missing_or_mislabelled_slot_is_passed_over() {
+    let tmp = tempfile::tempdir().unwrap();
+    let set = six_books(tmp.path(), TestCodec::I8Vec, 56);
+    let q = Rng(57).unit(16);
+    let books: crate::scan::BookSet = ["id:1".to_string()].into_iter().collect();
+    let request = ScanRequest { top_k: 50, books: Some(&books), threads: 1 };
+    let filtered = set.scan(&q, &request, NO_PENALTY, None).unwrap();
+    let past_end = set.parts().0[0].slot_count();
+    let bad = [
+        crate::scan::SlotRef { seg: 0, slot: past_end, key: slot_ref(&set, 0, 0).key },
+        crate::scan::SlotRef { seg: 2, slot: 0, key: slot_ref(&set, 0, 0).key },
+        crate::scan::SlotRef { seg: 0, slot: 100, key: slot_ref(&set, 0, 101).key },
+    ];
+    assert_eq!(set.scan_with(&q, &request, &bad, NO_PENALTY, None).unwrap(), filtered);
+    let mut mixed = bad.to_vec();
+    mixed.push(slot_ref(&set, 0, 230));
+    let merged = set.scan_with(&q, &request, &mixed, NO_PENALTY, None).unwrap();
+    assert_eq!(merged.len(), filtered.len() + 1);
+    assert!(merged.iter().any(|h| h.slot == 230));
+}

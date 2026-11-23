@@ -330,6 +330,39 @@ mod tests {
         assert_eq!(hits(Sources::Library), vec![(11, Some(12))]);
     }
 
+    /// A quoted phrase over two adjacent user-document lines: the same rule
+    /// as the library (and Otzaria's text and PDF books).
+    #[test]
+    fn phrase_across_user_lines_follows_the_library_rule() {
+        let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let lib = library(d1.path());
+        let user = Arc::new(LineIndex::create_user(d2.path(), IndexOptions::default()).unwrap());
+        {
+            let mut w = user.writer(50_000_000, 1).unwrap();
+            w.put_document("c:/a.txt", "s", &lines(&[("x delta", 0), ("alpha y", 0)])).unwrap();
+            w.commit(None).unwrap();
+        }
+        lib.attach_user_index(Some(user)).unwrap();
+        let n = |query: &str, sources, cross_line| {
+            let o = SearchOptions { query: query.into(), cross_line, sources, ..Default::default() };
+            lib.search_options(&o).unwrap().hits.len()
+        };
+        for cross in [false, true] {
+            // the whole query one phrase: Otzaria's literal phrase search,
+            // which always crosses a line (cross_line forced on), in the
+            // library ("gamma alpha" + "delta") and in a user document
+            assert_eq!(n("\"alpha delta\"", Sources::Library, cross), 1);
+            assert_eq!(n("\"delta alpha\"", Sources::User, cross), 1);
+            assert_eq!(n("\"delta alpha\"", Sources::All, cross), 1);
+            // a phrase among other words is required within one line
+            assert_eq!(n("\"delta alpha\" x", Sources::User, cross), 0);
+            assert_eq!(n("\"x delta\" y", Sources::User, cross), 0);
+        }
+        // unquoted, the words pair across the break only with cross_line
+        assert_eq!(n("delta alpha", Sources::User, false), 0);
+        assert_eq!(n("delta alpha", Sources::User, true), 1);
+    }
+
     #[test]
     fn fm_expansions_merge_both_indexes() {
         let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());

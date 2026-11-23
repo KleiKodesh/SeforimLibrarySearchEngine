@@ -1041,4 +1041,20 @@ mod tests {
         assert_eq!((h[1], h[2], h[3]), (0, h[0], 0));
     }
 
+    /// Each Otzaria line's `lineCheck` is written with the book rows: CRC-32 of
+    /// every newline piece as prepared (one value per piece, as `chunk_key`).
+    #[test]
+    fn line_checks_in_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index = index(tmp.path(), &[(3, book3([100, 101, 102, 103]))]);
+        let searcher = index.reader.searcher();
+        let seg = searcher.segment_reader(0);
+        let checks = seg.fast_fields().column_opt::<u64>("line_check").unwrap().unwrap();
+        let ids = seg.fast_fields().u64("line_id").unwrap();
+        let doc = (0..seg.max_doc()).find(|&d| ids.first(d) == Some(102)).unwrap();
+        let got: Vec<u64> = checks.values_for_doc(doc).collect();
+        let want: Vec<u64> = ROWS[2].split('\n').map(|p| u64::from(seforim_vectors::chunker::line_check(p))).collect();
+        assert_eq!(got, want);
+    }
+
 }

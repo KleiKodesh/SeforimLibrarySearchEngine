@@ -292,5 +292,12 @@ fn line_dedup_hash_is_otzarias() {
     let cols = book_line_columns(&[twelve.as_bytes(), b"x
 y"], &[]);
     assert_eq!(cols.iter().map(Vec::len).collect::<Vec<_>>(), vec![1, 2]);
-    assert_eq!(cols[0][0].1, h);
+    assert_eq!(cols[0][0].line_hash, h);
+    // lineCheck: CRC-32 of each piece as the normalizer got it (line_source.rs line_check)
+    assert_eq!((cols[1][0].line_check, cols[1][1].line_check), (crc32fast::hash(b"x"), crc32fast::hash(b"y")));
+    assert_eq!(cols[0][0].line_check, line_check(&twelve));
+    // the BOM of a first row stays in its check unless a data: URI is in the book
+    let bom = |rows: &[&[u8]]| book_line_columns(rows, &[])[0][0].line_check;
+    assert_eq!(bom(&[b"\xEF\xBB\xBFab", b"c"]), crc32fast::hash(b"\xEF\xBB\xBFab"));
+    assert_eq!(bom(&[b"\xEF\xBB\xBFab", b"data:c"]), crc32fast::hash(b"ab"));
 }

@@ -101,6 +101,11 @@ pub struct LineFields {
     /// The book's `textHash` (Otzaria's `libraryBookContentFingerprint` of its
     /// rows + notes), on every line of the book. None: an older index.
     pub text_hash: Option<Field>,
+    /// Each Otzaria line's `lineCheck` (line_source.rs `line_check`: CRC-32 of
+    /// the line as the indexing path prepared it), one value per piece as
+    /// `chunk_key`, written with the book rows: what Otzaria's stale check
+    /// compares a line's current text with. None: an older index.
+    pub line_check: Option<Field>,
     /// A user index only ([`LineIndex::create_user`]): the stored line text
     /// of its documents (no database holds them). Added after every other
     /// field, so a user index's segments search together with a library's.
@@ -155,6 +160,7 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
     let chunk_key = b.add_u64_field("chunk_key", FAST);
     let line_hash = b.add_u64_field("line_hash", FAST);
     let text_hash = b.add_u64_field("text_hash", FAST);
+    let line_check = b.add_u64_field("line_check", FAST);
     (
         b.build(),
         LineFields {
@@ -170,6 +176,7 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
             chunk_key: Some(chunk_key),
             line_hash: Some(line_hash),
             text_hash: Some(text_hash),
+            line_check: Some(line_check),
             doc_text: None,
         },
     )
@@ -356,6 +363,7 @@ impl LineIndex {
         fields.chunk_key = schema.get_field("chunk_key").ok();
         fields.line_hash = schema.get_field("line_hash").ok();
         fields.text_hash = schema.get_field("text_hash").ok();
+        fields.line_check = schema.get_field("line_check").ok();
         fields.doc_text = schema.get_field("doc_text").ok();
         let index = Self::wrap(index, fields, options, dir)?;
         // issue #29: an update's merge that did not finish (the process
@@ -870,7 +878,7 @@ pub struct LineWriter {
     docs: Option<crate::user_docs::Registry>,
     /// Chunk keys + line hashes (per piece) and the book's text hash set for
     /// lines not added yet, by line id ([`Self::set_book_chunk_keys`]).
-    chunk_keys: std::collections::HashMap<u64, (Vec<(u64, u64)>, Option<u64>)>,
+    chunk_keys: std::collections::HashMap<u64, (Vec<seforim_vectors::chunker::LineColumns>, Option<u64>)>,
     /// Keys were set: the commit records the recipe ([`CHUNK_KEYS_FILE`]).
     chunk_keys_set: bool,
 }
@@ -997,12 +1005,15 @@ impl LineWriter {
             }
         }
         if let Some((pieces, text_hash)) = given {
-            for (key, hash) in pieces {
+            for c in pieces {
                 if let Some(field) = f.chunk_key {
-                    document.add_u64(field, key);
+                    document.add_u64(field, c.chunk_key);
                 }
                 if let Some(field) = f.line_hash {
-                    document.add_u64(field, hash);
+                    document.add_u64(field, c.line_hash);
+                }
+                if let Some(field) = f.line_check {
+                    document.add_u64(field, u64::from(c.line_check));
                 }
             }
             if let (Some(field), Some(hash)) = (f.text_hash, text_hash) {
@@ -1100,7 +1111,7 @@ impl LineWriter {
     /// TEST ONLY: a line's column values as given (a test set's synthetic keys).
     #[cfg(test)]
     pub(crate) fn test_chunk_keys(&mut self, line_id: u64, values: Vec<u64>) {
-        self.chunk_keys.insert(line_id, (values.into_iter().map(|v| (v, 0)).collect(), None));
+        self.chunk_keys.insert(line_id, (values.into_iter().map(|v| seforim_vectors::chunker::LineColumns { chunk_key: v, line_hash: 0, line_check: 0 }).collect(), None));
         self.chunk_keys_set = true;
     }
 

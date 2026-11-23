@@ -623,6 +623,9 @@ pub struct BookLine {
     pub text: String,
     /// The section: the number of `<h` lines up to and including this one.
     pub section: u64,
+    /// Otzaria's `lineCheck` (line_source.rs `line_check`): CRC-32 of the line
+    /// exactly as the indexing path handed it to the normalizer.
+    pub check: u32,
 }
 
 impl BookLine {
@@ -701,7 +704,7 @@ pub fn book_lines(rows: &[&[u8]], notes: &[BookNote]) -> Vec<BookLine> {
             if raw_line.starts_with("<h") {
                 section += 1;
             }
-            BookLine { row, sub, text: normalize_text_for_indexing(raw_line), section }
+            BookLine { row, sub, text: normalize_text_for_indexing(raw_line), section, check: line_check(raw_line) }
         })
         .collect()
 }
@@ -754,25 +757,40 @@ pub fn line_dedup_hash(normalized_text: &str) -> u64 {
     }
 }
 
-/// [`book_column_values`] with each line's `lineHash` ([`line_dedup_hash`]):
-/// per row, (chunk key column value, line hash) per newline piece.
-pub fn book_line_columns(rows: &[&[u8]], notes: &[BookNote]) -> Vec<Vec<(u64, u64)>> {
+/// line_source.rs `line_check`: CRC-32 of the exact text the indexing path
+/// normalized, so a change to anything in it (spacing, punctuation, nikud,
+/// markup) is seen.
+pub fn line_check(prepared: &str) -> u32 {
+    crc32fast::hash(prepared.as_bytes())
+}
+
+/// The columns Otzaria writes per line of a book: per row, one
+/// [`LineColumns`] per newline piece.
+pub fn book_line_columns(rows: &[&[u8]], notes: &[BookNote]) -> Vec<Vec<LineColumns>> {
     let lines = book_lines(rows, notes);
     let refs: Vec<LineRef<'_>> = lines.iter().map(BookLine::as_ref).collect();
     let chunker = Chunker::production();
-    let mut out: Vec<Vec<(u64, u64)>> = vec![Vec::new(); rows.len()];
+    let mut out: Vec<Vec<LineColumns>> = vec![Vec::new(); rows.len()];
     for (index, line) in lines.iter().enumerate() {
         let value = chunker.embedded_text(&refs, index).map_or(0, |t| ChunkKey::of(&t).column_value());
-        out[line.row].push((value, line_dedup_hash(&line.text)));
+        out[line.row].push(LineColumns { chunk_key: value, line_hash: line_dedup_hash(&line.text), line_check: line.check });
     }
     out
+}
+
+/// One Otzaria line's columns: `chunkKey` value, `lineHash`, `lineCheck`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineColumns {
+    pub chunk_key: u64,
+    pub line_hash: u64,
+    pub line_check: u32,
 }
 
 /// search_engine.rs `add_text_book_impl` with semantic_keys.rs `column_values`: each
 /// row's `chunk_key` column values, one per newline piece of [`book_lines`], in order: the
 /// production key's `column_value` where the recipe embeds the line, 0 where it does not.
 pub fn book_column_values(rows: &[&[u8]], notes: &[BookNote]) -> Vec<Vec<u64>> {
-    book_line_columns(rows, notes).into_iter().map(|r| r.into_iter().map(|(k, _)| k).collect()).collect()
+    book_line_columns(rows, notes).into_iter().map(|r| r.into_iter().map(|c| c.chunk_key).collect()).collect()
 }
 
 /// One row's lines as [`book_lines`] makes them from that row alone, its own notes

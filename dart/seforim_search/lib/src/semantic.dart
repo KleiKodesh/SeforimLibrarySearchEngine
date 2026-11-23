@@ -180,7 +180,8 @@ final class VectorBookNote {
 
 /// One host row the semantic resolver asked for (`need_rows`): its raw
 /// content as stored (zstd decoded, a leading BOM kept, NULL as empty) and its
-/// own `line_note` rows ([VectorBookNote.lineIndex] ignored).
+/// own `line_note` rows ([VectorBookNote.lineIndex] = the row's database
+/// `lineIndex`). The resolver asks for every row of a book it reads.
 final class SemanticRow {
   const SemanticRow(this.lineId, this.raw, [this.notes = const []]);
   final int lineId;
@@ -216,10 +217,10 @@ int packRows(Allocator al, List<int> ids, List<Uint8List> rows, List<Map<String,
   return call(idp, ids.length, content, total, offsets, j, jl);
 }
 
-/// The notes of [rows], each with `line_index` = its row's index (the row calls' rule).
+/// The notes of [rows], each with `row` = its row's index in the call and `line_index` = the database lineIndex.
 List<Map<String, Object?>> rowNotes(List<SemanticRow> rows) => [
       for (final (i, r) in rows.indexed)
-        for (final n in r.notes) {...n.toJson(), 'line_index': i}
+        for (final n in r.notes) {...n.toJson(), 'row': i}
     ];
 
 /// Expands Otzaria's downloaded vector file (`.oxv.zst`) to a plain `.oxv`;

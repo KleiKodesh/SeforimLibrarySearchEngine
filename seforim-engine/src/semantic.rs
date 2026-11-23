@@ -1359,6 +1359,105 @@ mod tests {
         given
     }
 
+    /// Book 30 of `rows` (+ `notes`, database `lineIndex`) indexed with its
+    /// chunk keys, a set holding window 1 of the line `target` (its book_lines
+    /// ordinal), keyed as Otzaria keys it from the WHOLE book; the hit's line
+    /// and the window-1 key the line has when its row is read alone.
+    fn whole_book_case(tmp: &Path, rows: &[&[u8]], notes: &[seforim_vectors::chunker::BookNote], target: usize) -> (Option<u64>, u64, u64) {
+        use seforim_vectors::chunker::{book_lines, row_lines, Chunker, LineRef};
+        use seforim_vectors::oxv::{TestBook, TestCodec, TestSegment, TestSlot};
+        let index = LineIndex::create(&tmp.join("index"), IndexOptions::default()).unwrap();
+        let ids: Vec<u64> = (0..rows.len() as u64).map(|i| 300 + i).collect();
+        {
+            let mut w = index.writer(50_000_000, 1).unwrap();
+            w.set_book_chunk_keys(&ids, rows, notes).unwrap();
+            for (i, raw) in rows.iter().enumerate() {
+                let text = String::from_utf8_lossy(raw).into_owned();
+                w.add(&LineDoc { line_id: ids[i], position: i as u64, book_id: 30, text, section_id: None, no_cross: false }).unwrap();
+            }
+            w.commit(None).unwrap();
+        }
+        let lines = book_lines(rows, notes);
+        let window1 = |text: &str| {
+            let refs = [LineRef { text, section: 0 }];
+            Chunker::production().window_keys(&refs, 0).into_iter().find(|&(w, _)| w == 1).unwrap().1
+        };
+        let key = window1(&lines[target].text);
+        let row = lines[target].row;
+        let own: Vec<_> = notes.iter().filter(|n| n.line_index == row as i64).cloned().map(|mut n| {
+            n.line_index = 0;
+            n
+        }).collect();
+        let alone = window1(&row_lines(rows[row], &own)[lines[target].sub].0);
+        let seg = TestSegment {
+            dims: 8,
+            codec: TestCodec::F32,
+            delta: false,
+            from: 0,
+            to: 1,
+            tag: "v1".into(),
+            books: vec![TestBook {
+                name: "id:30".into(),
+                slots: vec![TestSlot { key: key.column_value(), hint: target as u32, window: 1, vector: axis(1) }],
+                ..Default::default()
+            }],
+            occurrences: vec![],
+            tombstones: vec![],
+        };
+        let oxv = tmp.join("lib.oxv");
+        seforim_vectors::oxv::write_segment(&oxv, &seg).unwrap();
+        index.open_vectors(&oxv).unwrap();
+        let mut rounds = 0;
+        let hit = loop {
+            let r = index.semantic_search(&axis(1), &SemanticOptions { k: 1, ..Default::default() }, None).unwrap();
+            if r.need_rows.is_empty() {
+                break r.hits.first().map(|h| h.line_id);
+            }
+            rounds += 1;
+            assert!(rounds < 3, "one round of host rows");
+            let mut need = r.need_rows.clone();
+            need.sort_unstable();
+            assert_eq!(need, ids, "the whole book is asked for");
+            let given = r
+                .need_rows
+                .iter()
+                .map(|&id| {
+                    let i = (id - 300) as usize;
+                    HostRow { line_id: id, raw: rows[i].to_vec(), notes: notes.iter().filter(|n| n.line_index == i as i64).cloned().collect() }
+                })
+                .collect();
+            index.add_semantic_rows(given).unwrap();
+        };
+        (hit, key.column_value(), alone.column_value())
+    }
+
+    /// Otzaria reads a line from its whole book: a note of a later row is
+    /// placed by an earlier row holding `\n` (the long line keeps no note),
+    /// and the first row's BOM is dropped only when a `data:` is anywhere in
+    /// the book. Both resolve as Otzaria keyed them (the note case would not
+    /// from its row alone; the BOM reaches no key).
+    #[test]
+    fn a_line_is_read_from_its_whole_book() {
+        let long = long_line();
+        // the note: lineIndex 1 (the long row) lands on row 0's second piece
+        let tmp = tempfile::tempdir().unwrap();
+        let note = seforim_vectors::chunker::BookNote { line_index: 1, char_pos: -1, has_marker: false, body: "a note body of several words".into() };
+        let rows: [&[u8]; 2] = [b"first piece\nsecond piece", long.as_bytes()];
+        let (hit, whole, alone) = whole_book_case(tmp.path(), &rows, &[note], 2);
+        assert_ne!(whole, alone, "the case must tell the two reads apart");
+        assert_eq!(hit, Some(301));
+        // the BOM: first row long with a BOM, a later row holds `data:`
+        let tmp = tempfile::tempdir().unwrap();
+        let first = [b"\xEF\xBB\xBF".as_slice(), long.as_bytes()].concat();
+        let rows: [&[u8]; 2] = [&first, b"see data:x here"];
+        let (hit, whole, alone) = whole_book_case(tmp.path(), &rows, &[], 0);
+        // the line's text loses the BOM only with the book's `data:` row; no key sees it
+        // (the embedded text is trimmed of U+FEFF, as JavaScript's trim)
+        assert_eq!(whole, alone);
+        assert_eq!(hit, Some(300));
+        assert_ne!(seforim_vectors::chunker::book_lines(&rows, &[])[0].text, seforim_vectors::chunker::book_lines(&rows[..1], &[])[0].text);
+    }
+
     #[test]
     fn semantic_and_hybrid_on_a_line_index() {
         let tmp = tempfile::tempdir().unwrap();

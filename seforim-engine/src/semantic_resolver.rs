@@ -26,8 +26,14 @@
 //! the column a book's other lines of a text are not searched (Otzaria finds
 //! them by its `lineHash` column, which this index does not hold); a window
 //! record whose line moved to another book is not searched for
-//! (`moved_places`); a row is prepared from its own notes alone (see
-//! [`seforim_vectors::chunker::row_lines`]).
+//! (`moved_places`).
+//!
+//! A line's text is read as Otzaria's indexing path read it: from its whole
+//! book ([`seforim_vectors::chunker::book_lines`] over every row of the book
+//! and all its notes), so a note placed by an earlier row that holds `\n` and
+//! the first row's BOM dropped when a `data:` is anywhere in the book come out
+//! as Otzaria's. The host gives the book's rows in one `need_rows` round; the
+//! prepared book is kept for the generation.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
@@ -47,8 +53,8 @@ use tantivy::{DocAddress, Searcher};
 /// they hold at most (Otzaria's).
 const BOOK_CACHE: usize = 4096;
 const BOOK_LINES: usize = 2_000_000;
-/// How many host rows are kept between searches (Otzaria's `KEY_CACHE`).
-const KEY_CACHE: usize = 65_536;
+/// How many books' prepared texts are kept between searches (as the book maps).
+const TEXT_BOOKS: usize = BOOK_CACHE;
 /// How many values' places a pass over the whole column found are kept.
 const MOVED_CACHE: usize = 1024;
 /// The most places of one value a pass over the whole column keeps.
@@ -61,7 +67,8 @@ const MAX_LINES_PER_HIT: usize = MAX_RECORDS_PER_HIT;
 const MAX_FAILED_REPEATS: usize = 16;
 
 /// One host row: its line id, raw content (as stored, zstd decoded) and its
-/// `line_note` rows (`line_index` 0 = this row).
+/// `line_note` rows (`line_index` = the database `lineIndex` of the row, as
+/// [`seforim_vectors::chunker::book_lines`] reads it).
 #[derive(Debug, Clone)]
 pub struct HostRow {
     pub line_id: u64,
@@ -69,9 +76,9 @@ pub struct HostRow {
     pub notes: Vec<seforim_vectors::chunker::BookNote>,
 }
 
-/// One line of a row as the recipe reads it: its text and whether it opens a
-/// section (a heading).
-type RowLines = Arc<Vec<(String, bool)>>;
+/// A book's lines as the recipe reads them, by (line id, piece of the row):
+/// the text and its section (headings counted from the book's start).
+type BookTexts = Arc<HashMap<(u64, u32), (String, u64)>>;
 
 /// What a resolver remembers from one search to the next, for one generation
 /// of the index (Otzaria's `ResolverCache`).
@@ -81,7 +88,11 @@ pub(crate) struct ResolverCache {
     directory: Option<Arc<Directory>>,
     lines: Option<LruCache<u64, Arc<BookLines>>>,
     book_lines: usize,
-    rows: Option<LruCache<u64, RowLines>>,
+    texts: Option<LruCache<u64, BookTexts>>,
+    text_lines: usize,
+    /// Host rows given since the last resolution, by line id, until their
+    /// book is prepared.
+    pending: HashMap<u64, HostRow>,
     moved: Option<LruCache<u64, Arc<[(DocAddress, u32)]>>>,
     /// Passes over the whole column made in this generation (tests).
     pub(crate) passes: u64,
@@ -110,8 +121,19 @@ impl ResolverCache {
         }
     }
 
-    fn rows(&mut self) -> &mut LruCache<u64, RowLines> {
-        self.rows.get_or_insert_with(|| LruCache::new(NonZeroUsize::new(KEY_CACHE).unwrap()))
+    fn texts(&mut self) -> &mut LruCache<u64, BookTexts> {
+        self.texts.get_or_insert_with(|| LruCache::new(NonZeroUsize::new(TEXT_BOOKS).unwrap()))
+    }
+
+    fn keep_texts(&mut self, id: u64, texts: BookTexts) {
+        self.text_lines += texts.len();
+        if let Some((_, evicted)) = self.texts().push(id, texts) {
+            self.text_lines -= evicted.len();
+        }
+        while self.text_lines > BOOK_LINES && self.texts().len() > 1 {
+            let Some((_, evicted)) = self.texts().pop_lru() else { break };
+            self.text_lines -= evicted.len();
+        }
     }
 
     fn moved(&mut self) -> &mut LruCache<u64, Arc<[(DocAddress, u32)]>> {
@@ -366,26 +388,41 @@ impl<'a> LiveResolver<'a> {
         book.values[position].filter(|&v| v != 0)
     }
 
-    /// The rows of `book`'s positions `range` from the cache; the ones it lacks
-    /// are recorded for the host and None returned.
-    fn texts(&self, book: &BookLines, range: std::ops::Range<usize>) -> Option<Vec<(String, bool)>> {
-        let mut cache = self.lock();
-        let rows = cache.at(self.generation).rows();
-        let mut out = Vec::with_capacity(range.len());
-        let mut lacking = Vec::new();
-        for p in range {
-            match rows.get(&book.line_ids[p]) {
-                Some(lines) => out.push(lines.get(book.subs[p] as usize).cloned().unwrap_or_default()),
-                None => lacking.push(book.line_ids[p]),
-            }
+    /// The texts of `book`'s positions `range` (text, section), read from the
+    /// whole book; a book not prepared yet has every row recorded for the host
+    /// and None returned.
+    fn texts(&self, book: &BookLines, range: std::ops::Range<usize>) -> Option<Vec<(String, u64)>> {
+        let texts = self.book_texts(book)?;
+        Some(range.map(|p| texts.get(&(book.line_ids[p], book.subs[p])).cloned().unwrap_or_default()).collect())
+    }
+
+    /// `book`'s prepared lines: from the cache, or prepared from the host rows
+    /// given for every row of the book (Otzaria's whole-book read).
+    fn book_texts(&self, book: &BookLines) -> Option<BookTexts> {
+        let mut ids: Vec<u64> = book.line_ids.clone();
+        ids.dedup();
+        let mut guard = self.lock();
+        let cache = guard.at(self.generation);
+        if let Some(texts) = cache.texts().get(&book.id) {
+            return Some(texts.clone());
         }
-        drop(cache);
-        if lacking.is_empty() {
-            Some(out)
-        } else {
-            self.missing.lock().unwrap_or_else(PoisonError::into_inner).extend(lacking);
-            None
+        if !ids.iter().all(|id| cache.pending.contains_key(id)) {
+            drop(guard);
+            self.missing.lock().unwrap_or_else(PoisonError::into_inner).extend(ids);
+            return None;
         }
+        let rows: Vec<HostRow> = ids.iter().map(|id| cache.pending.remove(id).expect("checked above")).collect();
+        let raw: Vec<&[u8]> = rows.iter().map(|r| r.raw.as_slice()).collect();
+        let mut notes: Vec<seforim_vectors::chunker::BookNote> = rows.iter().flat_map(|r| r.notes.iter().cloned()).collect();
+        // the notes query's order: `lineIndex`, then as given (`id`, `noteIndex`)
+        notes.sort_by_key(|n| n.line_index);
+        let texts: HashMap<(u64, u32), (String, u64)> = seforim_vectors::chunker::book_lines(&raw, &notes)
+            .into_iter()
+            .map(|l| ((ids[l.row], l.sub as u32), (l.text, l.section)))
+            .collect();
+        let texts = Arc::new(texts);
+        cache.keep_texts(book.id, texts.clone());
+        Some(texts)
     }
 
     /// The window-0 key of the line at `position`, recomputed from its text and
@@ -395,14 +432,7 @@ impl<'a> LiveResolver<'a> {
         let start = position.saturating_sub(reach);
         let end = (position + reach + 1).min(book.docs.len());
         let texts = self.texts(book, start..end)?;
-        let mut section = 0;
-        let refs: Vec<LineRef<'_>> = texts
-            .iter()
-            .map(|(text, heading)| {
-                section += u64::from(*heading);
-                LineRef { text, section }
-            })
-            .collect();
+        let refs: Vec<LineRef<'_>> = texts.iter().map(|(text, section)| LineRef { text, section: *section }).collect();
         self.chunker.embedded_text(&refs, position - start).map(|t| ChunkKey::of(&t))
     }
 
@@ -824,11 +854,12 @@ impl CandidateResolver for LiveResolver<'_> {
 }
 
 impl ResolverCache {
-    /// Keeps host rows for the generation `generation` (prepared as the recipe reads them).
+    /// Keeps host rows for the generation `generation` until their book is
+    /// prepared (the next resolution).
     pub(crate) fn add_rows(&mut self, generation: u64, rows: Vec<HostRow>) {
-        let cache = self.at(generation).rows();
+        let cache = self.at(generation);
         for row in rows {
-            cache.put(row.line_id, Arc::new(seforim_vectors::chunker::row_lines(&row.raw, &row.notes)));
+            cache.pending.insert(row.line_id, row);
         }
     }
 }

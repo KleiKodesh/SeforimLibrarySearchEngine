@@ -532,7 +532,8 @@ class SeforimSqlDb implements SeforimDataSource {
         }
         return [
           for (final id in lineIds)
-            if (raw[id] case final r?) SemanticRow(id, r, notes[id] ?? const [])
+            // a line the database no longer holds reads as empty (Otzaria's Missing row)
+            SemanticRow(id, raw[id] ?? Uint8List(0), notes[id] ?? const [])
         ];
       });
 

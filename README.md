@@ -2411,13 +2411,17 @@ vectors and resolves them as Otzaria's `resolve` does: every record at its hint 
 column; a book where it is not searched once, nearest the hint first; a book's other lines
 of the text (`repeats_of`); a hit found in none of its books looked for in one pass over
 the whole column (places kept per generation); an alias by its anchor; a window past the
-first (no column holds it) from the row's text within 16 lines. Caches per generation of
-the index: books (4,096 / 2M lines), host rows (65,536), the whole-column places (1,024);
+first (no column holds it) from the line's text within 16 lines. A line's text is read from
+its WHOLE book as Otzaria's indexing read it (`chunker::book_lines` over every row + note of
+the book: a note placed by an earlier `\n` row, the first row's BOM dropped only when a
+`data:` is in the book). Caches per generation of the index: books (4,096 / 2M lines), prepared
+book texts (4,096 books / 2M lines), the whole-column places (1,024);
 books read in parallel (rayon). Then one result per line at its best occurrence (score +
 applied penalty - the record's penalty), best first, at most `k`; records resolving to no
 line are counted (`unmapped`). **Rows through the host:** the engine never opens SQLite; a
-text check returns `need_rows` (line ids, batched by the prefetch) and the host gives the
-raw rows + notes (`add_semantic_rows` / `se_vectors_add_rows`, hybrid `se_hybrid_add_rows`),
+text check returns `need_rows` (every line id of each book it reads, batched by the prefetch)
+and the host gives the raw rows + notes (notes JSON: `row` = index in the call, `line_index` =
+the database `lineIndex`; `add_semantic_rows` / `se_vectors_add_rows`, hybrid `se_hybrid_add_rows`),
 then asks again (a hybrid session keeps its scan meanwhile). **Named deviation (D-lines,
 user's decision):** one index entry per seforim.db line (footnotes stay their own lines): a
 line holding a newline is several Otzaria lines, so its entry carries one key per piece (the

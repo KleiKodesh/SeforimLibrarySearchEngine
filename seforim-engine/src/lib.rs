@@ -1107,6 +1107,7 @@ mod tests {
         let pos = |i: u64| (i * 7919) % n;
         let text = |p: u64| if p % 3 == 0 { "alpha beta" } else { "gamma alpha" };
         let mut w = index.writer(120_000_000, 4).unwrap();
+        w.no_merges(); // keep several segments (a background merge raced the assert)
         for i in 0..n {
             let p = pos(i);
             w.add(&line(p + 1, p, p / 100, text(p))).unwrap();
@@ -1166,6 +1167,9 @@ mod tests {
         let pos = |i: u64| (i * 7919) % n;
         let text = |p: u64| if p % 3 == 0 { "alpha beta" } else { "gamma alpha" };
         let mut w = index.writer(120_000_000, 4).unwrap();
+        // the segments must stay several: a background merge of 8+ segments
+        // (4 threads x 4 commits) made this a flake
+        w.no_merges();
         for i in 0..n {
             let p = pos(i);
             w.add(&line(p + 1, p, p / 100, text(p))).unwrap();

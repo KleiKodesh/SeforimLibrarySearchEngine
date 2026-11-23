@@ -933,6 +933,13 @@ impl SharedReader {
 }
 
 impl LineWriter {
+    /// TEST ONLY: no background merge, so a test's commits keep their
+    /// segments (tantivy's default policy may merge them at any moment).
+    #[cfg(test)]
+    pub(crate) fn no_merges(&mut self) {
+        self.writer.set_merge_policy(Box::new(tantivy::indexer::NoMergePolicy));
+    }
+
     /// Queues a line. Not visible until `commit`.
     pub fn add(&mut self, line: &LineDoc) -> Result<()> {
         if crate::user_docs::is_user_id(line.line_id) || crate::user_docs::is_user_id(line.book_id) {

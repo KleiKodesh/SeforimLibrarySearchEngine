@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 32;
+const int seforimAbiVersion = 33;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -477,6 +477,9 @@ final class SeforimNative {
   late final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, int) indexLineSources = lib.lookupFunction<
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, Size),
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, int)>('se_index_line_sources');
+  late final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, int) indexLineHashes = lib.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, Size),
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, int)>('se_index_line_hashes');
   late final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, int) indexLineTexts = lib.lookupFunction<
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, Size),
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint64>, int)>('se_index_line_texts');

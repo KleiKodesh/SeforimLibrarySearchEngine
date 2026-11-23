@@ -706,19 +706,73 @@ pub fn book_lines(rows: &[&[u8]], notes: &[BookNote]) -> Vec<BookLine> {
         .collect()
 }
 
+/// search_engine.rs `LINE_DEDUP_MIN_LETTERS`.
+pub const LINE_DEDUP_MIN_LETTERS: usize = 12;
+
+/// search_engine.rs `line_dedup_hash` (`LineDedupHasher`): FNV-1a over the
+/// line's Hebrew letters, ASCII letters / digits (lower-cased) and other
+/// alphanumerics (lower-cased); 0 = fewer than 12 Hebrew letters (no
+/// signature); a hash of 0 is 1. `normalized_text` = the indexed text
+/// ([`normalize_text_for_indexing`]).
+pub fn line_dedup_hash(normalized_text: &str) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = OFFSET;
+    let mut letters = 0usize;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    };
+    let mut buf = [0u8; 4];
+    for c in normalized_text.chars() {
+        if ('\u{05D0}'..='\u{05EA}').contains(&c) {
+            letters += 1;
+            feed(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        if c.is_ascii() {
+            if c.is_ascii_alphanumeric() {
+                feed(&[c.to_ascii_lowercase() as u8]);
+            }
+            continue;
+        }
+        if !c.is_alphanumeric() {
+            continue;
+        }
+        for lower in c.to_lowercase() {
+            feed(lower.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    if letters < LINE_DEDUP_MIN_LETTERS {
+        0
+    } else if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
+/// [`book_column_values`] with each line's `lineHash` ([`line_dedup_hash`]):
+/// per row, (chunk key column value, line hash) per newline piece.
+pub fn book_line_columns(rows: &[&[u8]], notes: &[BookNote]) -> Vec<Vec<(u64, u64)>> {
+    let lines = book_lines(rows, notes);
+    let refs: Vec<LineRef<'_>> = lines.iter().map(BookLine::as_ref).collect();
+    let chunker = Chunker::production();
+    let mut out: Vec<Vec<(u64, u64)>> = vec![Vec::new(); rows.len()];
+    for (index, line) in lines.iter().enumerate() {
+        let value = chunker.embedded_text(&refs, index).map_or(0, |t| ChunkKey::of(&t).column_value());
+        out[line.row].push((value, line_dedup_hash(&line.text)));
+    }
+    out
+}
+
 /// search_engine.rs `add_text_book_impl` with semantic_keys.rs `column_values`: each
 /// row's `chunk_key` column values, one per newline piece of [`book_lines`], in order: the
 /// production key's `column_value` where the recipe embeds the line, 0 where it does not.
 pub fn book_column_values(rows: &[&[u8]], notes: &[BookNote]) -> Vec<Vec<u64>> {
-    let lines = book_lines(rows, notes);
-    let refs: Vec<LineRef<'_>> = lines.iter().map(BookLine::as_ref).collect();
-    let chunker = Chunker::production();
-    let mut out: Vec<Vec<u64>> = vec![Vec::new(); rows.len()];
-    for (index, line) in lines.iter().enumerate() {
-        let value = chunker.embedded_text(&refs, index).map_or(0, |t| ChunkKey::of(&t).column_value());
-        out[line.row].push(value);
-    }
-    out
+    book_line_columns(rows, notes).into_iter().map(|r| r.into_iter().map(|(k, _)| k).collect()).collect()
 }
 
 /// One row's lines as [`book_lines`] makes them from that row alone, its own notes

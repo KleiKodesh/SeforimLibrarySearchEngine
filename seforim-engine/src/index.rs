@@ -94,6 +94,13 @@ pub struct LineFields {
     /// [`LineWriter::set_book_chunk_keys`]; read by the semantic resolver.
     /// None: an index built before the field existed.
     pub chunk_key: Option<Field>,
+    /// Each Otzaria line's `lineHash` (search_engine.rs `line_dedup_hash`), one
+    /// value per piece as `chunk_key`; 0 = no signature. Identical-text
+    /// grouping reads it (no text). None: an index built before the field.
+    pub line_hash: Option<Field>,
+    /// The book's `textHash` (Otzaria's `libraryBookContentFingerprint` of its
+    /// rows + notes), on every line of the book. None: an older index.
+    pub text_hash: Option<Field>,
     /// A user index only ([`LineIndex::create_user`]): the stored line text
     /// of its documents (no database holds them). Added after every other
     /// field, so a user index's segments search together with a library's.
@@ -146,6 +153,8 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
     let line_flags = b.add_u64_field("line_flags", FAST);
     let section_id = b.add_u64_field("section_id", FAST);
     let chunk_key = b.add_u64_field("chunk_key", FAST);
+    let line_hash = b.add_u64_field("line_hash", FAST);
+    let text_hash = b.add_u64_field("text_hash", FAST);
     (
         b.build(),
         LineFields {
@@ -159,6 +168,8 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
             line_flags: Some(line_flags),
             section_id: Some(section_id),
             chunk_key: Some(chunk_key),
+            line_hash: Some(line_hash),
+            text_hash: Some(text_hash),
             doc_text: None,
         },
     )
@@ -343,6 +354,8 @@ impl LineIndex {
         fields.line_flags = schema.get_field("line_flags").ok();
         fields.section_id = schema.get_field("section_id").ok();
         fields.chunk_key = schema.get_field("chunk_key").ok();
+        fields.line_hash = schema.get_field("line_hash").ok();
+        fields.text_hash = schema.get_field("text_hash").ok();
         fields.doc_text = schema.get_field("doc_text").ok();
         let index = Self::wrap(index, fields, options, dir)?;
         // issue #29: an update's merge that did not finish (the process
@@ -352,6 +365,41 @@ impl LineIndex {
             let _ = index.resume_background_merge();
         }
         Ok(index)
+    }
+
+    /// Each line's `lineHash` (its first Otzaria line's; 0 = no signature or
+    /// the line is not in the index), the attached user index included: what
+    /// identical-text grouping keys on (Otzaria's `ResultGrouping::IdenticalText`
+    /// reads its `lineHash` column, no text).
+    ///
+    /// User's note (2026-11-23): this grouping is pointless functionality that
+    /// shouldn't exist; the same text in different commentaries is fine to show.
+    /// It is kept only so the Otzaria host behaves as Otzaria does.
+    pub fn line_hashes(&self, line_ids: &[u64]) -> Result<Vec<u64>> {
+        use tantivy::DocSet;
+        let searcher = match self.user_index() {
+            Some(u) => tantivy::Searcher::union(&[self.reader.searcher(), u.reader.searcher()])?,
+            None => self.reader.searcher(),
+        };
+        let mut out = vec![0u64; line_ids.len()];
+        for segment in searcher.segment_readers() {
+            let ids = segment.inverted_index(self.fields.line_id)?;
+            let Some(field) = self.fields.line_hash else { break };
+            let Some(hashes) = segment.fast_fields().column_opt::<u64>(searcher.schema().get_field_name(field))? else { continue };
+            for (i, &id) in line_ids.iter().enumerate() {
+                if let Some(mut p) = ids.read_postings(&Term::from_field_u64(self.fields.line_id, id), IndexRecordOption::Basic)? {
+                    let mut doc = p.doc();
+                    while doc != tantivy::TERMINATED {
+                        if !segment.is_deleted(doc) {
+                            out[i] = hashes.first(doc).unwrap_or(0);
+                            break;
+                        }
+                        doc = p.advance();
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The committed documents registry (empty on an index with none).
@@ -820,9 +868,9 @@ pub struct LineWriter {
     /// The documents registry with this writer's queued changes (a user
     /// index; loaded on the first document call, written by the commit).
     docs: Option<crate::user_docs::Registry>,
-    /// Chunk keys set for lines not added yet, by line id
-    /// ([`Self::set_book_chunk_keys`]).
-    chunk_keys: std::collections::HashMap<u64, Vec<u64>>,
+    /// Chunk keys + line hashes (per piece) and the book's text hash set for
+    /// lines not added yet, by line id ([`Self::set_book_chunk_keys`]).
+    chunk_keys: std::collections::HashMap<u64, (Vec<(u64, u64)>, Option<u64>)>,
     /// Keys were set: the commit records the recipe ([`CHUNK_KEYS_FILE`]).
     chunk_keys_set: bool,
 }
@@ -930,9 +978,28 @@ impl LineWriter {
         if let (Some(field), Some(section)) = (f.section_id, line.section_id) {
             document.add_u64(field, section);
         }
-        if let (Some(field), Some(keys)) = (f.chunk_key, self.chunk_keys.remove(&line.line_id)) {
-            for key in keys {
-                document.add_u64(field, key);
+        let given = self.chunk_keys.remove(&line.line_id);
+        if given.is_none() {
+            // no book rows given (a user document, a host without chunk keys): the
+            // line's own pieces, as Otzaria hashes a document's text
+            if let Some(field) = f.line_hash {
+                for piece in line.text.split('\n') {
+                    let plain = seforim_vectors::chunker::normalize_text_for_indexing(piece);
+                    document.add_u64(field, seforim_vectors::chunker::line_dedup_hash(&plain));
+                }
+            }
+        }
+        if let Some((pieces, text_hash)) = given {
+            for (key, hash) in pieces {
+                if let Some(field) = f.chunk_key {
+                    document.add_u64(field, key);
+                }
+                if let Some(field) = f.line_hash {
+                    document.add_u64(field, hash);
+                }
+            }
+            if let (Some(field), Some(hash)) = (f.text_hash, text_hash) {
+                document.add_u64(field, hash);
             }
         }
         if let (Some(field), Some(text)) = (f.doc_text, stored) {
@@ -1012,8 +1079,13 @@ impl LineWriter {
         if row_line_ids.len() != rows.len() {
             return Err(crate::Error::Unsupported("one line id per row".into()));
         }
-        let values = seforim_vectors::chunker::book_column_values(rows, notes);
-        self.chunk_keys.extend(row_line_ids.iter().copied().zip(values));
+        let values = seforim_vectors::chunker::book_line_columns(rows, notes);
+        let note_rows: Vec<hebrew_fts::otzaria::BookNoteRow> = notes
+            .iter()
+            .map(|n| hebrew_fts::otzaria::BookNoteRow { line_index: n.line_index, char_pos: n.char_pos, has_marker: n.has_marker, body: n.body.clone() })
+            .collect();
+        let text_hash = hebrew_fts::otzaria::book_content_fingerprint(rows.iter().copied(), &note_rows);
+        self.chunk_keys.extend(row_line_ids.iter().copied().zip(values.into_iter().map(|v| (v, text_hash))));
         self.chunk_keys_set = true;
         Ok(())
     }
@@ -1021,7 +1093,7 @@ impl LineWriter {
     /// TEST ONLY: a line's column values as given (a test set's synthetic keys).
     #[cfg(test)]
     pub(crate) fn test_chunk_keys(&mut self, line_id: u64, values: Vec<u64>) {
-        self.chunk_keys.insert(line_id, values);
+        self.chunk_keys.insert(line_id, (values.into_iter().map(|v| (v, 0)).collect(), None));
         self.chunk_keys_set = true;
     }
 

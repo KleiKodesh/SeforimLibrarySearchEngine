@@ -275,3 +275,22 @@ fn column_values_per_row_and_row_lines() {
     assert_eq!(row_lines(rows[0], &[]), vec![(lines[0].text.clone(), true)]);
     assert_eq!(row_lines(rows[1], &[]), vec![(lines[1].text.clone(), false), (lines[2].text.clone(), false)]);
 }
+
+/// search_engine.rs `line_dedup_hash`: Hebrew letters, ASCII alphanumerics
+/// lower-cased; spaces and punctuation ignored; under 12 Hebrew letters = 0.
+#[test]
+fn line_dedup_hash_is_otzarias() {
+    let twelve: String = (0..12).map(|i| char::from_u32(0x05D0 + i).unwrap()).collect();
+    let eleven: String = twelve.chars().take(11).collect();
+    assert_eq!(line_dedup_hash(&eleven), 0);
+    let h = line_dedup_hash(&twelve);
+    assert_ne!(h, 0);
+    let spaced: String = twelve.chars().flat_map(|c| [c, ' ', ',']).collect();
+    assert_eq!(line_dedup_hash(&spaced), h);
+    assert_eq!(line_dedup_hash(&format!("{twelve} AB1")), line_dedup_hash(&format!("{twelve} ab1")));
+    assert_ne!(line_dedup_hash(&format!("{twelve} 100")), line_dedup_hash(&format!("{twelve} 200")));
+    let cols = book_line_columns(&[twelve.as_bytes(), b"x
+y"], &[]);
+    assert_eq!(cols.iter().map(Vec::len).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(cols[0][0].1, h);
+}

@@ -184,6 +184,18 @@ final class SeforimIndex implements Finalizable {
     ];
   }
 
+  /// Each line's `lineHash` (Otzaria's signature of its text, stored at build;
+  /// 0 = none or not in the index), the user index included: what
+  /// identical-text grouping keys on (the u64 read as a signed int).
+  List<int> lineHashes(List<int> lineIds) {
+    final json = using((a) {
+      final p = a<Uint64>(lineIds.isEmpty ? 1 : lineIds.length);
+      p.asTypedList(lineIds.length).setAll(0, lineIds);
+      return _n.takeString(_n.indexLineHashes(handle, p, lineIds.length));
+    });
+    return [for (final o in jsonDecode(json) as List) o as int];
+  }
+
   /// The stored texts of user lines (the user index keeps them); null for a
   /// line the user index does not hold (library texts come from seforim.db).
   List<String?> lineTexts(List<int> lineIds) {

@@ -91,7 +91,7 @@ void buildIndexFromDb(SeforimDataSource db, String dir,
           }
         }
         w.addAll(batch);
-        w.commit('{"lines":$position,"db":"${db.fingerprint()}","notes":${db.hasNotes ? 1 : 0},"chunk_keys":1}');
+        w.commit('{"lines":$position,"db":"${db.fingerprint()}","notes":${db.hasNotes ? 1 : 0},"chunk_keys":2}');
       } catch (_) {
         w.rollback();
         rethrow;
@@ -141,8 +141,8 @@ abstract final class SeforimIndexBuilder {
         if (options != null && (info.positions != options.positions || info.keepMarks != options.keepMarks)) {
           return true;
         }
-        // built before the semantic chunk key column was written: rebuild
-        return p == null || !p.contains('"lines"') || !p.contains('"chunk_keys"');
+        // built before the semantic chunk key + line hash columns were written: rebuild
+        return p == null || !p.contains('"lines"') || !p.contains('"chunk_keys":2');
       } finally {
         i.close();
       }

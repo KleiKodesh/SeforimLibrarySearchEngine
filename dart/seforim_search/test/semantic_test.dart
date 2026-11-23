@@ -141,6 +141,25 @@ void main() {
     }
   });
 
+  test('line hashes from the index: identical texts alike, short lines none', () {
+    final dir = Directory('${tmp.path}_hash')..createSync();
+    try {
+      final index = SeforimIndex.create(dir.path);
+      final w = index.openWriter(heapBytes: 30000000, threads: 1);
+      final text = String.fromCharCodes([for (var i = 0; i < 14; i++) 0x05D0 + i]);
+      for (final (i, (id, t)) in [(1, text), (2, 'short'), (3, text)].indexed) {
+        w.add(LineDocument(lineId: id, position: i, bookId: 1 + i, text: t));
+      }
+      w.commit();
+      w.close();
+      final h = index.lineHashes([1, 2, 3, 99]);
+      expect((h[0] != 0, h[1], h[2] == h[0], h[3]), (true, 0, true, 0));
+      index.close();
+    } finally {
+      dir.deleteSync(recursive: true);
+    }
+  });
+
   test('async on a SearchWorker', () async {
     final worker = await SearchWorker.spawn(tmp.path, nativePath: native);
     final info = await worker.openVectors(oxv);

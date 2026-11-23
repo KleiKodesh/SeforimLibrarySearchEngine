@@ -407,11 +407,12 @@ final class SeforimLibrary {
         }
       }
     }
-    final texts = grouping == Grouping.identicalText ? await _texts(ids) : const <int, String>{};
+    final hashes = grouping == Grouping.identicalText ? await worker.lineHashes(ids) : const <int>[];
+    final hashOf = {for (var i = 0; i < hashes.length; i++) ids[i]: hashes[i]};
     final groups = groupInOrder<PlacedHit>(
         all,
         (h) => groupKey(grouping,
-            tocEntryId: sections[h.lineId] ?? 0, lineId: h.lineId, text: texts[h.lineId]));
+            tocEntryId: sections[h.lineId] ?? 0, lineId: h.lineId, lineHash: hashOf[h.lineId] ?? 0));
     final counts = withCounts ? await _exactCounts(s) : null;
     final end = limit > 0 && offset + limit < groups.length ? offset + limit : groups.length;
     final titles = await bookTitles();

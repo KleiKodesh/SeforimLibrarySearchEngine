@@ -995,4 +995,19 @@ mod tests {
         let r = index.semantic_search(&axis(1), &SemanticOptions { k: 1, ..Default::default() }, None).unwrap();
         assert!(r.hits.is_empty());
     }
+
+    /// Each line's `lineHash` from the index (identical-text grouping): equal
+    /// texts in two books sign alike, a short line has none, a missing line 0.
+    #[test]
+    fn line_hashes_from_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = "a line of text that is long enough";
+        let heb: String = (0..14).map(|i| char::from_u32(0x05D0 + i).unwrap()).collect();
+        let a = format!("{heb} {long}");
+        let index = index(tmp.path(), &[(3, vec![(100, a.as_str()), (101, "short")]), (4, vec![(200, a.as_str())])]);
+        let h = index.line_hashes(&[100, 101, 200, 999]).unwrap();
+        assert_ne!(h[0], 0);
+        assert_eq!((h[1], h[2], h[3]), (0, h[0], 0));
+    }
+
 }

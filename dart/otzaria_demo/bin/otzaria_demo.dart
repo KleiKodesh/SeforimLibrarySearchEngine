@@ -494,7 +494,7 @@ Future<void> _search(SeforimDb db, String dir, Map<String, String?> o, String qu
     _ => null,
   };
   if (grouping != null) {
-    _grouped(db, session, hits, request, o, grouping, titles, limit, offset, sw, searchMs, renderAll);
+    _grouped(db, index, session, hits, request, o, grouping, titles, limit, offset, sw, searchMs, renderAll);
     index.close();
     return;
   }
@@ -801,6 +801,7 @@ void _printCounts(SeforimDb db, SearchSession session, Map<int, String> titles) 
 /// read, so counts may be a lower bound (shown with +), as Otzaria's truncated.
 void _grouped(
   SeforimDb db,
+  SeforimIndex index,
   SearchSession session,
   List<PlacedHit> all,
   SearchOptions request,
@@ -816,6 +817,7 @@ void _grouped(
   var scanned = all;
   var truncated = false;
   final texts = <int, String>{};
+  final hashes = <int, int>{};
   // The engine returns line ids only; sections come from the DB in one pass.
   final sections = grouping == Grouping.sameSection ? db.sectionsOf(scanned.map((h) => h.lineId)) : const <int, int>{};
   if (grouping == Grouping.identicalText) {
@@ -824,14 +826,15 @@ void _grouped(
       scanned = all.sublist(0, cap);
       truncated = true;
     }
-    for (var i = 0; i < scanned.length; i += 2048) {
-      final end = i + 2048 > scanned.length ? scanned.length : i + 2048;
-      texts.addAll(db.lineTexts(scanned.sublist(i, end).map((h) => h.lineId)));
+    final ids = [for (final h in scanned) h.lineId];
+    final h = index.lineHashes(ids);
+    for (var i = 0; i < ids.length; i++) {
+      hashes[ids[i]] = h[i];
     }
   }
   final groups = groupInOrder<PlacedHit>(
     scanned,
-    (h) => groupKey(grouping, tocEntryId: sections[h.lineId] ?? 0, lineId: h.lineId, text: texts[h.lineId]),
+    (h) => groupKey(grouping, tocEntryId: sections[h.lineId] ?? 0, lineId: h.lineId, lineHash: hashes[h.lineId] ?? 0),
   );
 
   final cards = <(HitGroup<PlacedHit>, PlacedHit, String, Snippet)>[];

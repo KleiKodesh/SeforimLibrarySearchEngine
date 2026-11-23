@@ -261,6 +261,9 @@ final class SearchWorker {
   /// library line: those come from the host's database).
   Future<List<String?>> lineTexts(List<int> lineIds) => _call('index', 'lineTexts', lineIds);
 
+  /// [SeforimIndex.lineHashes] on the worker.
+  Future<List<int>> lineHashes(List<int> lineIds) => _call('index', 'lineHashes', lineIds);
+
   /// [openWriter] on the attached user index: [AsyncIndexWriter.putDocument]
   /// / [AsyncIndexWriter.deleteDocuments], commit, then
   /// [AsyncIndexWriter.mergeAndClose] and [buildUserFmSidecar] after a large
@@ -923,6 +926,8 @@ void _workerMain((SendPort, String, String?) args) {
               value = index.lineSources((b as List).cast<int>());
             case 'lineTexts':
               value = index.lineTexts((b as List).cast<int>());
+            case 'lineHashes':
+              value = index.lineHashes((b as List).cast<int>());
             case 'startBackgroundMerge':
               value = index.startBackgroundMerge((b as List?)?.cast<int>());
             case 'recordBackgroundMerge':

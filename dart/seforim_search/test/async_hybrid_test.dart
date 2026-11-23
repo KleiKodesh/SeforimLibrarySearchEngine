@@ -20,14 +20,14 @@ String? _nativePath() {
 String _fixture() {
   var dir = Directory.current;
   for (var i = 0; i < 5; i++) {
-    final f = File('${dir.path}/seforim-vectors/tests/data/synthetic.oxv');
+    final f = File('${dir.path}/seforim-vectors/tests/data/verified.oxv');
     if (f.existsSync()) return f.path;
     dir = dir.parent;
   }
-  throw StateError('synthetic.oxv not found');
+  throw StateError('verified.oxv not found');
 }
 
-Float32List v(List<double> x) => Float32List.fromList(x);
+Float32List axis(int a) => Float32List(8)..[a] = 1;
 
 final _env = Platform.environment;
 final _modelDir = _env['OTZARIA_MEIVIN_MODEL'] ?? '${_env['APPDATA']}/otzaria/books/meivin-qa491-onnx';
@@ -46,6 +46,11 @@ void main() {
     w.add(LineDocument(lineId: 1, position: 0, bookId: 5, text: texts[1]!));
     w.add(LineDocument(lineId: 2, position: 1, bookId: 5, text: texts[2]!));
     w.add(LineDocument(lineId: 3, position: 2, bookId: 6, text: texts[3]!));
+    // book 3 of verified.oxv with its chunk keys (Otzaria line 1 = line 101)
+    const rows = ['<h1>Title of the book</h1>', 'first line that is long enough to stand'];
+    w.setBookChunkKeys([100, 101], [for (final r in rows) Uint8List.fromList(utf8.encode(r))]);
+    w.add(LineDocument(lineId: 100, position: 3, bookId: 3, text: rows[0]));
+    w.add(LineDocument(lineId: 101, position: 4, bookId: 3, text: rows[1]));
     w.commit();
     w.close();
     index.close();
@@ -65,16 +70,14 @@ void main() {
     final worker = await SearchWorker.spawn('${tmp.path}/pos', nativePath: native);
     try {
       await worker.openVectors(oxv);
-      await worker.mapVectorBook('id:5', 5, [1, 2]);
-      final h = await worker.hybridSession('alpha', vector: v([0, 0, 1, 0]));
+      final h = await worker.hybridSession('alpha', vector: axis(1));
       final page = await h.page(0, 10);
-      expect((page.hits.first.lineId, page.hits.first.source), (1, 'both'));
+      expect(page.hits.firstWhere((x) => x.lineId == 101).source, 'semantic');
       expect((page.meta.executedMode, page.meta.semanticAvailable), (HybridRetrieval.hybrid, true));
       // the same answers as the synchronous session
       final index = SeforimIndex.open('${tmp.path}/pos');
       index.openVectors(oxv);
-      index.mapVectorBook('id:5', 5, [1, 2]);
-      final sync = index.hybridSession('alpha', v([0, 0, 1, 0]));
+      final sync = index.hybridSession('alpha', axis(1));
       final sp = sync.page(0, 10);
       expect([for (final x in page.hits) (x.lineId, x.source, x.fused)], [for (final x in sp.hits) (x.lineId, x.source, x.fused)]);
       final sw = sync.window(5);
@@ -86,7 +89,7 @@ void main() {
 
       // a cancelled token stops a step that fuses (a fresh session: a served window is cached)
       final cancel = SearchCancelToken()..cancel();
-      final hc = await worker.hybridSession('alpha', vector: v([0, 0, 1, 0]));
+      final hc = await worker.hybridSession('alpha', vector: axis(1));
       await expectLater(hc.page(0, 10, cancel: cancel), throwsA(isA<SearchCancelledException>()));
       await hc.close();
       await h.close();

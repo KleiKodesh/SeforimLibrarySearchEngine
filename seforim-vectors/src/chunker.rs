@@ -580,21 +580,8 @@ fn window_spans(chars: &[char], first: usize, length: usize, overlap: usize, max
 // Verification (semantic_resolver.rs)
 // ---------------------------------------------------------------------------
 
-/// semantic_resolver.rs `RECOMPUTE_REACH`: lines on each side of a hint searched for a key.
-pub const RECOMPUTE_REACH: usize = 16;
-
 /// semantic_resolver.rs `ALIAS_WINDOW`: a short line found through a neighbour's vector.
 pub const ALIAS_WINDOW: u8 = 255;
-
-/// One stored record to check: the line ordinal, its window and its key as stored
-/// (16 bytes in format 2, 8 in format 3). For an alias record ([`ALIAS_WINDOW`]) pass
-/// the alias's anchor (the short line's own key) with window 0, as `alias_line` does.
-#[derive(Debug, Clone)]
-pub struct StoredKey<'a> {
-    pub ordinal: usize,
-    pub window: u8,
-    pub key: &'a [u8],
-}
 
 /// Whether line `ordinal` holds `key` as `window`, compared at the stored width
 /// (`ChunkKey::same_text`): the check semantic_resolver.rs makes before a line is shown.
@@ -606,30 +593,6 @@ pub fn holds(chunker: &Chunker, lines: &[LineRef<'_>], ordinal: usize, window: u
         return chunker.embedded_text(lines, ordinal).is_some_and(|t| ChunkKey::of(&t).same_text(key));
     }
     chunker.window_keys(lines, ordinal).iter().any(|&(w, k)| w == window && k.same_text(key))
-}
-
-/// [`holds`] for each record, in order.
-pub fn verify(chunker: &Chunker, lines: &[LineRef<'_>], records: &[StoredKey<'_>]) -> Vec<bool> {
-    records
-        .iter()
-        .map(|r| ChunkKey::from_stored(r.key).is_some_and(|k| holds(chunker, lines, r.ordinal, r.window, k)))
-        .collect()
-}
-
-/// semantic_resolver.rs `search_book` (recompute path): the line within
-/// [`RECOMPUTE_REACH`] of `hint` that holds `key` as `window`, nearest first (ties to
-/// the lower line). What a hit whose line moved (an insertion above it) resolves to.
-pub fn locate(chunker: &Chunker, lines: &[LineRef<'_>], hint: usize, window: u8, key: &[u8]) -> Option<usize> {
-    let key = ChunkKey::from_stored(key)?;
-    if lines.is_empty() {
-        return None;
-    }
-    let centre = hint.min(lines.len() - 1);
-    let start = centre.saturating_sub(RECOMPUTE_REACH);
-    let end = (centre + RECOMPUTE_REACH + 1).min(lines.len());
-    let mut found: Vec<usize> = (start..end).filter(|&p| holds(chunker, lines, p, window, key)).collect();
-    found.sort_by_key(|&p| (p.abs_diff(centre), p));
-    found.first().copied()
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +702,35 @@ pub fn book_lines(rows: &[&[u8]], notes: &[BookNote]) -> Vec<BookLine> {
                 section += 1;
             }
             BookLine { row, sub, text: normalize_text_for_indexing(raw_line), section }
+        })
+        .collect()
+}
+
+/// search_engine.rs `add_text_book_impl` with semantic_keys.rs `column_values`: each
+/// row's `chunk_key` column values, one per newline piece of [`book_lines`], in order: the
+/// production key's `column_value` where the recipe embeds the line, 0 where it does not.
+pub fn book_column_values(rows: &[&[u8]], notes: &[BookNote]) -> Vec<Vec<u64>> {
+    let lines = book_lines(rows, notes);
+    let refs: Vec<LineRef<'_>> = lines.iter().map(BookLine::as_ref).collect();
+    let chunker = Chunker::production();
+    let mut out: Vec<Vec<u64>> = vec![Vec::new(); rows.len()];
+    for (index, line) in lines.iter().enumerate() {
+        let value = chunker.embedded_text(&refs, index).map_or(0, |t| ChunkKey::of(&t).column_value());
+        out[line.row].push(value);
+    }
+    out
+}
+
+/// One row's lines as [`book_lines`] makes them from that row alone, its own notes
+/// given with `line_index` 0: (normalized text, opens a section) per newline piece.
+pub fn row_lines(row: &[u8], notes: &[BookNote]) -> Vec<(String, bool)> {
+    let mut last = 0;
+    book_lines(&[row], notes)
+        .into_iter()
+        .map(|l| {
+            let heading = l.section > last;
+            last = l.section;
+            (l.text, heading)
         })
         .collect()
 }

@@ -569,9 +569,9 @@ final class SeforimLibrary {
 
   // -- semantic and hybrid search (issue #18) --
 
-  /// Opens Otzaria's vector set at [path] on the worker (map its books with
-  /// [worker]'s mapVectorBookRows / setVectorMapping: the rows are the
-  /// host's).
+  /// Opens Otzaria's vector set at [path] on the worker. Nothing is mapped:
+  /// each search resolves its hits by the index's chunk keys, the rows a
+  /// window check needs read from [source] ([semanticRows]).
   Future<VectorSetInfo> openVectors(String path) => worker.openVectors(path);
 
   /// Closes the vector set.
@@ -596,8 +596,14 @@ final class SeforimLibrary {
   /// line texts from [source] (library lines) and the user index (user
   /// lines) when it needs them. Page it with [AsyncHybridSession.page] (or
   /// [AsyncHybridSession.window] to group), then close it.
-  Future<AsyncHybridSession> hybridSearch(String query, {HybridOptions options = const HybridOptions(), Float32List? vector}) =>
-      worker.hybridSession(query, vector: vector, options: options, texts: _rawTexts);
+  /// [rows]: where the semantic resolver's rows are read (default [semanticRows],
+  /// on this isolate; a host may read them on a helper isolate).
+  Future<AsyncHybridSession> hybridSearch(String query,
+          {HybridOptions options = const HybridOptions(), Float32List? vector, SemanticRows? rows}) =>
+      worker.hybridSession(query, vector: vector, options: options, texts: _rawTexts, rows: rows ?? semanticRows);
+
+  /// The host rows the semantic resolver asks for (`need_rows`), from [source].
+  Future<List<SemanticRow>> semanticRows(List<int> ids) async => await source.semanticRows(ids);
 
   Future<Map<int, Uint8List>> _rawTexts(List<int> ids) async =>
       {for (final e in (await _texts(ids)).entries) e.key: utf8.encode(e.value)};

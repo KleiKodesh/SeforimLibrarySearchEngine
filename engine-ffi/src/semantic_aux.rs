@@ -238,7 +238,7 @@ pub unsafe extern "C" fn se_vectors_coverage_add_book(counter: *mut CoverageCoun
     })
 }
 
-/// One book from its raw rows and `line_note` rows, as [`crate::se_vectors_map_book_rows`]
+/// One book from its raw rows and `line_note` rows, as [`crate::se_writer_book_chunk_keys`]
 /// takes them (`content` cut at `offsets[0..=row_count]`, `notes_json` may be empty): the
 /// engine rebuilds the book's lines as Otzaria indexes them (chunker `book_lines`: a row
 /// holding a newline gives several lines, notes rehydrated, heading-count sections) and

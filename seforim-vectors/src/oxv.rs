@@ -17,8 +17,8 @@
 //!   alias row is a short line borrowing a neighbour's vector.
 //!
 //! Book names are Otzaria's index `filePath` (`id:<bookId>` for a library
-//! book). The HOST maps each name to its book id and line ids
-//! ([`OxvBookMap`], kept by [`crate::set::LineMap`]).
+//! book); a hit's records are resolved to live lines by a
+//! [`crate::set::CandidateResolver`].
 //!
 //! The header's CRC and the CRCs of the small sections are checked; the
 //! block-summed sections (keys, hints, vectors) are mapped unchecked, as
@@ -52,7 +52,7 @@ const FLAG_BASE: u32 = 1;
 const FLAG_DELTA: u32 = 2;
 const FLAG_COMPACTED: u32 = 4;
 /// occurrence.rs: the window of an alias occurrence.
-pub(crate) const ALIAS_WINDOW: u8 = u8::MAX;
+pub const ALIAS_WINDOW: u8 = u8::MAX;
 const ROLE_ALIAS: u8 = 1;
 
 // section kinds (format.rs SectionKind)
@@ -87,7 +87,7 @@ const PARAMS_VERSION: u32 = 1;
 
 /// A chunk key: 16 bytes (format 2), or 8 bytes padded with zeros (format 3,
 /// Otzaria's `ChunkKey::narrowed`); compared as bytes.
-pub(crate) type Key = [u8; 16];
+pub type Key = [u8; 16];
 
 fn u16_at(b: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([b[at], b[at + 1]])
@@ -253,18 +253,6 @@ pub struct OxvBookInfo {
     pub records: u64,
     /// Highest line ordinal + 1 (the line count the host's mapping must cover).
     pub lines: u64,
-}
-
-/// The host's mapping of one Otzaria book (JSON at the C ABI).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct OxvBookMap {
-    /// The book's name in the vectors (`id:<bookId>` for a library book).
-    pub name: String,
-    /// The host's book id.
-    pub book_id: u64,
-    /// The host's line id of each line ordinal (0-based), as the vectors
-    /// count the book's lines (seforim.db `lineIndex, id` order).
-    pub line_ids: Vec<u64>,
 }
 
 /// An open `.oxv` segment.
@@ -797,7 +785,7 @@ impl OxvFile {
 
 /// The chunk number of a window: 0 a line's first window, n its n-th,
 /// [`CHUNK_BORROWED`] an alias (a short line borrowing a neighbour's vector).
-pub(crate) fn chunk_of_window(window: u8) -> u32 {
+pub fn chunk_of_window(window: u8) -> u32 {
     if window == ALIAS_WINDOW {
         CHUNK_BORROWED
     } else {

@@ -2,6 +2,7 @@
 // catalog order, the line feed, notes books, snippet texts. The host plugs in
 // its database layer as a [SeforimSqlConnection] (its sqlite library, its
 // line-content decoder); package:seforim_search_sqlite is the ready-made one.
+import '../semantic.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -492,6 +493,60 @@ class SeforimSqlDb implements SeforimDataSource {
     }
     return out;
   }
+
+  /// The `line_note` rows (non-NULL body) of [lineIds] as stored, keyed by
+  /// line id in `noteIndex` order: [VectorBookNote.lineIndex] = the line's
+  /// `lineIndex` (Otzaria's semantic read of a line with its notes).
+  Map<int, List<VectorBookNote>> _noteRows(String where, List<Object?> params) {
+    final out = <int, List<VectorBookNote>>{};
+    if (!hasNotes) return out;
+    final cols = {for (final r in _select('PRAGMA table_info(line_note)')) r[1] as String};
+    final rs = _select(
+        'SELECT n.lineId, l.lineIndex, ${cols.contains('charPos') ? 'n.charPos' : 'NULL'}, '
+        '${cols.contains('hasMarker') ? 'n.hasMarker' : '0'}, typeof(n.body), CAST(n.body AS BLOB) '
+        'FROM line_note n JOIN line l ON l.id = n.lineId '
+        'WHERE $where AND n.body IS NOT NULL ORDER BY l.lineIndex, l.id, n.noteIndex',
+        params);
+    for (final r in rs) {
+      final id = r[0] as int;
+      final body = rawContent(r[4] as String, r[5] as Uint8List?, id);
+      out.putIfAbsent(id, () => []).add(VectorBookNote(r[1] as int, _keepBom(body),
+          charPos: (r[2] as int?) ?? -1, hasMarker: ((r[3] as int?) ?? 0) != 0));
+    }
+    return out;
+  }
+
+  /// UTF-8 [bytes] as a String with a leading BOM kept (utf8.decode drops it).
+  static String _keepBom(Uint8List bytes) {
+    final bom = bytes.length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+    return bom ? '\uFEFF${utf8.decode(bytes.sublist(3), allowMalformed: true)}' : utf8.decode(bytes, allowMalformed: true);
+  }
+
+  @override
+  List<SemanticRow> semanticRows(List<int> lineIds) => _readSnapshot(() {
+        final raw = rawContents(lineIds);
+        final notes = <int, List<VectorBookNote>>{};
+        for (var i = 0; i < lineIds.length; i += 500) {
+          final chunk = lineIds.sublist(i, i + 500 > lineIds.length ? lineIds.length : i + 500);
+          notes.addAll(_noteRows('n.lineId IN (${List.filled(chunk.length, '?').join(',')})', chunk));
+        }
+        return [
+          for (final id in lineIds)
+            if (raw[id] case final r?) SemanticRow(id, r, notes[id] ?? const [])
+        ];
+      });
+
+  @override
+  ({List<int> ids, List<Uint8List> rows, List<VectorBookNote> notes}) bookChunkRows(int bookId) => _readSnapshot(() {
+        final ids = <int>[], rows = <Uint8List>[];
+        for (final (id, raw) in bookRawRows(bookId)) {
+          ids.add(id);
+          rows.add(raw);
+        }
+        final notes = [for (final n in _noteRows('l.bookId = ?', [bookId]).values) ...n]
+          ..sort((a, b) => a.lineIndex.compareTo(b.lineIndex));
+        return (ids: ids, rows: rows, notes: notes);
+      });
 
   /// A real book's rows as stored, in `lineIndex, id` order: (line id, raw
   /// content) with zstd frames decoded but nothing else touched (a leading BOM

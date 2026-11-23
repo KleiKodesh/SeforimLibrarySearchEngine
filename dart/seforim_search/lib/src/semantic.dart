@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:typed_data';
@@ -160,21 +161,9 @@ final class OxvInfo {
           .toList());
 }
 
-/// The host's mapping of one book of an Otzaria vector set ([SemanticIndex.setVectorMapping]).
-final class OxvBookMap {
-  const OxvBookMap(this.name, this.bookId, this.lineIds);
-  final String name;
-  final int bookId;
-
-  /// The line id of each 0-based line ordinal (seforim.db rows in
-  /// `lineIndex, id` order).
-  final List<int> lineIds;
-
-  Map<String, Object?> toJson() => {'name': name, 'book_id': bookId, 'line_ids': lineIds};
-}
-
-/// One `line_note` row of a book (non-NULL body) for
-/// [SemanticIndex.mapVectorBookRows].
+/// One `line_note` row of a book (non-NULL body): for the chunk keys of a
+/// book ([IndexWriter.setBookChunkKeys], `lineIndex` = its line's) or of a
+/// [SemanticRow] (`lineIndex` 0 = the row's own).
 final class VectorBookNote {
   const VectorBookNote(this.lineIndex, this.body, {this.charPos = -1, this.hasMarker = false});
 
@@ -189,17 +178,49 @@ final class VectorBookNote {
   Map<String, Object?> toJson() => {'line_index': lineIndex, 'char_pos': charPos, 'has_marker': hasMarker, 'body': body};
 }
 
-/// The text check of one book ([SemanticIndex.mapVectorBookRows]).
-final class VectorBookVerify {
-  const VectorBookVerify(this.lines, this.records, this.verified, this.moved, this.unverified);
-  factory VectorBookVerify.fromJson(Map<String, dynamic> j) => VectorBookVerify(
-      j['lines'] as int, j['records'] as int, j['verified'] as int, j['moved'] as int, j['unverified'] as int);
-  final int lines;
-  final int records;
-  final int verified;
-  final int moved;
-  final int unverified;
+/// One host row the semantic resolver asked for (`need_rows`): its raw
+/// content as stored (zstd decoded, a leading BOM kept, NULL as empty) and its
+/// own `line_note` rows ([VectorBookNote.lineIndex] ignored).
+final class SemanticRow {
+  const SemanticRow(this.lineId, this.raw, [this.notes = const []]);
+  final int lineId;
+  final Uint8List raw;
+  final List<VectorBookNote> notes;
 }
+
+/// Reads the host rows of [lineIds] from the host's own database (the engine
+/// never opens SQLite).
+typedef SemanticRows = FutureOr<List<SemanticRow>> Function(List<int> lineIds);
+
+/// Packs rows for the engine's row calls (`se_vectors_add_rows`,
+/// `se_hybrid_add_rows`, `se_writer_book_chunk_keys`): ids, content, offsets
+/// and the notes JSON ([rowNotes]: the notes' `line_index`, as each call reads it).
+int packRows(Allocator al, List<int> ids, List<Uint8List> rows, List<Map<String, Object?>> notes,
+    int Function(Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int) call) {
+  final idp = al<Uint64>(ids.isEmpty ? 1 : ids.length);
+  idp.asTypedList(ids.length).setAll(0, ids);
+  final offsets = al<Uint64>(rows.length + 1);
+  final off = offsets.asTypedList(rows.length + 1);
+  var total = 0;
+  for (var i = 0; i < rows.length; i++) {
+    off[i] = total;
+    total += rows[i].length;
+  }
+  off[rows.length] = total;
+  final content = al<Uint8>(total == 0 ? 1 : total);
+  final c = content.asTypedList(total);
+  for (var i = 0; i < rows.length; i++) {
+    c.setAll(off[i], rows[i]);
+  }
+  final (j, jl) = utf8Native(jsonEncode(notes), al);
+  return call(idp, ids.length, content, total, offsets, j, jl);
+}
+
+/// The notes of [rows], each with `line_index` = its row's index (the row calls' rule).
+List<Map<String, Object?>> rowNotes(List<SemanticRow> rows) => [
+      for (final (i, r) in rows.indexed)
+        for (final n in r.notes) {...n.toJson(), 'line_index': i}
+    ];
 
 /// Expands Otzaria's downloaded vector file (`.oxv.zst`) to a plain `.oxv`;
 /// returns the bytes written.
@@ -228,14 +249,18 @@ OxvInfo readOxvInfo(String path) {
 /// A semantic search's hits and what the scan did.
 final class SemanticResult {
   SemanticResult._(this.hits, this.vectors, this.records, this.unmapped, this.scanned, this.threads, this.generation,
-      this.json);
+      this.json, this.needRows);
   final List<SemanticHit> hits;
 
   /// Vectors scored; records = line occurrences of the best vectors read.
   final int vectors, records;
 
-  /// Records the host's mapping does not cover (dropped, never guessed).
+  /// Admitted records that resolved to no live line (counted, never guessed).
   final int unmapped;
+
+  /// Not empty: no hits yet; the host rows the resolver needs first
+  /// ([SemanticIndex.addSemanticRows], then search again).
+  final List<int> needRows;
   final int scanned, threads, generation;
 
   /// The engine's JSON.
@@ -249,7 +274,8 @@ final class SemanticResult {
             chunk: h['chunk'] as int? ?? 0))
         .toList();
     return SemanticResult._(hits, j['vectors'] as int, j['records'] as int, j['unmapped'] as int,
-        j['scanned'] as int, j['threads'] as int, j['generation'] as int, text);
+        j['scanned'] as int, j['threads'] as int, j['generation'] as int, text,
+        [for (final e in (j['need_rows'] as List?) ?? const []) e as int]);
   }
 }
 
@@ -432,15 +458,20 @@ final class HybridSession {
   Pointer<Void> _h;
 
   HybridPage page(int offset, int limit,
-      {Map<int, Uint8List> Function(List<int> lineIds)? texts, SearchCancelToken? cancel}) =>
-      hybridPageFromJson(_step(() => _pageCall(offset, limit, cancel?.handle ?? nullptr), texts));
+      {Map<int, Uint8List> Function(List<int> lineIds)? texts,
+      List<SemanticRow> Function(List<int> lineIds)? rows,
+      SearchCancelToken? cancel}) =>
+      hybridPageFromJson(_step(() => _pageCall(offset, limit, cancel?.handle ?? nullptr), texts, rows));
 
   /// One fused window of [window] candidates (at most 10,000), apart from the
   /// pages: for a host that groups results itself (Otzaria's grouping counts
   /// its window in groups; the host grows the window and admits groups as
   /// Otzaria's session does). Stale lines are left out.
-  HybridWindow window(int window, {Map<int, Uint8List> Function(List<int> lineIds)? texts, SearchCancelToken? cancel}) =>
-      hybridWindowFromJson(_step(() => _windowCall(window, cancel?.handle ?? nullptr), texts));
+  HybridWindow window(int window,
+          {Map<int, Uint8List> Function(List<int> lineIds)? texts,
+          List<SemanticRow> Function(List<int> lineIds)? rows,
+          SearchCancelToken? cancel}) =>
+      hybridWindowFromJson(_step(() => _windowCall(window, cancel?.handle ?? nullptr), texts, rows));
 
   Pointer<Utf8> _pageCall(int offset, int limit, Pointer<Void> token) {
     if (_h == nullptr) throw StateError('HybridSession is closed');
@@ -452,17 +483,33 @@ final class HybridSession {
     return SeforimNative.instance.hybridWindow(_h, window, token);
   }
 
-  /// Calls [call] until it answers with something other than `need_texts`,
-  /// giving the session the texts it asks for.
-  Map<String, dynamic> _step(Pointer<Utf8> Function() call, Map<int, Uint8List> Function(List<int> lineIds)? texts) {
+  /// Calls [call] until it answers with something other than `need_texts` /
+  /// `need_rows`, giving the session the texts and rows it asks for.
+  Map<String, dynamic> _step(Pointer<Utf8> Function() call, Map<int, Uint8List> Function(List<int> lineIds)? texts,
+      List<SemanticRow> Function(List<int> lineIds)? rows) {
     while (true) {
       final j = _once(call);
+      final needRows = j['need_rows'] as List?;
+      if (needRows != null) {
+        if (rows == null) throw StateError('the hybrid session needs host rows: pass rows');
+        addRows(rows([for (final e in needRows) e as int]));
+        continue;
+      }
       final need = j['need_texts'] as List?;
       if (need == null) return j;
       if (texts == null) throw StateError('the hybrid session needs line texts: pass texts');
       final ids = [for (final e in need) e as int];
       addTexts(ids, texts(ids));
     }
+  }
+
+  /// Gives the session the host rows it asked for (`need_rows`).
+  void addRows(List<SemanticRow> rows) {
+    final n = SeforimNative.instance;
+    if (_h == nullptr) throw StateError('HybridSession is closed');
+    final rc = using((al) => packRows(al, [for (final r in rows) r.lineId], [for (final r in rows) r.raw], rowNotes(rows),
+        (ids, count, content, total, offsets, j, jl) => n.hybridAddRows(_h, ids, count, content, total, offsets, j, jl)));
+    if (rc != 0) throw n.error();
   }
 
   Map<String, dynamic> _once(Pointer<Utf8> Function() call) {
@@ -505,7 +552,7 @@ final class HybridSession {
 
 /// One step of [session]'s page (`kind` 'page': [a] offset, [b] limit) or
 /// window ('window': [a] the window): the answer's JSON, which holds
-/// `need_texts` when the session asks for texts ([HybridSession.addTexts]).
+/// `need_texts` / `need_rows` when the session asks for texts / rows.
 /// For the worker ([AsyncHybridSession]), which asks the calling isolate.
 Map<String, dynamic> hybridStep(HybridSession session, String kind, int a, int b, int cancelAddress) {
   final token = Pointer<Void>.fromAddress(cancelAddress);
@@ -560,13 +607,14 @@ final class FusedHit {
 
 /// Semantic search on an index (issue #18), like Otzaria: the index opens
 /// Otzaria's own vector set read-only and runs an exact integer scan; the
-/// host maps each book of the set (`id:<bookId>`) to its line ids. Hybrid:
+/// hits are resolved lazily by the index's chunk key column (nothing mapped at
+/// open; a window check asks the host's rows, [SemanticRows]). Hybrid:
 /// [SemanticIndex.hybridSession]. Blocking; [SearchWorker] has the async
 /// versions.
 extension SemanticIndex on SeforimIndex {
   /// Opens Otzaria's vector set read-only: a set directory (`CURRENT`,
   /// `gen-N/set.json`, `segments/*.oxv`) or one base `.oxv`. Replaces a set
-  /// opened before; the line mapping stays.
+  /// opened before. Nothing is mapped.
   VectorSetInfo openVectors(String path) {
     final n = SeforimNative.instance;
     final text = using((al) {
@@ -576,71 +624,17 @@ extension SemanticIndex on SeforimIndex {
     return VectorSetInfo.fromJson(jsonDecode(text) as Map<String, dynamic>);
   }
 
-  /// Forgets the vector set (the line mapping stays).
+  /// Forgets the vector set.
   void closeVectors() {
     final n = SeforimNative.instance;
     if (n.vectorsClose(handle) != 0) throw n.error();
   }
 
-  /// Maps one book of the set ([name], `id:<bookId>` for a library book) to
-  /// the host's lines: [lineIds][ordinal] for each 0-based line ordinal
-  /// (seforim.db rows of the book in `lineIndex, id` order). Replaces that
-  /// book's mapping; an empty list removes it.
-  void mapVectorBook(String name, int bookId, List<int> lineIds) {
+  /// Gives the semantic resolver the host rows it asked for (`need_rows`).
+  void addSemanticRows(List<SemanticRow> rows) {
     final n = SeforimNative.instance;
-    final rc = using((al) {
-      final (p, pl) = utf8Native(name, al);
-      final ids = al<Uint64>(lineIds.isEmpty ? 1 : lineIds.length);
-      ids.asTypedList(lineIds.length).setAll(0, lineIds);
-      return n.vectorsMapBook(handle, p, pl, bookId, ids, lineIds.length);
-    });
-    if (rc != 0) throw n.error();
-  }
-
-  /// Maps one book WITH Otzaria's text check: [rows] = the book's raw rows
-  /// (UTF-8 content, seforim.db `lineIndex, id` order, NULL as empty),
-  /// [rowLineIds] their line ids, [notes] its `line_note` rows (lineIndex,
-  /// noteIndex order). Records whose recomputed chunk key fails are dropped
-  /// and counted. [chunkingIdentity] 0 = the set's (a single `.oxv` needs the
-  /// model's).
-  VectorBookVerify mapVectorBookRows(String name, int bookId, List<int> rowLineIds, List<Uint8List> rows,
-      [List<VectorBookNote> notes = const [], int chunkingIdentity = 0]) {
-    if (rows.length != rowLineIds.length) {
-      throw ArgumentError('rows and rowLineIds differ in length');
-    }
-    final n = SeforimNative.instance;
-    final text = using((al) {
-      final (p, pl) = utf8Native(name, al);
-      final ids = al<Uint64>(rowLineIds.isEmpty ? 1 : rowLineIds.length);
-      ids.asTypedList(rowLineIds.length).setAll(0, rowLineIds);
-      final offsets = al<Uint64>(rows.length + 1);
-      final off = offsets.asTypedList(rows.length + 1);
-      var total = 0;
-      for (var i = 0; i < rows.length; i++) {
-        off[i] = total;
-        total += rows[i].length;
-      }
-      off[rows.length] = total;
-      final content = al<Uint8>(total == 0 ? 1 : total);
-      final c = content.asTypedList(total);
-      for (var i = 0; i < rows.length; i++) {
-        c.setAll(off[i], rows[i]);
-      }
-      final (j, jl) = utf8Native(jsonEncode([for (final t in notes) t.toJson()]), al);
-      return n.takeString(n.vectorsMapBookRows(
-          handle, p, pl, bookId, ids, rowLineIds.length, content, total, offsets, j, jl, chunkingIdentity));
-    });
-    return VectorBookVerify.fromJson(jsonDecode(text) as Map<String, dynamic>);
-  }
-
-  /// Maps several books at once (each as [mapVectorBook]); [replace] drops
-  /// every book mapped before.
-  void setVectorMapping(List<OxvBookMap> books, {bool replace = false}) {
-    final n = SeforimNative.instance;
-    final rc = using((al) {
-      final (j, jl) = utf8Native(jsonEncode([for (final b in books) b.toJson()]), al);
-      return n.vectorsSetMapping(handle, j, jl, replace ? 1 : 0);
-    });
+    final rc = using((al) => packRows(al, [for (final r in rows) r.lineId], [for (final r in rows) r.raw], rowNotes(rows),
+        (ids, count, content, total, offsets, j, jl) => n.vectorsAddRows(handle, ids, count, content, total, offsets, j, jl)));
     if (rc != 0) throw n.error();
   }
 
@@ -652,8 +646,23 @@ extension SemanticIndex on SeforimIndex {
   }
 
   /// The k lines closest to [query] (Otzaria's query model): an exact scan
-  /// of every live vector of the set (or the filter's books).
+  /// of every live vector of the set (or the filter's books). [rows] reads the
+  /// host rows a window check needs (without it such a search throws).
   SemanticResult semanticSearch(Float32List query,
+      [SemanticOptions options = const SemanticOptions(),
+      SearchCancelToken? cancel,
+      int? cancelAddress,
+      List<SemanticRow> Function(List<int> lineIds)? rows]) {
+    while (true) {
+      final r = semanticSearchStep(query, options, cancel, cancelAddress);
+      if (r.needRows.isEmpty) return r;
+      if (rows == null) throw StateError('the semantic search needs host rows: pass rows');
+      addSemanticRows(rows(r.needRows));
+    }
+  }
+
+  /// One step of [semanticSearch]: its result, or [SemanticResult.needRows].
+  SemanticResult semanticSearchStep(Float32List query,
       [SemanticOptions options = const SemanticOptions(), SearchCancelToken? cancel, int? cancelAddress]) {
     final n = SeforimNative.instance;
     final text = using((al) {

@@ -1,11 +1,13 @@
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
 import 'models.dart';
 import 'native.dart';
+import 'semantic.dart';
 import 'session.dart';
 
 /// Runs [body] with the CALLING OS thread in the OS background mode (low CPU,
@@ -519,6 +521,17 @@ final class IndexWriter implements Finalizable {
   /// delete the book, add its new lines, then ONE commit). Lines added after
   /// this call are kept.
   void deleteBook(int bookId) => _n.checkStatus(_n.writerDeleteBook(_h, bookId));
+
+  /// One book's semantic chunk keys (Otzaria's `chunkKey` column): its raw
+  /// rows ([rowLineIds] their line ids, `lineIndex, id` order, content as
+  /// stored) and its `line_note` rows ([VectorBookNote.lineIndex] = the
+  /// line's `lineIndex`). Call before the book's lines are added (build and
+  /// per-book update); the engine keys each line as Otzaria indexes it.
+  void setBookChunkKeys(List<int> rowLineIds, List<Uint8List> rows, [List<VectorBookNote> notes = const []]) {
+    if (rows.length != rowLineIds.length) throw ArgumentError('rows and rowLineIds differ in length');
+    _n.checkStatus(using((al) => packRows(al, rowLineIds, rows, [for (final n in notes) n.toJson()],
+        (ids, count, content, total, offsets, j, jl) => _n.writerBookChunkKeys(_h, ids, count, content, total, offsets, j, jl))));
+  }
 
   /// Adds or replaces the user document [key] (a user index's writer only;
   /// issue #44). Visible after [commit], which writes the documents list

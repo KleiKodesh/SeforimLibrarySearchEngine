@@ -87,6 +87,13 @@ pub struct LineFields {
     /// The host's section id (same-section scope); absent on a line = a
     /// section of its own.
     pub section_id: Option<Field>,
+    /// Each line's semantic chunk keys (Otzaria's `chunkKey` column, issue
+    /// #18): one value per Otzaria line of the row (a row holding a newline
+    /// is several), the production key's first 64 bits or 0 for a line the
+    /// recipe does not embed. Set per book by
+    /// [`LineWriter::set_book_chunk_keys`]; read by the semantic resolver.
+    /// None: an index built before the field existed.
+    pub chunk_key: Option<Field>,
     /// A user index only ([`LineIndex::create_user`]): the stored line text
     /// of its documents (no database holds them). Added after every other
     /// field, so a user index's segments search together with a library's.
@@ -138,6 +145,7 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
     let line_last = b.add_u64_field("line_last", FAST);
     let line_flags = b.add_u64_field("line_flags", FAST);
     let section_id = b.add_u64_field("section_id", FAST);
+    let chunk_key = b.add_u64_field("chunk_key", FAST);
     (
         b.build(),
         LineFields {
@@ -150,6 +158,7 @@ fn line_schema(options: IndexOptions) -> (Schema, LineFields) {
             line_last: Some(line_last),
             line_flags: Some(line_flags),
             section_id: Some(section_id),
+            chunk_key: Some(chunk_key),
             doc_text: None,
         },
     )
@@ -333,6 +342,7 @@ impl LineIndex {
         fields.line_last = schema.get_field("line_last").ok();
         fields.line_flags = schema.get_field("line_flags").ok();
         fields.section_id = schema.get_field("section_id").ok();
+        fields.chunk_key = schema.get_field("chunk_key").ok();
         fields.doc_text = schema.get_field("doc_text").ok();
         let index = Self::wrap(index, fields, options, dir)?;
         // issue #29: an update's merge that did not finish (the process
@@ -756,6 +766,8 @@ impl WriterParts {
             fm: self.fm.clone(),
             dir: self.dir.clone(),
             docs: None,
+            chunk_keys: Default::default(),
+            chunk_keys_set: false,
         };
         // files a previous merge could not delete (still mapped then)
         writer.collect_garbage();
@@ -782,6 +794,8 @@ impl WriterParts {
             fm: self.fm.clone(),
             dir: self.dir.clone(),
             docs: None,
+            chunk_keys: Default::default(),
+            chunk_keys_set: false,
         };
         writer.collect_garbage();
         Ok(writer)
@@ -806,7 +820,16 @@ pub struct LineWriter {
     /// The documents registry with this writer's queued changes (a user
     /// index; loaded on the first document call, written by the commit).
     docs: Option<crate::user_docs::Registry>,
+    /// Chunk keys set for lines not added yet, by line id
+    /// ([`Self::set_book_chunk_keys`]).
+    chunk_keys: std::collections::HashMap<u64, Vec<u64>>,
+    /// Keys were set: the commit records the recipe ([`CHUNK_KEYS_FILE`]).
+    chunk_keys_set: bool,
 }
+
+/// Where the recipe of the `chunk_key` column is recorded (Otzaria's index
+/// metadata `chunk_key_*`): `{"identity": <the production chunking's identity>}`.
+pub const CHUNK_KEYS_FILE: &str = "chunk_keys.json";
 
 /// The index's one reader (issue #22), shared by the index and its writers.
 #[derive(Clone)]
@@ -907,6 +930,11 @@ impl LineWriter {
         if let (Some(field), Some(section)) = (f.section_id, line.section_id) {
             document.add_u64(field, section);
         }
+        if let (Some(field), Some(keys)) = (f.chunk_key, self.chunk_keys.remove(&line.line_id)) {
+            for key in keys {
+                document.add_u64(field, key);
+            }
+        }
         if let (Some(field), Some(text)) = (f.doc_text, stored) {
             document.add_text(field, text);
         }
@@ -971,6 +999,32 @@ impl LineWriter {
         Ok(gone.len())
     }
 
+    /// One book's semantic chunk keys (Otzaria's `add_text_book_impl` keys,
+    /// semantic_keys.rs `column_values`), from its raw rows (`lineIndex, id`
+    /// order, `row_line_ids[i]` the line id of row `i`) and its `line_note`
+    /// rows: the book's lines as Otzaria indexes them (a row holding a newline
+    /// is several), each keyed by the production recipe. Call before the
+    /// book's lines are added; each line takes its row's values.
+    pub fn set_book_chunk_keys(&mut self, row_line_ids: &[u64], rows: &[&[u8]], notes: &[seforim_vectors::chunker::BookNote]) -> Result<()> {
+        if self.fields.chunk_key.is_none() {
+            return Err(crate::Error::Unsupported("the index has no chunk_key column: rebuild it".into()));
+        }
+        if row_line_ids.len() != rows.len() {
+            return Err(crate::Error::Unsupported("one line id per row".into()));
+        }
+        let values = seforim_vectors::chunker::book_column_values(rows, notes);
+        self.chunk_keys.extend(row_line_ids.iter().copied().zip(values));
+        self.chunk_keys_set = true;
+        Ok(())
+    }
+
+    /// TEST ONLY: a line's column values as given (a test set's synthetic keys).
+    #[cfg(test)]
+    pub(crate) fn test_chunk_keys(&mut self, line_id: u64, values: Vec<u64>) {
+        self.chunk_keys.insert(line_id, values);
+        self.chunk_keys_set = true;
+    }
+
     /// Queues the deletion of every doc with this line id. An update is a
     /// delete followed by an add of the new version.
     pub fn delete(&mut self, line_id: u64) {
@@ -1012,6 +1066,12 @@ impl LineWriter {
             prepared.set_payload(p);
         }
         prepared.commit()?;
+        // keys of lines never added are not carried past the commit
+        self.chunk_keys.clear();
+        if self.chunk_keys_set {
+            let identity = seforim_vectors::chunker::ChunkerConfig::production().identity();
+            fs::write(self.dir.join(CHUNK_KEYS_FILE), format!("{{\"identity\":{identity}}}"))?;
+        }
         // committed: the next document call reloads the registry
         self.docs = None;
         self.reader.after_write();

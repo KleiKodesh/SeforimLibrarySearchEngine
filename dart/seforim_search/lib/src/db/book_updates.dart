@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import '../../seforim_search.dart';
 
+import 'index_builder.dart';
 import 'note_ids.dart';
 import 'data_source.dart';
 
@@ -192,6 +193,7 @@ BookUpdateReport updateChangedBooks(SeforimIndex index, SeforimDataSource db,
         for (final id in [book, notesBookId(book)]) {
           final start = first[id];
           if (start == null) continue;
+          setChunkKeys(w, db, id);
           var position = start;
           final batch = <LineDocument>[];
           for (final line in db.bookLines(id)) {

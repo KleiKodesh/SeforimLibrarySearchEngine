@@ -94,7 +94,7 @@ pub extern "C" fn se_version() -> *const c_char {
 /// value they were built for (`NativeAbi.Expected` / `seforimAbiVersion`) and
 /// refuse to load a library with another value. `tools/release/check_sync.py`
 /// fails CI when the three disagree.
-pub const SE_ABI_VERSION: u32 = 31; // 31: se_vectors_coverage_add_book_rows (a coverage book from its raw rows + notes, Otzaria semantic_coverage), se_passage_window_texts (a semantic hit's embedded window text, Otzaria embedded_window_texts), se_vectors_book_lines (a book's lines and heading-count sections as Otzaria indexes them), live keys for compaction (se_live_keys_open / _add_book_rows / _free, se_vectors_compact takes `live`: Otzaria's live_library_version re-anchoring), issue #18; 30: search word option `fuzzy_distance` (0..=2, 0 = Otzaria's distance-0 fuzzy word), hybrid `fuzzy_max_distance` 0 accepted (Otzaria's smart search; several words on an index without positions: the adjacency boost from the line texts); 29: hybrid session options `retrieval`, `lexical_mode`, `fuzzy_max_distance`, `match_nikud`, `match_teamim`; page fields `lexical_truncated`, `total_count`, `counts_are_exact`, `requested_mode`, `executed_mode`, `semantic_available`, `fallback_reason`, `fallback_kind`, `candidate_window_truncated`, `stale_dropped`; hit fields `matched_window`, `section_id`; no vector set = Otzaria's lexical fallback; se_hybrid_window (otzaria_search_engine 7.2.0 search_semantic port, issue #18); 28: se_vectors_coverage_add_book requires one section per line, a passage target's missing section means no context window (Otzaria context_window); 27: semantic passage highlights (se_passage_plan, se_passage_mark), vector set directory info and coverage (se_vectors_dir_info, se_vectors_coverage_open / _add_book / _result / _free; vector install error kind `missing`), otzaria_search_engine 7.2.0 port (issue #18); 26: search request fuzzy group field `exact_quotes` (default off: Otzaria's quote-transparent fuzzy rule); 25: se_search_group_terms, index highlight matchers (se_matcher_open kinds index_highlight / index_fuzzy / index_smart, se_text_helper ops fuzzy_index_highlight_tokens / smart_index_highlight_words); 24: Otzaria's text / query helpers (se_text_helper, se_matcher_open / _find / _free, se_book_content_fingerprint, otzaria_search_engine 7.2.0 port); 23: se_vectors_compact (vector set compaction, Otzaria sidecar port, issue #18); 22: se_hybrid_open options `ranking` (Otzaria's RankingProfile) and `foundational_books` replace `fusion` / the penalties (issue #18); 21: Otzaria's hybrid search session (se_hybrid_open, se_hybrid_page, se_hybrid_add_texts, se_hybrid_close; se_search_fuse_semantic removed, issue #18); 20: se_vectors_install report `needs_compaction` (Otzaria sidecar compaction policy, issue #18); 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
+pub const SE_ABI_VERSION: u32 = 32; // 32: lazy semantic resolver like Otzaria (issue #18): index column `chunk_key` (se_writer_book_chunk_keys at build and per-book update), se_vectors_add_rows / se_hybrid_add_rows (`need_rows` of se_semantic_search / se_hybrid_page / se_hybrid_window), se_vectors_map_book / se_vectors_map_book_rows / se_vectors_set_mapping removed, info `books_mapped` = set books the index holds; 31: se_vectors_coverage_add_book_rows (a coverage book from its raw rows + notes, Otzaria semantic_coverage), se_passage_window_texts (a semantic hit's embedded window text, Otzaria embedded_window_texts), se_vectors_book_lines (a book's lines and heading-count sections as Otzaria indexes them), live keys for compaction (se_live_keys_open / _add_book_rows / _free, se_vectors_compact takes `live`: Otzaria's live_library_version re-anchoring), issue #18; 30: search word option `fuzzy_distance` (0..=2, 0 = Otzaria's distance-0 fuzzy word), hybrid `fuzzy_max_distance` 0 accepted (Otzaria's smart search; several words on an index without positions: the adjacency boost from the line texts); 29: hybrid session options `retrieval`, `lexical_mode`, `fuzzy_max_distance`, `match_nikud`, `match_teamim`; page fields `lexical_truncated`, `total_count`, `counts_are_exact`, `requested_mode`, `executed_mode`, `semantic_available`, `fallback_reason`, `fallback_kind`, `candidate_window_truncated`, `stale_dropped`; hit fields `matched_window`, `section_id`; no vector set = Otzaria's lexical fallback; se_hybrid_window (otzaria_search_engine 7.2.0 search_semantic port, issue #18); 28: se_vectors_coverage_add_book requires one section per line, a passage target's missing section means no context window (Otzaria context_window); 27: semantic passage highlights (se_passage_plan, se_passage_mark), vector set directory info and coverage (se_vectors_dir_info, se_vectors_coverage_open / _add_book / _result / _free; vector install error kind `missing`), otzaria_search_engine 7.2.0 port (issue #18); 26: search request fuzzy group field `exact_quotes` (default off: Otzaria's quote-transparent fuzzy rule); 25: se_search_group_terms, index highlight matchers (se_matcher_open kinds index_highlight / index_fuzzy / index_smart, se_text_helper ops fuzzy_index_highlight_tokens / smart_index_highlight_words); 24: Otzaria's text / query helpers (se_text_helper, se_matcher_open / _find / _free, se_book_content_fingerprint, otzaria_search_engine 7.2.0 port); 23: se_vectors_compact (vector set compaction, Otzaria sidecar port, issue #18); 22: se_hybrid_open options `ranking` (Otzaria's RankingProfile) and `foundational_books` replace `fusion` / the penalties (issue #18); 21: Otzaria's hybrid search session (se_hybrid_open, se_hybrid_page, se_hybrid_add_texts, se_hybrid_close; se_search_fuse_semantic removed, issue #18); 20: se_vectors_install report `needs_compaction` (Otzaria sidecar compaction policy, issue #18); 19: user index (se_user_index_create / _open / _handle / _close, se_index_attach_user, se_writer_put_document, se_writer_delete_documents, se_index_documents, se_index_line_sources, se_index_line_texts, se_user_id_base), search option `sources`, info `user_index` (issue #44); 18: se_oxv_verify and se_vectors_install take a cancel token, se_vectors_install the query model's model.json (issue #18); 17: se_oxv_verify, se_vectors_install (vector set install, Otzaria sidecar port, issue #18); 16: se_vectors_map_book_rows (Otzaria's text check + newline-row split, issue #18); 15: semantic search like Otzaria over its own vector set (se_vectors_open, se_vectors_close, se_vectors_map_book, se_vectors_set_mapping; se_vectors_info / se_semantic_search JSON changed; se_vectors_update and se_vectors_import_oxv removed, issue #18); 14: search options `position_ranges`, `decline_over_cap`, `substring`, info `declined` (issue G-K1); 13: Otzaria vector import (se_oxv_expand, se_oxv_info, se_vectors_import_oxv), several vectors (chunks) per line (se_vectors_update `chunks`, hit `chunk`, info `vectors`, option `chunk_penalty`, issue #18); 12: se_index_release_memory (issue #40); 11: semantic search (se_vectors_update, se_vectors_info, se_semantic_search, se_search_fuse_semantic)
 
 /// The C ABI version of this library (see [`SE_ABI_VERSION`]).
 #[no_mangle]
@@ -851,6 +851,44 @@ pub unsafe extern "C" fn se_writer_add_lines(
             writer.add(&doc).map_err(|e| fail(err(e)))?;
         }
         Ok(count as i64)
+    })
+}
+
+/// One book's semantic chunk keys (Otzaria's `chunkKey` column, issue #18):
+/// its raw rows (`lineIndex, id` order; content as stored, zstd decoded, NULL as
+/// empty) at `content[offsets[i] .. offsets[i + 1]]`, `row_line_ids[i]` the line
+/// id of row `i`, and its `line_note` rows as `notes_json` (may be empty;
+/// `line_index` = the row's `lineIndex`, as `se_vectors_coverage_add_book_rows`).
+/// The engine rebuilds the book's lines as Otzaria indexes them and keys each by
+/// the production recipe. Call before the book's lines are added (build and
+/// per-book update). 0, or -1 on error.
+///
+/// # Safety
+/// `writer` live; `row_line_ids` valid for `row_count`, `offsets` for
+/// `row_count + 1`, `content` for `content_len`; `notes_json` null with 0 or
+/// valid UTF-8.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn se_writer_book_chunk_keys(
+    writer: *mut LineWriter,
+    row_line_ids: *const u64,
+    row_count: usize,
+    content: *const u8,
+    content_len: usize,
+    offsets: *const u64,
+    notes_json: *const u8,
+    notes_len: usize,
+) -> i32 {
+    guard(-1, || {
+        let writer = writer.as_mut().ok_or("null writer")?;
+        let ids = slice_arg(row_line_ids, row_count, "row_line_ids")?;
+        for &l in ids {
+            check_id("line_id", l)?;
+        }
+        let rows = book_rows_arg(content, content_len, offsets, row_count)?;
+        let notes = book_notes_arg(notes_json, notes_len)?;
+        writer.set_book_chunk_keys(ids, &rows, &notes).map_err(err)?;
+        Ok(0)
     })
 }
 
@@ -2040,90 +2078,65 @@ pub unsafe extern "C" fn se_vectors_close(index: *const LineIndex) -> i32 {
     })
 }
 
-/// Maps one Otzaria book of the vectors to the host's lines (kept in
-/// memory): `name` (the book's name in the set, `id:<bookId>` for a library
-/// book), the host's `book_id`, and `line_ids[ordinal]` for each 0-based line
-/// ordinal (seforim.db rows of the book in `lineIndex, id` order). Replaces
-/// that book's mapping; `count` 0 removes it. A record the mapping does not
-/// cover is counted (`unmapped`), never guessed. 0, or -1 on error.
+/// Host rows a semantic resolution asked for (`need_rows` of
+/// `se_semantic_search`): `line_ids[i]`'s raw content (as stored, zstd decoded,
+/// NULL as empty) at `content[offsets[i] .. offsets[i + 1]]`, and the rows'
+/// `line_note` rows as `notes_json` (may be empty), `line_index` = the row's
+/// index in this call. Kept for the index's current generation; search again.
+/// Needs an open set. 0, or -1 on error.
 ///
 /// # Safety
-/// `index` live; `name` valid UTF-8 for `name_len`; `line_ids` valid for `count`.
-#[no_mangle]
-pub unsafe extern "C" fn se_vectors_map_book(
-    index: *const LineIndex,
-    name: *const u8,
-    name_len: usize,
-    book_id: u64,
-    line_ids: *const u64,
-    count: usize,
-) -> i32 {
-    guard(-1, || {
-        let index = index.as_ref().ok_or("null index")?;
-        let name = str_arg(name, name_len)?.to_string();
-        let lines = slice_arg(line_ids, count, "line_ids")?;
-        check_id("book_id", book_id)?;
-        for &l in lines {
-            check_id("line_id", l)?;
-        }
-        index.set_vector_mapping(vec![seforim_engine::semantic::OxvBookMap { name, book_id, line_ids: lines.to_vec() }], false);
-        Ok(0)
-    })
-}
-
-/// Maps one book WITH Otzaria's text check (issue #18): the book's raw rows
-/// (seforim.db `lineIndex, id` order; `line_content` decoded from zstd by the
-/// host, NULL as empty) given as `content` (all rows concatenated, `content_len`
-/// bytes) cut at `offsets[0..=row_count]` (u64, row `i` = `offsets[i]..offsets[i+1]`),
-/// `row_line_ids[i]` the line id of row `i`, and the book's `line_note` rows as
-/// `notes_json` (may be empty): `[{"line_index":N,"char_pos":N,"has_marker":bool,
-/// "body":".."}]` in `lineIndex, noteIndex` order. The engine rebuilds the book's
-/// lines exactly as Otzaria indexes them (a row holding a newline gives several
-/// lines, each mapped to its row's line id), checks every record of the book in
-/// the open set against the recomputed chunk key at the stored width (a moved line
-/// found within 16 lines and remapped) and drops the records that fail (counted).
-/// `chunking_identity` 0 = the set's (set.json); a single `.oxv` needs the query
-/// model's `chunking_identity` (model.json). Needs an open set. Returns JSON
-/// `{"lines":N,"records":N,"verified":N,"moved":N,"unverified":N}`, null on error.
-///
-/// # Safety
-/// `index` live; `name` valid UTF-8 for `name_len`; `row_line_ids` valid for
-/// `row_count`; `offsets` valid for `row_count + 1`; `content` for `content_len`;
-/// `notes_json` valid UTF-8 for `notes_len`.
+/// `index` live; `line_ids` valid for `count`, `offsets` for `count + 1`,
+/// `content` for `content_len`; `notes_json` null with 0 or valid UTF-8.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn se_vectors_map_book_rows(
+pub unsafe extern "C" fn se_vectors_add_rows(
     index: *const LineIndex,
-    name: *const u8,
-    name_len: usize,
-    book_id: u64,
-    row_line_ids: *const u64,
-    row_count: usize,
+    line_ids: *const u64,
+    count: usize,
     content: *const u8,
     content_len: usize,
     offsets: *const u64,
     notes_json: *const u8,
     notes_len: usize,
-    chunking_identity: u64,
-) -> *mut c_char {
-    guard(ptr::null_mut(), || {
+) -> i32 {
+    guard(-1, || {
         let index = index.as_ref().ok_or("null index")?;
-        let name = str_arg(name, name_len)?;
-        check_id("book_id", book_id)?;
-        let ids = slice_arg(row_line_ids, row_count, "row_line_ids")?;
-        for &l in ids {
-            check_id("line_id", l)?;
-        }
-        let rows = book_rows_arg(content, content_len, offsets, row_count)?;
-        let notes = book_notes_arg(notes_json, notes_len)?;
-        let identity = (chunking_identity != 0).then_some(chunking_identity);
-        let v = index.map_vector_book_rows(name, book_id, ids, &rows, &notes, identity).map_err(err)?;
-        Ok(out_string(serde_json::to_string(&v).map_err(err)?))
+        let rows = host_rows_arg(line_ids, count, content, content_len, offsets, notes_json, notes_len)?;
+        index.add_semantic_rows(rows).map_err(err)?;
+        Ok(0)
     })
 }
 
+/// Rows by line id with their own notes (`line_index` = the row's index in
+/// the call), as `se_vectors_add_rows` takes them.
+///
+/// # Safety
+/// As `se_vectors_add_rows`.
+unsafe fn host_rows_arg(
+    line_ids: *const u64,
+    count: usize,
+    content: *const u8,
+    content_len: usize,
+    offsets: *const u64,
+    notes_json: *const u8,
+    notes_len: usize,
+) -> Result<Vec<seforim_engine::semantic::HostRow>, String> {
+    let ids = slice_arg(line_ids, count, "line_ids")?;
+    let raw = book_rows_arg(content, content_len, offsets, count)?;
+    let notes = book_notes_arg(notes_json, notes_len)?;
+    let mut rows: Vec<seforim_engine::semantic::HostRow> =
+        ids.iter().zip(raw).map(|(&line_id, r)| seforim_engine::semantic::HostRow { line_id, raw: r.to_vec(), notes: Vec::new() }).collect();
+    for mut n in notes {
+        let row = usize::try_from(n.line_index).ok().filter(|&r| r < rows.len()).ok_or_else(|| format!("note line_index {} is not a row of the call", n.line_index))?;
+        n.line_index = 0;
+        rows[row].notes.push(n);
+    }
+    Ok(rows)
+}
+
 /// A book's raw rows: `content` (`content_len` bytes) cut at `offsets[0..=row_count]`
-/// (row `i` = `offsets[i]..offsets[i+1]`), as `se_vectors_map_book_rows` takes them.
+/// (row `i` = `offsets[i]..offsets[i+1]`).
 ///
 /// # Safety
 /// `offsets` valid for `row_count + 1`; `content` for `content_len`.
@@ -2142,7 +2155,7 @@ pub(crate) unsafe fn book_rows_arg<'a>(content: *const u8, content_len: usize, o
 }
 
 /// A book's `line_note` rows as JSON `[{"line_index":N,"char_pos":N,"has_marker":bool,
-/// "body":".."}]` (empty = none), as `se_vectors_map_book_rows` takes them.
+/// "body":".."}]` (empty = none).
 ///
 /// # Safety
 /// `notes_json` null with 0 or valid UTF-8 for `notes_len`.
@@ -2167,33 +2180,12 @@ pub(crate) unsafe fn book_notes_arg(notes_json: *const u8, notes_len: usize) -> 
         .collect())
 }
 
-/// Maps several books at once: `maps_json` `[{"name":"id:123","book_id":123,
-/// "line_ids":[..]}]` (as `se_vectors_map_book` each); `replace` != 0 drops
-/// every book mapped before. 0, or -1 on error.
-///
-/// # Safety
-/// `index` live; `maps_json` valid UTF-8 for `maps_len`.
-#[no_mangle]
-pub unsafe extern "C" fn se_vectors_set_mapping(index: *const LineIndex, maps_json: *const u8, maps_len: usize, replace: i32) -> i32 {
-    guard(-1, || {
-        let index = index.as_ref().ok_or("null index")?;
-        let maps: Vec<seforim_engine::semantic::OxvBookMap> = serde_json::from_str(str_arg(maps_json, maps_len)?).map_err(err)?;
-        for m in &maps {
-            check_id("book_id", m.book_id)?;
-            for &l in &m.line_ids {
-                check_id("line_id", l)?;
-            }
-        }
-        index.set_vector_mapping(maps, replace != 0);
-        Ok(0)
-    })
-}
-
 /// The open vector set: JSON `{"path","generation":N,"recovered_from_previous":bool,
 /// "dims":N,"codec":"i8-sym-vec"|"rot192-i8i4"|..,"library_version":N,
 /// "library_release_tag":"..","segments":[{"file","kind","from_library_version",
 /// "to_library_version","slots","slots_dead","foreign","foreign_unresolved","size"}],
-/// "slots_live":N,"slots_dead":N,"books":N,"books_mapped":N,"books_unmapped":N,
+/// "slots_live":N,"slots_dead":N,"books":N,"books_mapped":N (books of the set the
+/// index holds),"books_unmapped":N,
 /// "bytes_on_disk":N}`, or `null` (the JSON literal) when no set is open.
 /// Free with `se_string_free`; a null pointer on error.
 ///
@@ -2210,13 +2202,15 @@ pub unsafe extern "C" fn se_vectors_info(index: *const LineIndex) -> *mut c_char
 /// Semantic search like Otzaria: an exact scan of every live vector of the
 /// set against the host's query vector (`query`, `dims` floats from
 /// Otzaria's query model; normalized if not unit length) with Otzaria's
-/// integer kernels, the best `k` vectors mapped to the host's lines.
+/// integer kernels, the best `k` vectors resolved to live lines by the index's
+/// `chunk_key` column (Otzaria's resolver; nothing mapped at open).
 /// `options_json` (may be empty): `{"k":10,"books":[..]|null,"threads":0,
 /// "window_penalty":0.04,"alias_penalty":0.04}`: `books` = the lexical
 /// search's filter (scans those books' slot ranges); `threads` 0 = half the
 /// cores, at most 8. Returns JSON `{"hits":[{"line_id","book_id","score",
 /// "chunk"}],"vectors":N,"records":N,"unmapped":N,"scanned":N,"threads":N,
-/// "generation":N}`: one hit per line (its best occurrence: `chunk` 0 its
+/// "generation":N}` (plus `"need_rows":[line ids]` with no hits: the host rows a
+/// text check needs first, see `se_vectors_add_rows`): one hit per line (its best occurrence: `chunk` 0 its
 /// first window, n its n-th, bit 31 found through a neighbour's vector),
 /// best first; no set: no hits. Null on error. `token` null or live.
 ///
@@ -2304,7 +2298,9 @@ pub unsafe extern "C" fn se_hybrid_open(
 /// without positions, a query of several words: the phrase is scored from
 /// the line texts; or a profile whose text bonuses / duplicate penalty read
 /// the lines) `{"need_texts":[line ids]}`: give them with
-/// `se_hybrid_add_texts` and ask again. Null on error. `token` null or live.
+/// `se_hybrid_add_texts` and ask again, or `{"need_rows":[line ids]}` (the semantic
+/// resolver checks a window from the row's text): give them with
+/// `se_hybrid_add_rows` and ask again. Null on error. `token` null or live.
 ///
 /// # Safety
 /// `session` from `se_hybrid_open`; `token` null or live.
@@ -2315,6 +2311,7 @@ pub unsafe extern "C" fn se_hybrid_page(session: *mut HybridSession, offset: u32
         let json = match session.page(offset, limit, token.as_ref()).map_err(err)? {
             HybridStep::Page(p) => serde_json::to_string(&p).map_err(err)?,
             HybridStep::NeedTexts(ids) => serde_json::json!({ "need_texts": ids }).to_string(),
+            HybridStep::NeedRows(ids) => serde_json::json!({ "need_rows": ids }).to_string(),
         };
         Ok(out_string(json))
     })
@@ -2338,6 +2335,7 @@ pub unsafe extern "C" fn se_hybrid_window(session: *mut HybridSession, window: u
         let json = match session.window(window, token.as_ref()).map_err(err)? {
             HybridWindowStep::Window(w) => serde_json::to_string(&w).map_err(err)?,
             HybridWindowStep::NeedTexts(ids) => serde_json::json!({ "need_texts": ids }).to_string(),
+            HybridWindowStep::NeedRows(ids) => serde_json::json!({ "need_rows": ids }).to_string(),
         };
         Ok(out_string(json))
     })
@@ -2373,6 +2371,31 @@ pub unsafe extern "C" fn se_hybrid_add_texts(
             texts.push((ids[i], String::from_utf8_lossy(&bytes[a..b]).into_owned()));
         }
         session.add_texts(texts);
+        Ok(0)
+    })
+}
+
+/// Gives a hybrid session the rows it asked for (`need_rows`), as
+/// `se_vectors_add_rows` takes them. 0, or -1 on error.
+///
+/// # Safety
+/// `session` from `se_hybrid_open`; the rest as `se_vectors_add_rows`.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn se_hybrid_add_rows(
+    session: *mut HybridSession,
+    line_ids: *const u64,
+    count: usize,
+    content: *const u8,
+    content_len: usize,
+    offsets: *const u64,
+    notes_json: *const u8,
+    notes_len: usize,
+) -> i32 {
+    guard(-1, || {
+        let session = session.as_mut().ok_or("null session")?;
+        let rows = host_rows_arg(line_ids, count, content, content_len, offsets, notes_json, notes_len)?;
+        session.add_rows(rows).map_err(err)?;
         Ok(0)
     })
 }

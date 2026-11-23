@@ -32,7 +32,7 @@ class StaleResumeException extends SeforimEngineException {
 /// The C ABI version this package was built for: the native library's
 /// `se_abi_version()` must return exactly this (engine-ffi `SE_ABI_VERSION`;
 /// `tools/release/check_sync.py` keeps the two in sync).
-const int seforimAbiVersion = 31;
+const int seforimAbiVersion = 32;
 
 /// Thrown at load when the native library's C ABI version is not the one
 /// this package was built for.
@@ -216,16 +216,10 @@ final class SeforimNative {
         vectorsOpen = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, Size),
             Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int)>('se_vectors_open'),
         vectorsClose = lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>('se_vectors_close'),
-        vectorsMapBook = lib.lookupFunction<
-            Int32 Function(Pointer<Void>, Pointer<Uint8>, Size, Uint64, Pointer<Uint64>, Size),
-            int Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint64>, int)>('se_vectors_map_book'),
-        vectorsMapBookRows = lib.lookupFunction<
-            Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, Size, Uint64, Pointer<Uint64>, Size, Pointer<Uint8>, Size,
-                Pointer<Uint64>, Pointer<Uint8>, Size, Uint64),
-            Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint64>, int, Pointer<Uint8>, int,
-                Pointer<Uint64>, Pointer<Uint8>, int, int)>('se_vectors_map_book_rows'),
-        vectorsSetMapping = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint8>, Size, Int32),
-            int Function(Pointer<Void>, Pointer<Uint8>, int, int)>('se_vectors_set_mapping'),
+        vectorsAddRows = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint64>, Size, Pointer<Uint8>, Size, Pointer<Uint64>, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int)>('se_vectors_add_rows'),
+        writerBookChunkKeys = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint64>, Size, Pointer<Uint8>, Size, Pointer<Uint64>, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int)>('se_writer_book_chunk_keys'),
         oxvExpand = lib.lookupFunction<Int64 Function(Pointer<Uint8>, Size, Pointer<Uint8>, Size),
             int Function(Pointer<Uint8>, int, Pointer<Uint8>, int)>('se_oxv_expand'),
         oxvInfo = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Uint8>, Size),
@@ -287,6 +281,8 @@ final class SeforimNative {
         hybridAddTexts = lib.lookupFunction<
             Int32 Function(Pointer<Void>, Pointer<Uint64>, Size, Pointer<Uint8>, Size, Pointer<Uint64>),
             int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>)>('se_hybrid_add_texts'),
+        hybridAddRows = lib.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint64>, Size, Pointer<Uint8>, Size, Pointer<Uint64>, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int)>('se_hybrid_add_rows'),
         hybridClose = lib.lookupFunction<_CloseC, _CloseD>('se_hybrid_close'),
         lastErrorCancelled = lib.lookupFunction<Int32 Function(), int Function()>('se_last_error_cancelled'),
         cancelTokenNew = lib.lookupFunction<Pointer<Void> Function(), Pointer<Void> Function()>('se_cancel_token_new'),
@@ -399,10 +395,11 @@ final class SeforimNative {
   final int Function(Pointer<Void>, int, int) searchStreamPull;
   final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int) vectorsOpen;
   final int Function(Pointer<Void>) vectorsClose;
-  final int Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint64>, int) vectorsMapBook;
-  final Pointer<Utf8> Function(Pointer<Void>, Pointer<Uint8>, int, int, Pointer<Uint64>, int, Pointer<Uint8>, int,
-      Pointer<Uint64>, Pointer<Uint8>, int, int) vectorsMapBookRows;
-  final int Function(Pointer<Void>, Pointer<Uint8>, int, int) vectorsSetMapping;
+  /// `se_vectors_add_rows` (host rows for the semantic resolver, `need_rows`).
+  final int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int) vectorsAddRows;
+
+  /// `se_writer_book_chunk_keys` (a book's raw rows + notes before its lines).
+  final int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int) writerBookChunkKeys;
   final int Function(Pointer<Uint8>, int, Pointer<Uint8>, int) oxvExpand;
   final Pointer<Utf8> Function(Pointer<Uint8>, int) oxvInfo;
   final Pointer<Utf8> Function(Pointer<Uint8>, int) passagePlan;
@@ -429,6 +426,7 @@ final class SeforimNative {
   final Pointer<Utf8> Function(Pointer<Void>, int, int, Pointer<Void>) hybridPage;
   final Pointer<Utf8> Function(Pointer<Void>, int, Pointer<Void>) hybridWindow;
   final int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>) hybridAddTexts;
+  final int Function(Pointer<Void>, Pointer<Uint64>, int, Pointer<Uint8>, int, Pointer<Uint64>, Pointer<Uint8>, int) hybridAddRows;
   final void Function(Pointer<Void>) hybridClose;
   final int Function() lastErrorCancelled;
   final Pointer<Void> Function() cancelTokenNew;

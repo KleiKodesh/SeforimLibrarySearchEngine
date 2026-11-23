@@ -802,6 +802,7 @@ dependencies = [
  "fs4",
  "hebrew-fts",
  "libc",
+ "lru",
  "memmap2",
  "rayon",
  "seforim-vectors",

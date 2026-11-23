@@ -94,12 +94,15 @@ pub struct ScanPenalties {
     pub alias: f32,
 }
 
-/// One record of a hit's key (resolve.rs `RecordRef`, without the anchor).
+/// One record of a hit's key (resolve.rs `RecordRef`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordRef {
     pub book: String,
     pub hint: u32,
     pub window: u8,
+    /// An occurrence snapshot row's anchor: an alias row's own key (the short
+    /// line's), the row's key otherwise; None for a record read off a slot.
+    pub anchor: Option<crate::oxv::Key>,
 }
 
 /// One scanned vector (resolve.rs `VectorHit`).
@@ -583,11 +586,11 @@ fn records(set: &ScanSet<'_>, seg: u16, slot: u32, books: Option<&BookSet>, pena
     }
     let mut out = Vec::new();
     let window = segment.slot_window(slot);
-    out.push(RecordRef { book: segment.books()[segment.book_of_slot(slot)].name.clone(), hint: segment.hint(slot), window });
+    out.push(RecordRef { book: segment.books()[segment.book_of_slot(slot)].name.clone(), hint: segment.hint(slot), window, anchor: None });
     if segment.has_extras(slot) {
         for extra in segment.extras_of_slot(slot) {
             let (_, hint) = segment.extra(extra);
-            out.push(RecordRef { book: segment.books()[segment.book_of_extra(extra)].name.clone(), hint, window });
+            out.push(RecordRef { book: segment.books()[segment.book_of_extra(extra)].name.clone(), hint, window, anchor: None });
         }
     }
     let first = set.reverse_links.partition_point(|l| (l.target_seg, l.target_slot) < (seg, slot));
@@ -601,7 +604,7 @@ fn records(set: &ScanSet<'_>, seg: u16, slot: u32, books: Option<&BookSet>, pena
         }
         let (_, book, hint) = from.segment.foreign_record(link.foreign);
         if let Some(book) = from.segment.books().get(book as usize) {
-            out.push(RecordRef { book: book.name.clone(), hint, window });
+            out.push(RecordRef { book: book.name.clone(), hint, window, anchor: None });
         }
     }
     finish_records(&mut out, books, penalties);
@@ -623,7 +626,7 @@ fn snapshot_records(segment: &OxvFile, snapshot: &[crate::oxv::Occ], books: Opti
             let rank = (round, penalty_sort_key(row.window, penalties), row.window, row.book);
             let at = selected.partition_point(|(o, _)| *o < rank);
             if at < MAX_RECORDS_PER_HIT {
-                selected.insert(at, (rank, RecordRef { book: book.name.clone(), hint: row.hint, window: row.window }));
+                selected.insert(at, (rank, RecordRef { book: book.name.clone(), hint: row.hint, window: row.window, anchor: Some(row.anchor) }));
                 selected.truncate(MAX_RECORDS_PER_HIT);
             }
         }

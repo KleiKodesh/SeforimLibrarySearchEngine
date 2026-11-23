@@ -10,10 +10,9 @@
 //! query rotated once; scalar, AVX2 and NEON computing the same integers, so
 //! results are bit-identical on every CPU).
 //!
-//! The host keeps the line ids: it registers, per Otzaria book name
-//! (`id:<bookId>`), its book id and the line id of each line ordinal
-//! ([`set::LineMap`]); [`set::SegmentSet::search_lines`] maps the scanned
-//! vectors to lines, one result per line. The query vector comes from the
+//! [`set::SegmentSet::search_lines`] resolves the scanned vectors to live
+//! lines through a [`set::CandidateResolver`] (the engine's reads its index's
+//! `chunk_key` column), one result per line. The query vector comes from the
 //! host's model (Otzaria's query model); no model runs here.
 //!
 //! [`fusion`] is the hybrid ranking (lexical + semantic lines).

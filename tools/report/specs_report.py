@@ -18,7 +18,7 @@ _args = [a for i, a in enumerate(sys.argv[1:], 1) if a != "--prefix" and sys.arg
 SP = _args[0] if _args else os.path.join(ROOT, "bench-results")
 P = sys.argv[sys.argv.index("--prefix") + 1] if "--prefix" in sys.argv else ""
 OUT = os.path.join(ROOT, "FTS-SPECS-AND-COMPARISONS.md")
-INDEX_FORMAT = "tantivy17"   # C# TantivySeforimIndex.IndexFormatVersion
+INDEX_FORMAT = "tantivy18"   # C# TantivySeforimIndex.IndexFormatVersion
 FTSLIB_FORMAT = "fts14"       # KitveiHakodesh SeforimDbFtsIndexer.IndexFormatVersion
 MEASURED_FTSLIB = "fts14"     # FtsLib format of the runs in the results dir (= FTSLIB_FORMAT once rerun)
 # Results measured on an older index format, to rerun on the full DB (set to [] once rerun).
@@ -28,6 +28,8 @@ STALE = [
     "Otzaria hit counts, fuzzy rows: fuzzy words now take Otzaria's quote rule by default (the word as typed "
     "against a term as written or quote-free, the closer distance; off with `exact_quotes`); the rows need a "
     "rerun on the fullrun workflow (FtsLib parity unchanged: the FtsLib facade sets `ignore_quotes`).",
+    "Index format `tantivy18` (per-line `chunk_key` column, issue #18): every build row and parity / speed "
+    "result is from `tantivy17`; the builds need a rerun (search output unchanged).",
 ]
 # Snippets from index positions vs the text path (median of 15, first 4000 hits, 8 cores).
 SNIPPETS = [

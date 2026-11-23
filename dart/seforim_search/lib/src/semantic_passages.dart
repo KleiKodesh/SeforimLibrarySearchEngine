@@ -308,7 +308,7 @@ final class VectorCoverageCounter {
 
   /// One book from its raw rows (UTF-8 content as stored, seforim.db `lineIndex, id`
   /// order, NULL as empty) and its `line_note` rows (`lineIndex, noteIndex` order), as
-  /// [SemanticIndex.mapVectorBookRows] takes them: the engine rebuilds the lines as Otzaria
+  /// [IndexWriter.setBookChunkKeys] takes them: the engine rebuilds the lines as Otzaria
   /// indexes them (a row holding a newline gives several lines, heading-count sections).
   void addBookRows(List<Uint8List> rows, [List<VectorBookNote> notes = const []]) {
     final n = SeforimNative.instance;

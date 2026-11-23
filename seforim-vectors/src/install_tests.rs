@@ -2,8 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{compaction_wanted, error_kind, install, Kind, install_with, sha256_hex, verify_segment, InstallOptions};
-use crate::oxv::{self, OxvBookMap, OxvFile, TestBook, TestCodec, TestSegment, TestSlot};
-use crate::set::{self, LineMap, LineSearch, SegmentSet};
+use crate::oxv::{self, OxvFile, TestBook, TestCodec, TestSegment, TestSlot};
+use crate::set::{self, LineSearch, SegmentSet};
+use crate::tests::{search, HintMap};
 
 fn slot(key: u64, hint: u32, vector: Vec<f32>) -> TestSlot {
     TestSlot { key, hint, window: 0, vector }
@@ -115,16 +116,8 @@ fn segments(dir: &Path) -> (PathBuf, PathBuf) {
     (b, x)
 }
 
-fn mapping() -> LineMap {
-    let mut map = LineMap::default();
-    map.set(
-        vec![
-            OxvBookMap { name: "id:1".into(), book_id: 1, line_ids: vec![10, 11] },
-            OxvBookMap { name: "id:2".into(), book_id: 2, line_ids: vec![20, 21, 22, 23, 24, 25] },
-        ],
-        true,
-    );
-    map
+fn mapping() -> HintMap {
+    HintMap::new(&[("id:1", 1, vec![10, 11]), ("id:2", 2, vec![20, 21, 22, 23, 24, 25])])
 }
 
 #[test]
@@ -206,11 +199,11 @@ fn base_then_delta_installs_as_otzaria_and_the_reader_opens_it() {
     let map = mapping();
     for a in 0..6 {
         let req = LineSearch { k: 8, threads: 1, ..Default::default() };
-        let ours = set.search_lines(&axis(D, a), &map, &req, None).unwrap();
-        let theirs = hand.search_lines(&axis(D, a), &map, &req, None).unwrap();
+        let ours = search(&set, &axis(D, a), &map, &req).unwrap();
+        let theirs = search(&hand, &axis(D, a), &map, &req).unwrap();
         assert_eq!(ours.hits, theirs.hits, "axis {a}");
     }
-    let r = set.search_lines(&axis(D, 3), &map, &LineSearch { k: 2, threads: 1, ..Default::default() }, None).unwrap();
+    let r = search(&set, &axis(D, 3), &map, &LineSearch { k: 2, threads: 1, ..Default::default() }).unwrap();
     let mut lines: Vec<u64> = r.hits.iter().map(|h| h.line_id).collect();
     lines.sort();
     assert_eq!(lines, vec![20, 23]);
@@ -393,10 +386,10 @@ fn installed(tmp: &Path) -> PathBuf {
     dir
 }
 
-fn all_hits(dir: &Path, map: &LineMap) -> Vec<Vec<set::LineHit>> {
+fn all_hits(dir: &Path, map: &HintMap) -> Vec<Vec<set::LineHit>> {
     let set = SegmentSet::open(dir).unwrap();
     (0..D)
-        .map(|a| set.search_lines(&axis(D, a), map, &LineSearch { k: 16, threads: 1, ..Default::default() }, None).unwrap().hits)
+        .map(|a| search(&set, &axis(D, a), map, &LineSearch { k: 16, threads: 1, ..Default::default() }).unwrap().hits)
         .collect()
 }
 
@@ -489,10 +482,9 @@ fn compaction_reanchors_on_the_live_index_of_the_sets_version() {
     let forced = CompactionPolicy { force: true, ..Default::default() };
     let r = compact(&dir, &forced, Some(&Live), None).unwrap();
     assert_eq!((r.records_pruned, r.hints_refreshed), (1, 1));
-    let mut map = mapping();
-    map.set(vec![OxvBookMap { name: "id:2".into(), book_id: 2, line_ids: vec![20, 21, 22, 23, 24, 25, 26, 27] }], false);
+    let map = HintMap::new(&[("id:1", 1, vec![10, 11]), ("id:2", 2, vec![20, 21, 22, 23, 24, 25, 26, 27])]);
     let set = SegmentSet::open(&dir).unwrap();
-    let search = |a: usize| set.search_lines(&axis(D, a), &map, &LineSearch { k: 16, threads: 1, ..Default::default() }, None).unwrap().hits;
+    let search = |a: usize| crate::tests::search(&set, &axis(D, a), &map, &LineSearch { k: 16, threads: 1, ..Default::default() }).unwrap().hits;
     let top = |a: usize| -> Vec<u64> { search(a).iter().filter(|h| h.score > 0.5).map(|h| h.line_id).collect() };
     // key 4 re-anchored on line 7
     assert_eq!(top(3), vec![27]);

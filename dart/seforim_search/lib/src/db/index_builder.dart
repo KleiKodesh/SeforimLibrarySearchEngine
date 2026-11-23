@@ -72,6 +72,7 @@ void buildIndexFromDb(SeforimDataSource db, String dir,
         report(IndexBuildStage.indexing, 0, total);
         for (final bookId in books) {
           if (cancelled?.call() ?? false) throw const IndexBuildCancelled();
+          setChunkKeys(w, db, bookId);
           for (final line in db.bookLines(bookId)) {
             batch.add(LineDocument(
                 lineId: line.id,
@@ -90,7 +91,7 @@ void buildIndexFromDb(SeforimDataSource db, String dir,
           }
         }
         w.addAll(batch);
-        w.commit('{"lines":$position,"db":"${db.fingerprint()}","notes":${db.hasNotes ? 1 : 0}}');
+        w.commit('{"lines":$position,"db":"${db.fingerprint()}","notes":${db.hasNotes ? 1 : 0},"chunk_keys":1}');
       } catch (_) {
         w.rollback();
         rethrow;
@@ -115,6 +116,14 @@ void buildIndexFromDb(SeforimDataSource db, String dir,
   index.close();
 }
 
+/// A real book's semantic chunk keys ([IndexWriter.setBookChunkKeys]) before
+/// its lines; a notes book has none (its lines are keyed with their book's).
+void setChunkKeys(IndexWriter w, SeforimDataSource db, int bookId) {
+  if (isVirtualId(bookId)) return;
+  final b = db.bookChunkRows(bookId);
+  if (b.ids.isNotEmpty) w.setBookChunkKeys(b.ids, b.rows, b.notes);
+}
+
 /// Background-isolate index build / update from seforim.db for a host's
 /// first run and later DB changes.
 abstract final class SeforimIndexBuilder {
@@ -132,7 +141,8 @@ abstract final class SeforimIndexBuilder {
         if (options != null && (info.positions != options.positions || info.keepMarks != options.keepMarks)) {
           return true;
         }
-        return p == null || !p.contains('"lines"');
+        // built before the semantic chunk key column was written: rebuild
+        return p == null || !p.contains('"lines"') || !p.contains('"chunk_keys"');
       } finally {
         i.close();
       }

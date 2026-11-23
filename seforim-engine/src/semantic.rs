@@ -4,10 +4,10 @@
 //! `%APPDATA%\otzaria\vectors`; nothing is converted or built), and the
 //! hybrid fusion of a lexical search with a semantic one.
 //!
-//! The host supplies the query vector (Otzaria's query model) and the line
-//! mapping: per Otzaria book name (`id:<bookId>`), its book id and the line
-//! id of each line ordinal ([`LineIndex::set_vector_mapping`], kept in
-//! memory); the engine never runs a model. Three modes:
+//! The host supplies the query vector (Otzaria's query model); the engine
+//! never runs a model. The scanned vectors are resolved to live lines lazily,
+//! per search, by the index's `chunk_key` column (`semantic_resolver`, a port
+//! of Otzaria's `LiveResolver`): opening a set maps nothing. Three modes:
 //! - lexical only: the plain search, unchanged (the default);
 //! - semantic only: [`LineIndex::semantic_search`], the top k lines by cosine
 //!   similarity, filtered by books like the lexical search;
@@ -23,11 +23,13 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use seforim_vectors::fusion;
 pub use seforim_vectors::fusion::{FusionStrategy, QueryTypeAlphas, RankingProfile};
-use seforim_vectors::set::{LineMap, SegmentSet};
+use seforim_vectors::set::{Resolved, ScannedLines, SegmentSet};
 
-pub use seforim_vectors::oxv::{OxvBookMap, OxvInfo};
+pub use seforim_vectors::oxv::OxvInfo;
 pub use seforim_vectors::chunker::BookNote;
-pub use seforim_vectors::set::{BookVerify, LineSearch as SemanticOptions, SetInfo as VectorInfo, DEFAULT_WINDOW_PENALTY};
+pub use seforim_vectors::set::{LineSearch as SemanticOptions, SetInfo as VectorInfo, DEFAULT_WINDOW_PENALTY};
+pub use crate::semantic_resolver::HostRow;
+use crate::semantic_resolver::{LiveResolver, ResolverCache};
 pub use seforim_vectors::CHUNK_BORROWED;
 
 use crate::search::CancelToken;
@@ -35,7 +37,7 @@ use crate::{Error, LineIndex, Result};
 
 /// The vector set of an index: where it is (the host's directory or file),
 /// the open set (dropped by `release_memory`, reopened lazily) and the
-/// host's line mapping (kept in memory).
+/// resolver's caches (per generation of the index).
 #[derive(Default)]
 pub struct VectorCache {
     state: Mutex<VectorState>,
@@ -45,15 +47,23 @@ pub struct VectorCache {
 struct VectorState {
     path: Option<PathBuf>,
     set: Option<Arc<SegmentSet>>,
-    map: Arc<LineMap>,
+    resolver: Arc<Mutex<ResolverCache>>,
 }
 
 impl VectorCache {
-    /// Drops the open set (issue #40): its mappings are released when the
-    /// last search holding it ends; the next call reopens it. The host's
-    /// line mapping stays.
+    /// Drops the open set and the resolver's caches (issue #40): the set's
+    /// mappings are released when the last search holding it ends; the next
+    /// call reopens it.
     pub(crate) fn release(&self) {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).set = None;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.set = None;
+        state.resolver = Default::default();
+    }
+
+    /// TEST ONLY: passes over the whole column in the current generation.
+    #[cfg(test)]
+    pub(crate) fn resolver_passes(&self) -> u64 {
+        self.state.lock().unwrap().resolver.lock().unwrap().passes
     }
 }
 
@@ -78,7 +88,7 @@ pub struct SemanticResult {
     pub vectors: u64,
     /// Records of those vectors read (admitted books only, under a filter).
     pub records: u64,
-    /// Records the host's mapping does not cover (counted, never guessed).
+    /// Admitted records that resolved to no live line (counted, never guessed).
     pub unmapped: u64,
     /// Slots the scan visited.
     pub scanned: u64,
@@ -86,6 +96,10 @@ pub struct SemanticResult {
     pub threads: usize,
     /// The set generation searched (0: a single `.oxv`).
     pub generation: u64,
+    /// Not empty: no hits yet; the host rows (line ids) the resolver needs
+    /// first ([`LineIndex::add_semantic_rows`], then search again).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub need_rows: Vec<u64>,
 }
 
 
@@ -127,73 +141,73 @@ fn map_err(e: seforim_vectors::Error) -> Error {
 
 impl LineIndex {
     /// Opens Otzaria's vector set read-only (a set directory as Otzaria
-    /// installs it, e.g. `%APPDATA%\otzaria\vectors`, or one base `.oxv`)
-    /// and keeps it for [`semantic_search`](Self::semantic_search). Replaces
-    /// a set opened before; the line mapping stays.
+    /// installs it, or one base `.oxv`) and keeps it for
+    /// [`semantic_search`](Self::semantic_search). Replaces a set opened
+    /// before. Nothing is mapped (Otzaria's `open_semantic_artifact_impl`):
+    /// each search resolves its own hits.
     pub fn open_vectors(&self, path: &Path) -> Result<VectorInfo> {
         let set = Arc::new(SegmentSet::open(path).map_err(map_err)?);
+        let cache = self.vectors.state.lock().unwrap().resolver.clone();
+        let info = {
+            let resolver = self.live_resolver(&set, &cache)?;
+            let held = |name: &str| resolver.holds_book(name);
+            set.info(Some(&held))
+        };
         let mut state = self.vectors.state.lock().unwrap();
-        let info = set.info(Some(&state.map));
         state.path = Some(path.to_path_buf());
         state.set = Some(set);
         Ok(info)
     }
 
-    /// Forgets the vector set (the line mapping stays).
+    /// Forgets the vector set.
     pub fn close_vectors(&self) {
         let mut state = self.vectors.state.lock().unwrap();
         state.path = None;
         state.set = None;
     }
 
-    /// Registers the host's line mapping: per Otzaria book name, its book id
-    /// and the line id of each line ordinal (the vectors' hint). `replace`
-    /// drops every book mapped before; otherwise the books given are added
-    /// or replaced.
-    pub fn set_vector_mapping(&self, books: Vec<OxvBookMap>, replace: bool) {
-        let mut state = self.vectors.state.lock().unwrap();
-        Arc::make_mut(&mut state.map).set(books, replace);
+    /// The recipe the index's `chunk_key` column was written under (None:
+    /// no column, or keys never set).
+    fn chunk_key_identity(&self) -> Option<u64> {
+        self.fields.chunk_key?;
+        let text = std::fs::read_to_string(self.dir.join(crate::index::CHUNK_KEYS_FILE)).ok()?;
+        serde_json::from_str::<serde_json::Value>(&text).ok()?.get("identity")?.as_u64()
     }
 
-    /// Maps one book WITH the text check (Otzaria's resolver): the book's raw
-    /// rows (`lineIndex, id` order; `row_line_ids[i]` the line id of row `i`) and
-    /// its `line_note` rows rebuild its lines as Otzaria indexes them (a row
-    /// holding a newline is several lines of one line id), every record of the
-    /// book in the open set is checked against its recomputed chunk key (moved
-    /// lines found within 16 lines), and records that fail are dropped and
-    /// counted. `identity`: the query model's chunking identity (None: the
-    /// set's). Needs an open set.
-    pub fn map_vector_book_rows(
-        &self,
-        name: &str,
-        book_id: u64,
-        row_line_ids: &[u64],
-        rows: &[&[u8]],
-        notes: &[BookNote],
-        identity: Option<u64>,
-    ) -> Result<BookVerify> {
-        let Some((set, _)) = self.vector_set()? else {
+    /// The resolver over the current snapshot for `set` (its chunking, else
+    /// the production recipe).
+    fn live_resolver<'a>(&self, set: &SegmentSet, cache: &'a Mutex<ResolverCache>) -> Result<LiveResolver<'a>> {
+        LiveResolver::new(self.reader.searcher(), chunking_of(set)?, self.chunk_key_identity(), cache).map_err(map_err)
+    }
+
+    /// Host rows a semantic resolution asked for (`need_rows`): kept for the
+    /// index's current generation, then search again. Needs an open set.
+    pub fn add_semantic_rows(&self, rows: Vec<HostRow>) -> Result<()> {
+        let Some((set, cache)) = self.vector_set()? else {
             return Err(Error::Unsupported("open the vector set first".into()));
         };
-        let (map, verify) = set.map_book_rows(name, book_id, row_line_ids, rows, notes, identity).map_err(map_err)?;
-        self.set_vector_mapping(vec![map], false);
-        Ok(verify)
+        let generation = self.live_resolver(&set, &cache)?.generation();
+        cache.lock().unwrap_or_else(|e| e.into_inner()).add_rows(generation, rows);
+        Ok(())
     }
 
-    /// The open set and the mapping (reopened after `release_memory`).
-    fn vector_set(&self) -> Result<Option<(Arc<SegmentSet>, Arc<LineMap>)>> {
+    /// The open set and the resolver's caches (reopened after `release_memory`).
+    fn vector_set(&self) -> Result<Option<(Arc<SegmentSet>, Arc<Mutex<ResolverCache>>)>> {
         let mut state = self.vectors.state.lock().unwrap();
         if state.set.is_none() {
             if let Some(path) = state.path.clone() {
                 state.set = Some(Arc::new(SegmentSet::open(&path).map_err(map_err)?));
             }
         }
-        Ok(state.set.clone().map(|s| (s, state.map.clone())))
+        Ok(state.set.clone().map(|s| (s, state.resolver.clone())))
     }
 
-    /// The open set (None: none opened), with the mapping's counts.
+    /// The open set (None: none opened), with the books the index holds.
     pub fn vector_info(&self) -> Result<Option<VectorInfo>> {
-        Ok(self.vector_set()?.map(|(set, map)| set.info(Some(&map))))
+        let Some((set, cache)) = self.vector_set()? else { return Ok(None) };
+        let resolver = self.live_resolver(&set, &cache)?;
+        let held = |name: &str| resolver.holds_book(name);
+        Ok(Some(set.info(Some(&held))))
     }
 
     /// The top `options.k` lines for `query` (the host's query vector, the
@@ -201,7 +215,7 @@ impl LineIndex {
     /// exact scan over the set, the scanned vectors mapped to the host's
     /// line ids, one result per line. No set: an empty result.
     pub fn semantic_search(&self, query: &[f32], options: &SemanticOptions, cancel: Option<&CancelToken>) -> Result<SemanticResult> {
-        let Some((set, map)) = self.vector_set()? else { return Ok(SemanticResult::default()) };
+        let Some((set, cache)) = self.vector_set()? else { return Ok(SemanticResult::default()) };
         let norm = query.iter().map(|x| f64::from(*x) * f64::from(*x)).sum::<f64>().sqrt();
         let unit;
         let query = if (norm - 1.0).abs() > 1e-4 {
@@ -211,7 +225,11 @@ impl LineIndex {
             query
         };
         let flag = cancel.map(|c| c.flag());
-        let r = set.search_lines(query, &map, options, flag.as_deref()).map_err(map_err)?;
+        let resolver = self.live_resolver(&set, &cache)?;
+        let r = match set.search_lines(query, &resolver, options, flag.as_deref()).map_err(map_err)? {
+            Resolved::Done(r) => r,
+            Resolved::NeedRows(need_rows) => return Ok(SemanticResult { need_rows, generation: set.generation(), ..Default::default() }),
+        };
         Ok(SemanticResult {
             hits: r.hits.into_iter().map(|h| SemanticHit { line_id: h.line_id, book_id: h.book_id, score: h.score, chunk: h.chunk }).collect(),
             vectors: r.vectors,
@@ -220,7 +238,17 @@ impl LineIndex {
             scanned: r.scanned,
             threads: r.threads,
             generation: set.generation(),
+            need_rows: Vec::new(),
         })
+    }
+}
+
+/// The set's chunking recipe (else the production recipe).
+fn chunking_of(set: &SegmentSet) -> Result<seforim_vectors::chunker::ChunkerConfig> {
+    match set.chunking_identity() {
+        Some(id) => seforim_vectors::chunker::ChunkerConfig::by_identity(id)
+            .ok_or_else(|| Error::Unsupported(format!("chunking identity {id} is not a recipe this build implements"))),
+        None => Ok(seforim_vectors::chunker::ChunkerConfig::production()),
     }
 }
 
@@ -374,6 +402,9 @@ pub struct HybridWindow {
 pub enum HybridStep {
     Page(HybridPage),
     NeedTexts(Vec<u64>),
+    /// The semantic side's resolver needs these host rows first
+    /// ([`HybridSession::add_rows`], then ask again).
+    NeedRows(Vec<u64>),
 }
 
 /// A step of [`HybridSession::window`] (see [`HybridStep`]).
@@ -381,6 +412,13 @@ pub enum HybridStep {
 pub enum HybridWindowStep {
     Window(HybridWindow),
     NeedTexts(Vec<u64>),
+    NeedRows(Vec<u64>),
+}
+
+/// What a window waits for.
+enum Need {
+    Texts(Vec<u64>),
+    Rows(Vec<u64>),
 }
 
 /// The fuzzy lexical side: Otzaria's smart fuzzy query run once as the
@@ -415,7 +453,14 @@ pub struct HybridSession {
     source: crate::relevance::HybridSource,
     book_field: tantivy::schema::Field,
     position_field: tantivy::schema::Field,
-    set: Option<(Arc<SegmentSet>, Arc<LineMap>)>,
+    set: Option<(Arc<SegmentSet>, Arc<Mutex<ResolverCache>>)>,
+    /// The resolver's inputs: the snapshot the session searches, the recipe
+    /// and the column's recipe.
+    searcher: tantivy::Searcher,
+    chunking: seforim_vectors::chunker::ChunkerConfig,
+    column_identity: Option<u64>,
+    /// Scans kept while the resolver waits for host rows, by request.
+    scans: std::collections::HashMap<(usize, Option<Vec<u64>>), ScannedLines>,
     query: String,
     vector: Vec<f32>,
     options: HybridOptions,
@@ -491,6 +536,10 @@ impl LineIndex {
     pub fn hybrid_session(&self, query: &str, vector: &[f32], options: HybridOptions) -> Result<HybridSession> {
         options.ranking.validate().map_err(Error::Unsupported)?;
         let set = self.vector_set()?;
+        let chunking = match &set {
+            Some((s, _)) => chunking_of(s)?,
+            None => seforim_vectors::chunker::ChunkerConfig::production(),
+        };
         let vector = if vector.is_empty() || (vector.iter().map(|x| f64::from(*x) * f64::from(*x)).sum::<f64>().sqrt() - 1.0).abs() <= 1e-4 {
             vector.to_vec()
         } else {
@@ -523,6 +572,10 @@ impl LineIndex {
             book_field: self.fields.book_id,
             position_field: self.fields.position,
             set,
+            searcher: self.reader.searcher(),
+            chunking,
+            column_identity: self.chunk_key_identity(),
+            scans: Default::default(),
             query: query.to_string(),
             vector,
             options,
@@ -634,6 +687,33 @@ impl HybridSession {
         self.texts.extend(texts);
     }
 
+    /// Host rows the semantic resolver asked for ([`HybridStep::NeedRows`]).
+    pub fn add_rows(&mut self, rows: Vec<HostRow>) -> Result<()> {
+        let Some((_, cache)) = &self.set else { return Ok(()) };
+        let generation = LiveResolver::new(self.searcher.clone(), self.chunking.clone(), self.column_identity, cache).map_err(map_err)?.generation();
+        cache.lock().unwrap_or_else(|e| e.into_inner()).add_rows(generation, rows);
+        Ok(())
+    }
+
+    /// The semantic side's lines for `opts` (the scan kept until it resolves).
+    fn semantic_lines(&mut self, opts: &SemanticOptions, cancel: Option<&CancelToken>) -> std::result::Result<std::result::Result<seforim_vectors::set::LineResult, Vec<u64>>, seforim_vectors::Error> {
+        let (set, cache) = self.set.clone().expect("a set");
+        let resolver = LiveResolver::new(self.searcher.clone(), self.chunking.clone(), self.column_identity, &cache)?;
+        let flag = cancel.map(|c| c.flag());
+        let key = (opts.k, opts.books.clone());
+        let scanned = match self.scans.remove(&key) {
+            Some(s) => s,
+            None => set.scan_lines(&self.vector, &resolver, opts, flag.as_deref())?,
+        };
+        match scanned.resolve(&resolver, opts, false, flag.as_deref())? {
+            Resolved::Done(r) => Ok(Ok(r)),
+            Resolved::NeedRows(rows) => {
+                self.scans.insert(key, scanned);
+                Ok(Err(rows))
+            }
+        }
+    }
+
     /// The results `offset .. offset + limit` (Otzaria's page), growing the
     /// window as needed.
     pub fn page(&mut self, offset: u32, limit: u32, cancel: Option<&CancelToken>) -> Result<HybridStep> {
@@ -649,7 +729,8 @@ impl HybridSession {
             let window = requested.min(u64::from(MAX_HYBRID_WINDOW)) as u32;
             let raw = match self.expand(window, cancel)? {
                 Ok(raw) => raw,
-                Err(need) => return Ok(HybridStep::NeedTexts(need)),
+                Err(Need::Texts(need)) => return Ok(HybridStep::NeedTexts(need)),
+                Err(Need::Rows(need)) => return Ok(HybridStep::NeedRows(need)),
             };
             if requested > u64::from(MAX_HYBRID_WINDOW) {
                 self.capped_request = Some(requested);
@@ -715,7 +796,8 @@ impl HybridSession {
         }
         let raw = match self.expand(window, cancel)? {
             Ok(raw) => raw,
-            Err(need) => return Ok(HybridWindowStep::NeedTexts(need)),
+            Err(Need::Texts(need)) => return Ok(HybridWindowStep::NeedTexts(need)),
+            Err(Need::Rows(need)) => return Ok(HybridWindowStep::NeedRows(need)),
         };
         if capped {
             self.capped_request = Some(u64::from(asked));
@@ -930,7 +1012,7 @@ impl HybridSession {
     /// One window fused (otzaria_search_engine `expand_semantic_session` +
     /// otzaria-semantic-search `HybridCoordinator::prepare_with` / `fuse`, with
     /// `limit = window`, offset 0); Err = texts needed.
-    fn expand(&mut self, window: u32, cancel: Option<&CancelToken>) -> Result<std::result::Result<RawWindow, Vec<u64>>> {
+    fn expand(&mut self, window: u32, cancel: Option<&CancelToken>) -> Result<std::result::Result<RawWindow, Need>> {
         let profile = self.options.ranking.clone();
         let requested = self.options.retrieval;
         let books = self.options.books.clone();
@@ -942,13 +1024,13 @@ impl HybridSession {
             } else {
                 match self.lexical_window(1)? {
                     Ok((_, total, truncated)) => (Vec::new(), Some((total, truncated))),
-                    Err(need) => return Ok(Err(need)),
+                    Err(need) => return Ok(Err(Need::Texts(need))),
                 }
             }
         } else {
             match self.lexical_window(window as usize)? {
                 Ok((c, total, truncated)) => (c, Some((total, truncated))),
-                Err(need) => return Ok(Err(need)),
+                Err(need) => return Ok(Err(Need::Texts(need))),
             }
         };
         let lexical_done = requested == RetrievalMode::SemanticOnly || candidates.len() < window as usize;
@@ -961,11 +1043,10 @@ impl HybridSession {
         let mut semantic_hits = 0usize;
         let skip_for_exact = requested == RetrievalMode::Hybrid && self.alpha >= 1.0;
         if requested != RetrievalMode::LexicalOnly && !skip_for_exact {
-            if let Some((set, map)) = &self.set {
+            if self.set.is_some() {
                 if self.vector.is_empty() {
                     failure = Some("no query vector was given".to_string());
                 } else {
-                    let flag = cancel.map(|c| c.flag());
                     let opts = SemanticOptions {
                         k: top_k,
                         books: self.options.books.clone(),
@@ -973,11 +1054,12 @@ impl HybridSession {
                         window_penalty: profile.window_penalty,
                         alias_penalty: profile.alias_penalty,
                     };
-                    match set.search_lines_all(&self.vector, map, &opts, flag.as_deref()) {
+                    match self.semantic_lines(&opts, cancel) {
                         Err(seforim_vectors::Error::Cancelled) => return Err(Error::Cancelled),
                         // degraded, not failed: the lexical results are served
                         Err(e) => failure = Some(e.to_string()),
-                        Ok(r) => {
+                        Ok(Err(rows)) => return Ok(Err(Need::Rows(rows))),
+                        Ok(Ok(r)) => {
                             semantic_hits = r.vectors as usize;
                             semantic = r.hits.into_iter().map(|h| SemanticHit { line_id: h.line_id, book_id: h.book_id, score: h.score, chunk: h.chunk }).collect();
                             healthy = true;
@@ -991,7 +1073,10 @@ impl HybridSession {
                                     None => foundational.iter().copied().collect(),
                                 };
                                 let opts = SemanticOptions { k: base_k, books: Some(base_books), ..opts };
-                                let extras = set.search_lines_all(&self.vector, map, &opts, flag.as_deref()).map_err(map_err)?;
+                                let extras = match self.semantic_lines(&opts, cancel).map_err(map_err)? {
+                                    Ok(r) => r,
+                                    Err(rows) => return Ok(Err(Need::Rows(rows))),
+                                };
                                 let mut seen: std::collections::HashSet<u64> = semantic.iter().map(|h| h.line_id).collect();
                                 for h in extras.hits {
                                     if seen.insert(h.line_id) {
@@ -1018,7 +1103,7 @@ impl HybridSession {
             need.sort_unstable();
             need.dedup();
             if !need.is_empty() {
-                return Ok(Err(need));
+                return Ok(Err(Need::Texts(need)));
             }
         }
         // the semantic lines' sections; a line the index lacks is stale (Otzaria's hydration miss)
@@ -1177,38 +1262,101 @@ mod tests {
         v
     }
 
-    /// Lines 1..4 (books 10, 20) indexed; an Otzaria set (one base `.oxv`)
-    /// holding books `id:10` (line ordinals 0, 1) and `id:20` (0, 1, a
-    /// second window of ordinal 1 on axis 5).
+    /// Line 4 of [`index_with_vectors`]: a long line (two windows).
+    fn long_line() -> String {
+        let words: String = (0..120).map(|i| format!(" w{i:03}")).collect();
+        format!("alpha{words}")
+    }
+
+    /// The rows of [`index_with_vectors`] (book 10: lines 1, 2; book 20: 3, 4).
+    fn rows() -> Vec<(u64, String)> {
+        vec![(1, "alpha beta".into()), (2, "beta gamma".into()), (3, "gamma delta".into()), (4, long_line())]
+    }
+
+    /// The real chunk key column value of each line of `rows` (one book).
+    fn real_values(rows: &[&str]) -> Vec<u64> {
+        let raw: Vec<&[u8]> = rows.iter().map(|r| r.as_bytes()).collect();
+        seforim_vectors::chunker::book_column_values(&raw, &[]).concat()
+    }
+
+    /// The key of window `window` (past the first) of the line `text`.
+    fn window_value(text: &str, window: u8) -> u64 {
+        use seforim_vectors::chunker::{row_lines, Chunker, LineRef};
+        let lines = row_lines(text.as_bytes(), &[]);
+        let refs = [LineRef { text: &lines[0].0, section: 0 }];
+        Chunker::production().window_keys(&refs, 0).into_iter().find(|&(w, _)| w == window).unwrap().1.column_value()
+    }
+
+    /// Lines 1..4 (books 10, 20) indexed with their chunk keys; an Otzaria set
+    /// (one base `.oxv`) holding books `id:10` (line ordinals 0, 1) and `id:20`
+    /// (0, 1, a second window of ordinal 1 on axis 5), keyed by the lines' real
+    /// keys (production recipe).
     fn index_with_vectors(tmp: &Path) -> LineIndex {
+        use seforim_vectors::oxv::{TestBook, TestCodec, TestSegment, TestSlot};
         let index = LineIndex::create(&tmp.join("index"), IndexOptions::default()).unwrap();
-        let lines = [(1u64, 10u64, "alpha beta"), (2, 10, "beta gamma"), (3, 20, "gamma delta"), (4, 20, "alpha")];
+        let rows = rows();
+        let books = [(10u64, &rows[..2]), (20, &rows[2..])];
         {
             let mut w = index.writer(50_000_000, 1).unwrap();
-            for (i, &(id, book, text)) in lines.iter().enumerate() {
-                let doc = LineDoc { line_id: id, position: i as u64, book_id: book, text: text.into(), section_id: None, no_cross: false };
-                w.add(&doc).unwrap();
+            let mut position = 0;
+            for (book, lines) in books {
+                let ids: Vec<u64> = lines.iter().map(|l| l.0).collect();
+                let raw: Vec<&[u8]> = lines.iter().map(|l| l.1.as_bytes()).collect();
+                w.set_book_chunk_keys(&ids, &raw, &[]).unwrap();
+                for (id, text) in lines {
+                    w.add(&LineDoc { line_id: *id, position, book_id: book, text: text.clone(), section_id: None, no_cross: false }).unwrap();
+                    position += 1;
+                }
             }
             w.commit(None).unwrap();
         }
-        let oxv = tmp.join("lib.oxv");
-        seforim_vectors::oxv::write_test_segment(
-            &oxv,
-            8,
-            false,
-            "v1",
-            &[("id:10", vec![(0, 0, axis(1)), (1, 0, axis(2))]), ("id:20", vec![(0, 0, axis(3)), (1, 0, axis(4)), (1, 1, axis(5))])],
-        )
-        .unwrap();
-        index.open_vectors(&oxv).unwrap();
-        index.set_vector_mapping(
-            vec![
-                OxvBookMap { name: "id:10".into(), book_id: 10, line_ids: vec![1, 2] },
-                OxvBookMap { name: "id:20".into(), book_id: 20, line_ids: vec![3, 4] },
+        let v10 = real_values(&["alpha beta", "beta gamma"]);
+        let long = long_line();
+        let v20 = real_values(&["gamma delta", &long]);
+        let slot = |key: u64, hint: u32, window: u8, a: usize| TestSlot { key, hint, window, vector: axis(a) };
+        let seg = TestSegment {
+            dims: 8,
+            codec: TestCodec::F32,
+            delta: false,
+            from: 0,
+            to: 1,
+            tag: "v1".into(),
+            books: vec![
+                TestBook { name: "id:10".into(), slots: vec![slot(v10[0], 0, 0, 1), slot(v10[1], 1, 0, 2)], ..Default::default() },
+                TestBook {
+                    name: "id:20".into(),
+                    slots: vec![slot(v20[0], 0, 0, 3), slot(v20[1], 1, 0, 4), slot(window_value(&long, 1), 1, 1, 5)],
+                    ..Default::default()
+                },
             ],
-            true,
-        );
+            occurrences: vec![],
+            tombstones: vec![],
+        };
+        let oxv = tmp.join("lib.oxv");
+        seforim_vectors::oxv::write_segment(&oxv, &seg).unwrap();
+        index.open_vectors(&oxv).unwrap();
         index
+    }
+
+    /// A semantic search, the rows given from [`rows`] when the resolver asks.
+    fn sem(index: &LineIndex, q: &[f32], opts: &SemanticOptions) -> SemanticResult {
+        loop {
+            let r = index.semantic_search(q, opts, None).unwrap();
+            if r.need_rows.is_empty() {
+                return r;
+            }
+            index.add_semantic_rows(host_rows(&r.need_rows, &rows())).unwrap();
+        }
+    }
+
+    fn host_rows(ids: &[u64], rows: &[(u64, String)]) -> Vec<HostRow> {
+        let given: Vec<HostRow> = rows
+            .iter()
+            .filter(|(id, _)| ids.contains(id))
+            .map(|(id, t)| HostRow { line_id: *id, raw: t.as_bytes().to_vec(), notes: Vec::new() })
+            .collect();
+        assert_eq!(given.len(), ids.len(), "rows asked for unknown lines {ids:?}");
+        given
     }
 
     #[test]
@@ -1225,27 +1373,23 @@ mod tests {
         // the query is line 3's own vector (not unit length: normalized): line 3 first, score 1
         let mut q = axis(3);
         q[3] = 2.0;
-        let r = index.semantic_search(&q, &SemanticOptions { k: 2, ..Default::default() }, None).unwrap();
+        let r = sem(&index, &q, &SemanticOptions { k: 2, ..Default::default() });
         assert_eq!((r.hits[0].line_id, r.hits[0].book_id), (3, 20));
         assert!((r.hits[0].score - 1.0).abs() < 1e-5);
-        // a second window: 0.04 off, chunk 1
-        let r = index.semantic_search(&axis(5), &SemanticOptions { k: 1, ..Default::default() }, None).unwrap();
+        // a second window: its row asked for first (no column holds it), then 0.04 off, chunk 1
+        let first = index.semantic_search(&axis(5), &SemanticOptions { k: 1, ..Default::default() }, None).unwrap();
+        assert!(first.hits.is_empty() && first.need_rows.contains(&4), "{first:?}");
+        let r = sem(&index, &axis(5), &SemanticOptions { k: 1, ..Default::default() });
         assert_eq!((r.hits[0].line_id, r.hits[0].chunk), (4, 1));
         assert!((r.hits[0].score - 0.96).abs() < 1e-5);
         // book filter
         let opts = SemanticOptions { k: 4, books: Some(vec![10]), ..Default::default() };
-        let r = index.semantic_search(&axis(3), &opts, None).unwrap();
+        let r = sem(&index, &axis(3), &opts);
         assert!(r.hits.iter().all(|h| h.book_id == 10) && r.hits.len() == 2);
         // cancelled
         let token = CancelToken::new();
         token.cancel();
         assert!(matches!(index.semantic_search(&axis(3), &SemanticOptions::default(), Some(&token)), Err(Error::Cancelled)));
-        // an unmapped book's records are counted
-        index.set_vector_mapping(vec![OxvBookMap { name: "id:10".into(), book_id: 10, line_ids: vec![1, 2] }], true);
-        let r = index.semantic_search(&axis(3), &SemanticOptions { k: 1, ..Default::default() }, None).unwrap();
-        assert_eq!((r.hits.len(), r.unmapped), (0, 1));
-        index.set_vector_mapping(vec![OxvBookMap { name: "id:20".into(), book_id: 20, line_ids: vec![3, 4] }], false);
-
         // hybrid: the semantic-only line joins the lexical ones
         let balanced = HybridOptions { ranking: RankingProfile::balanced(), ..Default::default() };
         let mut h = index.hybrid_session("alpha", &axis(3), balanced).unwrap();
@@ -1294,6 +1438,11 @@ mod tests {
                     assert_eq!(given.len(), ids.len(), "texts asked for unknown lines {ids:?}");
                     s.add_texts(given);
                 }
+                HybridStep::NeedRows(ids) => {
+                    let mut rows: Vec<(u64, String)> = texts.iter().map(|(id, t)| (*id, t.to_string())).collect();
+                    rows.extend(super::tests::rows().into_iter().filter(|(id, _)| !texts.iter().any(|t| t.0 == *id)));
+                    s.add_rows(host_rows(&ids, &rows)).unwrap();
+                }
             }
         }
     }
@@ -1325,6 +1474,9 @@ mod tests {
             let mut w = index.writer(50_000_000, 1).unwrap();
             for (i, &(id, text)) in LINES.iter().enumerate() {
                 let book = if id == 6 { 2 } else { 1 };
+                if id == 6 {
+                    w.test_chunk_keys(6, vec![1]);
+                }
                 let doc = LineDoc { line_id: id, position: i as u64, book_id: book, text: text.into(), section_id: None, no_cross: false };
                 w.add(&doc).unwrap();
             }
@@ -1334,7 +1486,6 @@ mod tests {
         let oxv = tmp.path().join("vec.oxv");
         seforim_vectors::oxv::write_test_segment(&oxv, 8, false, "v1", &[("id:2", vec![(0, 0, axis(1))])]).unwrap();
         index.open_vectors(&oxv).unwrap();
-        index.set_vector_mapping(vec![OxvBookMap { name: "id:2".into(), book_id: 2, line_ids: vec![6] }], true);
         (tmp, index)
     }
 
@@ -1436,12 +1587,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let index = index_with_vectors(tmp.path());
         index.close_vectors();
-        // "alpha": lines 1 ("alpha beta") and 4 ("alpha"), line 4 first (shorter: higher BM25)
+        // "alpha": lines 1 ("alpha beta") and 4 (a long line), line 1 first (shorter: higher BM25)
         let mut s = index.hybrid_session("alpha", &axis(3), HybridOptions::default()).unwrap();
         let p0 = page(&mut s, 0, 1, &[]);
-        assert_eq!(p0.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), vec![4]);
+        assert_eq!(p0.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), vec![1]);
         let h = p0.hits[0];
-        assert_eq!((h.fused, h.lexical, h.semantic, h.source, h.position), (1.0, None, None, "lexical", Some(3)));
+        assert_eq!((h.fused, h.lexical, h.semantic, h.source, h.position), (1.0, None, None, "lexical", Some(0)));
         assert!(p0.more);
         let m = &p0.meta;
         assert_eq!((m.lexical_total, m.total_count, m.counts_are_exact, m.semantic_available), (2, 2, true, false));
@@ -1449,7 +1600,7 @@ mod tests {
         assert_eq!((m.fallback_kind, m.fallback_reason.as_deref()), (Some("not_configured"), Some(NOT_CONFIGURED)));
         // the rank is the page's: the second page's first result is 1 again
         let p1 = page(&mut s, 1, 1, &[]);
-        assert_eq!((p1.hits[0].line_id, p1.hits[0].fused, p1.more), (1, 1.0, false));
+        assert_eq!((p1.hits[0].line_id, p1.hits[0].fused, p1.more), (4, 1.0, false));
         // semantic only: nothing shown, the lexical side counted
         let p = page(&mut index.hybrid_session("alpha", &axis(3), opts(RetrievalMode::SemanticOnly)).unwrap(), 0, 10, &[]);
         assert!(p.hits.is_empty() && !p.more);
@@ -1501,7 +1652,7 @@ mod tests {
         assert_eq!(p.meta.fallback_reason, None);
         // lexical only: lines 1 and 4 alone, alpha 1, nothing semantic
         let p = page(&mut index.hybrid_session("alpha", &axis(3), opts(RetrievalMode::LexicalOnly)).unwrap(), 0, 10, &[]);
-        assert_eq!(p.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), vec![4, 1]);
+        assert_eq!(p.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), vec![1, 4]);
         // Otzaria's default RRF (k 60) over the lexical ranks alone
         for (rank, h) in p.hits.iter().enumerate() {
             assert!(h.source == "lexical" && h.lexical.is_some() && (h.fused - 1.0 / (61.0 + rank as f32)).abs() < 1e-7, "{h:?}");
@@ -1509,7 +1660,7 @@ mod tests {
         assert_eq!((p.meta.executed_mode, p.meta.semantic_available, p.meta.fallback_kind), (RetrievalMode::LexicalOnly, false, None));
         // no query vector with a set open: the semantic side failed, hybrid ran lexical only
         let p = page(&mut index.hybrid_session("alpha", &[], HybridOptions::default()).unwrap(), 0, 10, &[]);
-        assert_eq!(p.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), vec![4, 1]);
+        assert_eq!(p.hits.iter().map(|h| h.line_id).collect::<Vec<_>>(), vec![1, 4]);
         assert_eq!((p.meta.executed_mode, p.meta.fallback_kind), (RetrievalMode::LexicalOnly, Some("query_failed")));
         assert_eq!(p.meta.fallback_reason.as_deref(), Some("no query vector was given"));
     }
@@ -1523,7 +1674,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let index = index_with_vectors(tmp.path());
         // axis 5 is line 4's second window
-        let p = page(&mut index.hybrid_session("zzz", &axis(5), HybridOptions::default()).unwrap(), 0, 10, &[]);
+        let texts: Vec<(u64, String)> = rows();
+        let texts: Vec<(u64, &str)> = texts.iter().map(|(id, t)| (*id, t.as_str())).collect();
+        let p = page(&mut index.hybrid_session("zzz", &axis(5), HybridOptions::default()).unwrap(), 0, 10, &texts);
         let four = p.hits.iter().find(|h| h.line_id == 4).unwrap();
         assert_eq!((four.matched_window, four.source), (1, "semantic"));
         assert!(p.hits.iter().filter(|h| h.line_id != 4).all(|h| h.matched_window == 0));
@@ -1531,13 +1684,6 @@ mod tests {
         let j = serde_json::to_value(&p).unwrap();
         assert_eq!(j["executed_mode"], "hybrid");
         assert!(j["hits"][0].get("matched_window").is_some() && j.get("lexical_total").is_some());
-        // book 20's ordinal 1 mapped to line 99, not in the index: stale
-        index.set_vector_mapping(vec![OxvBookMap { name: "id:20".into(), book_id: 20, line_ids: vec![3, 99] }], false);
-        let p = page(&mut index.hybrid_session("zzz", &axis(4), HybridOptions::default()).unwrap(), 0, 10, &[]);
-        assert!(p.hits.iter().all(|h| h.line_id != 99));
-        assert_eq!(p.meta.stale_dropped, 1);
-        assert!(p.meta.fallback_reason.as_deref().unwrap().starts_with("dropped 1 stale semantic result(s)"));
-        assert_eq!(p.meta.fallback_kind, None, "a note has no kind");
         // a page that asks past the maximum window: capped at 10000, noted
         let p = page(&mut index.hybrid_session("alpha", &axis(3), HybridOptions::default()).unwrap(), 6000, 10, &[]);
         assert!(p.hits.is_empty() && p.meta.candidate_window_truncated && p.window == MAX_HYBRID_WINDOW);
@@ -1545,8 +1691,8 @@ mod tests {
         // window(): the fused window for a host that groups, stale lines left out
         let mut s = index.hybrid_session("alpha", &axis(4), HybridOptions::default()).unwrap();
         let HybridWindowStep::Window(w) = s.window(5, None).unwrap() else { panic!("texts") };
-        assert!(w.hits.len() <= 5 && w.semantic_done && w.hits.iter().all(|h| h.line_id != 99));
-        assert_eq!(w.meta.stale_dropped, 1);
+        assert!(w.hits.len() <= 5 && w.semantic_done);
+        assert_eq!(w.meta.stale_dropped, 0);
         assert_eq!(w.hits.iter().find(|h| h.line_id == 1).map(|h| h.section_id), Some(0));
     }
 
@@ -1647,6 +1793,7 @@ mod tests {
         let index = LineIndex::create(tmp.path(), IndexOptions::default()).unwrap();
         {
             let mut w = index.writer(50_000_000, 1).unwrap();
+            w.test_chunk_keys(1, vec![1]);
             for (i, &(id, text)) in lines.iter().enumerate() {
                 let doc = LineDoc { line_id: id, position: i as u64, book_id: 1, text: text.into(), section_id: None, no_cross: false };
                 w.add(&doc).unwrap();
@@ -1656,7 +1803,6 @@ mod tests {
         let oxv = tmp.path().join("vec.oxv");
         seforim_vectors::oxv::write_test_segment(&oxv, 8, false, "v1", &[("id:1", vec![(0, 0, axis(1))])]).unwrap();
         index.open_vectors(&oxv).unwrap();
-        index.set_vector_mapping(vec![OxvBookMap { name: "id:1".into(), book_id: 1, line_ids: vec![1] }], true);
 
         let field = index.fields.text;
         let term = |w: &str| Term::from_field_text(field, w);
@@ -1726,6 +1872,7 @@ mod tests {
         let index = LineIndex::create(tmp.path(), IndexOptions { keep_marks: true, ..IndexOptions::default() }).unwrap();
         {
             let mut w = index.writer(50_000_000, 1).unwrap();
+            w.test_chunk_keys(1, vec![1]);
             for (i, (id, text)) in lines.iter().enumerate() {
                 w.add(&LineDoc { line_id: *id, position: i as u64, book_id: 1, text: text.clone(), section_id: None, no_cross: false })
                     .unwrap();
@@ -1735,7 +1882,6 @@ mod tests {
         let oxv = tmp.path().join("vec.oxv");
         seforim_vectors::oxv::write_test_segment(&oxv, 8, false, "v1", &[("id:1", vec![(0, 0, axis(1))])]).unwrap();
         index.open_vectors(&oxv).unwrap();
-        index.set_vector_mapping(vec![OxvBookMap { name: "id:1".into(), book_id: 1, line_ids: vec![1] }], true);
         let ids = |q: &str, nikud: bool| -> Vec<u64> {
             let o = HybridOptions { match_nikud: nikud, ..lexonly() };
             let mut v: Vec<u64> = page(&mut index.hybrid_session(q, &[], o).unwrap(), 0, 10, &[]).hits.iter().map(|h| h.line_id).collect();
@@ -1763,6 +1909,10 @@ mod tests {
         {
             let mut w = index.writer(50_000_000, 1).unwrap();
             for i in 0..200u64 {
+                // book 1's ordinal o (line 1 + 4o) holds the test set's key o + 1
+                if i % 4 == 0 && i / 4 < 8 {
+                    w.test_chunk_keys(i + 1, vec![i / 4 + 1]);
+                }
                 let text = format!("alpha{} beta gamma{}", i % 7, i % 5);
                 w.add(&LineDoc { line_id: i + 1, position: i, book_id: 1 + i % 4, text, section_id: None, no_cross: false })
                     .unwrap();
@@ -1775,7 +1925,6 @@ mod tests {
         let recs: Vec<(u32, u32, Vec<f32>)> = (0..8u32).map(|i| (i, 0, axis(i as usize))).collect();
         seforim_vectors::oxv::write_test_segment(&oxv, 8, false, "v1", &[("id:1", recs)]).unwrap();
         index.open_vectors(&oxv).unwrap();
-        index.set_vector_mapping(vec![OxvBookMap { name: "id:1".into(), book_id: 1, line_ids: (1..=8).collect() }], true);
         let queries = ["*pha3", "beta~1", "/alpha[12]/", "/beta gamma[34]/", "alpha1 gamma2"];
         let ids = |index: &LineIndex, q: &str| -> Vec<u64> {
             let r = index.search_options(&SearchOptions { query: q.into(), user_regex: true, ..Default::default() }).unwrap();
@@ -1784,7 +1933,7 @@ mod tests {
         let before: Vec<Vec<u64>> = queries.iter().map(|q| ids(&index, q)).collect();
         assert!(before.iter().all(|h| !h.is_empty()), "{:?}", before.iter().map(|h| h.len()).collect::<Vec<_>>());
         let sem = index.semantic_search(&axis(3), &SemanticOptions::default(), None).unwrap();
-        assert_eq!(sem.hits[0].line_id, 4);
+        assert_eq!(sem.hits[0].line_id, 13);
         // a session open across the release keeps working
         let mut open = index.search_options(&SearchOptions { query: "*pha3".into(), ..Default::default() }).unwrap();
         index.release_memory().unwrap();

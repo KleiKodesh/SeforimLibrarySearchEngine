@@ -4,6 +4,9 @@
 // layer (one connection, its own sqlite library) by implementing
 // [SeforimDataSource]; package:seforim_search_sqlite is the ready-made one.
 import 'dart:async';
+import 'dart:typed_data';
+
+import '../semantic.dart';
 
 /// A line's book and line index ([SeforimDataSource.lineLocations]).
 typedef LineLocation = ({int bookId, int lineIndex});
@@ -77,6 +80,15 @@ abstract class SeforimDataSource {
 
   /// The DB holds footnotes (indexed as virtual notes books).
   bool get hasNotes;
+
+  /// Rows the semantic resolver asked for (`need_rows`), each as stored (zstd
+  /// decoded, a leading BOM kept) with its own `line_note` rows: read from
+  /// the host's own database (the engine never opens SQLite).
+  FutureOr<List<SemanticRow>> semanticRows(List<int> lineIds);
+
+  /// A real book's raw rows (`lineIndex, id` order) and its `line_note` rows
+  /// (lineIndex = the line's): what [IndexWriter.setBookChunkKeys] takes.
+  ({List<int> ids, List<Uint8List> rows, List<VectorBookNote> notes}) bookChunkRows(int bookId);
 
   /// Throws, naming the id, when a line / book id or a note does not fit the
   /// virtual id scheme (note_ids.dart `checkNoteIdLimits`).

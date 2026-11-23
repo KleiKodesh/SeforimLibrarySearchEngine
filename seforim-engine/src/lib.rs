@@ -32,6 +32,7 @@ pub(crate) mod positioned;
 pub(crate) mod stream;
 pub mod search;
 pub mod semantic;
+pub mod semantic_resolver;
 pub mod user_docs;
 
 pub use fm_index::FmIndex;

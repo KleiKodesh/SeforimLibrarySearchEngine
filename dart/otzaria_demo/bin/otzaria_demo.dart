@@ -15,12 +15,9 @@ const _usage = '''
 otzaria_demo build  [--db path] [--index dir] [--max-lines N] [--max-books N] [--keep-marks] [--no-positions]
 otzaria_demo semantic-search <index dir> --vectors <set dir | file.oxv> (--line N | --lines a,b,c | --query text)
                     [--k 10] [--books a,b] [--threads N] [--hybrid] [--repeat N] [--ort onnxruntime.dll] [--model dir]
-                    [--no-verify] [--chunking-identity N] (default: Otzaria's text check of every book; identity from model.json, else the set's)
                     [--query-file utf8.txt] (instead of --query: shells can mangle Hebrew arguments)
-                    Otzaria's vector set opened read-only, its id:N books mapped onto seforim.db line ids;
+                    Otzaria's vector set opened read-only, hits resolved lazily by the index's chunk keys;
                     query embedded with Otzaria's Meivin model (default model dir: Otzaria's install)
-otzaria_demo semantic-verify <scratch index dir> --vectors <set dir | file.oxv> [--chunking-identity N] [--report 30]
-                    Otzaria's text check over every book of the set; the books with the most unverified records
 otzaria_demo search [--db path] [--index dir] [options] <query>
 otzaria_demo update [--db path] [--index dir] [--wait] [--watch]
                     per-book update by book.contentHash, then the background merge
@@ -117,9 +114,6 @@ Future<void> main(List<String> args) async {
           stderr.writeln('${db.unreadableLineIds.length} rows unreadable (line ids: $ids'
               '${db.unreadableLineIds.length > 20 ? ', ...' : ''})');
         }
-      case 'semantic-verify' when rest.length == 1 && o['vectors'] != null:
-        semanticVerifyCommand(db, rest[0], o['vectors']!,
-            chunkingIdentity: _int(o, 'chunking-identity') ?? 0, report: _int(o, 'report') ?? 30);
       case 'semantic-search' when rest.length == 1 && o['vectors'] != null:
         final model = o['model'] ?? defaultMeivinDir();
         final ort = o['ort'] ?? Platform.environment['OTZARIA_ONNX_RUNTIME'];
@@ -138,9 +132,7 @@ Future<void> main(List<String> args) async {
             books: ints(o['books']),
             threads: _int(o, 'threads') ?? 0,
             hybrid: o.containsKey('hybrid'),
-            repeat: _int(o, 'repeat') ?? 1,
-            verify: !o.containsKey('no-verify'),
-            chunkingIdentity: _int(o, 'chunking-identity'));
+            repeat: _int(o, 'repeat') ?? 1);
       default:
         stdout.write(_usage);
         exit(64);

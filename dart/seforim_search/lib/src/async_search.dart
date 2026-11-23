@@ -128,10 +128,23 @@ final class SearchWorker {
   Future<AsyncSearchSession> search(SearchOptions options, {SearchCancelToken? cancel}) =>
       _open(options.toJson(), options.contextWords, cancel);
 
-  /// [SemanticIndex.semanticSearch] on the worker (issue #18).
-  Future<SemanticResult> semanticSearch(Float32List query, [SemanticOptions options = const SemanticOptions(),
-          SearchCancelToken? cancel]) =>
-      _call('semanticSearch', null, (query, options), cancel?.address);
+  /// [SemanticIndex.semanticSearch] on the worker (issue #18). [rows] reads
+  /// the host rows a window check needs, on this isolate (the host's own
+  /// database); they are sent to the worker and the search asked again.
+  Future<SemanticResult> semanticSearch(Float32List query,
+      [SemanticOptions options = const SemanticOptions(), SearchCancelToken? cancel, SemanticRows? rows]) async {
+    // a Finalizable local: the token outlives every step of this call
+    final SearchCancelToken? c = cancel;
+    while (true) {
+      final r = await _call<SemanticResult>('semanticSearch', null, (query, options), c?.address);
+      if (r.needRows.isEmpty) return r;
+      if (rows == null) throw StateError('the semantic search needs host rows: pass rows');
+      await addSemanticRows(await rows(r.needRows));
+    }
+  }
+
+  /// [SemanticIndex.addSemanticRows] on the worker.
+  Future<void> addSemanticRows(List<SemanticRow> rows) => _call('addSemanticRows', rows);
 
   /// [SemanticIndex.openVectors] on the worker.
   Future<VectorSetInfo> openVectors(String path) => _call('openVectors', path);
@@ -156,19 +169,6 @@ final class SearchWorker {
   Future<Map<String, dynamic>> verifyOxv(String path, {String? manifestJson, SearchCancelToken? cancel}) =>
       _call('verifyOxv', path, manifestJson, cancel?.address);
 
-  /// [SemanticIndex.mapVectorBook] on the worker.
-  Future<void> mapVectorBook(String name, int bookId, List<int> lineIds) =>
-      _call('mapVectorBook', name, (bookId, lineIds));
-
-  /// [SemanticIndex.mapVectorBookRows] on the worker.
-  Future<VectorBookVerify> mapVectorBookRows(String name, int bookId, List<int> rowLineIds, List<Uint8List> rows,
-          [List<VectorBookNote> notes = const [], int chunkingIdentity = 0]) =>
-      _call('mapVectorBookRows', name, (bookId, rowLineIds, rows), (notes, chunkingIdentity));
-
-  /// [SemanticIndex.setVectorMapping] on the worker.
-  Future<void> setVectorMapping(List<OxvBookMap> books, {bool replace = false}) =>
-      _call('setVectorMapping', books, replace);
-
   /// [SemanticIndex.vectorInfo] on the worker.
   Future<VectorSetInfo?> vectorInfo() => _call('vectorInfo');
 
@@ -181,10 +181,12 @@ final class SearchWorker {
   /// [HybridRetrieval.lexicalOnly] = an empty vector: the lexical side alone).
   /// [texts]: the default line-text provider of the session's calls (an index
   /// without positions scores a query of several words from the line texts).
+  /// [rows]: the default host-row provider (the semantic resolver's window
+  /// checks, `need_rows`).
   Future<AsyncHybridSession> hybridSession(String query,
-      {Float32List? vector, HybridOptions options = const HybridOptions(), HybridTexts? texts}) async {
+      {Float32List? vector, HybridOptions options = const HybridOptions(), HybridTexts? texts, SemanticRows? rows}) async {
     final id = await _call<int>('hybridOpen', query, vector, options);
-    return AsyncHybridSession._(this, id, texts);
+    return AsyncHybridSession._(this, id, texts, rows);
   }
 
   /// Loads Otzaria's query model on the worker ([MeivinEmbedder.open] on
@@ -522,30 +524,41 @@ typedef HybridTexts = FutureOr<Map<int, Uint8List>> Function(List<int> lineIds);
 /// step. So the texts come from the calling isolate's own database, and the
 /// worker never waits on the host.
 final class AsyncHybridSession {
-  AsyncHybridSession._(this._worker, this._id, this._texts);
+  AsyncHybridSession._(this._worker, this._id, this._texts, this._rows);
 
   final SearchWorker _worker;
   final int _id;
   final HybridTexts? _texts;
+  final SemanticRows? _rows;
   var _closed = false;
 
   /// [HybridSession.page]; [cancel] stops the running step
   /// ([SearchCancelledException]).
-  Future<HybridPage> page(int offset, int limit, {HybridTexts? texts, SearchCancelToken? cancel}) async =>
-      hybridPageFromJson(await _step('page', offset, limit, texts, cancel));
+  Future<HybridPage> page(int offset, int limit, {HybridTexts? texts, SemanticRows? rows, SearchCancelToken? cancel}) async =>
+      hybridPageFromJson(await _step('page', offset, limit, texts, rows, cancel));
 
   /// [HybridSession.window].
-  Future<HybridWindow> window(int window, {HybridTexts? texts, SearchCancelToken? cancel}) async =>
-      hybridWindowFromJson(await _step('window', window, 0, texts, cancel));
+  Future<HybridWindow> window(int window, {HybridTexts? texts, SemanticRows? rows, SearchCancelToken? cancel}) async =>
+      hybridWindowFromJson(await _step('window', window, 0, texts, rows, cancel));
+
+  /// [HybridSession.addRows] on the worker.
+  Future<void> addRows(List<SemanticRow> rows) => _call('addRows', rows);
 
   /// [HybridSession.addTexts] on the worker (texts given ahead of a step).
   Future<void> addTexts(List<int> ids, Map<int, Uint8List> texts) => _call('addTexts', ids, texts);
 
-  Future<Map<String, dynamic>> _step(String kind, int a, int b, HybridTexts? texts, SearchCancelToken? cancel) async {
+  Future<Map<String, dynamic>> _step(
+      String kind, int a, int b, HybridTexts? texts, SemanticRows? rows, SearchCancelToken? cancel) async {
     // a Finalizable local: the token outlives every step of this call
     final SearchCancelToken? c = cancel;
     while (true) {
       final j = jsonDecode(await _call<String>('step', (kind, a, b), c?.address ?? 0)) as Map<String, dynamic>;
+      final needRows = j['need_rows'] as List?;
+      if (needRows != null) {
+        final provider = rows ?? _rows ?? (throw StateError('the hybrid session needs host rows: pass rows'));
+        await addRows(await provider([for (final e in needRows) e as int]));
+        continue;
+      }
       final need = j['need_texts'] as List?;
       if (need == null) return j;
       final provider = texts ?? _texts ?? (throw StateError('the hybrid session needs line texts: pass texts'));
@@ -738,7 +751,9 @@ void _workerMain((SendPort, String, String?) args) {
           s().matchMode = SnippetMatchMode.values[b as int];
         case 'semanticSearch':
           final (query, options) = b as (Float32List, SemanticOptions);
-          value = index.semanticSearch(query, options, null, c as int?);
+          value = index.semanticSearchStep(query, options, null, c as int?);
+        case 'addSemanticRows':
+          index.addSemanticRows((a as List).cast<SemanticRow>());
         case 'openVectors':
           value = index.openVectors(a as String);
         case 'closeVectors':
@@ -752,15 +767,6 @@ void _workerMain((SendPort, String, String?) args) {
           value = compactVectorSet(a as String, policy: policy, cancelAddress: c as int?, liveAddress: live);
         case 'verifyOxv':
           value = verifyOxv(a as String, manifestJson: b as String?, cancelAddress: c as int?);
-        case 'mapVectorBook':
-          final (bookId, lineIds) = b as (int, List<int>);
-          index.mapVectorBook(a as String, bookId, lineIds);
-        case 'mapVectorBookRows':
-          final (bookId, rowLineIds, rows) = b as (int, List<int>, List<Uint8List>);
-          final (notes, identity) = c as (List<VectorBookNote>, int);
-          value = index.mapVectorBookRows(a as String, bookId, rowLineIds, rows, notes, identity);
-        case 'setVectorMapping':
-          index.setVectorMapping((a as List).cast<OxvBookMap>(), replace: b as bool);
         case 'vectorInfo':
           value = index.vectorInfo();
         case 'hybridOpen':
@@ -788,6 +794,8 @@ void _workerMain((SendPort, String, String?) args) {
               value = jsonEncode(hybridStep(h, kind, p, q, y as int));
             case 'addTexts':
               h.addTexts((x as List).cast<int>(), (y as Map).cast<int, Uint8List>());
+            case 'addRows':
+              h.addRows((x as List).cast<SemanticRow>());
             case 'close':
               hybrids.remove(hid);
               h.close();

@@ -6,11 +6,12 @@
 //! (`SegmentSet::open`, `is_live`, links, scan); nothing is written, no
 //! recovery, no install, no compaction: the set is Otzaria's own copy.
 //!
-//! Line ids stay in the host: it registers, per Otzaria book name, its book
-//! id and the ordinal -> line id list ([`LineMap`]); [`SegmentSet::search_lines`]
-//! maps the scan's hits (book, hint, window) to line ids, one result per line.
+//! The scan's hits (book, hint, window, key) are resolved to live lines by a
+//! [`CandidateResolver`] (Otzaria's `resolve.rs` trait; the engine's resolver
+//! reads the index's `chunk_key` column, semantic_resolver.rs);
+//! [`SegmentSet::search_lines`] scans, resolves and cuts.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -18,27 +19,9 @@ use std::sync::atomic::AtomicBool;
 use serde::{Deserialize, Serialize};
 
 use crate::kernel::PreparedQuery;
-use crate::oxv::{chunk_of_window, OxvBookMap, OxvFile, ALIAS_WINDOW};
+use crate::oxv::OxvFile;
 use crate::scan::{self, BookSet, Link, ReverseLink, ScanPenalties, ScanRequest, ScanSegment, ScanSet, LINK_UNRESOLVED};
 use crate::{Error, Result};
-
-/// A mapped ordinal whose records failed the text check: no line.
-pub const UNVERIFIED: u64 = u64::MAX;
-
-/// What a book's text check did (JSON at the C ABI).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BookVerify {
-    /// Lines of the book as Otzaria counts them (rows holding a newline split).
-    pub lines: u64,
-    /// Records of the book in the set.
-    pub records: u64,
-    /// Records whose line holds their key at their own ordinal.
-    pub verified: u64,
-    /// Records found at another line within 16 lines (remapped there).
-    pub moved: u64,
-    /// Records whose key no line near them holds (dropped, counted).
-    pub unverified: u64,
-}
 
 /// Otzaria's default window and alias penalty (config/profiles.rs).
 pub const DEFAULT_WINDOW_PENALTY: f32 = 0.04;
@@ -115,9 +98,9 @@ pub struct SetInfo {
     pub slots_dead: u64,
     /// Distinct book names in the set.
     pub books: u64,
-    /// Books the host mapped (in the set or not).
+    /// Books of the set the index holds.
     pub books_mapped: u64,
-    /// Books of the set the host did not map.
+    /// Books of the set the index does not hold.
     pub books_unmapped: u64,
     pub bytes_on_disk: u64,
 }
@@ -135,47 +118,67 @@ pub struct SegmentInfo {
     pub size: u64,
 }
 
-/// The host's line mapping, kept in memory: Otzaria book name -> the host's
-/// book id and the line id of each line ordinal.
-#[derive(Debug, Default, Clone)]
-pub struct LineMap {
-    books: HashMap<String, (u64, Vec<u64>)>,
+/// resolve.rs `CandidateResolver`: the live lines of the scanned vectors.
+pub trait CandidateResolver {
+    /// The set's book names of the host's books `ids` (a filter).
+    fn admissible_books(&self, ids: &[u64]) -> BookSet;
+
+    /// The lines `hits` resolve to in the admitted `books` (None: every book):
+    /// each line once, at its best occurrence (`score + applied_penalty -
+    /// penalty(window)`), best first; or the host rows the check needs first.
+    fn resolve(&self, hits: &[scan::VectorHit], books: Option<&BookSet>, options: &LineSearch, cancel: Option<&AtomicBool>) -> Result<Resolution>;
 }
 
-impl LineMap {
-    /// Adds or replaces the books given (`replace`: drops every other first).
-    pub fn set(&mut self, books: Vec<OxvBookMap>, replace: bool) {
-        if replace {
-            self.books.clear();
+/// What a resolver returns.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Resolution {
+    /// The lines, and how many admitted records resolved to none.
+    Lines { lines: Vec<LineHit>, unresolved: u64 },
+    /// The host line ids whose rows the resolver needs before it can answer.
+    NeedRows(Vec<u64>),
+}
+
+/// A line search's scan, kept so that a resolution waiting for host rows
+/// does not scan again.
+#[derive(Debug, Clone)]
+pub struct ScannedLines {
+    hits: Vec<scan::VectorHit>,
+    books: Option<BookSet>,
+    result: LineResult,
+}
+
+impl ScannedLines {
+    /// The scan's vectors.
+    pub fn hits(&self) -> &[scan::VectorHit] {
+        &self.hits
+    }
+
+    /// The lines (cut to `options.k` when `cut`), or the rows to fetch first.
+    pub fn resolve(&self, resolver: &dyn CandidateResolver, options: &LineSearch, cut: bool, cancel: Option<&AtomicBool>) -> Result<Resolved> {
+        let mut result = self.result.clone();
+        if self.hits.is_empty() {
+            return Ok(Resolved::Done(result));
         }
-        for b in books {
-            self.books.insert(b.name, (b.book_id, b.line_ids));
+        match resolver.resolve(&self.hits, self.books.as_ref(), options, cancel)? {
+            Resolution::NeedRows(rows) => Ok(Resolved::NeedRows(rows)),
+            Resolution::Lines { mut lines, unresolved } => {
+                if cut {
+                    lines.truncate(options.k);
+                }
+                result.unmapped = unresolved;
+                result.hits = lines;
+                Ok(Resolved::Done(result))
+            }
         }
     }
+}
 
-    pub fn len(&self) -> usize {
-        self.books.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.books.is_empty()
-    }
-
-    /// Mapped lines in all.
-    pub fn lines(&self) -> u64 {
-        self.books.values().map(|b| b.1.len() as u64).sum()
-    }
-
-    fn line(&self, book: &str, ordinal: u32) -> Option<(u64, u64)> {
-        let (book_id, lines) = self.books.get(book)?;
-        lines.get(ordinal as usize).filter(|&&l| l != UNVERIFIED).map(|&l| (l, *book_id))
-    }
-
-    /// The Otzaria names of the host's books `ids`.
-    fn names_of(&self, ids: &[u64]) -> BookSet {
-        let ids: HashSet<u64> = ids.iter().copied().collect();
-        self.books.iter().filter(|(_, (b, _))| ids.contains(b)).map(|(n, _)| n.clone()).collect()
-    }
+/// A line search's answer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Resolved {
+    Done(LineResult),
+    /// Host rows to hand the resolver before asking again.
+    NeedRows(Vec<u64>),
 }
 
 /// A semantic search over a set (JSON at the C ABI).
@@ -220,8 +223,7 @@ pub struct LineResult {
     pub vectors: u64,
     /// Records of those vectors read.
     pub records: u64,
-    /// Records the host's mapping does not cover (book unmapped or ordinal
-    /// past its line list): counted, never guessed.
+    /// Admitted records that resolved to no live line: counted, never guessed.
     pub unmapped: u64,
     /// Slots the scan visited.
     pub scanned: u64,
@@ -394,144 +396,17 @@ impl SegmentSet {
         self.chunking
     }
 
-    /// Every record of book `name` in the set as (ordinal, window, key to check):
-    /// live primary, extra and resolved foreign records, a key with an occurrence
-    /// snapshot taking the newest snapshot's rows of this book instead (an alias row
-    /// checks its anchor at window 0). Otzaria's `SegmentSet::book_occurrences`, every
-    /// record kept.
-    fn book_records(&self, name: &str) -> Vec<(u32, u8, crate::oxv::Key)> {
-        let mut plain: Vec<(crate::oxv::Key, u32, u8)> = Vec::new();
-        for (seg, segment) in self.segments.iter().enumerate() {
-            let Ok(b) = segment.books().binary_search_by(|x| x.name.as_str().cmp(name)) else { continue };
-            let book = &segment.books()[b];
-            for slot in book.slots.clone() {
-                if self.is_live(seg as u16, slot) {
-                    plain.push((segment.key(slot), segment.hint(slot), segment.slot_window(slot)));
-                }
-            }
-            for i in book.extras.clone() {
-                let (slot, hint) = segment.extra(i);
-                if self.is_live(seg as u16, slot) {
-                    plain.push((segment.key(slot), hint, segment.slot_window(slot)));
-                }
-            }
-            for i in book.foreign.clone() {
-                let (key, _, hint) = segment.foreign_record(i);
-                if let Some((ts, tslot)) = self.links[seg].get(i as usize).and_then(Link::target) {
-                    if self.is_live(ts, tslot) {
-                        plain.push((key, hint, self.segments[ts as usize].slot_window(tslot)));
-                    }
-                }
-            }
+    /// The distinct book names of the set's segments.
+    pub fn book_names(&self) -> Vec<String> {
+        let mut names: HashSet<&str> = HashSet::new();
+        for s in &self.segments {
+            names.extend(s.books().iter().map(|b| b.name.as_str()));
         }
-        let mut out = Vec::with_capacity(plain.len());
-        let mut snapped: HashSet<crate::oxv::Key> = HashSet::new();
-        for (key, hint, window) in plain {
-            match self.snapshot_of(&key) {
-                Some((segment, rows)) => {
-                    if !snapped.insert(key) {
-                        continue;
-                    }
-                    for r in rows {
-                        if segment.books().get(r.book as usize).is_some_and(|x| x.name == name) {
-                            if r.window == ALIAS_WINDOW {
-                                out.push((r.hint, 0, r.anchor));
-                            } else {
-                                out.push((r.hint, r.window, key));
-                            }
-                        }
-                    }
-                }
-                None => out.push((hint, window, key)),
-            }
-        }
-        out.sort_unstable();
-        out.dedup();
-        out
+        names.into_iter().map(str::to_string).collect()
     }
 
-    fn snapshot_of(&self, key: &crate::oxv::Key) -> Option<(&OxvFile, Vec<crate::oxv::Occ>)> {
-        self.segments.iter().rev().find_map(|s| s.key_occurrences(key).map(|rows| (s, rows)))
-    }
-
-    /// The text check and the line split of one book (Otzaria's resolver,
-    /// semantic_resolver.rs): the book's lines are rebuilt from its raw rows
-    /// (`lineIndex, id` order, `row_line_ids[i]` the line id of row `i`) and its
-    /// `line_note` rows exactly as Otzaria indexes them (`chunker::book_lines`: a row
-    /// holding a newline gives several lines, each mapped to its row's line id), and
-    /// every record of the book is checked against the recomputed chunk key at the
-    /// stored width; a record whose ordinal no longer holds its key is looked for
-    /// within 16 lines (`chunker::locate`) and remapped there. An ordinal maps to a
-    /// line only when all its records agree; otherwise its records count as
-    /// unverified. `identity`: the chunking identity (None: the set's).
-    pub fn map_book_rows(
-        &self,
-        name: &str,
-        book_id: u64,
-        row_line_ids: &[u64],
-        rows: &[&[u8]],
-        notes: &[crate::chunker::BookNote],
-        identity: Option<u64>,
-    ) -> Result<(OxvBookMap, BookVerify)> {
-        use crate::chunker::{book_lines, holds, locate, BookLine, ChunkKey, Chunker, ChunkerConfig, LineRef};
-        if row_line_ids.len() != rows.len() {
-            return Err(Error::Invalid("one line id per row".into()));
-        }
-        let identity = identity
-            .or(self.chunking)
-            .ok_or_else(|| Error::Invalid("no chunking identity: pass the query model's chunking_identity".into()))?;
-        let config = ChunkerConfig::by_identity(identity)
-            .ok_or_else(|| Error::Invalid(format!("chunking identity {identity} is not a recipe this build implements")))?;
-        let chunker = Chunker::new(config).map_err(|e| Error::Invalid(e.0))?;
-        let lines = book_lines(rows, notes);
-        let refs: Vec<LineRef<'_>> = lines.iter().map(BookLine::as_ref).collect();
-        let records = self.book_records(name);
-        let mut v = BookVerify { lines: lines.len() as u64, records: records.len() as u64, ..Default::default() };
-        let max_hint = records.iter().map(|r| r.0 as usize + 1).max().unwrap_or(0);
-        let line_of = |p: usize| row_line_ids[lines[p].row];
-        let mut line_ids: Vec<u64> =
-            (0..max_hint.max(lines.len())).map(|p| if p < lines.len() { line_of(p) } else { UNVERIFIED }).collect();
-        let mut i = 0;
-        while i < records.len() {
-            let hint = records[i].0;
-            let mut j = i;
-            let mut target: Option<Option<usize>> = None;
-            let (mut ok, mut moved) = (0u64, 0u64);
-            while j < records.len() && records[j].0 == hint {
-                let (_, window, key) = records[j];
-                let found = if holds(&chunker, &refs, hint as usize, window, ChunkKey(key)) {
-                    ok += 1;
-                    Some(hint as usize)
-                } else {
-                    let p = locate(&chunker, &refs, hint as usize, window, &key);
-                    moved += p.is_some() as u64;
-                    p
-                };
-                target = match target {
-                    None => Some(found),
-                    Some(t) if t == found => Some(t),
-                    Some(_) => Some(None),
-                };
-                j += 1;
-            }
-            match target.flatten() {
-                Some(p) => {
-                    line_ids[hint as usize] = line_of(p);
-                    v.verified += ok;
-                    v.moved += moved;
-                }
-                None => {
-                    line_ids[hint as usize] = UNVERIFIED;
-                    v.unverified += (j - i) as u64;
-                }
-            }
-            i = j;
-        }
-        Ok((OxvBookMap { name: name.to_string(), book_id, line_ids }, v))
-    }
-
-    /// What the set holds; `map` (if given) counts the mapped books.
-    pub fn info(&self, map: Option<&LineMap>) -> SetInfo {
+    /// What the set holds; `held` (if given) tells the books the index holds.
+    pub fn info(&self, held: Option<&dyn Fn(&str) -> bool>) -> SetInfo {
         let mut names: HashSet<&str> = HashSet::new();
         for s in &self.segments {
             names.extend(s.books().iter().map(|b| b.name.as_str()));
@@ -559,7 +434,7 @@ impl SegmentSet {
             .collect();
         let slots: u64 = segments.iter().map(|s| s.slots).sum();
         let dead: u64 = segments.iter().map(|s| s.slots_dead).sum();
-        let mapped = map.map_or(0, |m| names.iter().filter(|n| m.books.contains_key(**n)).count() as u64);
+        let mapped = held.map_or(0, |h| names.iter().filter(|n| h(n)).count() as u64);
         SetInfo {
             path: self.path.to_string_lossy().into_owned(),
             generation: self.generation,
@@ -573,7 +448,7 @@ impl SegmentSet {
             slots_live: slots - dead,
             slots_dead: dead,
             books: names.len() as u64,
-            books_mapped: map.map_or(0, |m| m.len() as u64),
+            books_mapped: mapped,
             books_unmapped: names.len() as u64 - mapped,
         }
     }
@@ -593,70 +468,35 @@ impl SegmentSet {
         scan::scan(&set, &prepared, request, penalties, cancel)
     }
 
-    /// Semantic search by line: the scan's top `k` vectors, each record of
-    /// each (admitted books only, under a filter) mapped to the host's line
-    /// id with its own penalty (Otzaria hybrid/coordinator.rs `candidates_of`:
-    /// `score + applied_penalty - penalty(window)`), one result per line (its
-    /// best occurrence), best first (a stable sort: ties keep the scan's
-    /// order), at most `k` lines.
-    pub fn search_lines(&self, query: &[f32], map: &LineMap, options: &LineSearch, cancel: Option<&AtomicBool>) -> Result<LineResult> {
-        self.lines_of(query, map, options, true, cancel)
+    /// Semantic search by line: the scan's top `k` vectors (admitted books only,
+    /// under a filter) resolved to live lines by `resolver` (Otzaria's
+    /// coordinator `candidates_of` over `CandidateResolver::resolve`), one
+    /// result per line (its best occurrence), best first, at most `k` lines;
+    /// or the host rows the resolver needs (scan again, or keep the
+    /// [`ScannedLines`] of [`scan_lines`](Self::scan_lines) to resolve again).
+    pub fn search_lines(&self, query: &[f32], resolver: &dyn CandidateResolver, options: &LineSearch, cancel: Option<&AtomicBool>) -> Result<Resolved> {
+        self.scan_lines(query, resolver, options, cancel)?.resolve(resolver, options, true, cancel)
     }
 
-    /// [`search_lines`](Self::search_lines) without the cut to `k` lines:
-    /// every line the top `k` vectors resolve to (the candidates Otzaria's
-    /// hybrid coordinator fuses, `SemanticSide::candidates`).
-    pub fn search_lines_all(&self, query: &[f32], map: &LineMap, options: &LineSearch, cancel: Option<&AtomicBool>) -> Result<LineResult> {
-        self.lines_of(query, map, options, false, cancel)
-    }
-
-    fn lines_of(&self, query: &[f32], map: &LineMap, options: &LineSearch, cut: bool, cancel: Option<&AtomicBool>) -> Result<LineResult> {
-        let names = options.books.as_ref().map(|ids| map.names_of(ids));
+    /// The scan of a line search, before resolution.
+    pub fn scan_lines(&self, query: &[f32], resolver: &dyn CandidateResolver, options: &LineSearch, cancel: Option<&AtomicBool>) -> Result<ScannedLines> {
+        let names = options.books.as_ref().map(|ids| resolver.admissible_books(ids));
         let threads = if options.threads == 0 { scan::default_scan_threads() } else { options.threads };
         let mut result = LineResult { threads, ..Default::default() };
         if names.as_ref().is_some_and(|n| n.is_empty()) || options.k == 0 {
-            return Ok(result);
+            return Ok(ScannedLines { hits: Vec::new(), books: names, result });
         }
         let request = ScanRequest { top_k: options.k, books: names.as_ref(), threads };
         let penalties = ScanPenalties { window: options.window_penalty, alias: options.alias_penalty };
         result.scanned = self.slots_to_scan(names.as_ref());
         let hits = self.scan(query, &request, penalties, cancel)?;
         result.vectors = hits.len() as u64;
-        let mut at: HashMap<u64, usize> = HashMap::new();
-        let mut lines: Vec<LineHit> = Vec::new();
-        for hit in &hits {
-            for r in &hit.records {
-                if names.as_ref().is_some_and(|n| !n.contains(&r.book)) {
-                    continue;
-                }
-                result.records += 1;
-                let Some((line_id, book_id)) = map.line(&r.book, r.hint) else {
-                    result.unmapped += 1;
-                    continue;
-                };
-                let penalty = match r.window {
-                    0 => 0.0,
-                    ALIAS_WINDOW => options.alias_penalty,
-                    _ => hit.window_penalty,
-                };
-                let score = hit.score + hit.applied_penalty - penalty;
-                let line = LineHit { line_id, book_id, score, chunk: chunk_of_window(r.window) };
-                match at.get(&line_id) {
-                    Some(&i) if lines[i].score >= score => {}
-                    Some(&i) => lines[i] = line,
-                    None => {
-                        at.insert(line_id, lines.len());
-                        lines.push(line);
-                    }
-                }
-            }
-        }
-        lines.sort_by(|a, b| b.score.total_cmp(&a.score));
-        if cut {
-            lines.truncate(options.k);
-        }
-        result.hits = lines;
-        Ok(result)
+        result.records = hits
+            .iter()
+            .flat_map(|h| &h.records)
+            .filter(|r| names.as_ref().is_none_or(|n| n.contains(&r.book)))
+            .count() as u64;
+        Ok(ScannedLines { hits, books: names, result })
     }
 
     /// The slot count a scan under `books` visits (primary ranges; the few

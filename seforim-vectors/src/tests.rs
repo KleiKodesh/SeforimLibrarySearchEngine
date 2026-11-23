@@ -1,9 +1,9 @@
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use crate::oxv::{self, OxvBookMap, OxvFile, TestBook, TestCodec, TestSegment, TestSlot};
+use crate::oxv::{self, OxvFile, TestBook, TestCodec, TestSegment, TestSlot};
 use crate::scan::{ScanPenalties, ScanRequest};
-use crate::set::{self, LineMap, LineSearch, SegmentSet};
+use crate::set::{self, LineSearch, SegmentSet};
 use crate::{normalized, Error, CHUNK_BORROWED};
 
 /// splitmix64: deterministic synthetic vectors.
@@ -168,17 +168,80 @@ fn build_set(dir: &Path, codec: TestCodec) -> SegmentSet {
     SegmentSet::open(&set_dir).unwrap()
 }
 
-fn mapping() -> LineMap {
-    let mut map = LineMap::default();
-    map.set(
-        vec![
-            OxvBookMap { name: "id:1".into(), book_id: 1, line_ids: vec![10, 11] },
-            OxvBookMap { name: "id:2".into(), book_id: 2, line_ids: vec![20, 21, 22, 23] },
-            OxvBookMap { name: "id:9".into(), book_id: 9, line_ids: vec![90] },
-        ],
-        true,
-    );
-    map
+/// A test resolver: each record at its hint, by the line list given per book
+/// (the old in-memory mapping), with the coordinator's occurrence penalty and
+/// one result per line, best first.
+#[derive(Default)]
+pub(crate) struct HintMap {
+    books: std::collections::HashMap<String, (u64, Vec<u64>)>,
+}
+
+impl HintMap {
+    pub(crate) fn new(books: &[(&str, u64, Vec<u64>)]) -> Self {
+        HintMap { books: books.iter().map(|(n, b, l)| (n.to_string(), (*b, l.clone()))).collect() }
+    }
+}
+
+impl set::CandidateResolver for HintMap {
+    fn admissible_books(&self, ids: &[u64]) -> crate::scan::BookSet {
+        self.books.iter().filter(|(_, (b, _))| ids.contains(b)).map(|(n, _)| n.clone()).collect()
+    }
+
+    fn resolve(
+        &self,
+        hits: &[crate::scan::VectorHit],
+        books: Option<&crate::scan::BookSet>,
+        options: &LineSearch,
+        _cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> crate::Result<set::Resolution> {
+        let mut at: std::collections::HashMap<u64, usize> = Default::default();
+        let mut lines: Vec<set::LineHit> = Vec::new();
+        let mut unresolved = 0;
+        for hit in hits {
+            for r in &hit.records {
+                if books.is_some_and(|n| !n.contains(&r.book)) {
+                    continue;
+                }
+                let Some((book_id, ids)) = self.books.get(&r.book) else {
+                    unresolved += 1;
+                    continue;
+                };
+                let Some(&line_id) = ids.get(r.hint as usize) else {
+                    unresolved += 1;
+                    continue;
+                };
+                let penalty = match r.window {
+                    0 => 0.0,
+                    oxv::ALIAS_WINDOW => options.alias_penalty,
+                    _ => hit.window_penalty,
+                };
+                let score = hit.score + hit.applied_penalty - penalty;
+                let line = set::LineHit { line_id, book_id: *book_id, score, chunk: oxv::chunk_of_window(r.window) };
+                match at.get(&line_id) {
+                    Some(&i) if lines[i].score >= score => {}
+                    Some(&i) => lines[i] = line,
+                    None => {
+                        at.insert(line_id, lines.len());
+                        lines.push(line);
+                    }
+                }
+            }
+        }
+        lines.sort_by(|a, b| b.score.total_cmp(&a.score));
+        Ok(set::Resolution::Lines { lines, unresolved })
+    }
+}
+
+/// [`SegmentSet::search_lines`] with a resolver that never asks for rows.
+pub(crate) fn search(set: &SegmentSet, q: &[f32], map: &HintMap, options: &LineSearch) -> crate::Result<set::LineResult> {
+    match set.search_lines(q, map, options, None)? {
+        set::Resolved::Done(r) => Ok(r),
+        set::Resolved::NeedRows(_) => unreachable!("the hint map needs no rows"),
+    }
+}
+
+fn mapping() -> HintMap {
+    HintMap::new(&[("id:1", 1, vec![10, 11]), ("id:2", 2, vec![20, 21, 22, 23]), ("id:9", 9, vec![90])])
 }
 
 #[test]
@@ -187,13 +250,14 @@ fn a_base_and_delta_set_searches_by_the_hosts_lines() {
         let tmp = tempfile::tempdir().unwrap();
         let set = build_set(tmp.path(), codec);
         let map = mapping();
-        let info = set.info(Some(&map));
+        let held = |n: &str| map.books.contains_key(n);
+        let info = set.info(Some(&held));
         assert_eq!((info.generation, info.segments.len(), info.slots_live, info.slots_dead), (2, 2, 6, 1), "{codec:?}");
-        assert_eq!((info.books, info.books_mapped, info.books_unmapped), (3, 3, 1));
+        assert_eq!((info.books, info.books_mapped, info.books_unmapped), (3, 2, 1));
         assert_eq!(info.segments[1].foreign, 1);
         let d = 8;
         let search = |q: Vec<f32>, k: usize, books: Option<Vec<u64>>| {
-            set.search_lines(&q, &map, &LineSearch { k, books, threads: 2, ..Default::default() }, None).unwrap()
+            search(&set, &q, &map, &LineSearch { k, books, threads: 2, ..Default::default() }).unwrap()
         };
         let lines = |r: &set::LineResult| r.hits.iter().map(|h| h.line_id).collect::<Vec<_>>();
         let near = |a: f32, b: f32| (a - b).abs() < 3e-3;
@@ -223,7 +287,7 @@ fn a_base_and_delta_set_searches_by_the_hosts_lines() {
         // unmapped records are counted, never guessed
         let r = search(axis(d, 6), 1, None);
         assert!(r.hits.is_empty() || r.hits[0].score < 0.5);
-        let r = set.search_lines(&axis(d, 6), &map, &LineSearch { k: 1, ..Default::default() }, None).unwrap();
+        let r = crate::tests::search(&set, &axis(d, 6), &map, &LineSearch { k: 1, ..Default::default() }).unwrap();
         assert_eq!((r.vectors, r.unmapped), (1, 1));
         // the book filter: book 2 only; the extra of key 1 is gathered from id:1's range
         let r = search(axis(d, 0), 1, Some(vec![2]));
@@ -357,83 +421,15 @@ fn the_hosts_oxv_fixture_is_current() {
     assert_eq!(std::fs::read(&fixture).unwrap(), std::fs::read(&fresh).unwrap());
     // the fixture opens as a set and searches by line
     let set = SegmentSet::open(&fixture).unwrap();
-    let mut map = LineMap::default();
-    map.set(vec![OxvBookMap { name: "id:5".into(), book_id: 5, line_ids: vec![1, 2] }], true);
-    let r = set.search_lines(&axis(4, 2), &map, &LineSearch { k: 3, ..Default::default() }, None).unwrap();
+    let map = HintMap::new(&[("id:5", 5, vec![1, 2])]);
+    let r = search(&set, &axis(4, 2), &map, &LineSearch { k: 3, ..Default::default() }).unwrap();
     assert_eq!((r.hits[0].line_id, r.hits[0].chunk), (1, 1));
 }
 
-/// The text check (`map_book_rows`): keys recomputed from the host's raw rows; a row
-/// holding a newline gives two lines of one line id; a tampered row's records are
-/// dropped and counted; lines shifted by an inserted row are found again.
-#[test]
-fn a_book_mapped_from_its_rows_is_verified_against_the_keys() {
-    use crate::chunker::{book_lines, BookLine, Chunker, ChunkerConfig, LineRef};
-    let identity = ChunkerConfig::production().identity();
-    let chunker = Chunker::production();
-    let rows: Vec<&[u8]> = vec![
-        b"<h1>Title of the book</h1>",
-        b"first line that is long enough to stand",
-        b"second\nthird line long enough to stand alone too",
-        b"fourth line long enough to stand alone here",
-    ];
-    let lines = book_lines(&rows, &[]);
-    assert_eq!(lines.len(), 5);
-    let refs: Vec<LineRef<'_>> = lines.iter().map(BookLine::as_ref).collect();
-    let d = 8;
-    let slots: Vec<TestSlot> = (0..5)
-        .map(|p| {
-            let key = chunker.window_keys(&refs, p)[0].1;
-            slot(u64::from_be_bytes(key.0[..8].try_into().unwrap()), p as u32, 0, axis(d, p))
-        })
-        .collect();
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("book.oxv");
-    let seg = TestSegment {
-        dims: d,
-        codec: TestCodec::I8Vec,
-        delta: false,
-        from: 0,
-        to: 1,
-        tag: "v1".into(),
-        books: vec![TestBook { name: "id:3".into(), slots, ..Default::default() }],
-        occurrences: vec![],
-        tombstones: vec![],
-    };
-    oxv::write_segment(&path, &seg).unwrap();
-    let set = SegmentSet::open(&path).unwrap();
-    let ids = [100u64, 101, 102, 103];
-    // no identity: refused
-    assert!(set.map_book_rows("id:3", 3, &ids, &rows, &[], None).is_err());
-    let (map, v) = set.map_book_rows("id:3", 3, &ids, &rows, &[], Some(identity)).unwrap();
-    assert_eq!((v.lines, v.records, v.verified, v.moved, v.unverified), (5, 5, 5, 0, 0));
-    assert_eq!(map.line_ids, vec![100, 101, 102, 102, 103]);
-    let mut lm = LineMap::default();
-    lm.set(vec![map], true);
-    let r = set.search_lines(&axis(d, 3), &lm, &LineSearch { k: 1, ..Default::default() }, None).unwrap();
-    assert_eq!(r.hits[0].line_id, 102);
-
-    // a tampered row: its records are dropped and counted
-    let mut tampered = rows.clone();
-    tampered[3] = b"fourth line CHANGED enough to stand alone here";
-    let (map, v) = set.map_book_rows("id:3", 3, &ids, &tampered, &[], Some(identity)).unwrap();
-    assert!(v.unverified >= 1 && map.line_ids[4] == set::UNVERIFIED, "{v:?}");
-    lm.set(vec![map], true);
-    let r = set.search_lines(&axis(d, 4), &lm, &LineSearch { k: 1, ..Default::default() }, None).unwrap();
-    assert!(r.hits.is_empty() && r.unmapped == 1);
-
-    // a row inserted above: the long lines are found one line down
-    let mut shifted = vec![&b"<h1>Title of the book</h1>"[..], b"an inserted line long enough to stand alone"];
-    shifted.extend_from_slice(&rows[1..]);
-    let (map, v) = set.map_book_rows("id:3", 3, &[100, 99, 101, 102, 103], &shifted, &[], Some(identity)).unwrap();
-    assert!(v.moved >= 3, "{v:?}");
-    assert_eq!((map.line_ids[1], map.line_ids[4]), (101, 103));
-}
-
 /// The hosts' rows-verify fixture (`seforim-vectors/tests/data/verified.oxv`, used by
-/// the C# self-test and the Dart tests): book `id:3` with the 4 rows of
-/// [`a_book_mapped_from_its_rows_is_verified_against_the_keys`], real chunk keys of the
-/// production chunker, F32, 8 dims, line `p` = axis `p`. `REGEN_OXV=1` rewrites it.
+/// the engine's resolver tests and the Dart tests): book `id:3` with 4 rows (a heading,
+/// a row holding a newline), real chunk keys of the production chunker, F32, 8 dims,
+/// line `p` = axis `p`. `REGEN_OXV=1` rewrites it.
 #[test]
 fn the_hosts_verified_fixture_is_current() {
     use crate::chunker::{book_lines, BookLine, Chunker, ChunkerConfig, LineRef};
@@ -475,37 +471,6 @@ fn the_hosts_verified_fixture_is_current() {
     let set = SegmentSet::open(&fixture).unwrap();
     let identity = ChunkerConfig::production().identity();
     assert_eq!(identity, 320_260_894_818_558_297, "the hosts' tests pass this identity");
-    let (_, v) = set.map_book_rows("id:3", 3, &[100, 101, 102, 103], &rows, &[], Some(identity)).unwrap();
-    assert_eq!((v.lines, v.records, v.verified, v.unverified), (5, 5, 5, 0));
+    assert_eq!(set.book_names(), vec!["id:3".to_string()]);
 }
 
-/// Real data (read-only): `map_book_rows` on the books dumped by `dump_books.py`
-/// (`SE_CHUNKER_BOOKS`) against a real set / `.oxv` (`SE_CHUNKER_OXV`), the counts
-/// per book (the chunker's own real-data test checks the keys alone).
-#[test]
-#[ignore]
-fn real_map_book_rows() {
-    let books = std::env::var("SE_CHUNKER_BOOKS").expect("SE_CHUNKER_BOOKS");
-    let set = SegmentSet::open(Path::new(&std::env::var("SE_CHUNKER_OXV").expect("SE_CHUNKER_OXV"))).unwrap();
-    let identity: u64 = std::env::var("SE_CHUNKING_IDENTITY").map_or(2_685_558_872_390_372_738, |v| v.parse().unwrap());
-    let dump: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(books).unwrap()).unwrap();
-    for book in dump.as_array().unwrap() {
-        let id = book["book_id"].as_u64().unwrap();
-        let rows: Vec<Vec<u8>> = book["rows"].as_array().unwrap().iter().map(|r| crate::chunker::tests::b64(r["b64"].as_str().unwrap())).collect();
-        let ids: Vec<u64> = book["rows"].as_array().unwrap().iter().map(|r| r["id"].as_u64().unwrap()).collect();
-        let notes: Vec<crate::chunker::BookNote> = book["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|n| crate::chunker::BookNote {
-                line_index: n[0].as_i64().unwrap(),
-                char_pos: n[2].as_i64().unwrap(),
-                has_marker: n[3].as_i64().unwrap() == 1,
-                body: String::from_utf8_lossy(&crate::chunker::tests::b64(n[4].as_str().unwrap())).into_owned(),
-            })
-            .collect();
-        let refs: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
-        let (_, v) = set.map_book_rows(&format!("id:{id}"), id, &ids, &refs, &notes, Some(identity)).unwrap();
-        println!("book {id}: {v:?}");
-    }
-}

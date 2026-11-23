@@ -78,8 +78,6 @@ fn short_lines_borrow_their_section_only() {
     // Line 3 embeds the same four lines: it holds the key too.
     assert!(holds(&chunker, &lines, 3, 0, key));
     assert!(!holds(&chunker, &lines, 1, 0, key));
-    assert_eq!(locate(&chunker, &lines, 5, 0, &key.0), Some(3));
-    assert_eq!(verify(&chunker, &lines, &[StoredKey { ordinal: 2, window: 0, key: &key.0[..8] }]), vec![true]);
 }
 
 #[test]
@@ -156,7 +154,7 @@ fn real_data_match_rate() {
         let book_info = &oxv.books()[b];
         let mut records: Vec<(u32, u32)> = book_info.slots.clone().map(|slot| (slot, oxv.hint(slot))).collect();
         records.extend(book_info.extras.clone().map(|i| oxv.extra(i)).filter(|&(slot, _)| slot < oxv.slot_count()));
-        let (mut n, mut m, mut moved) = (0u64, 0u64, 0u64);
+        let (mut n, mut m) = (0u64, 0u64);
         for &(slot, hint) in &records {
             let window = oxv.slot_window(slot);
             if window == ALIAS_WINDOW {
@@ -166,14 +164,12 @@ fn real_data_match_rate() {
             n += 1;
             if holds(&chunker, &line_refs, hint as usize, window, ChunkKey(key)) {
                 m += 1;
-            } else if locate(&chunker, &line_refs, hint as usize, window, &key).is_some() {
-                moved += 1;
             }
         }
         all += n;
         ok += m;
         println!(
-            "book {id}: rows {} lines {} notes {} records {n} match {m} ({:.2}%) moved-within-reach {moved}",
+            "book {id}: rows {} lines {} notes {} records {n} match {m} ({:.2}%)",
             rows.len(),
             lines.len(),
             notes.len(),
@@ -264,4 +260,18 @@ fn pardes_windows_clean_every_window() {
     }
     let production = Chunker::production().embedded_windows(&lines, 0);
     assert_eq!(windows.iter().map(|w| &w.chars).collect::<Vec<_>>(), production.iter().map(|w| &w.chars).collect::<Vec<_>>());
+}
+
+#[test]
+fn column_values_per_row_and_row_lines() {
+    let rows: Vec<&[u8]> = vec![b"<h1>Title</h1>", b"a line that is long enough to stand\nab", b"another long line standing alone here"];
+    let lines = book_lines(&rows, &[]);
+    let refs: Vec<LineRef<'_>> = lines.iter().map(BookLine::as_ref).collect();
+    let chunker = Chunker::production();
+    let want: Vec<u64> = (0..lines.len()).map(|i| chunker.embedded_text(&refs, i).map_or(0, |t| ChunkKey::of(&t).column_value())).collect();
+    let got = book_column_values(&rows, &[]);
+    assert_eq!(got.iter().map(Vec::len).collect::<Vec<_>>(), vec![1, 2, 1]);
+    assert_eq!(got.concat(), want);
+    assert_eq!(row_lines(rows[0], &[]), vec![(lines[0].text.clone(), true)]);
+    assert_eq!(row_lines(rows[1], &[]), vec![(lines[1].text.clone(), false), (lines[2].text.clone(), false)]);
 }
